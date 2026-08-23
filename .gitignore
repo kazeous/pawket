@@ -28,6 +28,7 @@ firebase-adminsdk*.json
 
 # Database dumps and deployment exports
 *.sql
+!packages/database/migrations/**/*.sql
 *.sql.gz
 *.dump
 *.backup

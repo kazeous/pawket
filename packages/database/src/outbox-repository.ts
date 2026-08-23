@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
 
 import type { PawketDatabase } from "./client.js";
 import { systemOutbox } from "./schema.js";
@@ -20,11 +20,12 @@ export type OutboxEvent = NewOutboxEvent & {
   attempts: number;
   lockedAt: Date | null;
   lockedBy: string | null;
+  leaseExpiresAt: Date | null;
   publishedAt: Date | null;
   lastError: string | null;
 };
 
-type OutboxInsertTransaction = Pick<PawketDatabase, "insert">;
+type OutboxInsertTransaction = Parameters<Parameters<PawketDatabase["transaction"]>[0]>[0];
 
 type OutboxDatabaseRow = {
   id: string;
@@ -38,6 +39,7 @@ type OutboxDatabaseRow = {
   attempts: number;
   locked_at: Date | string | null;
   locked_by: string | null;
+  lease_expires_at: Date | string | null;
   published_at: Date | string | null;
   last_error: string | null;
 };
@@ -63,6 +65,7 @@ function mapOutboxRow(row: OutboxDatabaseRow): OutboxEvent {
     attempts: row.attempts,
     lockedAt: asOptionalDate(row.locked_at),
     lockedBy: row.locked_by,
+    leaseExpiresAt: asOptionalDate(row.lease_expires_at),
     publishedAt: asOptionalDate(row.published_at),
     lastError: row.last_error,
   };
@@ -98,9 +101,9 @@ export async function claimOutboxBatch(
   input: { workerId: string; limit: number; leaseMs: number; now?: Date },
 ): Promise<OutboxEvent[]> {
   const now = input.now ?? new Date();
-  const leaseBoundary = new Date(now.getTime() - input.leaseMs);
+  const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
   const nowValue = now.toISOString();
-  const leaseBoundaryValue = leaseBoundary.toISOString();
+  const leaseExpiresAtValue = leaseExpiresAt.toISOString();
 
   return db.transaction(async (tx) => {
     const rows = await tx.execute<OutboxDatabaseRow>(sql`
@@ -109,7 +112,7 @@ export async function claimOutboxBatch(
         from system_outbox
         where published_at is null
           and available_at <= ${nowValue}::timestamptz
-          and (locked_at is null or locked_at < ${leaseBoundaryValue}::timestamptz)
+          and (lease_expires_at is null or lease_expires_at <= ${nowValue}::timestamptz)
         order by occurred_at, id
         for update skip locked
         limit ${input.limit}
@@ -117,6 +120,7 @@ export async function claimOutboxBatch(
       update system_outbox as event
       set locked_at = ${nowValue}::timestamptz,
           locked_by = ${input.workerId},
+          lease_expires_at = ${leaseExpiresAtValue}::timestamptz,
           attempts = event.attempts + 1
       from candidates
       where event.id = candidates.id
@@ -137,6 +141,7 @@ export async function markOutboxPublished(
       publishedAt: input.publishedAt ?? new Date(),
       lockedAt: null,
       lockedBy: null,
+      leaseExpiresAt: null,
     })
     .where(
       and(
@@ -161,6 +166,7 @@ export async function markOutboxFailed(
       lastError: input.error.slice(0, 2_000),
       lockedAt: null,
       lockedBy: null,
+      leaseExpiresAt: null,
     })
     .where(
       and(
@@ -180,12 +186,12 @@ export async function releaseExpiredOutboxLeases(
 ): Promise<number> {
   const released = await db
     .update(systemOutbox)
-    .set({ lockedAt: null, lockedBy: null })
+    .set({ lockedAt: null, lockedBy: null, leaseExpiresAt: null })
     .where(
       and(
         isNull(systemOutbox.publishedAt),
-        isNotNull(systemOutbox.lockedAt),
-        lt(systemOutbox.lockedAt, now),
+        isNotNull(systemOutbox.leaseExpiresAt),
+        lte(systemOutbox.leaseExpiresAt, now),
       ),
     )
     .returning({ id: systemOutbox.id });

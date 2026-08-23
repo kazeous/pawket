@@ -148,6 +148,7 @@ describe("transactional outbox repository", () => {
         publishedAt: systemOutbox.publishedAt,
         lockedAt: systemOutbox.lockedAt,
         lockedBy: systemOutbox.lockedBy,
+        leaseExpiresAt: systemOutbox.leaseExpiresAt,
       })
       .from(systemOutbox)
       .where(eq(systemOutbox.id, eventId));
@@ -155,6 +156,7 @@ describe("transactional outbox repository", () => {
       publishedAt: new Date("2026-08-23T11:00:02.000Z"),
       lockedAt: null,
       lockedBy: null,
+      leaseExpiresAt: null,
     });
   });
 
@@ -188,6 +190,7 @@ describe("transactional outbox repository", () => {
         availableAt: systemOutbox.availableAt,
         lockedAt: systemOutbox.lockedAt,
         lockedBy: systemOutbox.lockedBy,
+        leaseExpiresAt: systemOutbox.leaseExpiresAt,
       })
       .from(systemOutbox)
       .where(eq(systemOutbox.id, eventId));
@@ -197,6 +200,7 @@ describe("transactional outbox repository", () => {
       availableAt: nextAttemptAt,
       lockedAt: null,
       lockedBy: null,
+      leaseExpiresAt: null,
     });
     expect(
       await claimOutboxBatch(db, {
@@ -216,22 +220,60 @@ describe("transactional outbox repository", () => {
     ).toHaveLength(1);
   });
 
-  test("an expired lease can be released and claimed by another worker", async () => {
+  test("release keeps active leases and clears them at exact expiry", async () => {
     const now = new Date("2026-08-23T13:00:00.000Z");
-    const eventId = await insertEvent({ occurredAt: now, availableAt: now });
+    await insertEvent({ occurredAt: now, availableAt: now });
     await claimOutboxBatch(db, { workerId: "worker-a", limit: 1, leaseMs: 30_000, now });
 
-    expect(await releaseExpiredOutboxLeases(db, now)).toBe(0);
-    expect(await releaseExpiredOutboxLeases(db, new Date(now.getTime() + 30_001))).toBe(1);
+    expect(await releaseExpiredOutboxLeases(db, new Date(now.getTime() + 1))).toBe(0);
+    expect(await releaseExpiredOutboxLeases(db, new Date(now.getTime() + 30_000))).toBe(1);
+  });
 
-    const claimed = await claimOutboxBatch(db, {
+  test("claim-time recovery honors in-lease, exact-expiry, and just-after-expiry boundaries", async () => {
+    const now = new Date("2026-08-23T13:30:00.000Z");
+    const eventIds = await Promise.all(
+      Array.from({ length: 3 }, (_, index) =>
+        insertEvent({
+          aggregateId: `lease-boundary-${index}`,
+          occurredAt: new Date(now.getTime() + index),
+          availableAt: now,
+        }),
+      ),
+    );
+    await claimOutboxBatch(db, { workerId: "worker-a", limit: 3, leaseMs: 30_000, now });
+
+    expect(
+      await claimOutboxBatch(db, {
+        workerId: "worker-b",
+        limit: 3,
+        leaseMs: 30_000,
+        now: new Date(now.getTime() + 29_999),
+      }),
+    ).toEqual([]);
+
+    const atExactExpiry = await claimOutboxBatch(db, {
       workerId: "worker-b",
       limit: 1,
       leaseMs: 30_000,
+      now: new Date(now.getTime() + 30_000),
+    });
+    const justAfterExpiry = await claimOutboxBatch(db, {
+      workerId: "worker-c",
+      limit: 3,
+      leaseMs: 30_000,
       now: new Date(now.getTime() + 30_001),
     });
-    expect(claimed.map((event) => event.id)).toEqual([eventId]);
-    expect(claimed[0]?.attempts).toBe(2);
+
+    expect(atExactExpiry).toHaveLength(1);
+    expect(justAfterExpiry).toHaveLength(2);
+    expect(atExactExpiry[0]?.lockedAt).toEqual(new Date(now.getTime() + 30_000));
+    expect(atExactExpiry[0]?.leaseExpiresAt).toEqual(new Date(now.getTime() + 60_000));
+    expect(new Set([...atExactExpiry, ...justAfterExpiry].map((event) => event.id))).toEqual(
+      new Set(eventIds),
+    );
+    expect([...atExactExpiry, ...justAfterExpiry].every((event) => event.attempts === 2)).toBe(
+      true,
+    );
   });
 
   test("caller transaction rollback removes both business and outbox rows", async () => {

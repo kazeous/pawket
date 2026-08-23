@@ -23,6 +23,7 @@ export const systemOutbox = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lockedAt: timestamp("locked_at", { withTimezone: true, mode: "date" }),
     lockedBy: text("locked_by"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "date" }),
     publishedAt: timestamp("published_at", { withTimezone: true, mode: "date" }),
     lastError: text("last_error"),
   },
@@ -31,7 +32,7 @@ export const systemOutbox = pgTable(
       .on(table.availableAt, table.occurredAt)
       .where(sql`${table.publishedAt} is null`),
     index("system_outbox_lease_idx")
-      .on(table.lockedAt)
+      .on(table.leaseExpiresAt)
       .where(sql`${table.publishedAt} is null`),
   ],
 );
