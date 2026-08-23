@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer, type Socket } from "node:net";
 
+import { Queue } from "bullmq";
+
 import {
   afterAll,
   afterEach,
@@ -706,6 +708,62 @@ describe("worker runtime integration", () => {
     const metricsAfter = await workerMetricSnapshot("failed");
     expect(metricsAfter.jobs - metricsBefore.jobs).toBe(1);
     expect(metricsAfter.durations - metricsBefore.durations).toBe(1);
+  });
+
+  test("a BullMQ job ID mismatch fails before outbox acknowledgement", async () => {
+    const mismatchId = randomUUID();
+    const now = new Date();
+    const eventId = await db.transaction((tx) =>
+      insertOutboxEvent(tx, {
+        eventType: "system.foundation.ping.v1",
+        eventVersion: 1,
+        aggregateType: "system",
+        aggregateId: randomUUID(),
+        payload: { ping: true },
+        occurredAt: now,
+        availableAt: now,
+      }),
+    );
+    const rawQueue = new Queue<SystemOutboxJob>(SYSTEM_QUEUE, {
+      connection: inspectionConnection,
+    });
+    const acknowledge = vi.fn<typeof acknowledgeOutboxEvent>();
+    const handle = await startWorker({
+      databaseUrl,
+      valkeyUrl: runtimeUrl,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      dependencies: { acknowledge },
+      logger: { info() {}, error() {} },
+    });
+    handles.push(handle);
+
+    try {
+      await rawQueue.add(
+        OUTBOX_JOB,
+        {
+          outboxEventId: eventId,
+          eventType: "system.foundation.ping.v1",
+          eventVersion: 1,
+          aggregateType: "system",
+          aggregateId: randomUUID(),
+          payload: { ping: true },
+          occurredAt: now.toISOString(),
+        },
+        { jobId: mismatchId, attempts: 1, removeOnFail: false },
+      );
+      await waitForJobState(inspectionQueue, mismatchId, "failed");
+
+      const retained = await inspectionQueue.getJob(mismatchId);
+      expect(retained?.failedReason).toBe("Outbox job ID does not match outbox event ID");
+      expect(acknowledge).not.toHaveBeenCalled();
+      const row = (await db.select().from(systemOutbox)).find((event) => event.id === eventId);
+      expect(row?.publishedAt).toBeNull();
+    } finally {
+      await rawQueue.close();
+    }
   });
 
   test("unsupported BullMQ names share one fixed metric label", async () => {

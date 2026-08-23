@@ -115,6 +115,39 @@ describe("health probes", () => {
     expect(response.status).toBe(503);
   });
 
+  it("returns down at the hard deadline when a dependency ignores abort forever", async () => {
+    vi.useFakeTimers();
+    let observedAbort = false;
+    const probe = createReadinessProbe({
+      checkDatabase: (signal) =>
+        new Promise<void>(() => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              observedAbort = true;
+            },
+            { once: true },
+          );
+        }),
+      checkValkey: async () => undefined,
+      revision: "revision-123",
+    });
+
+    const responsePromise = createReadinessResponse(probe);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const response = await responsePromise;
+
+    expect(observedAbort).toBe(true);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      status: "not_ready",
+      database: "down",
+      valkey: "up",
+      revision: "revision-123",
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("waits for asynchronous Valkey socket cleanup before rejecting an aborted check", async () => {
     let disconnected = false;
     let resolveCleanup: (() => void) | undefined;

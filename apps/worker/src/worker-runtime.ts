@@ -124,6 +124,9 @@ function createProcessor(
           if (job.name !== OUTBOX_JOB) {
             throw new Error("Unsupported system job name");
           }
+          if (job.id !== job.data.outboxEventId) {
+            throw new Error("Outbox job ID does not match outbox event ID");
+          }
           if (job.data.eventType !== "system.foundation.ping.v1") {
             throw new Error("Unsupported outbox event type");
           }
@@ -146,6 +149,7 @@ function createProcessor(
           if (
             error instanceof Error &&
             (error.message === "Unsupported system job name" ||
+              error.message === "Outbox job ID does not match outbox event ID" ||
               error.message === "Unsupported outbox event type" ||
               error.message === "Outbox event acknowledgement failed")
           ) {

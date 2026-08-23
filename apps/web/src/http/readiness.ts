@@ -19,19 +19,38 @@ export type ReadinessDependencies = {
 
 async function dependencyStatus(check: ReadinessCheck): Promise<DependencyStatus> {
   const controller = new AbortController();
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, READINESS_TIMEOUT_MS);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let checkPromise: Promise<void>;
 
   try {
-    await check(controller.signal);
-    return timedOut ? "down" : "up";
+    checkPromise = Promise.resolve(check(controller.signal));
   } catch {
     return "down";
+  }
+
+  // A dependency adapter may still reject after the probe has timed out. Keep
+  // that rejection observed while the hard-deadline race returns the result.
+  checkPromise.catch(() => undefined);
+
+  const timeoutPromise = new Promise<DependencyStatus>((resolve) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      resolve("down");
+    }, READINESS_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([
+      checkPromise.then(
+        () => "up" as const,
+        () => "down" as const,
+      ),
+      timeoutPromise,
+    ]);
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
   }
 }
 

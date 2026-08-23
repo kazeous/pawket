@@ -218,6 +218,57 @@ describe("system queue", () => {
     expect(await queue.getJobs(["wait", "active", "failed", "completed"])).toEqual([]);
   });
 
+  test("public add rejects a mismatched explicit job ID and auto-sets a missing ID", async () => {
+    const mismatched = jobPayload();
+
+    await expect(
+      Promise.resolve().then(() =>
+        queue.add(OUTBOX_JOB, mismatched, { jobId: randomUUID() }),
+      ),
+    ).rejects.toThrow("canonical outbox job ID");
+    expect(await queue.getJobs(["wait", "active", "failed", "completed"])).toEqual([]);
+
+    const missing = jobPayload();
+    const accepted = await queue.add(OUTBOX_JOB, missing);
+    expect(accepted.id).toBe(missing.outboxEventId);
+    expect(await queue.getJob(missing.outboxEventId)).toBeDefined();
+  });
+
+  test("public addBulk enforces canonical IDs atomically and fills missing IDs", async () => {
+    const first = jobPayload();
+    const mismatched = jobPayload();
+
+    await expect(
+      Promise.resolve().then(() =>
+        queue.addBulk([
+          { name: OUTBOX_JOB, data: first },
+          { name: OUTBOX_JOB, data: mismatched, opts: { jobId: randomUUID() } },
+        ]),
+      ),
+    ).rejects.toThrow("canonical outbox job ID");
+    expect(await queue.getJobs(["wait", "active", "failed", "completed"])).toEqual([]);
+
+    const accepted = jobPayload();
+    const jobs = await queue.addBulk([{ name: OUTBOX_JOB, data: accepted }]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.id).toBe(accepted.outboxEventId);
+  });
+
+  test.each([
+    ["numeric", 42],
+    ["empty", ""],
+    ["wrapped", new String(randomUUID())],
+  ])("public add rejects %s job ID variants", async (_label, jobId) => {
+    const payload = jobPayload();
+
+    await expect(
+      Promise.resolve().then(() =>
+        queue.add(OUTBOX_JOB, payload, { jobId: jobId as string }),
+      ),
+    ).rejects.toThrow("canonical outbox job ID");
+    expect(await queue.getJob(payload.outboxEventId)).toBeUndefined();
+  });
+
   test("benign custom JSON is canonicalized before enqueue", async () => {
     const payload = jobPayload();
     payload.payload = {

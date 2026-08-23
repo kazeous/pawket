@@ -139,23 +139,39 @@ function canonicalizeJobData(data: SystemOutboxJob): SystemOutboxJob {
   }
 }
 
-class SafeSystemQueue extends Queue<SystemOutboxJob> {
+function canonicalJobOptions(
+  data: SystemOutboxJob,
+  options: JobsOptions | undefined,
+): JobsOptions {
+  if (options?.jobId !== undefined && options.jobId !== data.outboxEventId) {
+    throw new Error("canonical outbox job ID must match outboxEventId");
+  }
+
+  return { ...options, jobId: data.outboxEventId };
+}
+
+export class SafeSystemQueue extends Queue<SystemOutboxJob> {
   override add(name: string, data: SystemOutboxJob, options?: JobsOptions) {
-    return super.add(name, canonicalizeJobData(data), options);
+    const canonical = canonicalizeJobData(data);
+    return super.add(name, canonical, canonicalJobOptions(canonical, options));
   }
 
   override addBulk(
     jobs: Parameters<Queue<SystemOutboxJob>["addBulk"]>[0],
   ) {
-    const canonicalJobs = jobs.map((job) => ({
-      ...job,
-      data: canonicalizeJobData(job.data),
-    }));
+    const canonicalJobs = jobs.map((job) => {
+      const data = canonicalizeJobData(job.data);
+      return {
+        ...job,
+        data,
+        opts: canonicalJobOptions(data, job.opts),
+      };
+    });
     return super.addBulk(canonicalJobs);
   }
 }
 
-export function createSystemQueue(connection: Redis): Queue<SystemOutboxJob> {
+export function createSystemQueue(connection: Redis): SafeSystemQueue {
   return new SafeSystemQueue(SYSTEM_QUEUE, {
     connection,
     defaultJobOptions: {

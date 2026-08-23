@@ -11,6 +11,7 @@ export {
 } from "./connection.js";
 export {
   OUTBOX_JOB,
+  SafeSystemQueue,
   SYSTEM_QUEUE,
   createSystemQueue,
   dispatchOutboxBatch,
