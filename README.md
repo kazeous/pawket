@@ -34,3 +34,17 @@ do not publish those local tags as production artifacts.
 Database backup and PostgreSQL WAL archiving are deliberately deferred. They
 remain an increment-10 go-live requirement and are not provided by this
 foundation topology.
+
+Validate the production Compose source locally or in CI after setting the
+required variables:
+
+```text
+corepack pnpm compose:validate
+```
+
+The validator requires exactly one service-level `exclude_from_hc: true` on
+the `migrate` service, removes only that Coolify extension in memory, and
+streams the projected source to strict Docker Compose validation without
+writing rendered configuration to disk. CI and Task 8 must call this command
+instead of running `docker compose -f compose.prod.yaml config --quiet`
+directly, because strict Docker Compose does not recognize Coolify's extension.
