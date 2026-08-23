@@ -112,7 +112,10 @@ export async function claimOutboxBatch(
         from system_outbox
         where published_at is null
           and available_at <= ${nowValue}::timestamptz
-          and (lease_expires_at is null or lease_expires_at <= ${nowValue}::timestamptz)
+          and (
+            (locked_at is null and lease_expires_at is null)
+            or lease_expires_at <= ${nowValue}::timestamptz
+          )
         order by occurred_at, id
         for update skip locked
         limit ${input.limit}

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   jsonb,
@@ -34,5 +35,9 @@ export const systemOutbox = pgTable(
     index("system_outbox_lease_idx")
       .on(table.leaseExpiresAt)
       .where(sql`${table.publishedAt} is null`),
+    check(
+      "system_outbox_lease_expiry_required",
+      sql`${table.lockedAt} is null or ${table.leaseExpiresAt} is not null`,
+    ),
   ],
 );
