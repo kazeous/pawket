@@ -54,6 +54,9 @@ importers:
       '@pawket/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@pawket/queue':
+        specifier: workspace:*
+        version: link:../../packages/queue
       next:
         specifier: 16.3.2
         version: 16.3.2(@babel/core@7.29.7(supports-color@7.2.0))(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

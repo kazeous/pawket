@@ -4,7 +4,9 @@
   "type": "module",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./metrics": "./src/metrics.ts",
+    "./request-context": "./src/request-context.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
