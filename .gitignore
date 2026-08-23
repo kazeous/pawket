@@ -1,0 +1,51 @@
+# Local project governance and working documents
+/docs/
+/AGENTS.md
+
+# Environment variables and local configuration
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+secrets/
+
+# Private keys, certificates, and signing material
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+
+# Credentials and service-account files
+credentials.json
+service-account*.json
+firebase-adminsdk*.json
+
+# Logs, diagnostics, and runtime state
+*.log
+logs/
+*.pid
+*.pid.lock
+*.seed
+*.stackdump
+
+# Dependency and build output
+node_modules/
+.next/
+dist/
+build/
+coverage/
+.cache/
+.turbo/
+
+# Editor and operating-system artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
