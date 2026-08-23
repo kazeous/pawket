@@ -1,0 +1,110 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-24.04
+    env:
+      NODE_ENV: test
+      APP_ENV: production
+      APP_REVISION: ci
+      POSTGRES_DB: pawket_ci
+      POSTGRES_USER: pawket
+      POSTGRES_PASSWORD: pawket_ci_only
+      DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_ci
+      VALKEY_URL: redis://127.0.0.1:6379
+      TEST_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_ci
+      TEST_VALKEY_URL: redis://127.0.0.1:6379
+      METRICS_TOKEN: 01234567890123456789012345678901
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_DB: pawket_ci
+          POSTGRES_USER: pawket
+          POSTGRES_PASSWORD: pawket_ci_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pawket -d pawket_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      valkey:
+        image: valkey/valkey:9.1.1-alpine3.24
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Activate Corepack and pnpm 11.22.0
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.22.0 --activate
+          test "$(corepack pnpm --version)" = "11.22.0"
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: corepack pnpm lint
+
+      - name: Typecheck
+        run: corepack pnpm typecheck
+
+      - name: Unit tests
+        run: corepack pnpm test
+
+      - name: Apply integration-test migrations
+        run: corepack pnpm --filter @pawket/database db:migrate
+
+      - name: PostgreSQL and Valkey integration tests
+        run: corepack pnpm test:integration
+
+      - name: Application build
+        run: corepack pnpm build
+
+      - name: Validate production Compose
+        run: corepack pnpm compose:validate
+
+      - name: Set up QEMU for ARM64 builds
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build web image for linux/arm64
+        run: docker buildx build --platform linux/arm64 --target web --output type=cacheonly .
+
+      - name: Build worker image for linux/arm64
+        run: docker buildx build --platform linux/arm64 --target worker --output type=cacheonly .
+
+      - name: Build migration image for linux/arm64
+        run: docker buildx build --platform linux/arm64 --target migrate --output type=cacheonly .

@@ -48,3 +48,13 @@ streams the projected source to strict Docker Compose validation without
 writing rendered configuration to disk. CI and Task 8 must call this command
 instead of running `docker compose -f compose.prod.yaml config --quiet`
 directly, because strict Docker Compose does not recognize Coolify's extension.
+
+## Verification gate
+
+Pull requests and pushes to `main` run the same release gate defined by
+`.github/workflows/verify.yml`: frozen pnpm installation, lint, typecheck, unit
+tests, PostgreSQL/Valkey integration tests, application build, Coolify Compose
+validation, and cache-only `linux/arm64` builds for the web, worker, and
+migration targets. Run the gate locally with the same `corepack pnpm` commands;
+Compose validation must go through `corepack pnpm compose:validate` so the
+Coolify-only health-check extension remains in the deployment source.
