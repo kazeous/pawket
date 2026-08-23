@@ -17,6 +17,7 @@ COPY packages/database/package.json packages/database/package.json
 COPY packages/identity/package.json packages/identity/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/queue/package.json packages/queue/package.json
+COPY packages/security/package.json packages/security/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY . .

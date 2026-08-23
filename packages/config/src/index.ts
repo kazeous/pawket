@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+import {
+  incrementTwoEnvShape,
+  IncrementTwoConfigError,
+  resolveIncrementTwoEnv,
+  type IncrementTwoServerEnv,
+} from "@pawket/config/increment-two";
+
 const serverEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]),
   APP_ENV: z.enum(["local", "test", "staging", "production"]),
@@ -20,9 +27,12 @@ const serverEnvSchema = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(10),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   OUTBOX_LEASE_MS: z.coerce.number().int().min(5000).max(300000).default(30000),
+  ...incrementTwoEnvShape,
 });
 
-export type ServerEnv = z.infer<typeof serverEnvSchema>;
+type ParsedServerEnv = z.infer<typeof serverEnvSchema>;
+export type ServerEnv = Omit<ParsedServerEnv, keyof IncrementTwoServerEnv> &
+  IncrementTwoServerEnv;
 
 function safeIssueReason(issue: z.core.$ZodIssue): string {
   switch (issue.code) {
@@ -37,7 +47,9 @@ function safeIssueReason(issue: z.core.$ZodIssue): string {
     case "invalid_format":
       return "has an invalid format";
     case "custom":
-      return "has an unsupported protocol";
+      return issue.path[0] === "DATABASE_URL" || issue.path[0] === "VALKEY_URL"
+        ? "has an unsupported protocol"
+        : "has an invalid format";
     default:
       return "is invalid";
   }
@@ -58,7 +70,23 @@ export function parseServerEnv(
     throw new Error(`Invalid server environment: ${formatValidationFailure(parsed.error)}`);
   }
 
-  return parsed.data;
+  try {
+    const incrementTwo = resolveIncrementTwoEnv(parsed.data, parsed.data.APP_ENV);
+    if (
+      (parsed.data.APP_ENV === "production" || parsed.data.APP_ENV === "staging") &&
+      parsed.data.NODE_ENV !== "production"
+    ) {
+      throw new IncrementTwoConfigError([
+        { field: "NODE_ENV", reason: "must be production when deployed" },
+      ]);
+    }
+    return { ...parsed.data, ...incrementTwo } as ServerEnv;
+  } catch (error) {
+    if (error instanceof IncrementTwoConfigError) {
+      throw new Error(`Invalid server environment: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 type ServerEnvLoadResult =

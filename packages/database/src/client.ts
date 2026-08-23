@@ -4,6 +4,7 @@ import postgres from "postgres";
 import * as schema from "./schema.js";
 
 export type PawketDatabase = PostgresJsDatabase<typeof schema>;
+export type PawketTransaction = Parameters<Parameters<PawketDatabase["transaction"]>[0]>[0];
 
 export function createDatabase(databaseUrl: string): {
   db: PawketDatabase;

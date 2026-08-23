@@ -1,4 +1,22 @@
-export { createDatabase, type PawketDatabase } from "./client.js";
+export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
+export {
+  appendAdminAuditEvent,
+  type NewAdminAuditEvent,
+} from "./admin-audit-repository.js";
+export {
+  calculateBusinessDayWindow,
+  calculateStoredReceiptBusinessDayWindow,
+  importBusinessCalendarVersion,
+  vietnamDateFromInstant,
+  BusinessCalendarError,
+  type BusinessCalendarHoliday,
+  type BusinessDayWindow,
+} from "./business-calendar-repository.js";
+export {
+  beginIdempotentCommand,
+  completeIdempotentCommand,
+  type BeginIdempotentCommandResult,
+} from "./idempotency-repository.js";
 export {
   acknowledgeOutboxEvent,
   claimOutboxBatch,
@@ -9,4 +27,10 @@ export {
   type NewOutboxEvent,
   type OutboxEvent,
 } from "./outbox-repository.js";
-export { systemOutbox } from "./schema.js";
+export {
+  adminAuditEvents,
+  systemBusinessCalendarHolidays,
+  systemBusinessCalendarVersions,
+  systemCommandIdempotency,
+  systemOutbox,
+} from "./schema.js";

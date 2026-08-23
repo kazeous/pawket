@@ -1,5 +1,6 @@
 import { Queue, type JobsOptions } from "bullmq";
 import type { Redis } from "ioredis";
+import { canonicalizeSafeStructuredData } from "@pawket/security/structured-data";
 
 import {
   PRODUCER_OPERATION_TIMEOUT_MS,
@@ -28,105 +29,12 @@ export type SystemOutboxJob = {
 
 class UnsafeOutboxPayloadError extends Error {}
 
-const sensitiveKeyParts = [
-  "apikey",
-  "accesskey",
-  "basicauth",
-  "authheader",
-  "authentication",
-  "oauth",
-  "password",
-  "secret",
-  "token",
-  "credential",
-  "authorization",
-  "cookie",
-  "databaseurl",
-  "valkeyurl",
-];
-const sensitiveExactKeys = new Set(["auth", "oauth"]);
-const connectionUrlPattern =
-  /(?:postgres(?:ql)?|redis|rediss|mysql|mongodb(?:\+srv)?|amqp|amqps):\/\/[^\s]+/i;
-const embeddedCredentialUrlPattern =
-  /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+(?::[^@\s/]*)?@/i;
-const embeddedUrlPattern = /[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function normalizedKeyIsSensitive(key: string): boolean {
-  const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return (
-    sensitiveExactKeys.has(normalizedKey) ||
-    sensitiveKeyParts.some((part) => normalizedKey.includes(part))
-  );
-}
-
-function stringContainsCredentials(value: string): boolean {
-  if (
-    connectionUrlPattern.test(value) ||
-    embeddedCredentialUrlPattern.test(value)
-  ) {
-    return true;
-  }
-
-  for (const candidate of value.match(embeddedUrlPattern) ?? []) {
-    try {
-      const url = new URL(candidate);
-      if (url.username || url.password) {
-        return true;
-      }
-      for (const key of url.searchParams.keys()) {
-        if (normalizedKeyIsSensitive(key)) {
-          return true;
-        }
-      }
-    } catch {
-      // Malformed URL-shaped application text is not a connection secret.
-    }
-  }
-
-  return false;
-}
-
-function assertSafeJobValue(value: unknown, seen = new WeakSet<object>()): void {
-  if (typeof value === "string") {
-    if (stringContainsCredentials(value)) {
-      throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
-    }
-    return;
-  }
-
-  if (typeof value !== "object" || value === null) {
-    return;
-  }
-  if (seen.has(value)) {
-    throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
-  }
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      assertSafeJobValue(item, seen);
-    }
-    return;
-  }
-
-  for (const [key, childValue] of Object.entries(value)) {
-    if (normalizedKeyIsSensitive(key)) {
-      throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
-    }
-    assertSafeJobValue(childValue, seen);
-  }
-}
-
 function canonicalizeJobData(data: SystemOutboxJob): SystemOutboxJob {
   try {
-    const serialized = JSON.stringify(data);
-    if (serialized === undefined) {
-      throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
-    }
-    const canonical = JSON.parse(serialized) as SystemOutboxJob;
-    assertSafeJobValue(canonical);
+    const canonical = canonicalizeSafeStructuredData(data, "job");
     if (
       typeof canonical.outboxEventId !== "string" ||
       !uuidPattern.test(canonical.outboxEventId)

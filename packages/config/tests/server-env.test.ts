@@ -9,6 +9,32 @@ const completeProductionEnv = {
   DATABASE_URL: "postgresql://pawket:secret@localhost:5432/pawket",
   VALKEY_URL: "redis://localhost:6379",
   METRICS_TOKEN: "12345678901234567890123456789012",
+  APP_BASE_URL: "https://pawket.example",
+  AUTH_TRUSTED_ORIGINS: "https://pawket.example,https://admin.pawket.example",
+  BETTER_AUTH_SECRETS: JSON.stringify(["production-auth-secret-value-000000000001"]),
+  PII_ACTIVE_KEY_ID: "pii-2026-08",
+  PII_KEYRING_JSON: JSON.stringify({
+    "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+  }),
+  PII_LOOKUP_HMAC_KEY: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  SECURITY_EMAIL_ADAPTER: "disabled",
+  BOOTSTRAP_OWNER_EMAIL: "owner@pawket.example",
+  VERIFICATION_DEPOSIT_AMOUNT_VND: "1000",
+  OPERATING_BANK_BIN: "970436",
+  OPERATING_BANK_ACCOUNT_NUMBER: "123456789",
+  OPERATING_BANK_ACCOUNT_NAME: "PAWKET OPERATIONS",
+  VN_BUSINESS_CALENDAR_VERSION: "vn-2026-approved-v1",
+  VN_BUSINESS_HOLIDAYS: JSON.stringify(["2026-09-02"]),
+  AUTH_USER_ABSOLUTE_TTL_SECONDS: "2592000",
+  AUTH_USER_IDLE_TTL_SECONDS: "604800",
+  AUTH_OWNER_ABSOLUTE_TTL_SECONDS: "43200",
+  AUTH_OWNER_IDLE_TTL_SECONDS: "1800",
+  AUTH_MFA_PENDING_TTL_SECONDS: "600",
+  AUTH_PRIMARY_STEP_UP_TTL_SECONDS: "900",
+  AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: "300",
+  AUTH_TOTP_MAX_FAILED_ATTEMPTS: "5",
+  AUTH_TOTP_LOCKOUT_SECONDS: "900",
+  AUTH_PASSWORD_RESET_TTL_SECONDS: "1800",
 } as const;
 
 const numericFields = [
@@ -70,14 +96,87 @@ function expectSafeValidationError(
 describe("parseServerEnv", () => {
   it("parses a complete production environment", () => {
     // Catches a parser that leaves numeric values as strings or omits defaults.
-    expect(parseServerEnv({ ...completeProductionEnv, PORT: "8080" })).toEqual({
-      ...completeProductionEnv,
-      LOG_LEVEL: "info",
-      PORT: 8080,
-      WORKER_CONCURRENCY: 10,
-      OUTBOX_BATCH_SIZE: 100,
-      OUTBOX_LEASE_MS: 30000,
+    const parsed = parseServerEnv({ ...completeProductionEnv, PORT: "8080" });
+    expect(parsed).toEqual(
+      expect.objectContaining({
+        NODE_ENV: "production",
+        APP_ENV: "production",
+        APP_REVISION: "abc123",
+        LOG_LEVEL: "info",
+        PORT: 8080,
+        WORKER_CONCURRENCY: 10,
+        OUTBOX_BATCH_SIZE: 100,
+        OUTBOX_LEASE_MS: 30000,
+        APP_BASE_URL: "https://pawket.example",
+        AUTH_TRUSTED_ORIGINS: [
+          "https://pawket.example",
+          "https://admin.pawket.example",
+        ],
+        BETTER_AUTH_SECRETS: ["production-auth-secret-value-000000000001"],
+        PII_ACTIVE_KEY_ID: "pii-2026-08",
+        PII_KEYRING_JSON: {
+          "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        },
+        VERIFICATION_DEPOSIT_AMOUNT_VND: 1000,
+        VN_BUSINESS_HOLIDAYS: ["2026-09-02"],
+        AUTH_OWNER_IDLE_TTL_SECONDS: 1800,
+      }),
+    );
+  });
+
+  it("uses explicit local-only defaults without adding phone or SMS configuration", () => {
+    const local = parseServerEnv({
+      NODE_ENV: "development",
+      APP_ENV: "local",
+      APP_REVISION: "local",
+      DATABASE_URL: "postgresql://pawket:local@localhost:5432/pawket",
+      VALKEY_URL: "redis://localhost:6379",
+      METRICS_TOKEN: "local-metrics-token-123456789012345",
     });
+
+    expect(local.APP_BASE_URL).toBe("http://localhost:3000");
+    expect(local.SECURITY_EMAIL_ADAPTER).toBe("local");
+    expect(Object.keys(local).join(" ")).not.toMatch(/phone|sms/i);
+  });
+
+  it("fails deployed configuration closed without echoing sensitive material", () => {
+    const rejectedKeyring = '{"leaked-key":"not-a-real-key"}';
+    expectSafeValidationError(
+      { ...completeProductionEnv, PII_KEYRING_JSON: rejectedKeyring },
+      "PII_KEYRING_JSON",
+      "has an invalid format",
+      rejectedKeyring,
+    );
+    expect(() =>
+      parseServerEnv({ ...completeProductionEnv, APP_BASE_URL: "http://pawket.example" }),
+    ).toThrow("APP_BASE_URL must use HTTPS when deployed");
+  });
+
+  it("requires OAuth credentials as an all-or-nothing provider pair", () => {
+    const clientSecret = "provider-secret-that-must-not-leak";
+    expect(() =>
+      parseServerEnv({ ...completeProductionEnv, GOOGLE_CLIENT_SECRET: clientSecret }),
+    ).toThrow("GOOGLE_CLIENT_ID must be configured as a complete provider pair");
+    try {
+      parseServerEnv({ ...completeProductionEnv, GOOGLE_CLIENT_SECRET: clientSecret });
+    } catch (error) {
+      expect((error as Error).message).not.toContain(clientSecret);
+    }
+  });
+
+  it("treats blank optional OAuth variables from Compose as disabled providers", () => {
+    const parsed = parseServerEnv({
+      ...completeProductionEnv,
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "   ",
+      DISCORD_CLIENT_ID: "",
+      DISCORD_CLIENT_SECRET: "",
+    });
+
+    expect(parsed.GOOGLE_CLIENT_ID).toBeUndefined();
+    expect(parsed.GOOGLE_CLIENT_SECRET).toBeUndefined();
+    expect(parsed.DISCORD_CLIENT_ID).toBeUndefined();
+    expect(parsed.DISCORD_CLIENT_SECRET).toBeUndefined();
   });
 
   it("rejects a metrics token shorter than 32 characters without echoing it", () => {

@@ -24,7 +24,7 @@ async function executeMigration(client: postgres.Sql, filename: string): Promise
   }
 }
 
-test("lease migration preserves legacy locks and rejects new locks without expiry", async () => {
+test("shared-control expand migration upgrades 88849bd shape while old outbox code still runs", async () => {
   const schemaName = `outbox_upgrade_${process.pid}_${Date.now()}`;
   const client = postgres(databaseUrl, { max: 1 });
   const legacyLockedAt = new Date("2026-08-23T14:00:00.000Z");
@@ -67,9 +67,40 @@ test("lease migration preserves legacy locks and rejects new locks without expir
       )
     `);
 
-    for (const migration of upgradeMigrations) {
+    const sharedControlMigration = upgradeMigrations.find((migration) =>
+      migration.includes("shared-controls"),
+    );
+    if (!sharedControlMigration) {
+      throw new Error("Shared-control expand migration is required for upgrade testing");
+    }
+    for (const migration of upgradeMigrations.filter(
+      (migration) => migration !== sharedControlMigration,
+    )) {
       await executeMigration(client, migration);
     }
+
+    // This row represents the already-deployed 88849bd schema immediately before 0003.
+    await client.unsafe(`
+      insert into system_outbox (
+        event_type,
+        event_version,
+        aggregate_type,
+        aggregate_id,
+        payload,
+        occurred_at,
+        available_at
+      ) values (
+        'baseline.current',
+        1,
+        'baseline',
+        'baseline-88849bd',
+        '{"safe":true}',
+        '${legacyLockedAt.toISOString()}'::timestamptz,
+        '${new Date(legacyLockedAt.getTime() + 86_400_000).toISOString()}'::timestamptz
+      )
+    `);
+
+    await executeMigration(client, sharedControlMigration);
 
     const [legacyRow] = await client.unsafe<{ lease_expires_at: string | null }[]>(`
       select lease_expires_at
@@ -80,6 +111,31 @@ test("lease migration preserves legacy locks and rejects new locks without expir
     expect.soft(new Date(legacyRow?.lease_expires_at ?? 0)).toEqual(
       new Date(legacyLockedAt.getTime() + 5 * 60_000),
     );
+
+    const [baselineRow] = await client.unsafe<{ payload: Record<string, unknown> }[]>(`
+      select payload
+      from system_outbox
+      where aggregate_id = 'baseline-88849bd'
+    `);
+    expect.soft(baselineRow?.payload).toEqual({ safe: true });
+    const sharedTables = await client.unsafe<{ table_name: string }[]>(`
+      select table_name
+      from information_schema.tables
+      where table_schema = '${schemaName}'
+        and table_name in (
+          'admin_audit_events',
+          'system_command_idempotency',
+          'system_business_calendar_versions',
+          'system_business_calendar_holidays'
+        )
+      order by table_name
+    `);
+    expect.soft(sharedTables.map((row) => row.table_name)).toEqual([
+      "admin_audit_events",
+      "system_business_calendar_holidays",
+      "system_business_calendar_versions",
+      "system_command_idempotency",
+    ]);
 
     const isolatedDb = drizzle(client, { schema: { systemOutbox } });
     expect.soft(

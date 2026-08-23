@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@pawket/database": "workspace:*",
+    "@pawket/security": "workspace:*",
     "bullmq": "6.2.0",
     "ioredis": "6.0.0"
   }

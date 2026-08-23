@@ -1,20 +1,17 @@
-import type { ServerEnv } from "@pawket/config";
+import { parseServerEnv } from "@pawket/config";
 import type { DestinationStream } from "pino";
 import { describe, expect, it } from "vitest";
 
 import {
   createLogger,
-  httpRequestDurationSeconds,
-  httpRequestsTotal,
   metricsRegistry,
-  outboxOldestAgeSeconds,
-  outboxPendingTotal,
-  workerJobDurationSeconds,
-  workerJobsTotal,
+  recordHttpRequestMetrics,
+  recordWorkerJobMetrics,
+  setOutboxMetrics,
   withRequestContext,
 } from "../src/index.js";
 
-const testEnv: ServerEnv = {
+const testEnv = parseServerEnv({
   NODE_ENV: "test",
   APP_ENV: "test",
   APP_REVISION: "test-revision-123",
@@ -26,7 +23,7 @@ const testEnv: ServerEnv = {
   WORKER_CONCURRENCY: 10,
   OUTBOX_BATCH_SIZE: 100,
   OUTBOX_LEASE_MS: 30000,
-};
+});
 
 describe("createLogger", () => {
   it("serializes service metadata and request context while redacting sensitive values", () => {
@@ -188,41 +185,76 @@ describe("createLogger", () => {
     }
     expect(serializedRecord).toContain("[Redacted]");
   });
+
+  it("redacts configured secrets even under safe keys and inside the log message", () => {
+    const records: string[] = [];
+    const destination: DestinationStream = {
+      write(record) {
+        records.push(record);
+      },
+    };
+    const logger = createLogger({ service: "web", env: testEnv, destination });
+
+    logger.info(
+      { note: `lookup=${testEnv.PII_LOOKUP_HMAC_KEY}` },
+      `destination=${testEnv.OPERATING_BANK_ACCOUNT_NUMBER}`,
+    );
+
+    const serializedRecord = records[0] ?? "";
+    expect(serializedRecord).not.toContain(testEnv.PII_LOOKUP_HMAC_KEY);
+    expect(serializedRecord).not.toContain(testEnv.OPERATING_BANK_ACCOUNT_NUMBER);
+    expect(serializedRecord).toContain("[Redacted]");
+  });
 });
 
 describe("operational metrics", () => {
   it("registers bounded-label HTTP, outbox, and worker metrics", async () => {
     // Catches missing metrics or an added required high-cardinality correlation label.
     metricsRegistry.resetMetrics();
-    const httpLabels = {
+    recordHttpRequestMetrics({
       method: "GET",
-      route: "/creator/:handle",
-      status_code: "200",
-    };
-    const workerLabels = {
-      queue: "outbox",
-      name: "publish-event",
+      route: "/api/health/ready",
+      statusCode: 200,
+      durationSeconds: 0.125,
+    });
+    setOutboxMetrics({ pending: 3, oldestAgeSeconds: 42 });
+    recordWorkerJobMetrics({
+      name: "system.outbox-event",
       outcome: "completed",
-    };
-
-    httpRequestsTotal.inc(httpLabels);
-    httpRequestDurationSeconds.observe(httpLabels, 0.125);
-    outboxPendingTotal.set(3);
-    outboxOldestAgeSeconds.set(42);
-    workerJobsTotal.inc(workerLabels);
-    workerJobDurationSeconds.observe(workerLabels, 0.25);
+      durationSeconds: 0.25,
+    });
 
     const serializedMetrics = await metricsRegistry.metrics();
     expect(serializedMetrics).toContain(
-      'pawket_http_requests_total{method="GET",route="/creator/:handle",status_code="200"} 1',
+      'pawket_http_requests_total{method="GET",route="/api/health/ready",status_code="200"} 1',
     );
     expect(serializedMetrics).toContain("pawket_http_request_duration_seconds_sum");
     expect(serializedMetrics).toContain("pawket_outbox_pending_total 3");
     expect(serializedMetrics).toContain("pawket_outbox_oldest_age_seconds 42");
     expect(serializedMetrics).toContain(
-      'pawket_worker_jobs_total{queue="outbox",name="publish-event",outcome="completed"} 1',
+      'pawket_worker_jobs_total{queue="pawket.system",name="system.outbox-event",outcome="completed"} 1',
     );
     expect(serializedMetrics).toContain("pawket_worker_job_duration_seconds_sum");
     expect(serializedMetrics).not.toContain("actor-demo");
+  });
+
+  it("rejects unbounded or sensitive metric labels before Prometheus observes them", async () => {
+    metricsRegistry.resetMetrics();
+    expect(() =>
+      recordHttpRequestMetrics({
+        method: "GET",
+        route: "/creator/private-account-number",
+        statusCode: 200,
+        durationSeconds: 0.1,
+      }),
+    ).toThrow("Unsafe metric data");
+    expect(() =>
+      recordWorkerJobMetrics({
+        name: "system.outbox-event",
+        outcome: "completed",
+        durationSeconds: Number.NaN,
+      }),
+    ).toThrow("Unsafe metric data");
+    expect(await metricsRegistry.metrics()).not.toContain("private-account-number");
   });
 });

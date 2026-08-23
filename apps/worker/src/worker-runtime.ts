@@ -5,8 +5,7 @@ import { Worker, type Job, type Processor } from "bullmq";
 
 import { acknowledgeOutboxEvent, createDatabase } from "@pawket/database";
 import {
-  workerJobDurationSeconds,
-  workerJobsTotal,
+  recordWorkerJobMetrics,
   withRequestContext,
 } from "@pawket/observability";
 import {
@@ -117,7 +116,7 @@ function createProcessor(
       },
       async () => {
         const startedAt = performance.now();
-        let outcome = "completed";
+        let outcome: "completed" | "failed" = "completed";
         const metricJobName = job.name === OUTBOX_JOB ? OUTBOX_JOB : "unsupported";
 
         try {
@@ -157,11 +156,11 @@ function createProcessor(
           }
           throw new Error("Worker job processing failed");
         } finally {
-          workerJobsTotal.inc({ queue: SYSTEM_QUEUE, name: metricJobName, outcome });
-          workerJobDurationSeconds.observe(
-            { queue: SYSTEM_QUEUE, name: metricJobName, outcome },
-            (performance.now() - startedAt) / 1_000,
-          );
+          recordWorkerJobMetrics({
+            name: metricJobName,
+            outcome,
+            durationSeconds: (performance.now() - startedAt) / 1_000,
+          });
         }
       },
     );

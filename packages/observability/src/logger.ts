@@ -1,4 +1,8 @@
 import type { ServerEnv } from "@pawket/config";
+import {
+  REDACTED_VALUE,
+  sanitizeStructuredLogValue,
+} from "@pawket/security/structured-data";
 import pino, { type DestinationStream, type Logger } from "pino";
 
 import { getRequestContext } from "./request-context.js";
@@ -23,73 +27,26 @@ const redactedPaths = [
   "*.token",
 ];
 
-const redactedValue = "[Redacted]";
-const sensitiveKeyPattern = /password|secret|token/i;
-
-function isPlainRecord(value: object): value is Record<string, unknown> {
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function shouldRedact(key: string, parentKey: string | undefined): boolean {
-  const normalizedKey = key.toLowerCase();
-  const normalizedParentKey = parentKey?.toLowerCase();
-
-  return (
-    normalizedKey === "authorization" ||
-    normalizedKey === "cookie" ||
-    normalizedKey === "database_url" ||
-    normalizedKey === "valkey_url" ||
-    sensitiveKeyPattern.test(key) ||
-    (normalizedKey === "body" &&
-      (normalizedParentKey === "request" || normalizedParentKey === "req"))
-  );
-}
-
-function sanitizeLogValue(
-  value: unknown,
-  key?: string,
-  parentKey?: string,
-  seen = new WeakMap<object, unknown>(),
-): unknown {
-  if (key !== undefined && shouldRedact(key, parentKey)) {
-    return redactedValue;
-  }
-
-  if (Array.isArray(value)) {
-    if (seen.has(value)) {
-      return seen.get(value);
-    }
-
-    const sanitized: unknown[] = [];
-    seen.set(value, sanitized);
-    for (const item of value) {
-      sanitized.push(sanitizeLogValue(item, undefined, key, seen));
-    }
-    return sanitized;
-  }
-
-  if (typeof value === "object" && value !== null && isPlainRecord(value)) {
-    if (seen.has(value)) {
-      return seen.get(value);
-    }
-
-    const sanitized: Record<string, unknown> = {};
-    seen.set(value, sanitized);
-    for (const [childKey, childValue] of Object.entries(value)) {
-      sanitized[childKey] = sanitizeLogValue(childValue, childKey, key, seen);
-    }
-    return sanitized;
-  }
-
-  return value;
-}
-
 export function createLogger(options: {
   service: "web" | "worker" | "migrate";
   env: ServerEnv;
   destination?: DestinationStream;
 }): Logger {
+  const configuredSecrets = [
+    options.env.DATABASE_URL,
+    options.env.VALKEY_URL,
+    options.env.METRICS_TOKEN,
+    ...options.env.BETTER_AUTH_SECRETS,
+    ...Object.values(options.env.PII_KEYRING_JSON),
+    options.env.PII_LOOKUP_HMAC_KEY,
+    options.env.GOOGLE_CLIENT_SECRET,
+    options.env.DISCORD_CLIENT_SECRET,
+    options.env.BOOTSTRAP_OWNER_EMAIL,
+    options.env.OPERATING_BANK_BIN,
+    options.env.OPERATING_BANK_ACCOUNT_NUMBER,
+    options.env.OPERATING_BANK_ACCOUNT_NAME,
+  ].filter((value): value is string => value !== undefined);
+
   return pino(
     {
       level: options.env.LOG_LEVEL,
@@ -100,7 +57,7 @@ export function createLogger(options: {
       },
       redact: {
         paths: redactedPaths,
-        censor: redactedValue,
+        censor: REDACTED_VALUE,
       },
       mixin() {
         return { ...getRequestContext() };
@@ -110,14 +67,10 @@ export function createLogger(options: {
       },
       hooks: {
         logMethod(args, method) {
-          const [firstArgument, ...remainingArguments] = args;
-
-          if (typeof firstArgument === "object" && firstArgument !== null) {
-            method.apply(this, [sanitizeLogValue(firstArgument), ...remainingArguments]);
-            return;
-          }
-
-          method.apply(this, args);
+          const sanitizedArgs = args.map((argument) =>
+            sanitizeStructuredLogValue(argument, configuredSecrets),
+          ) as unknown as typeof args;
+          method.apply(this, sanitizedArgs);
         },
       },
     },
