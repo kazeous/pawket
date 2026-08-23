@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in Coolify}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in Coolify}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Coolify}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  valkey:
+    image: valkey/valkey:9.1.1-alpine3.24
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  migrate:
+    image: pawket-migrate:${APP_REVISION:?Set APP_REVISION in Coolify}
+    build:
+      context: .
+      target: migrate
+    restart: "no"
+    exclude_from_hc: true
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: pawket-web:${APP_REVISION:?Set APP_REVISION in Coolify}
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: ${APP_ENV:?Set APP_ENV in Coolify}
+      APP_REVISION: ${APP_REVISION:?Set APP_REVISION in Coolify}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+      VALKEY_URL: ${VALKEY_URL:?Set VALKEY_URL in Coolify}
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in Coolify}
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health/ready').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  worker:
+    image: pawket-worker:${APP_REVISION:?Set APP_REVISION in Coolify}
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: ${APP_ENV:?Set APP_ENV in Coolify}
+      APP_REVISION: ${APP_REVISION:?Set APP_REVISION in Coolify}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+      VALKEY_URL: ${VALKEY_URL:?Set VALKEY_URL in Coolify}
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in Coolify}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  valkey_data:

@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -9,9 +11,10 @@ if (!databaseUrl) {
 }
 
 const client = postgres(databaseUrl, { max: 1 });
+const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url));
 
 try {
-  await migrate(drizzle(client), { migrationsFolder: "migrations" });
+  await migrate(drizzle(client), { migrationsFolder });
 } finally {
   await client.end();
 }
