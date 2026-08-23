@@ -61,9 +61,24 @@ export function parseServerEnv(
   return parsed.data;
 }
 
-let loadedServerEnv: ServerEnv | undefined;
+type ServerEnvLoadResult =
+  | { success: true; value: ServerEnv }
+  | { success: false; error: unknown };
+
+let loadedServerEnv: ServerEnvLoadResult | undefined;
 
 export function loadServerEnv(): ServerEnv {
-  loadedServerEnv ??= parseServerEnv(process.env);
-  return loadedServerEnv;
+  if (loadedServerEnv === undefined) {
+    try {
+      loadedServerEnv = { success: true, value: parseServerEnv(process.env) };
+    } catch (error) {
+      loadedServerEnv = { success: false, error };
+    }
+  }
+
+  if (!loadedServerEnv.success) {
+    throw loadedServerEnv.error;
+  }
+
+  return loadedServerEnv.value;
 }

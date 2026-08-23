@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseServerEnv } from "../src/index.js";
 
@@ -10,6 +10,62 @@ const completeProductionEnv = {
   VALKEY_URL: "redis://localhost:6379",
   METRICS_TOKEN: "12345678901234567890123456789012",
 } as const;
+
+const numericFields = [
+  {
+    field: "PORT",
+    belowMinimum: 0,
+    minimum: 1,
+    maximum: 65535,
+    aboveMaximum: 65536,
+    defaultValue: 3000,
+  },
+  {
+    field: "WORKER_CONCURRENCY",
+    belowMinimum: 0,
+    minimum: 1,
+    maximum: 50,
+    aboveMaximum: 51,
+    defaultValue: 10,
+  },
+  {
+    field: "OUTBOX_BATCH_SIZE",
+    belowMinimum: 0,
+    minimum: 1,
+    maximum: 500,
+    aboveMaximum: 501,
+    defaultValue: 100,
+  },
+  {
+    field: "OUTBOX_LEASE_MS",
+    belowMinimum: 4999,
+    minimum: 5000,
+    maximum: 300000,
+    aboveMaximum: 300001,
+    defaultValue: 30000,
+  },
+] as const;
+
+function expectSafeValidationError(
+  input: Record<string, string>,
+  field: string,
+  reason: string,
+  rejectedValue: string,
+): void {
+  let thrown: unknown;
+
+  try {
+    parseServerEnv(input);
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(Error);
+  const message = (thrown as Error).message;
+  expect(message).toContain(field);
+  expect(message).toContain(reason);
+  expect(message).not.toContain(rejectedValue);
+}
 
 describe("parseServerEnv", () => {
   it("parses a complete production environment", () => {
@@ -24,33 +80,105 @@ describe("parseServerEnv", () => {
     });
   });
 
-  it("rejects a metrics token shorter than 32 characters", () => {
-    // Catches accepting a token too short to serve as the metrics credential.
-    expect(() =>
-      parseServerEnv({ ...completeProductionEnv, METRICS_TOKEN: "too-short" }),
-    ).toThrow();
+  it("rejects a metrics token shorter than 32 characters without echoing it", () => {
+    // Catches accepting a short token or including it in the validation error.
+    const rejectedToken = "too-short";
+    expectSafeValidationError(
+      { ...completeProductionEnv, METRICS_TOKEN: rejectedToken },
+      "METRICS_TOKEN",
+      "is too short or too small",
+      rejectedToken,
+    );
   });
 
-  it("rejects non-postgresql database URLs", () => {
+  it("rejects non-postgresql database URLs without echoing them", () => {
     // Catches accepting a reachable URL that is not a PostgreSQL connection.
-    expect(() =>
-      parseServerEnv({ ...completeProductionEnv, DATABASE_URL: "https://localhost" }),
-    ).toThrow();
+    const rejectedDatabaseUrl = "https://localhost";
+    expectSafeValidationError(
+      { ...completeProductionEnv, DATABASE_URL: rejectedDatabaseUrl },
+      "DATABASE_URL",
+      "has an unsupported protocol",
+      rejectedDatabaseUrl,
+    );
   });
 
-  it("rejects non-redis Valkey URLs", () => {
+  it("rejects non-redis Valkey URLs without echoing them", () => {
     // Catches accepting a reachable URL that is not a Redis/Valkey connection.
-    expect(() =>
-      parseServerEnv({ ...completeProductionEnv, VALKEY_URL: "https://localhost" }),
-    ).toThrow();
+    const rejectedValkeyUrl = "https://localhost";
+    expectSafeValidationError(
+      { ...completeProductionEnv, VALKEY_URL: rejectedValkeyUrl },
+      "VALKEY_URL",
+      "has an unsupported protocol",
+      rejectedValkeyUrl,
+    );
   });
 
-  it("applies bounded worker defaults", () => {
-    // Catches missing or unsafe worker and outbox default values.
-    const env = parseServerEnv(completeProductionEnv);
+  it.each(numericFields)("accepts the $field minimum", ({ field, minimum }) => {
+    // Catches a lower bound that excludes its documented minimum.
+    expect(parseServerEnv({ ...completeProductionEnv, [field]: String(minimum) })[field]).toBe(
+      minimum,
+    );
+  });
 
-    expect(env.WORKER_CONCURRENCY).toBe(10);
-    expect(env.OUTBOX_BATCH_SIZE).toBe(100);
-    expect(env.OUTBOX_LEASE_MS).toBe(30000);
+  it.each(numericFields)("accepts the $field maximum", ({ field, maximum }) => {
+    // Catches an upper bound that excludes its documented maximum.
+    expect(parseServerEnv({ ...completeProductionEnv, [field]: String(maximum) })[field]).toBe(
+      maximum,
+    );
+  });
+
+  it.each(numericFields)("defaults $field safely", ({ field, defaultValue }) => {
+    // Catches an omitted numeric setting receiving the wrong default.
+    expect(parseServerEnv(completeProductionEnv)[field]).toBe(defaultValue);
+  });
+
+  it.each(numericFields)(
+    "rejects $field below its minimum without echoing it",
+    ({ field, belowMinimum }) => {
+      // Catches a lower bound that permits an unsafe value.
+      const rejectedValue = String(belowMinimum);
+      expectSafeValidationError(
+        { ...completeProductionEnv, [field]: rejectedValue },
+        field,
+        "is too short or too small",
+        rejectedValue,
+      );
+    },
+  );
+
+  it.each(numericFields)(
+    "rejects $field above its maximum without echoing it",
+    ({ field, aboveMaximum }) => {
+      // Catches an upper bound that permits an unsafe value.
+      const rejectedValue = String(aboveMaximum);
+      expectSafeValidationError(
+        { ...completeProductionEnv, [field]: rejectedValue },
+        field,
+        "is too long or too large",
+        rejectedValue,
+      );
+    },
+  );
+});
+
+describe("loadServerEnv", () => {
+  it("caches the first failed process environment result after process.env changes", async () => {
+    // Catches reparsing after the initial configuration load fails.
+    const originalEnv = process.env;
+
+    try {
+      vi.resetModules();
+      process.env = { ...completeProductionEnv, METRICS_TOKEN: "too-short" };
+      const { loadServerEnv } = await import("../src/index.js");
+
+      expect(() => loadServerEnv()).toThrow("METRICS_TOKEN is too short or too small");
+
+      process.env = { ...completeProductionEnv };
+
+      expect(() => loadServerEnv()).toThrow("METRICS_TOKEN is too short or too small");
+    } finally {
+      process.env = originalEnv;
+      vi.resetModules();
+    }
   });
 });
