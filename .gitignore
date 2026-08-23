@@ -26,6 +26,16 @@ credentials.json
 service-account*.json
 firebase-adminsdk*.json
 
+# Database dumps and deployment exports
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.bak
+coolify/
+coolify-exports/
+*.coolify-export
+
 # Logs, diagnostics, and runtime state
 *.log
 logs/
