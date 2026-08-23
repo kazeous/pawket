@@ -5,6 +5,7 @@
   "engines": { "node": ">=24 <25" },
   "scripts": {
     "compose:validate": "node scripts/validate-coolify-compose.mjs",
+    "docker:context:validate": "node scripts/validate-docker-context.mjs",
     "dev": "pnpm --parallel --filter @pawket/web --filter @pawket/worker dev",
     "build": "pnpm -r --if-present build",
     "lint": "eslint .",
