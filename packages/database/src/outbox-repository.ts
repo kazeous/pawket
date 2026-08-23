@@ -158,6 +158,34 @@ export async function markOutboxPublished(
   return updated.length === 1;
 }
 
+export async function acknowledgeOutboxEvent(
+  db: PawketDatabase,
+  input: { eventId: string; publishedAt?: Date },
+): Promise<boolean> {
+  const updated = await db
+    .update(systemOutbox)
+    .set({
+      publishedAt: input.publishedAt ?? new Date(),
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
+    })
+    .where(and(eq(systemOutbox.id, input.eventId), isNull(systemOutbox.publishedAt)))
+    .returning({ id: systemOutbox.id });
+
+  if (updated.length === 1) {
+    return true;
+  }
+
+  const existing = await db
+    .select({ id: systemOutbox.id })
+    .from(systemOutbox)
+    .where(and(eq(systemOutbox.id, input.eventId), isNotNull(systemOutbox.publishedAt)))
+    .limit(1);
+
+  return existing.length === 1;
+}
+
 export async function markOutboxFailed(
   db: PawketDatabase,
   input: { eventId: string; workerId: string; error: string; nextAttemptAt: Date },

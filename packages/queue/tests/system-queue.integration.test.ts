@@ -7,6 +7,7 @@ import {
   OUTBOX_JOB,
   SYSTEM_QUEUE,
   createQueueConnection,
+  createWorkerConnection,
   createSystemQueue,
   enqueueSystemOutboxJob,
   type SystemOutboxJob,
@@ -36,6 +37,13 @@ function jobPayload(outboxEventId = randomUUID()): SystemOutboxJob {
   };
 }
 
+async function waitForReady(connection: ReturnType<typeof createQueueConnection>): Promise<void> {
+  if (connection.status === "ready") {
+    return;
+  }
+  await new Promise<void>((resolve) => connection.once("ready", resolve));
+}
+
 async function waitForState(
   queue: ReturnType<typeof createSystemQueue>,
   jobId: string,
@@ -61,6 +69,7 @@ describe("system queue", () => {
   let worker: Worker<SystemOutboxJob> | undefined;
 
   beforeAll(async () => {
+    await waitForReady(connection);
     await connection.ping();
   });
 
@@ -98,6 +107,17 @@ describe("system queue", () => {
     );
   });
 
+  test("producer commands fail bounded while worker blocking commands may retry", async () => {
+    const workerConnection = createWorkerConnection(queueUrl);
+    try {
+      expect(connection.options.maxRetriesPerRequest).not.toBeNull();
+      expect(connection.options.enableOfflineQueue).toBe(false);
+      expect(workerConnection.options.maxRetriesPerRequest).toBeNull();
+    } finally {
+      workerConnection.disconnect();
+    }
+  });
+
   test("failed jobs remain available for manual inspection", async () => {
     const payload = jobPayload();
     worker = new Worker<SystemOutboxJob>(
@@ -105,7 +125,7 @@ describe("system queue", () => {
       async () => {
         throw new Error("deliberate queue test failure");
       },
-      { connection: createQueueConnection(queueUrl) },
+      { connection: createWorkerConnection(queueUrl) },
     );
 
     await queue.add(OUTBOX_JOB, payload, {

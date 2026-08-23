@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 
 import { Worker, type Job, type Processor } from "bullmq";
 
-import { createDatabase } from "@pawket/database";
+import { acknowledgeOutboxEvent, createDatabase } from "@pawket/database";
 import {
   workerJobDurationSeconds,
   workerJobsTotal,
@@ -14,6 +14,7 @@ import {
   SYSTEM_QUEUE,
   createQueueConnection,
   createSystemQueue,
+  createWorkerConnection,
   dispatchOutboxBatch,
   type SystemOutboxJob,
 } from "@pawket/queue";
@@ -34,11 +35,12 @@ type SignalSource = {
 type DatabaseResource = ReturnType<typeof createDatabase>;
 type ConnectionResource = ReturnType<typeof createQueueConnection>;
 type QueueResource = ReturnType<typeof createSystemQueue>;
-type WorkerResource = Pick<Worker<SystemOutboxJob>, "close">;
+type WorkerResource = Pick<Worker<SystemOutboxJob>, "close" | "disconnect">;
 
 export type WorkerRuntimeDependencies = {
   createDatabase(databaseUrl: string): DatabaseResource;
-  createConnection(valkeyUrl: string): ConnectionResource;
+  createProducerConnection(valkeyUrl: string): ConnectionResource;
+  createWorkerConnection(valkeyUrl: string): ConnectionResource;
   createQueue(connection: ConnectionResource): QueueResource;
   createWorker(
     processor: Processor<SystemOutboxJob>,
@@ -46,6 +48,7 @@ export type WorkerRuntimeDependencies = {
     concurrency: number,
   ): WorkerResource;
   dispatch: typeof dispatchOutboxBatch;
+  acknowledge: typeof acknowledgeOutboxEvent;
   hostname(): string;
   randomUUID(): string;
 };
@@ -78,7 +81,8 @@ const defaultLogger: RuntimeLogger = {
 
 const defaultDependencies: WorkerRuntimeDependencies = {
   createDatabase,
-  createConnection: createQueueConnection,
+  createProducerConnection: createQueueConnection,
+  createWorkerConnection,
   createQueue: createSystemQueue,
   createWorker(processor, connection, concurrency) {
     return new Worker<SystemOutboxJob>(SYSTEM_QUEUE, processor, {
@@ -87,11 +91,16 @@ const defaultDependencies: WorkerRuntimeDependencies = {
     });
   },
   dispatch: dispatchOutboxBatch,
+  acknowledge: acknowledgeOutboxEvent,
   hostname,
   randomUUID,
 };
 
-function createProcessor(logger: RuntimeLogger): Processor<SystemOutboxJob> {
+function createProcessor(
+  logger: RuntimeLogger,
+  database: DatabaseResource["db"],
+  acknowledge: typeof acknowledgeOutboxEvent,
+): Processor<SystemOutboxJob> {
   return async (job: Job<SystemOutboxJob>) => {
     if (!job.id) {
       throw new Error("BullMQ job ID is required");
@@ -106,30 +115,44 @@ function createProcessor(logger: RuntimeLogger): Processor<SystemOutboxJob> {
       async () => {
         const startedAt = performance.now();
         let outcome = "completed";
+        const metricJobName = job.name === OUTBOX_JOB ? OUTBOX_JOB : "unsupported";
 
         try {
           if (job.name !== OUTBOX_JOB) {
-            throw new Error(`Unsupported system job name: ${job.name}`);
+            throw new Error("Unsupported system job name");
           }
           if (job.data.eventType !== "system.foundation.ping.v1") {
-            throw new Error(`Unsupported outbox event type: ${job.data.eventType}`);
+            throw new Error("Unsupported outbox event type");
+          }
+          const acknowledged = await acknowledge(database, {
+            eventId: job.data.outboxEventId,
+          });
+          if (!acknowledged) {
+            throw new Error("Outbox event acknowledgement failed");
           }
         } catch (error) {
           outcome = "failed";
           logger.error(
             {
-              error: error instanceof Error ? error.message : "Unknown worker failure",
-              eventType: job.data.eventType,
+              category: "worker_job_failed",
               outboxEventId: job.data.outboxEventId,
               jobId: job.id,
             },
             "Worker job failed",
           );
-          throw error;
+          if (
+            error instanceof Error &&
+            (error.message === "Unsupported system job name" ||
+              error.message === "Unsupported outbox event type" ||
+              error.message === "Outbox event acknowledgement failed")
+          ) {
+            throw error;
+          }
+          throw new Error("Worker job processing failed");
         } finally {
-          workerJobsTotal.inc({ queue: SYSTEM_QUEUE, name: job.name, outcome });
+          workerJobsTotal.inc({ queue: SYSTEM_QUEUE, name: metricJobName, outcome });
           workerJobDurationSeconds.observe(
-            { queue: SYSTEM_QUEUE, name: job.name, outcome },
+            { queue: SYSTEM_QUEUE, name: metricJobName, outcome },
             (performance.now() - startedAt) / 1_000,
           );
         }
@@ -143,11 +166,33 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
   const database = dependencies.createDatabase(options.databaseUrl);
-  const connection = dependencies.createConnection(options.valkeyUrl);
-  const queue = dependencies.createQueue(connection);
+  const producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
+  try {
+    await producerConnection.connect();
+  } catch {
+    try {
+      producerConnection.disconnect();
+    } catch {
+      logger.error(
+        { category: "worker_startup_cleanup_failed", resource: "producer-valkey" },
+        "Worker startup cleanup failed",
+      );
+    }
+    try {
+      await database.close();
+    } catch {
+      logger.error(
+        { category: "worker_startup_cleanup_failed", resource: "postgres" },
+        "Worker startup cleanup failed",
+      );
+    }
+    throw new Error("Worker startup failed");
+  }
+  const workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
+  const queue = dependencies.createQueue(producerConnection);
   const worker = dependencies.createWorker(
-    createProcessor(logger),
-    connection,
+    createProcessor(logger, database.db, dependencies.acknowledge),
+    workerConnection,
     options.concurrency,
   );
   const workerId = `${dependencies.hostname()}:${dependencies.randomUUID()}`;
@@ -177,9 +222,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, "Outbox batch dispatched");
       }
-    } catch (error) {
+    } catch {
       logger.error(
-        { error: error instanceof Error ? error.message : "Unknown dispatcher failure", workerId },
+        { category: "outbox_poll_failed", workerId },
         "Outbox polling failed",
       );
     } finally {
@@ -198,14 +243,50 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     running = false;
     if (pollTimer !== undefined) {
       clearTimeout(pollTimer);
+      pollTimer = undefined;
     }
 
+    const attemptClose = async (
+      resource: string,
+      operation: () => Promise<unknown>,
+    ): Promise<void> => {
+      try {
+        await operation();
+      } catch {
+        logger.error(
+          { category: "worker_shutdown_close_failed", resource },
+          "Worker resource close failed",
+        );
+      }
+    };
     const gracefulClose = async (): Promise<void> => {
       await currentDispatch;
-      await worker.close();
-      await queue.close();
-      await connection.quit();
-      await database.close();
+      await attemptClose("worker", () => worker.close());
+      await attemptClose("queue", () => queue.close());
+      await attemptClose("producer-valkey", () => producerConnection.quit());
+      await attemptClose("worker-valkey", () => workerConnection.quit());
+      await attemptClose("postgres", () => database.close());
+    };
+    const forceClose = (): void => {
+      void attemptClose("worker-force", () => worker.disconnect());
+      void attemptClose("queue-force", () => queue.disconnect());
+      try {
+        producerConnection.disconnect();
+      } catch {
+        logger.error(
+          { category: "worker_shutdown_force_disconnect_failed", resource: "producer-valkey" },
+          "Worker resource force disconnect failed",
+        );
+      }
+      try {
+        workerConnection.disconnect();
+      } catch {
+        logger.error(
+          { category: "worker_shutdown_force_disconnect_failed", resource: "worker-valkey" },
+          "Worker resource force disconnect failed",
+        );
+      }
+      void attemptClose("postgres-force", () => database.close());
     };
     const timeoutMarker = Symbol("shutdown-timeout");
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -215,17 +296,20 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS,
       );
     });
-    const outcome = await Promise.race([gracefulClose(), timeout]);
+    try {
+      const outcome = await Promise.race([gracefulClose(), timeout]);
 
-    if (outcome === timeoutMarker) {
-      logger.error(
-        { timeoutMs: options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS },
-        "Worker shutdown exceeded its deadline",
-      );
-      connection.disconnect();
-      void database.close().catch(() => undefined);
-    } else if (timeoutTimer !== undefined) {
-      clearTimeout(timeoutTimer);
+      if (outcome === timeoutMarker) {
+        logger.error(
+          { category: "worker_shutdown_timeout", timeoutMs: options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS },
+          "Worker shutdown exceeded its deadline",
+        );
+        forceClose();
+      }
+    } finally {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer);
+      }
     }
   };
 

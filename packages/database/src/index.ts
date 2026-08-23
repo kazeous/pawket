@@ -1,5 +1,6 @@
 export { createDatabase, type PawketDatabase } from "./client.js";
 export {
+  acknowledgeOutboxEvent,
   claimOutboxBatch,
   insertOutboxEvent,
   markOutboxFailed,

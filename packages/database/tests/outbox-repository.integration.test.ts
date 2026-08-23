@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import {
+  acknowledgeOutboxEvent,
   claimOutboxBatch,
   createDatabase,
   insertOutboxEvent,
@@ -158,6 +159,45 @@ describe("transactional outbox repository", () => {
       lockedBy: null,
       leaseExpiresAt: null,
     });
+  });
+
+  test("worker acknowledgement is idempotent by event ID", async () => {
+    const now = new Date("2026-08-23T11:30:00.000Z");
+    const eventId = await insertEvent({ occurredAt: now, availableAt: now });
+    await claimOutboxBatch(db, {
+      workerId: "dispatcher-a",
+      limit: 1,
+      leaseMs: 30_000,
+      now,
+    });
+
+    expect(
+      await acknowledgeOutboxEvent(db, {
+        eventId,
+        publishedAt: new Date("2026-08-23T11:30:01.000Z"),
+      }),
+    ).toBe(true);
+    expect(
+      await acknowledgeOutboxEvent(db, {
+        eventId,
+        publishedAt: new Date("2026-08-23T11:30:02.000Z"),
+      }),
+    ).toBe(true);
+    expect(
+      await acknowledgeOutboxEvent(db, {
+        eventId: "00000000-0000-0000-0000-000000000000",
+      }),
+    ).toBe(false);
+
+    const [row] = await db.select().from(systemOutbox).where(eq(systemOutbox.id, eventId));
+    expect(row).toEqual(
+      expect.objectContaining({
+        publishedAt: new Date("2026-08-23T11:30:01.000Z"),
+        lockedAt: null,
+        lockedBy: null,
+        leaseExpiresAt: null,
+      }),
+    );
   });
 
   test("failure is lease-guarded, bounded, rescheduled, and increments attempts once", async () => {

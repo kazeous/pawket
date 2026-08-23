@@ -1,4 +1,4 @@
-export { createQueueConnection } from "./connection.js";
+export { createQueueConnection, createWorkerConnection } from "./connection.js";
 export {
   OUTBOX_JOB,
   SYSTEM_QUEUE,
