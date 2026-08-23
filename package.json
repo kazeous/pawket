@@ -13,6 +13,7 @@
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
   "devDependencies": {
+    "@eslint/compat": "2.1.0",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
@@ -21,7 +22,7 @@
     "eslint-config-next": "16.3.2",
     "tsup": "8.5.1",
     "tsx": "4.23.12",
-    "typescript": "7.0.2",
+    "typescript": "5.9.3",
     "vitest": "4.1.11"
   }
 }
