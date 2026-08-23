@@ -168,6 +168,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
+  let workerId: string;
+  try {
+    workerId = `${dependencies.hostname()}:${dependencies.randomUUID()}`;
+  } catch {
+    throw new Error("Worker startup failed");
+  }
   let database: DatabaseResource | undefined;
   let producerConnection: ConnectionResource | undefined;
   let workerConnection: ConnectionResource | undefined;
@@ -182,10 +188,14 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       try {
         await operation();
       } catch {
-        logger.error(
-          { category: "worker_startup_cleanup_failed", resource },
-          "Worker startup cleanup failed",
-        );
+        try {
+          logger.error(
+            { category: "worker_startup_cleanup_failed", resource },
+            "Worker startup cleanup failed",
+          );
+        } catch {
+          // Cleanup and the fixed startup error must survive logger failures.
+        }
       }
     };
 
@@ -223,7 +233,6 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     throw new Error("Worker startup failed");
   }
 
-  const workerId = `${dependencies.hostname()}:${dependencies.randomUUID()}`;
   let running = true;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let currentDispatch: Promise<void> | undefined;

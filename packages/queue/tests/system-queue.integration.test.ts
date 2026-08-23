@@ -145,6 +145,13 @@ describe("system queue", () => {
     const bypasses: Array<{ label: string; payload: Record<string, unknown> }> = [
       { label: "auth", payload: { AUTH: "dummy-secret-auth" } },
       { label: "oauth", payload: { o_auth: "dummy-secret-oauth" } },
+      { label: "basic-auth", payload: { basic_auth: "dummy-secret-basic-auth" } },
+      { label: "auth-header", payload: { auth_header: "dummy-secret-auth-header" } },
+      {
+        label: "authentication",
+        payload: { authentication: "dummy-secret-authentication" },
+      },
+      { label: "oauth2", payload: { oauth2: "dummy-secret-oauth2" } },
       { label: "api-key", payload: { "API-Key": "dummy-secret-api-key" } },
       { label: "access-key", payload: { access_key: "dummy-secret-access-key" } },
       {
@@ -154,6 +161,18 @@ describe("system queue", () => {
       {
         label: "query-credential",
         payload: { link: "https://example.invalid/path?access_token=dummy-secret-query" },
+      },
+      {
+        label: "embedded-username-url",
+        payload: {
+          note: "visit https://dummy-secret-embedded@example.invalid/path for details",
+        },
+      },
+      {
+        label: "embedded-query-credential",
+        payload: {
+          note: "callback https://example.invalid/path?api_key=dummy-secret-embedded-query then",
+        },
       },
       {
         label: "custom-to-json",
@@ -188,11 +207,11 @@ describe("system queue", () => {
     unsafe.payload = { nested: { OAuth: "dummy-secret-bulk" } };
 
     const rejection = Promise.resolve().then(() =>
-        queue.addBulk([
-          { name: OUTBOX_JOB, data: benign, opts: { jobId: benign.outboxEventId } },
-          { name: OUTBOX_JOB, data: unsafe, opts: { jobId: unsafe.outboxEventId } },
-        ]),
-      );
+      queue.addBulk([
+        { name: OUTBOX_JOB, data: benign, opts: { jobId: benign.outboxEventId } },
+        { name: OUTBOX_JOB, data: unsafe, opts: { jobId: unsafe.outboxEventId } },
+      ]),
+    );
     await expect(rejection).rejects.toThrow("Unsafe outbox job data");
     await expect(rejection).rejects.not.toThrow("dummy-secret-bulk");
 
@@ -208,11 +227,52 @@ describe("system queue", () => {
           return { displayName: "Benign Artist" };
         },
       },
+      help: "read https://example.invalid/help?topic=authentication for details",
     };
 
     await queue.add(OUTBOX_JOB, payload, { jobId: payload.outboxEventId });
 
     const stored = await queue.getJob(payload.outboxEventId);
-    expect(stored?.data.payload).toEqual({ artist: { displayName: "Benign Artist" } });
+    expect(stored?.data.payload).toEqual({
+      artist: { displayName: "Benign Artist" },
+      help: "read https://example.invalid/help?topic=authentication for details",
+    });
   });
+
+  test("deterministic enqueue uses only the canonical UUID after root toJSON", async () => {
+    const canonicalId = randomUUID();
+    const payload = jobPayload();
+    Object.assign(payload, {
+      toJSON() {
+        payload.outboxEventId = "dummy-secret-mutated-job-id";
+        return {
+          ...payload,
+          outboxEventId: canonicalId,
+          toJSON: undefined,
+        };
+      },
+    });
+
+    const job = await enqueueSystemOutboxJob(queue, payload);
+
+    expect(job.id).toBe(canonicalId);
+    const stored = await queue.getJob(canonicalId);
+    expect(stored?.data.outboxEventId).toBe(canonicalId);
+    expect(JSON.stringify(stored)).not.toContain("dummy-secret-mutated-job-id");
+    expect(await queue.getJob("dummy-secret-mutated-job-id")).toBeUndefined();
+  });
+
+  test.each(["not-a-uuid", "", 42])(
+    "public add rejects malformed canonical outboxEventId %j",
+    async (outboxEventId) => {
+      const payload = jobPayload();
+      payload.outboxEventId = outboxEventId as string;
+
+      await expect(
+        Promise.resolve().then(() =>
+          queue.add(OUTBOX_JOB, payload, { jobId: randomUUID() }),
+        ),
+      ).rejects.toThrow("Unsafe outbox job data");
+    },
+  );
 });

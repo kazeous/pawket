@@ -769,6 +769,8 @@ describe("worker shutdown", () => {
       workerConnectionDisconnect?: () => void;
       databaseClose?: () => Promise<void>;
       onWorkerConnectionCreate?: () => void;
+      hostname?: () => string;
+      randomUUID?: () => string;
       throwAt?:
         | "producer"
         | "worker-connection"
@@ -778,26 +780,32 @@ describe("worker shutdown", () => {
     } = {},
   ) {
     const calls: string[] = [];
+    const acquisitions: string[] = [];
     const signalSource = new EventEmitter();
     const dispatch = vi.fn(async () => ({ claimed: 0, enqueued: 0, failed: 0 }));
 
     return {
       calls,
+      acquisitions,
       dispatch,
       signalSource,
       dependencies: {
-        createDatabase: () => ({
-          db: {},
-          close:
-            options.databaseClose ??
-            (async () => {
-              calls.push("postgres");
-            }),
-        }),
+        createDatabase: () => {
+          acquisitions.push("postgres");
+          return {
+            db: {},
+            close:
+              options.databaseClose ??
+              (async () => {
+                calls.push("postgres");
+              }),
+          };
+        },
         createProducerConnection: () => {
           if (options.throwAt === "producer") {
             throw new Error("dummy-secret-producer-factory");
           }
+          acquisitions.push("producer-valkey");
           return {
             connect: options.producerConnect ?? (async () => undefined),
             quit:
@@ -817,6 +825,7 @@ describe("worker shutdown", () => {
           if (options.throwAt === "worker-connection") {
             throw new Error("dummy-secret-worker-connection-factory");
           }
+          acquisitions.push("worker-valkey");
           return {
             connect:
               options.workerConnect ??
@@ -841,6 +850,7 @@ describe("worker shutdown", () => {
           if (options.throwAt === "queue") {
             throw new Error("dummy-secret-queue-factory");
           }
+          acquisitions.push("queue");
           return {
             close:
               options.queueClose ??
@@ -858,6 +868,7 @@ describe("worker shutdown", () => {
           if (options.throwAt === "worker") {
             throw new Error("dummy-secret-worker-factory");
           }
+          acquisitions.push("worker");
           return {
             close:
               options.workerClose ??
@@ -871,6 +882,8 @@ describe("worker shutdown", () => {
               }),
           };
         },
+        hostname: options.hostname ?? (() => "test-worker-host"),
+        randomUUID: options.randomUUID ?? (() => randomUUID()),
         dispatch,
       } as unknown as Partial<WorkerRuntimeDependencies>,
     };
@@ -1037,6 +1050,92 @@ describe("worker shutdown", () => {
         signalSource: doubles.signalSource,
         dependencies: doubles.dependencies,
         logger: { info() {}, error() {} },
+      }),
+    ).rejects.toThrow("Worker startup failed");
+
+    expect(cleanupCalls).toEqual([
+      "queue",
+      "worker-valkey",
+      "producer-valkey",
+      "postgres",
+    ]);
+  });
+
+  test.each([
+    [
+      "hostname",
+      {
+        hostname: () => {
+          throw new Error("dummy-secret-hostname");
+        },
+      },
+    ],
+    [
+      "random UUID",
+      {
+        randomUUID: () => {
+          throw new Error("dummy-secret-random-uuid");
+        },
+      },
+    ],
+  ] as const)(
+    "%s identity failure exposes only a fixed error without acquiring resources",
+    async (_identityStage, identityOptions) => {
+      const doubles = runtimeDoubles(identityOptions);
+
+      await expect(
+        startWorker({
+          databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+          valkeyUrl: "redis://127.0.0.1:6379/15",
+          concurrency: 1,
+          batchSize: 10,
+          leaseMs: 30_000,
+          signalSource: doubles.signalSource,
+          dependencies: doubles.dependencies,
+          logger: { info() {}, error() {} },
+        }),
+      ).rejects.toThrow("Worker startup failed");
+
+      expect(doubles.acquisitions).toEqual([]);
+      expect(doubles.calls).toEqual([]);
+    },
+  );
+
+  test("throwing cleanup logger cannot stop startup unwind or replace fixed error", async () => {
+    const cleanupCalls: string[] = [];
+    const rejectCleanup = (resource: string) => async () => {
+      cleanupCalls.push(resource);
+      throw new Error(`dummy-secret-${resource}-cleanup`);
+    };
+    const doubles = runtimeDoubles({
+      throwAt: "worker",
+      queueDisconnect: rejectCleanup("queue"),
+      workerConnectionDisconnect: () => {
+        cleanupCalls.push("worker-valkey");
+        throw new Error("dummy-secret-worker-valkey-cleanup");
+      },
+      producerDisconnect: () => {
+        cleanupCalls.push("producer-valkey");
+        throw new Error("dummy-secret-producer-valkey-cleanup");
+      },
+      databaseClose: rejectCleanup("postgres"),
+    });
+
+    await expect(
+      startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: doubles.signalSource,
+        dependencies: doubles.dependencies,
+        logger: {
+          info() {},
+          error() {
+            throw new Error("dummy-secret-logger-error");
+          },
+        },
       }),
     ).rejects.toThrow("Worker startup failed");
 

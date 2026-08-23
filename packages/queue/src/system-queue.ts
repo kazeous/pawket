@@ -31,6 +31,10 @@ class UnsafeOutboxPayloadError extends Error {}
 const sensitiveKeyParts = [
   "apikey",
   "accesskey",
+  "basicauth",
+  "authheader",
+  "authentication",
+  "oauth",
   "password",
   "secret",
   "token",
@@ -43,6 +47,11 @@ const sensitiveKeyParts = [
 const sensitiveExactKeys = new Set(["auth", "oauth"]);
 const connectionUrlPattern =
   /(?:postgres(?:ql)?|redis|rediss|mysql|mongodb(?:\+srv)?|amqp|amqps):\/\/[^\s]+/i;
+const embeddedCredentialUrlPattern =
+  /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+(?::[^@\s/]*)?@/i;
+const embeddedUrlPattern = /[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function normalizedKeyIsSensitive(key: string): boolean {
   const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -53,22 +62,27 @@ function normalizedKeyIsSensitive(key: string): boolean {
 }
 
 function stringContainsCredentials(value: string): boolean {
-  if (connectionUrlPattern.test(value)) {
+  if (
+    connectionUrlPattern.test(value) ||
+    embeddedCredentialUrlPattern.test(value)
+  ) {
     return true;
   }
 
-  try {
-    const url = new URL(value);
-    if (url.username || url.password) {
-      return true;
-    }
-    for (const key of url.searchParams.keys()) {
-      if (normalizedKeyIsSensitive(key)) {
+  for (const candidate of value.match(embeddedUrlPattern) ?? []) {
+    try {
+      const url = new URL(candidate);
+      if (url.username || url.password) {
         return true;
       }
+      for (const key of url.searchParams.keys()) {
+        if (normalizedKeyIsSensitive(key)) {
+          return true;
+        }
+      }
+    } catch {
+      // Malformed URL-shaped application text is not a connection secret.
     }
-  } catch {
-    // Plain application strings are allowed.
   }
 
   return false;
@@ -105,14 +119,20 @@ function assertSafeJobValue(value: unknown, seen = new WeakSet<object>()): void 
   }
 }
 
-function canonicalizeJobData<T>(data: T): T {
+function canonicalizeJobData(data: SystemOutboxJob): SystemOutboxJob {
   try {
     const serialized = JSON.stringify(data);
     if (serialized === undefined) {
       throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
     }
-    const canonical = JSON.parse(serialized) as T;
+    const canonical = JSON.parse(serialized) as SystemOutboxJob;
     assertSafeJobValue(canonical);
+    if (
+      typeof canonical.outboxEventId !== "string" ||
+      !uuidPattern.test(canonical.outboxEventId)
+    ) {
+      throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
+    }
     return canonical;
   } catch {
     throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
@@ -168,7 +188,7 @@ export async function enqueueSystemOutboxJob<TQueue extends SystemQueuePublisher
   const job = await withProducerOperationDeadline(
     () =>
       queue.add(OUTBOX_JOB, canonicalPayload, {
-        jobId: payload.outboxEventId,
+        jobId: canonicalPayload.outboxEventId,
         attempts: 8,
         backoff: { type: "exponential", delay: 1_000 },
         removeOnComplete: { age: 86_400, count: 10_000 },
