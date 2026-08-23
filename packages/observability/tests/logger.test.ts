@@ -104,6 +104,90 @@ describe("createLogger", () => {
 
     expect(JSON.stringify(record)).toContain("[Redacted]");
   });
+
+  it("preserves installed correlation context when a log payload spoofs an ID", () => {
+    // Catches Pino mutating the installed store or letting a caller override correlation metadata.
+    const records: string[] = [];
+    const destination: DestinationStream = {
+      write(record) {
+        records.push(record);
+      },
+    };
+    const logger = createLogger({ service: "worker", env: testEnv, destination });
+    const context = { requestId: "request-authentic", actorId: "actor-authentic" };
+
+    withRequestContext(context, () => {
+      logger.info({ requestId: "request-spoofed", actorId: "actor-spoofed" }, "spoof attempt");
+      expect(context).toEqual({ requestId: "request-authentic", actorId: "actor-authentic" });
+    });
+
+    expect(JSON.parse(records[0] ?? "")).toMatchObject({
+      requestId: "request-authentic",
+      actorId: "actor-authentic",
+    });
+  });
+
+  it("redacts nested and case-variant secrets plus raw request bodies without mutating input", () => {
+    // Catches shallow, case-sensitive redaction and sanitizers that alter caller-owned payloads.
+    const records: string[] = [];
+    const destination: DestinationStream = {
+      write(record) {
+        records.push(record);
+      },
+    };
+    const logger = createLogger({ service: "web", env: testEnv, destination });
+    const payload = {
+      credentials: {
+        nested: {
+          token: "dummy-deep-token-value",
+        },
+      },
+      headers: {
+        Authorization: "Bearer dummy-case-authorization-value",
+      },
+      request: {
+        body: {
+          detail: "dummy-request-body-value",
+        },
+      },
+      req: {
+        body: "dummy-raw-request-body-value",
+      },
+    };
+
+    logger.info(payload, "deep redaction test record");
+
+    expect(payload).toEqual({
+      credentials: {
+        nested: {
+          token: "dummy-deep-token-value",
+        },
+      },
+      headers: {
+        Authorization: "Bearer dummy-case-authorization-value",
+      },
+      request: {
+        body: {
+          detail: "dummy-request-body-value",
+        },
+      },
+      req: {
+        body: "dummy-raw-request-body-value",
+      },
+    });
+
+    const serializedRecord = records[0] ?? "";
+    expect(() => JSON.parse(serializedRecord)).not.toThrow();
+    for (const sensitiveValue of [
+      "dummy-deep-token-value",
+      "dummy-case-authorization-value",
+      "dummy-request-body-value",
+      "dummy-raw-request-body-value",
+    ]) {
+      expect(serializedRecord).not.toContain(sensitiveValue);
+    }
+    expect(serializedRecord).toContain("[Redacted]");
+  });
 });
 
 describe("operational metrics", () => {
