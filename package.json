@@ -1,0 +1,27 @@
+{
+  "name": "pawket",
+  "private": true,
+  "packageManager": "pnpm@11.22.0",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @pawket/web --filter @pawket/worker dev",
+    "build": "pnpm -r --if-present build",
+    "lint": "eslint .",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitest/coverage-v8": "4.1.11",
+    "eslint": "10.9.0",
+    "eslint-config-next": "16.3.2",
+    "tsup": "8.5.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

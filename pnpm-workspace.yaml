@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: true
+  unrs-resolver: true
+
+injectWorkspacePackages: true

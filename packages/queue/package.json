@@ -1,0 +1,9 @@
+{
+  "name": "@pawket/queue",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "bullmq": "6.2.0",
+    "ioredis": "6.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@pawket/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pawket/config": "workspace:*",
+    "@pawket/database": "workspace:*",
+    "@pawket/observability": "workspace:*",
+    "@pawket/queue": "workspace:*"
+  }
+}

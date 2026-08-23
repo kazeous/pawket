@@ -42,6 +42,8 @@ build/
 coverage/
 .cache/
 .turbo/
+*.tsbuildinfo
+/apps/web/next-env.d.ts
 
 # Editor and operating-system artifacts
 .idea/
