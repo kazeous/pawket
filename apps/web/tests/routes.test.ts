@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const routeDependencies = vi.hoisted(() => ({
   checkDatabaseReadiness: vi.fn(),
+  closeReadinessConnection: vi.fn(),
   createReadinessConnection: vi.fn(),
   loadServerEnv: vi.fn(),
 }));
@@ -11,6 +12,7 @@ vi.mock("@pawket/database/readiness", () => ({
   checkDatabaseReadiness: routeDependencies.checkDatabaseReadiness,
 }));
 vi.mock("@pawket/queue/connection", () => ({
+  closeReadinessConnection: routeDependencies.closeReadinessConnection,
   createReadinessConnection: routeDependencies.createReadinessConnection,
 }));
 
@@ -59,9 +61,11 @@ describe("operational route wiring", () => {
     });
     routeDependencies.checkDatabaseReadiness.mockResolvedValue(undefined);
     routeDependencies.createReadinessConnection.mockReturnValue({
+      connect: vi.fn().mockResolvedValue(undefined),
       ping: vi.fn().mockResolvedValue("PONG"),
       disconnect: vi.fn(),
     });
+    routeDependencies.closeReadinessConnection.mockResolvedValue(undefined);
     const { GET } = await import("../src/app/api/health/ready/route.js");
 
     const response = await GET(new Request("http://localhost/api/health/ready"));

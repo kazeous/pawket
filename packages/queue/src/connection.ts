@@ -44,10 +44,37 @@ export function createReadinessConnection(valkeyUrl: string): Redis {
   return new Redis(valkeyUrl, {
     commandTimeout: READINESS_OPERATION_TIMEOUT_MS,
     connectTimeout: READINESS_OPERATION_TIMEOUT_MS,
-    enableOfflineQueue: false,
+    disconnectTimeout: 0,
+    enableOfflineQueue: true,
     lazyConnect: true,
     maxRetriesPerRequest: 1,
     retryStrategy: () => null,
+  });
+}
+
+export function closeReadinessConnection(connection: Redis): Promise<void> {
+  if (connection.status === "end") {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const complete = () => {
+      if (!settled) {
+        settled = true;
+        connection.removeListener("close", complete);
+        connection.removeListener("end", complete);
+        resolve();
+      }
+    };
+
+    connection.once("close", complete);
+    connection.once("end", complete);
+    connection.disconnect(false);
+
+    if (connection.status === "end") {
+      complete();
+    }
   });
 }
 

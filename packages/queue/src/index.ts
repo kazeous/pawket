@@ -2,6 +2,7 @@ export {
   PRODUCER_OPERATION_TIMEOUT_MS,
   connectQueueProducer,
   connectQueueWorker,
+  closeReadinessConnection,
   createQueueConnection,
   createReadinessConnection,
   createWorkerConnection,

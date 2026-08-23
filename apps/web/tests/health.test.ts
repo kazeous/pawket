@@ -1,3 +1,5 @@
+import net from "node:net";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -113,22 +115,84 @@ describe("health probes", () => {
     expect(response.status).toBe(503);
   });
 
-  it("disconnects a stalled Valkey client before rejecting an aborted check", async () => {
+  it("waits for asynchronous Valkey socket cleanup before rejecting an aborted check", async () => {
     let disconnected = false;
+    let resolveCleanup: (() => void) | undefined;
+    const cleanupComplete = new Promise<void>((resolve) => {
+      resolveCleanup = resolve;
+    });
     const controller = new AbortController();
     const check = createValkeyReadinessCheck("redis://localhost:6379", {
       createConnection: () => ({
+        connect: async () => undefined,
         ping: () => new Promise<void>(() => undefined),
-        disconnect: () => {
-          disconnected = true;
-        },
       }),
+      closeConnection: async () => {
+        disconnected = true;
+        await cleanupComplete;
+      },
     });
 
     const checkPromise = check(controller.signal);
+    let settled = false;
+    void checkPromise.catch(() => {
+      settled = true;
+    });
     controller.abort();
 
-    await expect(checkPromise).rejects.toThrow("aborted");
+    await Promise.resolve();
     expect(disconnected).toBe(true);
+    expect(settled).toBe(false);
+    resolveCleanup?.();
+
+    await expect(checkPromise).rejects.toThrow("aborted");
+    expect(settled).toBe(true);
+  });
+
+  it("waits for a real ioredis socket to close before an aborted check settles", async () => {
+    let socketClosed = false;
+    let resolveAccepted: (() => void) | undefined;
+    const accepted = new Promise<void>((resolve) => {
+      resolveAccepted = resolve;
+    });
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => {
+        socketClosed = true;
+        sockets.delete(socket);
+      });
+      resolveAccepted?.();
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("Silent Valkey test server did not expose a TCP port");
+      }
+      const controller = new AbortController();
+      const check = createValkeyReadinessCheck(`redis://127.0.0.1:${address.port}`);
+      let settledBeforeSocketClose = false;
+      const checkPromise = check(controller.signal).catch((error: unknown) => {
+        settledBeforeSocketClose = !socketClosed;
+        throw error;
+      });
+
+      await accepted;
+      controller.abort();
+
+      await expect(checkPromise).rejects.toBeInstanceOf(Error);
+      expect(socketClosed).toBe(true);
+      expect(settledBeforeSocketClose).toBe(false);
+    } finally {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
