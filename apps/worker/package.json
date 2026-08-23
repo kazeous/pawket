@@ -11,6 +11,7 @@
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/observability": "workspace:*",
-    "@pawket/queue": "workspace:*"
+    "@pawket/queue": "workspace:*",
+    "bullmq": "6.2.0"
   }
 }

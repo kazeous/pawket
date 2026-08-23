@@ -78,6 +78,9 @@ importers:
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      bullmq:
+        specifier: 6.2.0
+        version: 6.2.0(ioredis@6.0.0(supports-color@7.2.0))
 
   packages/config:
     dependencies:
@@ -112,6 +115,9 @@ importers:
 
   packages/queue:
     dependencies:
+      '@pawket/database':
+        specifier: workspace:*
+        version: link:../database
       bullmq:
         specifier: 6.2.0
         version: 6.2.0(ioredis@6.0.0(supports-color@7.2.0))
