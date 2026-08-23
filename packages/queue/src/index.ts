@@ -1,4 +1,11 @@
-export { createQueueConnection, createWorkerConnection } from "./connection.js";
+export {
+  PRODUCER_OPERATION_TIMEOUT_MS,
+  connectQueueProducer,
+  connectQueueWorker,
+  createQueueConnection,
+  createWorkerConnection,
+  withProducerOperationDeadline,
+} from "./connection.js";
 export {
   OUTBOX_JOB,
   SYSTEM_QUEUE,

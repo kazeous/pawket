@@ -2,6 +2,11 @@ import { Queue, type JobsOptions } from "bullmq";
 import type { Redis } from "ioredis";
 
 import {
+  PRODUCER_OPERATION_TIMEOUT_MS,
+  withProducerOperationDeadline,
+} from "./connection.js";
+
+import {
   claimOutboxBatch,
   markOutboxFailed,
   type OutboxEvent,
@@ -24,6 +29,8 @@ export type SystemOutboxJob = {
 class UnsafeOutboxPayloadError extends Error {}
 
 const sensitiveKeyParts = [
+  "apikey",
+  "accesskey",
   "password",
   "secret",
   "token",
@@ -33,13 +40,43 @@ const sensitiveKeyParts = [
   "databaseurl",
   "valkeyurl",
 ];
+const sensitiveExactKeys = new Set(["auth", "oauth"]);
 const connectionUrlPattern =
   /(?:postgres(?:ql)?|redis|rediss|mysql|mongodb(?:\+srv)?|amqp|amqps):\/\/[^\s]+/i;
-const credentialUrlPattern = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s/]+@/i;
+
+function normalizedKeyIsSensitive(key: string): boolean {
+  const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    sensitiveExactKeys.has(normalizedKey) ||
+    sensitiveKeyParts.some((part) => normalizedKey.includes(part))
+  );
+}
+
+function stringContainsCredentials(value: string): boolean {
+  if (connectionUrlPattern.test(value)) {
+    return true;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      return true;
+    }
+    for (const key of url.searchParams.keys()) {
+      if (normalizedKeyIsSensitive(key)) {
+        return true;
+      }
+    }
+  } catch {
+    // Plain application strings are allowed.
+  }
+
+  return false;
+}
 
 function assertSafeJobValue(value: unknown, seen = new WeakSet<object>()): void {
   if (typeof value === "string") {
-    if (connectionUrlPattern.test(value) || credentialUrlPattern.test(value)) {
+    if (stringContainsCredentials(value)) {
       throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
     }
     return;
@@ -61,18 +98,40 @@ function assertSafeJobValue(value: unknown, seen = new WeakSet<object>()): void 
   }
 
   for (const [key, childValue] of Object.entries(value)) {
-    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (sensitiveKeyParts.some((part) => normalizedKey.includes(part))) {
+    if (normalizedKeyIsSensitive(key)) {
       throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
     }
     assertSafeJobValue(childValue, seen);
   }
 }
 
+function canonicalizeJobData<T>(data: T): T {
+  try {
+    const serialized = JSON.stringify(data);
+    if (serialized === undefined) {
+      throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
+    }
+    const canonical = JSON.parse(serialized) as T;
+    assertSafeJobValue(canonical);
+    return canonical;
+  } catch {
+    throw new UnsafeOutboxPayloadError("Unsafe outbox job data");
+  }
+}
+
 class SafeSystemQueue extends Queue<SystemOutboxJob> {
   override add(name: string, data: SystemOutboxJob, options?: JobsOptions) {
-    assertSafeJobValue(data);
-    return super.add(name, data, options);
+    return super.add(name, canonicalizeJobData(data), options);
+  }
+
+  override addBulk(
+    jobs: Parameters<Queue<SystemOutboxJob>["addBulk"]>[0],
+  ) {
+    const canonicalJobs = jobs.map((job) => ({
+      ...job,
+      data: canonicalizeJobData(job.data),
+    }));
+    return super.addBulk(canonicalJobs);
   }
 }
 
@@ -93,21 +152,45 @@ export type SystemQueuePublisher = {
     name: string,
     data: SystemOutboxJob,
     options: JobsOptions,
-  ): Promise<{ id?: string }>;
+  ): Promise<{
+    id?: string;
+    getState?(): Promise<string>;
+    retry?(state?: "failed"): Promise<void>;
+  }>;
 };
 
-export function enqueueSystemOutboxJob<TQueue extends SystemQueuePublisher>(
+export async function enqueueSystemOutboxJob<TQueue extends SystemQueuePublisher>(
   queue: TQueue,
   payload: SystemOutboxJob,
-): ReturnType<TQueue["add"]> {
-  assertSafeJobValue(payload);
-  return queue.add(OUTBOX_JOB, payload, {
-    jobId: payload.outboxEventId,
-    attempts: 8,
-    backoff: { type: "exponential", delay: 1_000 },
-    removeOnComplete: { age: 86_400, count: 10_000 },
-    removeOnFail: false,
-  }) as ReturnType<TQueue["add"]>;
+  timeoutMs = PRODUCER_OPERATION_TIMEOUT_MS,
+): Promise<Awaited<ReturnType<TQueue["add"]>>> {
+  const canonicalPayload = canonicalizeJobData(payload);
+  const job = await withProducerOperationDeadline(
+    () =>
+      queue.add(OUTBOX_JOB, canonicalPayload, {
+        jobId: payload.outboxEventId,
+        attempts: 8,
+        backoff: { type: "exponential", delay: 1_000 },
+        removeOnComplete: { age: 86_400, count: 10_000 },
+        removeOnFail: false,
+      }) as ReturnType<TQueue["add"]>,
+    timeoutMs,
+  );
+
+  if (job.getState && job.retry) {
+    const state = await withProducerOperationDeadline(
+      () => job.getState?.() as Promise<string>,
+      timeoutMs,
+    );
+    if (state === "failed") {
+      await withProducerOperationDeadline(
+        () => job.retry?.("failed") as Promise<void>,
+        timeoutMs,
+      );
+    }
+  }
+
+  return job as Awaited<ReturnType<TQueue["add"]>>;
 }
 
 type MarkFailed = typeof markOutboxFailed;
@@ -123,6 +206,7 @@ export type DispatchOutboxOptions = {
   batchSize: number;
   leaseMs: number;
   retryDelayMs?: number;
+  enqueueTimeoutMs?: number;
   now?: () => Date;
 };
 
@@ -160,7 +244,11 @@ export async function dispatchOutboxBatch(
 
   for (const event of events) {
     try {
-      await enqueueSystemOutboxJob(dependencies.queue, toJobPayload(event));
+      await enqueueSystemOutboxJob(
+        dependencies.queue,
+        toJobPayload(event),
+        options.enqueueTimeoutMs,
+      );
       enqueued += 1;
     } catch (error) {
       failed += 1;

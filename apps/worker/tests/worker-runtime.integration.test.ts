@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createServer, type Socket } from "node:net";
 
 import {
   afterAll,
@@ -51,6 +52,32 @@ function isolatedValkeyUrl(source: string, database: number): string {
   const url = new URL(source);
   url.pathname = `/${database}`;
   return url.toString();
+}
+
+async function createSilentRedisPeer() {
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Silent Redis peer did not bind a TCP port");
+  }
+
+  return {
+    url: `redis://127.0.0.1:${address.port}`,
+    async close() {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 async function waitForReady(connection: ReturnType<typeof createQueueConnection>): Promise<void> {
@@ -293,6 +320,49 @@ describe("outbox dispatcher", () => {
     );
   });
 
+  test("a silent Redis peer cannot hold enqueue beyond its operation deadline", async () => {
+    const now = new Date();
+    await insertFoundationEvent(now);
+    const silentPeer = await createSilentRedisPeer();
+    const silentConnection = createQueueConnection(silentPeer.url);
+    silentConnection.on("error", () => undefined);
+    const silentQueue = createSystemQueue(silentConnection);
+    silentQueue.on("error", () => undefined);
+    const startedAt = Date.now();
+    const dispatch = dispatchOutboxBatch(
+      { db, queue: silentQueue },
+      {
+        workerId: "dispatcher-silent-valkey",
+        batchSize: 10,
+        leaseMs: 30_000,
+        enqueueTimeoutMs: 150,
+        now: () => now,
+      },
+    );
+    const outcome = await Promise.race([
+      dispatch,
+      new Promise<"test-timeout">((resolve) => setTimeout(() => resolve("test-timeout"), 750)),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+
+    silentConnection.disconnect();
+    await silentQueue.disconnect().catch(() => undefined);
+    await silentPeer.close();
+    await dispatch.catch(() => undefined);
+
+    expect(outcome).toEqual({ claimed: 1, enqueued: 0, failed: 1 });
+    expect(elapsedMs).toBeLessThan(750);
+    const [failed] = await db.select().from(systemOutbox);
+    expect(failed).toEqual(
+      expect.objectContaining({
+        lastError: "outbox_delivery_failed",
+        lockedAt: null,
+        lockedBy: null,
+        leaseExpiresAt: null,
+      }),
+    );
+  });
+
 });
 
 describe("worker runtime integration", () => {
@@ -317,6 +387,33 @@ describe("worker runtime integration", () => {
     await inspectionQueue.close();
     await inspectionConnection.quit();
     await database.close();
+  });
+
+  test("a silent Redis peer cannot hold producer startup beyond its operation deadline", async () => {
+    const silentPeer = await createSilentRedisPeer();
+    const startup = startWorker({
+      databaseUrl,
+      valkeyUrl: silentPeer.url,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      producerOperationTimeoutMs: 150,
+      signalSource: new EventEmitter(),
+      logger: { info() {}, error() {} },
+    });
+    const outcome = await Promise.race([
+      startup.then(
+        () => "started" as const,
+        (error: unknown) => error,
+      ),
+      new Promise<"test-timeout">((resolve) => setTimeout(() => resolve("test-timeout"), 750)),
+    ]);
+
+    await silentPeer.close();
+    await startup.catch(() => undefined);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe("Worker startup failed");
   });
 
   test("a foundation ping is published once and completed by the BullMQ worker", async () => {
@@ -468,6 +565,93 @@ describe("worker runtime integration", () => {
     expect(row?.publishedAt).not.toBeNull();
   });
 
+  test("redispatch reactivates a terminal failed job while PostgreSQL is unpublished", async () => {
+    const firstDispatchAt = new Date();
+    const aggregateId = randomUUID();
+    const eventId = await db.transaction((tx) =>
+      insertOutboxEvent(tx, {
+        eventType: "system.foundation.ping.v1",
+        eventVersion: 1,
+        aggregateType: "system",
+        aggregateId,
+        payload: { ping: true },
+        occurredAt: firstDispatchAt,
+        availableAt: firstDispatchAt,
+      }),
+    );
+    await inspectionQueue.add(
+      OUTBOX_JOB,
+      {
+        outboxEventId: eventId,
+        eventType: "system.foundation.ping.v1",
+        eventVersion: 1,
+        aggregateType: "system",
+        aggregateId,
+        payload: { ping: true },
+        occurredAt: firstDispatchAt.toISOString(),
+      },
+      { jobId: eventId, attempts: 1, removeOnFail: false },
+    );
+    await dispatchOutboxBatch(
+      { db, queue: inspectionQueue },
+      {
+        workerId: "dispatcher-before-terminal-failure",
+        batchSize: 1,
+        leaseMs: 5_000,
+        now: () => firstDispatchAt,
+      },
+    );
+
+    const failingHandle = await startWorker({
+      databaseUrl,
+      valkeyUrl: runtimeUrl,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 5_000,
+      signalSource: new EventEmitter(),
+      dependencies: {
+        acknowledge: vi.fn(async () => {
+          throw new Error("dummy-secret-terminal-ack-failure");
+        }),
+      },
+      logger: { info() {}, error() {} },
+    });
+    await waitForJobState(inspectionQueue, eventId, "failed");
+    await failingHandle.stop();
+
+    const failedBeforeRetry = await inspectionQueue.getJob(eventId);
+    expect(failedBeforeRetry?.failedReason).toBe("Worker job processing failed");
+    expect(failedBeforeRetry?.stacktrace.length).toBeGreaterThan(0);
+    expect((await db.select().from(systemOutbox))[0]?.publishedAt).toBeNull();
+
+    await expect(
+      dispatchOutboxBatch(
+        { db, queue: inspectionQueue },
+        {
+          workerId: "dispatcher-after-terminal-failure",
+          batchSize: 1,
+          leaseMs: 5_000,
+          now: () => new Date(firstDispatchAt.getTime() + 5_000),
+        },
+      ),
+    ).resolves.toEqual({ claimed: 1, enqueued: 1, failed: 0 });
+    await waitForJobState(inspectionQueue, eventId, "waiting");
+
+    const handle = await startWorker({
+      databaseUrl,
+      valkeyUrl: runtimeUrl,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 5_000,
+      signalSource: new EventEmitter(),
+    });
+    handles.push(handle);
+    await waitForJobState(inspectionQueue, eventId, "completed");
+
+    const row = (await db.select().from(systemOutbox)).find((event) => event.id === eventId);
+    expect(row?.publishedAt).not.toBeNull();
+  });
+
   test("an unknown event type fails visibly and remains retained", async () => {
     const metricsBefore = await workerMetricSnapshot("failed");
     const observedContexts: Array<RequestContext | undefined> = [];
@@ -579,9 +763,18 @@ describe("worker shutdown", () => {
       queueDisconnect?: () => Promise<void>;
       producerQuit?: () => Promise<void>;
       producerConnect?: () => Promise<void>;
+      producerDisconnect?: () => void;
       workerQuit?: () => Promise<void>;
+      workerConnect?: () => Promise<void>;
+      workerConnectionDisconnect?: () => void;
       databaseClose?: () => Promise<void>;
       onWorkerConnectionCreate?: () => void;
+      throwAt?:
+        | "producer"
+        | "worker-connection"
+        | "worker-connect"
+        | "queue"
+        | "worker";
     } = {},
   ) {
     const calls: string[] = [];
@@ -601,54 +794,83 @@ describe("worker shutdown", () => {
               calls.push("postgres");
             }),
         }),
-        createProducerConnection: () => ({
-          connect: options.producerConnect ?? (async () => undefined),
-          quit:
-            options.producerQuit ??
-            (async () => {
-              calls.push("producer-valkey");
-            }),
-          disconnect: () => {
-            calls.push("producer-valkey-force");
-          },
-        }),
+        createProducerConnection: () => {
+          if (options.throwAt === "producer") {
+            throw new Error("dummy-secret-producer-factory");
+          }
+          return {
+            connect: options.producerConnect ?? (async () => undefined),
+            quit:
+              options.producerQuit ??
+              (async () => {
+                calls.push("producer-valkey");
+              }),
+            disconnect:
+              options.producerDisconnect ??
+              (() => {
+                calls.push("producer-valkey-force");
+              }),
+          };
+        },
         createWorkerConnection: () => {
           options.onWorkerConnectionCreate?.();
+          if (options.throwAt === "worker-connection") {
+            throw new Error("dummy-secret-worker-connection-factory");
+          }
           return {
+            connect:
+              options.workerConnect ??
+              (async () => {
+                if (options.throwAt === "worker-connect") {
+                  throw new Error("dummy-secret-worker-connect");
+                }
+              }),
             quit:
               options.workerQuit ??
               (async () => {
                 calls.push("worker-valkey");
               }),
-            disconnect: () => {
-              calls.push("worker-valkey-force");
-            },
+            disconnect:
+              options.workerConnectionDisconnect ??
+              (() => {
+                calls.push("worker-valkey-force");
+              }),
           };
         },
-        createQueue: () => ({
-          close:
-            options.queueClose ??
-            (async () => {
-              calls.push("queue");
-            }),
-          disconnect:
-            options.queueDisconnect ??
-            (async () => {
-              calls.push("queue-force");
-            }),
-        }),
-        createWorker: () => ({
-          close:
-            options.workerClose ??
-            (async () => {
-              calls.push("worker");
-            }),
-          disconnect:
-            options.workerDisconnect ??
-            (async () => {
-              calls.push("worker-force");
-            }),
-        }),
+        createQueue: () => {
+          if (options.throwAt === "queue") {
+            throw new Error("dummy-secret-queue-factory");
+          }
+          return {
+            close:
+              options.queueClose ??
+              (async () => {
+                calls.push("queue");
+              }),
+            disconnect:
+              options.queueDisconnect ??
+              (async () => {
+                calls.push("queue-force");
+              }),
+          };
+        },
+        createWorker: () => {
+          if (options.throwAt === "worker") {
+            throw new Error("dummy-secret-worker-factory");
+          }
+          return {
+            close:
+              options.workerClose ??
+              (async () => {
+                calls.push("worker");
+              }),
+            disconnect:
+              options.workerDisconnect ??
+              (async () => {
+                calls.push("worker-force");
+              }),
+          };
+        },
         dispatch,
       } as unknown as Partial<WorkerRuntimeDependencies>,
     };
@@ -739,6 +961,91 @@ describe("worker shutdown", () => {
     ).rejects.toThrow("Worker startup failed");
 
     expect(doubles.calls).toEqual(["producer-valkey-force", "postgres"]);
+  });
+
+  test.each([
+    ["producer", ["postgres"]],
+    ["worker-connection", ["producer-valkey-force", "postgres"]],
+    [
+      "worker-connect",
+      ["worker-valkey-force", "producer-valkey-force", "postgres"],
+    ],
+    [
+      "queue",
+      ["worker-valkey-force", "producer-valkey-force", "postgres"],
+    ],
+    [
+      "worker",
+      [
+        "queue-force",
+        "worker-valkey-force",
+        "producer-valkey-force",
+        "postgres",
+      ],
+    ],
+  ] as const)(
+    "startup failure at %s unwinds every acquired resource",
+    async (throwAt, expectedCalls) => {
+      const doubles = runtimeDoubles({ throwAt });
+
+      await expect(
+        startWorker({
+          databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+          valkeyUrl: "redis://127.0.0.1:6379/15",
+          concurrency: 1,
+          batchSize: 10,
+          leaseMs: 30_000,
+          signalSource: doubles.signalSource,
+          dependencies: doubles.dependencies,
+          logger: { info() {}, error() {} },
+        }),
+      ).rejects.toThrow("Worker startup failed");
+
+      expect(doubles.calls).toEqual(expectedCalls);
+    },
+  );
+
+  test("startup cleanup attempts every resource when earlier cleanup rejects", async () => {
+    const cleanupCalls: string[] = [];
+    const doubles = runtimeDoubles({
+      throwAt: "worker",
+      queueDisconnect: async () => {
+        cleanupCalls.push("queue");
+        throw new Error("dummy-secret-queue-cleanup");
+      },
+      workerConnectionDisconnect: () => {
+        cleanupCalls.push("worker-valkey");
+        throw new Error("dummy-secret-worker-valkey-cleanup");
+      },
+      producerDisconnect: () => {
+        cleanupCalls.push("producer-valkey");
+        throw new Error("dummy-secret-producer-valkey-cleanup");
+      },
+      databaseClose: async () => {
+        cleanupCalls.push("postgres");
+        throw new Error("dummy-secret-postgres-cleanup");
+      },
+    });
+
+    await expect(
+      startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: doubles.signalSource,
+        dependencies: doubles.dependencies,
+        logger: { info() {}, error() {} },
+      }),
+    ).rejects.toThrow("Worker startup failed");
+
+    expect(cleanupCalls).toEqual([
+      "queue",
+      "worker-valkey",
+      "producer-valkey",
+      "postgres",
+    ]);
   });
 
   test("shutdown force-attempts every resource at the 25-second cap", async () => {

@@ -12,6 +12,8 @@ import {
 import {
   OUTBOX_JOB,
   SYSTEM_QUEUE,
+  connectQueueProducer,
+  connectQueueWorker,
   createQueueConnection,
   createSystemQueue,
   createWorkerConnection,
@@ -62,6 +64,7 @@ export type StartWorkerOptions = {
   logger?: RuntimeLogger;
   signalSource?: SignalSource;
   shutdownTimeoutMs?: number;
+  producerOperationTimeoutMs?: number;
   dependencies?: Partial<WorkerRuntimeDependencies>;
 };
 
@@ -165,36 +168,61 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
-  const database = dependencies.createDatabase(options.databaseUrl);
-  const producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
+  let database: DatabaseResource | undefined;
+  let producerConnection: ConnectionResource | undefined;
+  let workerConnection: ConnectionResource | undefined;
+  let queue: QueueResource | undefined;
+  let worker: WorkerResource | undefined;
+
+  const startupCleanup = async (): Promise<void> => {
+    const attemptCleanup = async (
+      resource: string,
+      operation: () => Promise<unknown> | unknown,
+    ): Promise<void> => {
+      try {
+        await operation();
+      } catch {
+        logger.error(
+          { category: "worker_startup_cleanup_failed", resource },
+          "Worker startup cleanup failed",
+        );
+      }
+    };
+
+    if (worker) {
+      await attemptCleanup("worker", () => worker?.disconnect());
+    }
+    if (queue) {
+      await attemptCleanup("queue", () => queue?.disconnect());
+    }
+    if (workerConnection) {
+      await attemptCleanup("worker-valkey", () => workerConnection?.disconnect());
+    }
+    if (producerConnection) {
+      await attemptCleanup("producer-valkey", () => producerConnection?.disconnect());
+    }
+    if (database) {
+      await attemptCleanup("postgres", () => database?.close());
+    }
+  };
+
   try {
-    await producerConnection.connect();
+    database = dependencies.createDatabase(options.databaseUrl);
+    producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
+    await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
+    workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
+    await connectQueueWorker(workerConnection, options.producerOperationTimeoutMs);
+    queue = dependencies.createQueue(producerConnection);
+    worker = dependencies.createWorker(
+      createProcessor(logger, database.db, dependencies.acknowledge),
+      workerConnection,
+      options.concurrency,
+    );
   } catch {
-    try {
-      producerConnection.disconnect();
-    } catch {
-      logger.error(
-        { category: "worker_startup_cleanup_failed", resource: "producer-valkey" },
-        "Worker startup cleanup failed",
-      );
-    }
-    try {
-      await database.close();
-    } catch {
-      logger.error(
-        { category: "worker_startup_cleanup_failed", resource: "postgres" },
-        "Worker startup cleanup failed",
-      );
-    }
+    await startupCleanup();
     throw new Error("Worker startup failed");
   }
-  const workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
-  const queue = dependencies.createQueue(producerConnection);
-  const worker = dependencies.createWorker(
-    createProcessor(logger, database.db, dependencies.acknowledge),
-    workerConnection,
-    options.concurrency,
-  );
+
   const workerId = `${dependencies.hostname()}:${dependencies.randomUUID()}`;
   let running = true;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
