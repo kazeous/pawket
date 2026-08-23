@@ -1,6 +1,8 @@
 # Local project governance and working documents
 /docs/
 /AGENTS.md
+/.worktrees/
+/.superpowers/
 
 # Environment variables and local configuration
 .env
