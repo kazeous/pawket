@@ -713,6 +713,7 @@ describe("worker runtime integration", () => {
   test("a BullMQ job ID mismatch fails before outbox acknowledgement", async () => {
     const mismatchId = randomUUID();
     const now = new Date();
+    const availableAt = new Date(now.getTime() + 60_000);
     const eventId = await db.transaction((tx) =>
       insertOutboxEvent(tx, {
         eventType: "system.foundation.ping.v1",
@@ -721,7 +722,7 @@ describe("worker runtime integration", () => {
         aggregateId: randomUUID(),
         payload: { ping: true },
         occurredAt: now,
-        availableAt: now,
+        availableAt,
       }),
     );
     const rawQueue = new Queue<SystemOutboxJob>(SYSTEM_QUEUE, {
