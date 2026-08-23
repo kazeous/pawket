@@ -60,5 +60,6 @@ describe("metrics authorization", () => {
   it("matches only identical tokens", () => {
     expect(constantTimeTokenMatches(metricsToken, metricsToken)).toBe(true);
     expect(constantTimeTokenMatches(metricsToken, "wrong")).toBe(false);
+    expect(constantTimeTokenMatches(metricsToken, "x".repeat(metricsToken.length))).toBe(false);
   });
 });

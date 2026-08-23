@@ -1,6 +1,7 @@
 import { Redis } from "ioredis";
 
 export const PRODUCER_OPERATION_TIMEOUT_MS = 5_000;
+export const READINESS_OPERATION_TIMEOUT_MS = 2_000;
 
 export async function withProducerOperationDeadline<T>(
   operation: () => Promise<T>,
@@ -32,6 +33,17 @@ export function createQueueConnection(valkeyUrl: string): Redis {
   return new Redis(valkeyUrl, {
     commandTimeout: PRODUCER_OPERATION_TIMEOUT_MS,
     connectTimeout: 500,
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+  });
+}
+
+export function createReadinessConnection(valkeyUrl: string): Redis {
+  return new Redis(valkeyUrl, {
+    commandTimeout: READINESS_OPERATION_TIMEOUT_MS,
+    connectTimeout: READINESS_OPERATION_TIMEOUT_MS,
     enableOfflineQueue: false,
     lazyConnect: true,
     maxRetriesPerRequest: 1,

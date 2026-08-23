@@ -3,7 +3,9 @@ export {
   connectQueueProducer,
   connectQueueWorker,
   createQueueConnection,
+  createReadinessConnection,
   createWorkerConnection,
+  READINESS_OPERATION_TIMEOUT_MS,
   withProducerOperationDeadline,
 } from "./connection.js";
 export {

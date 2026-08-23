@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createLivenessResponse,
   createReadinessProbe,
   createReadinessResponse,
 } from "../src/http/readiness.js";
+import { createValkeyReadinessCheck } from "../src/http/readiness-checks.js";
 
 describe("health probes", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("returns the exact liveness payload without consulting dependencies", async () => {
     const response = createLivenessResponse("revision-123");
 
@@ -76,5 +81,54 @@ describe("health probes", () => {
       valkey: "down",
       revision: "revision-123",
     });
+  });
+
+  it("aborts a stalled dependency and waits for its cleanup before returning 503", async () => {
+    vi.useFakeTimers();
+    let observedAbort = false;
+    let cleanupComplete = false;
+    const probe = createReadinessProbe({
+      checkDatabase: (signal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              observedAbort = true;
+              cleanupComplete = true;
+              reject(new Error("database connection destroyed"));
+            },
+            { once: true },
+          );
+        }),
+      checkValkey: async () => undefined,
+      revision: "revision-123",
+    });
+
+    const responsePromise = createReadinessResponse(probe);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const response = await responsePromise;
+
+    expect(observedAbort).toBe(true);
+    expect(cleanupComplete).toBe(true);
+    expect(response.status).toBe(503);
+  });
+
+  it("disconnects a stalled Valkey client before rejecting an aborted check", async () => {
+    let disconnected = false;
+    const controller = new AbortController();
+    const check = createValkeyReadinessCheck("redis://localhost:6379", {
+      createConnection: () => ({
+        ping: () => new Promise<void>(() => undefined),
+        disconnect: () => {
+          disconnected = true;
+        },
+      }),
+    });
+
+    const checkPromise = check(controller.signal);
+    controller.abort();
+
+    await expect(checkPromise).rejects.toThrow("aborted");
+    expect(disconnected).toBe(true);
   });
 });

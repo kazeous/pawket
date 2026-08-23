@@ -9,41 +9,29 @@ export type ReadinessResult = {
   revision: string;
 };
 
+export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
+
 export type ReadinessDependencies = {
-  checkDatabase: () => Promise<void>;
-  checkValkey: () => Promise<void>;
+  checkDatabase: ReadinessCheck;
+  checkValkey: ReadinessCheck;
   revision: string;
 };
 
-function withTimeout(check: () => Promise<void>): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  let checkPromise: Promise<void>;
+async function dependencyStatus(check: ReadinessCheck): Promise<DependencyStatus> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, READINESS_TIMEOUT_MS);
 
   try {
-    checkPromise = check();
-  } catch (error) {
-    return Promise.reject(error);
-  }
-
-  checkPromise.catch(() => undefined);
-
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error("Readiness check timed out")), READINESS_TIMEOUT_MS);
-  });
-
-  return Promise.race([checkPromise, timeoutPromise]).finally(() => {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
-    }
-  });
-}
-
-async function dependencyStatus(check: () => Promise<void>): Promise<DependencyStatus> {
-  try {
-    await withTimeout(check);
-    return "up";
+    await check(controller.signal);
+    return timedOut ? "down" : "up";
   } catch {
     return "down";
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

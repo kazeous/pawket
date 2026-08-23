@@ -2,6 +2,7 @@ import { getRequestContext } from "@pawket/observability";
 import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 
+import nextConfig from "../next.config";
 import { proxy } from "../src/proxy.js";
 import { withRouteContext } from "../src/http/route-context.js";
 import { applySecurityHeaders } from "../src/http/security-headers.js";
@@ -24,6 +25,15 @@ describe("HTTP hardening", () => {
     expect(response.headers.has("content-security-policy")).toBe(false);
   });
 
+  it("configures the required headers globally in Next", async () => {
+    const configuredHeaders = await nextConfig.headers?.();
+    const globalHeaders = configuredHeaders?.find((entry) => entry.source === "/:path*")?.headers;
+
+    expect(Object.fromEntries(globalHeaders?.map(({ key, value }) => [key.toLowerCase(), value]) ?? [])).toEqual(
+      expectedSecurityHeaders,
+    );
+  });
+
   it("preserves a valid request ID through the proxy and onto the response", () => {
     const response = proxy(
       new NextRequest("http://localhost/api/health/live", {
@@ -32,6 +42,7 @@ describe("HTTP hardening", () => {
     );
 
     expect(response.headers.get("x-request-id")).toBe("gateway.7:trace_id-1");
+    expect(response.headers.get("x-middleware-request-x-request-id")).toBe("gateway.7:trace_id-1");
   });
 
   it("replaces malformed request IDs rather than reflecting them", () => {
@@ -75,5 +86,48 @@ describe("HTTP hardening", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     );
     expect(response.status).toBe(200);
+  });
+
+  it("uses the proxy-forwarded canonical ID as the route context ID", async () => {
+    const proxied = proxy(
+      new NextRequest("http://localhost/api/health/live", {
+        headers: { "x-request-id": "invalid/request-id" },
+      }),
+    );
+    const forwarded = proxied.headers.get("x-middleware-request-x-request-id");
+    let contextRequestId: string | undefined;
+
+    await withRouteContext(
+      new Request("http://localhost/api/health/live", {
+        headers: { "x-request-id": forwarded ?? "" },
+      }),
+      () => {
+        contextRequestId = getRequestContext()?.requestId;
+        return new Response("ok");
+      },
+    );
+
+    expect(contextRequestId).toBe(forwarded);
+  });
+
+  it("retains isolated request contexts across asynchronous handlers", async () => {
+    const requestIds = await Promise.all([
+      withRouteContext(
+        new Request("http://localhost", { headers: { "x-request-id": "request-one" } }),
+        async () => {
+          await Promise.resolve();
+          return new Response(getRequestContext()?.requestId);
+        },
+      ).then((response) => response.text()),
+      withRouteContext(
+        new Request("http://localhost", { headers: { "x-request-id": "request-two" } }),
+        async () => {
+          await Promise.resolve();
+          return new Response(getRequestContext()?.requestId);
+        },
+      ).then((response) => response.text()),
+    ]);
+
+    expect(requestIds).toEqual(["request-one", "request-two"]);
   });
 });
