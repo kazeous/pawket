@@ -36,7 +36,7 @@ export function createLogger(options: {
     options.env.DATABASE_URL,
     options.env.VALKEY_URL,
     options.env.METRICS_TOKEN,
-    ...options.env.BETTER_AUTH_SECRETS,
+    ...options.env.BETTER_AUTH_SECRETS.map(({ value }) => value),
     ...Object.values(options.env.PII_KEYRING_JSON),
     options.env.PII_LOOKUP_HMAC_KEY,
     options.env.GOOGLE_CLIENT_SECRET,

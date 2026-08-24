@@ -11,7 +11,8 @@ const completeProductionEnv = {
   METRICS_TOKEN: "12345678901234567890123456789012",
   APP_BASE_URL: "https://pawket.example",
   AUTH_TRUSTED_ORIGINS: "https://pawket.example,https://admin.pawket.example",
-  BETTER_AUTH_SECRETS: JSON.stringify(["production-auth-secret-value-000000000001"]),
+  BETTER_AUTH_SECRETS:
+    "2:production-auth-secret-value-000000000002,1:production-auth-secret-value-000000000001",
   PII_ACTIVE_KEY_ID: "pii-2026-08",
   PII_KEYRING_JSON: JSON.stringify({
     "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -112,7 +113,10 @@ describe("parseServerEnv", () => {
           "https://pawket.example",
           "https://admin.pawket.example",
         ],
-        BETTER_AUTH_SECRETS: ["production-auth-secret-value-000000000001"],
+        BETTER_AUTH_SECRETS: [
+          { version: 2, value: "production-auth-secret-value-000000000002" },
+          { version: 1, value: "production-auth-secret-value-000000000001" },
+        ],
         PII_ACTIVE_KEY_ID: "pii-2026-08",
         PII_KEYRING_JSON: {
           "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",

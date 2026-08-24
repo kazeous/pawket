@@ -41,7 +41,9 @@ type AuthFactory = {
     db: PawketDatabase;
     baseURL: string;
     trustedOrigins: readonly string[];
-    secret: string;
+    secret?: string;
+    secrets?: readonly { version: number; value: string }[];
+    legacySecret?: string;
     keyring: ReturnType<typeof createEncryptionKeyring>;
     socialProviders?: {
       google?: { clientId: string; clientSecret: string };
@@ -70,6 +72,8 @@ const client = postgres(databaseUrl, { max: 1 });
 const db = drizzle(client, { schema }) as PawketDatabase;
 const migrationsDirectory = new URL("../../database/migrations/", import.meta.url);
 const baseURL = "https://pawket.example";
+const authSecretValue = "production-like-auth-secret-at-least-32-characters";
+const versionedAuthSecrets = [{ version: 1, value: authSecretValue }] as const;
 let auth: PawketAuth;
 let service: ReturnType<NonNullable<AuthFactory["createIdentityService"]>>;
 let serviceVerificationToken = "";
@@ -90,7 +94,8 @@ function createSocialAuth(): PawketAuth {
     db,
     baseURL,
     trustedOrigins: [baseURL],
-    secret: "production-like-auth-secret-at-least-32-characters",
+    secrets: versionedAuthSecrets,
+    legacySecret: authSecretValue,
     keyring: authKeyring,
     lookupHmacKey: Uint8Array.from({ length: 32 }, (_, index) => index + 20),
     socialProviders: {
@@ -276,7 +281,8 @@ beforeAll(async () => {
     db,
     baseURL,
     trustedOrigins: [baseURL],
-    secret: "production-like-auth-secret-at-least-32-characters",
+    secrets: versionedAuthSecrets,
+    legacySecret: authSecretValue,
     keyring: authKeyring,
     lookupHmacKey: Uint8Array.from({ length: 32 }, (_, index) => index + 20),
     throttle: { maximumAttempts: 20, windowMs: 60_000, blockMs: 120_000 },

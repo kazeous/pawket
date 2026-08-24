@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { symmetricDecrypt } from "better-auth/crypto";
+import { symmetricDecrypt, type SecretConfig } from "better-auth/crypto";
 import { twoFactor } from "better-auth/plugins";
 import { createOTP } from "@better-auth/utils/otp";
 
@@ -142,11 +142,22 @@ export type AuthenticationRiskHook = {
   }): Promise<"allow" | "deny" | "bot_challenge">;
 };
 
+type PawketAuthSecretOptions =
+  | {
+      secrets: readonly { version: number; value: string }[];
+      secret?: never;
+      legacySecret?: string;
+    }
+  | {
+      secret: string;
+      secrets?: never;
+      legacySecret?: never;
+    };
+
 type PawketAuthOptions = {
   db: PawketDatabase;
   baseURL: string;
   trustedOrigins: readonly string[];
-  secret: string;
   keyring: EncryptionKeyring;
   lookupHmacKey: Uint8Array;
   socialProviders?: {
@@ -156,7 +167,7 @@ type PawketAuthOptions = {
   throttle?: { maximumAttempts: number; windowMs: number; blockMs: number };
   acceleration?: AuthenticationThrottleAcceleration;
   riskHook?: AuthenticationRiskHook;
-};
+} & PawketAuthSecretOptions;
 
 export type PawketAuthBoundary = {
   handler(request: Request): Promise<Response>;
@@ -304,7 +315,7 @@ async function rollbackIncompleteTotpEnrollment(
 async function matchedTotpStep(input: {
   db: PawketDatabase;
   keyring: EncryptionKeyring;
-  authSecret: string;
+  authSecret: string | SecretConfig;
   userId: string;
   code: string;
   now: Date;
@@ -423,10 +434,27 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
   const enabledProviders = (["google", "discord"] as const).filter(
     (provider) => Boolean(options.socialProviders?.[provider]),
   );
+  const configuredAuthSecrets =
+    options.secrets !== undefined
+      ? options.secrets.map(({ version, value }) => ({ version, value }))
+      : [{ version: 0, value: options.secret }];
+  const currentAuthSecret = configuredAuthSecrets[0];
+  if (!currentAuthSecret) throw new Error("At least one authentication secret is required");
+  const legacyAuthSecret =
+    options.secrets !== undefined ? options.legacySecret : options.secret;
+  const authSecretConfig: SecretConfig = {
+    keys: new Map(configuredAuthSecrets.map(({ version, value }) => [version, value])),
+    currentVersion: currentAuthSecret.version,
+    ...(legacyAuthSecret ? { legacySecret: legacyAuthSecret } : {}),
+  };
+  const authSecretOptions = {
+    secrets: configuredAuthSecrets,
+    ...(legacyAuthSecret ? { secret: legacyAuthSecret } : {}),
+  };
   const auth = betterAuth({
     appName: "Pawket",
     baseURL: options.baseURL,
-    secret: options.secret,
+    ...authSecretOptions,
     trustedOrigins: [...options.trustedOrigins],
     disabledPaths: [...POLICY_OWNED_PATHS],
     database: createPawketAuthAdapter(
@@ -1171,7 +1199,7 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
         const acceptedStep = await matchedTotpStep({
           db: options.db,
           keyring: options.keyring,
-          authSecret: options.secret,
+          authSecret: authSecretConfig,
           userId: verifiedUserId,
           code: totpVerification.code,
           now: new Date(),
