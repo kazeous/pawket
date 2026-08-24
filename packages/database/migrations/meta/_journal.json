@@ -64,6 +64,34 @@
       "when": 1787582959831,
       "tag": "0008_creator-application-attestation-immutability",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787596961657,
+      "tag": "0009_payments_receiving_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787597519678,
+      "tag": "0010_wandering_photon",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787597993417,
+      "tag": "0011_slimy_talisman",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787599372790,
+      "tag": "0012_special_paibok",
+      "breakpoints": true
     }
   ]
 }

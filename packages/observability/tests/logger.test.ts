@@ -8,6 +8,7 @@ import {
   recordHttpRequestMetrics,
   recordWorkerJobMetrics,
   setOutboxMetrics,
+  setRefundLiabilityMetrics,
   withRequestContext,
 } from "../src/index.js";
 
@@ -218,6 +219,12 @@ describe("operational metrics", () => {
       durationSeconds: 0.125,
     });
     setOutboxMetrics({ pending: 3, oldestAgeSeconds: 42 });
+    setRefundLiabilityMetrics({
+      dueSoon: 2,
+      dueToday: 1,
+      overdue: 3,
+      outstandingAmountVnd: 60_000,
+    });
     recordWorkerJobMetrics({
       name: "system.outbox-event",
       outcome: "completed",
@@ -231,6 +238,10 @@ describe("operational metrics", () => {
     expect(serializedMetrics).toContain("pawket_http_request_duration_seconds_sum");
     expect(serializedMetrics).toContain("pawket_outbox_pending_total 3");
     expect(serializedMetrics).toContain("pawket_outbox_oldest_age_seconds 42");
+    expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="due_soon"} 2');
+    expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="due_today"} 1');
+    expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="overdue"} 3');
+    expect(serializedMetrics).toContain("pawket_refund_liability_outstanding_vnd 60000");
     expect(serializedMetrics).toContain(
       'pawket_worker_jobs_total{queue="pawket.system",name="system.outbox-event",outcome="completed"} 1',
     );

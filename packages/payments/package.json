@@ -1,0 +1,21 @@
+{
+  "name": "@pawket/payments",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pawket/database": "workspace:*",
+    "@pawket/security": "workspace:*",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "postgres": "3.4.9"
+  }
+}

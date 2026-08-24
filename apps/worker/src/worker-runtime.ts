@@ -11,8 +11,10 @@ import type { SecurityEmailSender } from "@pawket/identity/security-email";
 import type { EncryptionKeyring } from "@pawket/security";
 import {
   recordWorkerJobMetrics,
+  setRefundLiabilityMetrics,
   withRequestContext,
 } from "@pawket/observability";
+import { scanVerificationDepositRefundWindows } from "@pawket/payments";
 import {
   OUTBOX_JOB,
   SYSTEM_QUEUE,
@@ -27,6 +29,17 @@ import {
 
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
+const REFUND_SCAN_INTERVAL_MS = 60_000;
+const SAFE_PAYMENTS_EVENTS = new Set([
+  "payments.verification_deposit_challenge_issued.v1",
+  "payments.verification_deposit_received.v1",
+  "payments.receiving_account_control_verified.v1",
+  "payments.verification_deposit_refund_due_soon.v1",
+  "payments.verification_deposit_refund_due_today.v1",
+  "payments.verification_deposit_refund_overdue.v1",
+  "payments.verification_deposit_refund_sent.v1",
+  "payments.verification_deposit_refund_attention_required.v1",
+]);
 
 type RuntimeLogger = {
   info(data: Record<string, unknown>, message?: string): void;
@@ -55,6 +68,7 @@ export type WorkerRuntimeDependencies = {
   ): WorkerResource;
   dispatch: typeof dispatchOutboxBatch;
   acknowledge: typeof acknowledgeOutboxEvent;
+  scanRefundWindows: typeof scanVerificationDepositRefundWindows;
   hostname(): string;
   randomUUID(): string;
 };
@@ -103,6 +117,7 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   },
   dispatch: dispatchOutboxBatch,
   acknowledge: acknowledgeOutboxEvent,
+  scanRefundWindows: scanVerificationDepositRefundWindows,
   hostname,
   randomUUID,
 };
@@ -166,7 +181,10 @@ export function createWorkerJobProcessor(input: {
               sender: input.securityEmail.sender,
               now: new Date(),
             });
-          } else if (job.data.eventType !== "system.foundation.ping.v1") {
+          } else if (
+            job.data.eventType !== "system.foundation.ping.v1" &&
+            !SAFE_PAYMENTS_EVENTS.has(job.data.eventType)
+          ) {
             throw new Error("Unsupported outbox event type");
           }
           const acknowledged = await input.acknowledge(input.database, {
@@ -286,6 +304,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let running = true;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let currentDispatch: Promise<void> | undefined;
+  let lastRefundScanAt = 0;
   let stopPromise: Promise<void> | undefined;
   let resolveStopped!: () => void;
   const whenStopped = new Promise<void>((resolve) => {
@@ -298,6 +317,34 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
 
     try {
+      const scanAt = Date.now();
+      if (scanAt - lastRefundScanAt >= REFUND_SCAN_INTERVAL_MS) {
+        lastRefundScanAt = scanAt;
+        try {
+          const liabilities = await dependencies.scanRefundWindows({
+            db: database.db,
+            now: new Date(scanAt),
+          });
+          setRefundLiabilityMetrics(liabilities);
+          if (liabilities.dueSoon + liabilities.dueToday + liabilities.overdue > 0) {
+            logger.info(
+              {
+                workerId,
+                dueSoon: liabilities.dueSoon,
+                dueToday: liabilities.dueToday,
+                overdue: liabilities.overdue,
+                outstandingAmountVnd: liabilities.outstandingAmountVnd,
+              },
+              "Refund liabilities scanned",
+            );
+          }
+        } catch {
+          logger.error(
+            { category: "refund_liability_scan_failed", workerId },
+            "Refund liability scan failed",
+          );
+        }
+      }
       const result = await dependencies.dispatch(
         { db: database.db, queue },
         {

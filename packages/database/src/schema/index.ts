@@ -15,6 +15,15 @@ export {
 } from "./identity-core.js";
 export { creatorApplications, creatorApplicationRevisions, creatorApplicationAttestations } from "./creator-applications.js";
 export {
+  paymentsReceivingAccountOnboarding,
+  paymentsUnmatchedDeposits,
+  paymentsVerificationDepositChallenges,
+  paymentsVerificationDepositReceipts,
+  paymentsVerificationDepositRefundObligations,
+  paymentsVerificationDepositRefunds,
+  paymentsVerificationDepositReports,
+} from "./payments.js";
+export {
   adminAuditEvents,
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,

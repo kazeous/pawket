@@ -9,4 +9,5 @@ export {
   recordHttpRequestMetrics,
   recordWorkerJobMetrics,
   setOutboxMetrics,
+  setRefundLiabilityMetrics,
 } from "./metrics.js";

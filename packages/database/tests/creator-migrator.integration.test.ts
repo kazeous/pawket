@@ -111,7 +111,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(9);
+  expect(journal?.count).toBe(13);
 }
 
 async function createMigrationsThrough0006(): Promise<string> {

@@ -11,7 +11,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -34,7 +36,9 @@ button:disabled {
   opacity: 0.55;
 }
 
-input {
+input,
+select,
+textarea {
   box-sizing: border-box;
   width: 100%;
   border: 1px solid #a59e92;
@@ -43,10 +47,25 @@ input {
   padding: 0.65rem 0.75rem;
 }
 
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
 label {
   display: grid;
   gap: 0.35rem;
   font-weight: 600;
+}
+
+label:has(> input[type="checkbox"]) {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+label > input[type="checkbox"] {
+  width: auto;
+  margin: 0.2rem 0 0;
 }
 
 .page-shell {

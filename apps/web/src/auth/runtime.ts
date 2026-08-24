@@ -3,11 +3,12 @@ import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
-  createCanonicalCreatorReceivingAccountReferenceValidator,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
   createIdentityService,
   createPawketAuth,
+  createStepUpProof,
+  consumeStepUpProof,
   getIdentityUserSummary,
   listUserSessions,
   recordSecurityThrottleAttempt,
@@ -16,12 +17,19 @@ import {
   revokeAllUserSessions,
   revokeUserSession,
 } from "@pawket/identity";
+import {
+  createCreatorReceivingAccountReferenceValidator,
+  createPaymentsHttpHandlers,
+  createReceivingAccountService,
+  createVerificationDepositService,
+} from "@pawket/payments";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 
 type WebIdentityRuntime = {
   auth: ReturnType<typeof createPawketAuth>;
   handlers: ReturnType<typeof createIdentityHttpHandlers>;
   creatorHandlers: ReturnType<typeof createCreatorApplicationHttpHandlers>;
+  paymentsHandlers: ReturnType<typeof createPaymentsHttpHandlers>;
   authenticate(headers: Headers): Promise<{
     userId: string;
     sessionId: string;
@@ -68,6 +76,19 @@ export function getIdentityRuntime(): WebIdentityRuntime {
   });
   const lookupHmacKey = Buffer.from(env.PII_LOOKUP_HMAC_KEY, "base64");
   const emailDeliveryAvailable = isSecurityEmailDeliveryAvailable(env.SECURITY_EMAIL_ADAPTER);
+  const supportedBanks = {
+    "000000": "Local test bank",
+    "970415": "VietinBank",
+    "970436": "Vietcombank",
+    [env.OPERATING_BANK_BIN]:
+      env.OPERATING_BANK_BIN === "000000"
+        ? "Local test bank"
+        : env.OPERATING_BANK_BIN === "970415"
+          ? "VietinBank"
+          : env.OPERATING_BANK_BIN === "970436"
+            ? "Vietcombank"
+            : "Configured operating bank",
+  } as const;
   const auth = createPawketAuth({
     db: database.db,
     baseURL: env.APP_BASE_URL,
@@ -105,7 +126,30 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     db: database.db,
     keyring,
     commandFingerprintKey: lookupHmacKey,
-    receivingAccountReferences: createCanonicalCreatorReceivingAccountReferenceValidator(),
+    receivingAccountReferences: createCreatorReceivingAccountReferenceValidator({
+      db: database.db,
+    }),
+  });
+  const receivingAccounts = createReceivingAccountService({
+    db: database.db,
+    keyring,
+    lookupHmacKey,
+    supportedBanks,
+  });
+  const verificationDeposits = createVerificationDepositService({
+    db: database.db,
+    keyring,
+    lookupHmacKey,
+    supportedBanks,
+    depositAmountVnd: env.VERIFICATION_DEPOSIT_AMOUNT_VND,
+    operatingAccount: {
+      bankBin: env.OPERATING_BANK_BIN,
+      bankName: supportedBanks[env.OPERATING_BANK_BIN] ?? "Configured operating bank",
+      accountNumber: env.OPERATING_BANK_ACCOUNT_NUMBER,
+      accountHolderLabel: env.OPERATING_BANK_ACCOUNT_NAME,
+    },
+    calendarVersion: env.VN_BUSINESS_CALENDAR_VERSION,
+    consumeStepUpProof,
   });
 
   async function authenticate(headers: Headers) {
@@ -171,11 +215,37 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     authenticate,
     service: creatorService,
   });
+  const paymentsHandlers = createPaymentsHttpHandlers({
+    trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
+    authenticate,
+    async authorizeOwner(headers) {
+      const session = await authenticate(headers);
+      if (!session) return "unauthenticated";
+      return (await resolveOwnerSessionPermission(database.db, {
+        userId: session.userId,
+        sessionId: session.sessionId,
+        now: new Date(),
+      }))
+        ? "authorized"
+        : "forbidden";
+    },
+    issueOwnerStepUpProof: ({ userId, sessionId, actionClass, now }) =>
+      createStepUpProof(database.db, {
+        userId,
+        sessionId,
+        actionClass,
+        assuranceMethod: "totp",
+        now,
+      }),
+    accounts: receivingAccounts,
+    deposits: verificationDeposits,
+  });
 
   runtime = {
     auth,
     handlers,
     creatorHandlers,
+    paymentsHandlers,
     authenticate,
     async authorizeOwner(headers) {
       const session = await authenticate(headers);

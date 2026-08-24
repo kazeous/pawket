@@ -40,6 +40,25 @@ function job(eventType: string, payload: Record<string, unknown>) {
 }
 
 describe("security email worker contract", () => {
+  test("acknowledges safe Payments liability events without moving funds", async () => {
+    // Break caught: treating a notification event as a transfer command or poisoning the outbox.
+    const acknowledge = vi.fn(async () => true);
+    const processor = runtime.createWorkerJobProcessor!({
+      logger: { info() {}, error() {} },
+      database: {} as never,
+      acknowledge,
+    });
+    await expect(
+      processor(
+        job("payments.verification_deposit_refund_due_today.v1", {
+          obligationId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          state: "ready",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(acknowledge).toHaveBeenCalledOnce();
+  });
+
   test("delivers the purpose-bound handoff before acknowledging the outbox event", async () => {
     expect(typeof runtime.createWorkerJobProcessor).toBe("function");
     const calls: string[] = [];

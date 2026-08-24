@@ -66,6 +66,9 @@ importers:
       '@pawket/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@pawket/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
@@ -96,6 +99,9 @@ importers:
       '@pawket/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@pawket/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
@@ -202,6 +208,22 @@ importers:
       prom-client:
         specifier: 15.1.3
         version: 15.1.3
+
+  packages/payments:
+    dependencies:
+      '@pawket/database':
+        specifier: workspace:*
+        version: link:../database
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../security
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
+    devDependencies:
+      postgres:
+        specifier: 3.4.9
+        version: 3.4.9
 
   packages/queue:
     dependencies:

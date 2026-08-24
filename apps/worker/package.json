@@ -12,6 +12,7 @@
     "@pawket/database": "workspace:*",
     "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
+    "@pawket/payments": "workspace:*",
     "@pawket/queue": "workspace:*",
     "@pawket/security": "workspace:*",
     "bullmq": "6.2.0",

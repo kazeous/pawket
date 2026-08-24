@@ -33,6 +33,19 @@ const outboxOldestAgeSeconds = new Gauge({
   registers: [metricsRegistry],
 });
 
+const refundLiabilitiesTotal = new Gauge({
+  name: "pawket_refund_liabilities_total",
+  help: "Current verification-deposit refund liabilities by bounded due window.",
+  labelNames: ["window"],
+  registers: [metricsRegistry],
+});
+
+const refundLiabilityOutstandingVnd = new Gauge({
+  name: "pawket_refund_liability_outstanding_vnd",
+  help: "Total VND outstanding across verification-deposit refund liabilities.",
+  registers: [metricsRegistry],
+});
+
 const workerJobsTotal = new Counter({
   name: "pawket_worker_jobs_total",
   help: "Total worker jobs processed by Pawket.",
@@ -104,6 +117,31 @@ export function setOutboxMetrics(input: {
   }
   outboxPendingTotal.set(input.pending);
   outboxOldestAgeSeconds.set(input.oldestAgeSeconds);
+}
+
+export function setRefundLiabilityMetrics(input: {
+  dueSoon: number;
+  dueToday: number;
+  overdue: number;
+  outstandingAmountVnd: number;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    !Number.isInteger(input.dueSoon) ||
+    input.dueSoon < 0 ||
+    !Number.isInteger(input.dueToday) ||
+    input.dueToday < 0 ||
+    !Number.isInteger(input.overdue) ||
+    input.overdue < 0 ||
+    !Number.isSafeInteger(input.outstandingAmountVnd) ||
+    input.outstandingAmountVnd < 0
+  ) {
+    rejectUnsafeMetric();
+  }
+  refundLiabilitiesTotal.set({ window: "due_soon" }, input.dueSoon);
+  refundLiabilitiesTotal.set({ window: "due_today" }, input.dueToday);
+  refundLiabilitiesTotal.set({ window: "overdue" }, input.overdue);
+  refundLiabilityOutstandingVnd.set(input.outstandingAmountVnd);
 }
 
 export function recordWorkerJobMetrics(input: {
