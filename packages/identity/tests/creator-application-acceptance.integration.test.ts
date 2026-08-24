@@ -633,6 +633,78 @@ describe("creator application acceptance", () => {
     ).rejects.toThrow("submitted creator application attestations are immutable");
   });
 
+  test("PostgreSQL rejects inserting an attestation into a submitted revision", async () => {
+    // Break caught: backfilling a missing attestation type into a legacy submitted snapshot.
+    const userId = "submitted-attestation-insert-user";
+    const applicationId = randomUUID();
+    const revisionId = randomUUID();
+    const at = new Date("2026-08-24T03:00:00.000Z");
+    await createUser(userId);
+    await db.insert(creatorApplications).values({
+      id: applicationId,
+      userId,
+      state: "submitted",
+      version: 2,
+      currentRevisionId: revisionId,
+      createdAt: at,
+      updatedAt: at,
+    });
+    await db.insert(creatorApplicationRevisions).values({
+      id: revisionId,
+      applicationId,
+      revisionNumber: 1,
+      submittedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    });
+    await expect(
+      client`insert into creator_application_attestations (id, revision_id, type, policy_version, accepted_at, actor_user_id) values (${randomUUID()}, ${revisionId}, ${"privacy"}, ${"privacy-v1"}, ${at.toISOString()}, ${userId})`,
+    ).rejects.toThrow("submitted creator application attestations are immutable");
+  });
+
+  test("PostgreSQL rejects moving an attestation into a submitted revision while draft rows remain mutable", async () => {
+    // Break caught: an UPDATE bypassing OLD-only trigger checks to attach a draft attestation to a submitted snapshot.
+    const userId = "submitted-attestation-move-user";
+    const applicationId = randomUUID();
+    const submittedRevisionId = randomUUID();
+    const draftRevisionId = randomUUID();
+    const attestationId = randomUUID();
+    const at = new Date("2026-08-24T03:00:00.000Z");
+    await createUser(userId);
+    await db.insert(creatorApplications).values({
+      id: applicationId,
+      userId,
+      state: "submitted",
+      version: 2,
+      currentRevisionId: submittedRevisionId,
+      createdAt: at,
+      updatedAt: at,
+    });
+    await db.insert(creatorApplicationRevisions).values([
+      { id: submittedRevisionId, applicationId, revisionNumber: 1, submittedAt: at, createdAt: at, updatedAt: at },
+      { id: draftRevisionId, applicationId, revisionNumber: 2, createdAt: at, updatedAt: at },
+    ]);
+    await db.insert(creatorApplicationAttestations).values({
+      id: attestationId,
+      revisionId: draftRevisionId,
+      type: "privacy",
+      policyVersion: "privacy-v1",
+      acceptedAt: at,
+      actorUserId: userId,
+    });
+    await expect(
+      db.update(creatorApplicationAttestations)
+        .set({ policyVersion: "privacy-v2" })
+        .where(eq(creatorApplicationAttestations.id, attestationId)),
+    ).resolves.toBeDefined();
+    await expect(
+      client`update creator_application_attestations set revision_id = ${submittedRevisionId} where id = ${attestationId}`,
+    ).rejects.toThrow("submitted creator application attestations are immutable");
+    await expect(
+      db.delete(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.id, attestationId)),
+    ).resolves.toBeDefined();
+  });
+
   test("migration 0008 upgrades submitted attestation rows without rewriting migration history", async () => {
     // Break caught: applying the additive migration only on empty databases or leaving pre-existing submitted evidence mutable.
     const upgradeSchema = `creator_attestation_upgrade_${process.pid}_${Date.now()}`;
@@ -687,6 +759,9 @@ describe("creator application acceptance", () => {
       });
 
       await migrate("0008_creator-application-attestation-immutability.sql");
+      await expect(
+        client`insert into creator_application_attestations (id, revision_id, type, policy_version, accepted_at, actor_user_id) values (${randomUUID()}, ${revisionId}, ${"creator_terms"}, ${"creator-terms-v1"}, ${at.toISOString()}, ${userId})`,
+      ).rejects.toThrow("submitted creator application attestations are immutable");
       await expect(
         client`update creator_application_attestations set policy_version = 'changed' where id = ${attestationId}`,
       ).rejects.toThrow("submitted creator application attestations are immutable");
