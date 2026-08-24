@@ -72,7 +72,8 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     db: database.db,
     baseURL: env.APP_BASE_URL,
     trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
-    secret: env.BETTER_AUTH_SECRETS[0]!,
+    secrets: env.BETTER_AUTH_SECRETS,
+    legacySecret: env.BETTER_AUTH_SECRETS[0]!.value,
     keyring,
     lookupHmacKey,
     socialProviders: {

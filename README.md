@@ -14,7 +14,8 @@ the data services publish no host ports.
 Configure these required values in Coolify:
 
 - Non-secret variables: `APP_ENV=production`, `APP_REVISION`, `APP_BASE_URL`,
-  `AUTH_TRUSTED_ORIGINS`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=disabled`,
+  `AUTH_TRUSTED_ORIGINS`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=smtp`,
+  `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS_MODE`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`,
   `VERIFICATION_DEPOSIT_AMOUNT_VND`, `VN_BUSINESS_CALENDAR_VERSION`,
   `VN_BUSINESS_HOLIDAYS`, and the explicit `AUTH_*` lifetime and lockout values.
   `APP_REVISION` is the exact deployed commit SHA. The business-calendar version
@@ -23,10 +24,15 @@ Configure these required values in Coolify:
 - Secrets: `DATABASE_URL`, `VALKEY_URL`, `METRICS_TOKEN`, `POSTGRES_DB`,
   `POSTGRES_USER`, `POSTGRES_PASSWORD`, `BETTER_AUTH_SECRETS`,
   `PII_KEYRING_JSON`, `PII_LOOKUP_HMAC_KEY`, `BOOTSTRAP_OWNER_EMAIL`, and the
-  `OPERATING_BANK_*` values. The PostgreSQL URL and the three PostgreSQL
+  `OPERATING_BANK_*` values, plus `SMTP_USERNAME` and `SMTP_PASSWORD`. The
+  PostgreSQL URL and the three PostgreSQL
   bootstrap values must describe the same database and credentials.
   `METRICS_TOKEN` must contain at least 32 characters. Keep retired PII keys in
   the keyring until all matching envelopes have been rotated.
+
+`BETTER_AUTH_SECRETS` uses Better Auth's native comma-separated versioned format,
+with the current key first, for example `2:<current>,1:<previous>`. Versions must
+be unique non-negative integers and secret values must contain 32–512 characters.
 
 Google and Discord OAuth are optional. Enable either provider only by setting
 both its client ID and client secret; leaving both blank disables it. Phone and

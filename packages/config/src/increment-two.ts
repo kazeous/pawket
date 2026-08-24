@@ -48,24 +48,38 @@ const trustedOriginsSchema = z.string().max(2_048).transform((value, context) =>
 });
 
 const authSecretsSchema = z.string().max(2_048).transform((value, context) => {
-  try {
-    const parsed = JSON.parse(value) as unknown;
+  const entries = value.split(",").map((entry) => entry.trim());
+  if (entries.length < 1 || entries.length > 3 || entries.some((entry) => !entry)) {
+    return addInvalidFormatIssue(context);
+  }
+
+  const parsed: Array<{ version: number; value: string }> = [];
+  for (const entry of entries) {
+    const colonIndex = entry.indexOf(":");
+    if (colonIndex < 1) return addInvalidFormatIssue(context);
+
+    const versionText = entry.slice(0, colonIndex).trim();
+    const secretValue = entry.slice(colonIndex + 1).trim();
+    const version = Number(versionText);
     if (
-      !Array.isArray(parsed) ||
-      parsed.length < 1 ||
-      parsed.length > 3 ||
-      parsed.some(
-        (secret) =>
-          typeof secret !== "string" || [...secret].length < 32 || [...secret].length > 512,
-      ) ||
-      new Set(parsed).size !== parsed.length
+      !/^\d+$/.test(versionText) ||
+      !Number.isSafeInteger(version) ||
+      version < 0 ||
+      [...secretValue].length < 32 ||
+      [...secretValue].length > 512
     ) {
       return addInvalidFormatIssue(context);
     }
-    return parsed as string[];
-  } catch {
+    parsed.push({ version, value: secretValue });
+  }
+
+  if (
+    new Set(parsed.map(({ version }) => version)).size !== parsed.length ||
+    new Set(parsed.map(({ value: secretValue }) => secretValue)).size !== parsed.length
+  ) {
     return addInvalidFormatIssue(context);
   }
+  return parsed;
 });
 
 const piiKeyringSchema = z.string().max(16_384).transform((value, context) => {
@@ -167,7 +181,7 @@ type ParsedIncrementTwoEnv = {
 export type IncrementTwoServerEnv = {
   APP_BASE_URL: string;
   AUTH_TRUSTED_ORIGINS: string[];
-  BETTER_AUTH_SECRETS: string[];
+  BETTER_AUTH_SECRETS: Array<{ version: number; value: string }>;
   PII_ACTIVE_KEY_ID: string;
   PII_KEYRING_JSON: Record<string, string>;
   PII_LOOKUP_HMAC_KEY: string;
@@ -205,7 +219,7 @@ export type IncrementTwoServerEnv = {
 const localDefaults: IncrementTwoServerEnv = {
   APP_BASE_URL: "http://localhost:3000",
   AUTH_TRUSTED_ORIGINS: ["http://localhost:3000"],
-  BETTER_AUTH_SECRETS: ["local-only-better-auth-secret-000000000000"],
+  BETTER_AUTH_SECRETS: [{ version: 1, value: "local-only-better-auth-secret-000000000000" }],
   PII_ACTIVE_KEY_ID: "local-pii-v1",
   PII_KEYRING_JSON: { "local-pii-v1": localPiiKey },
   PII_LOOKUP_HMAC_KEY: localLookupKey,

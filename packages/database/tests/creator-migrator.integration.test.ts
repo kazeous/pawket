@@ -168,7 +168,9 @@ describe("configured Drizzle creator migrator", () => {
         client<{ name: string | null }[]>`select to_regclass('identity_users')::text as name`,
       ).resolves.toEqual([{ name: "identity_users" }]);
       await expect(
-        client<{ name: string | null }[]>`select to_regclass('creator_applications')::text as name`,
+        client<{ name: string | null }[]>`
+          select to_regclass(${`${schemaName}.creator_applications`})::text as name
+        `,
       ).resolves.toEqual([{ name: null }]);
 
       await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
