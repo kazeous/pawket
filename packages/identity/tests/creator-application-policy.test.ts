@@ -31,12 +31,11 @@ describe("creator application policy", () => {
     // Break caught: accepting non-HTTPS/private URLs or an unbounded portfolio list.
     expect(typeof creatorPolicy.validateCreatorPortfolioUrls).toBe("function");
     const validate = creatorPolicy.validateCreatorPortfolioUrls!;
-    expect(validate(["https://portfolio.example/art", "https://social.example/@artist"])).toEqual([
-      "https://portfolio.example/art",
-      "https://social.example/@artist",
-    ]);
+    expect(validate(["https://portfolio.example/art"])).toEqual(["https://portfolio.example/art"]);
+    expect(validate(Array.from({ length: 5 }, (_, index) => `https://portfolio.example/${index}`))).toHaveLength(5);
     expect(() => validate([])).toThrow();
     expect(() => validate(["http://portfolio.example/art"])).toThrow();
+    expect(() => validate(["https://artist:secret@portfolio.example/art"])).toThrow();
     expect(() => validate(["https://127.0.0.1/private"])).toThrow();
     expect(() => validate(Array.from({ length: 6 }, (_, index) => `https://portfolio.example/${index}`))).toThrow();
   });

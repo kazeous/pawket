@@ -5,7 +5,7 @@ const vietnamDateFormatter = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 
-function vietnamDate(now: Date): string {
+export function creatorApplicationVietnamDate(now: Date): string {
   const values = Object.fromEntries(
     vietnamDateFormatter
       .formatToParts(now)
@@ -46,7 +46,7 @@ export class CreatorApplicationPolicyError extends Error {
 
 export function parseCreatorDateOfBirth(value: string, now: Date): { value: string; age: number } {
   const birth = dateParts(value);
-  const today = vietnamDate(now);
+  const today = creatorApplicationVietnamDate(now);
   if (value > today) throw new CreatorApplicationPolicyError("future_date_of_birth");
   const todayParts = dateParts(today);
   let age = todayParts.year - birth.year;
@@ -95,7 +95,7 @@ export function validateCreatorPortfolioUrls(value: unknown): string[] {
 }
 
 export function rejectionCooldownUntil(rejectedAt: Date): Date {
-  const date = vietnamDate(rejectedAt);
+  const date = creatorApplicationVietnamDate(rejectedAt);
   const { year, month, day } = dateParts(date);
   const afterFourteenCalendarDays = new Date(Date.UTC(year, month - 1, day + 14));
   const target = `${afterFourteenCalendarDays.getUTCFullYear()}-${String(afterFourteenCalendarDays.getUTCMonth() + 1).padStart(2, "0")}-${String(afterFourteenCalendarDays.getUTCDate()).padStart(2, "0")}`;
