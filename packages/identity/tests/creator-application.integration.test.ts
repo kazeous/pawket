@@ -111,4 +111,18 @@ describe("creator application repository", () => {
     const withdrawn = await applications.withdraw({ userId: "creator-user", idempotencyKey: "withdraw-one", expectedVersion: current.version });
     await expect(applications.withdraw({ userId: "creator-user", idempotencyKey: "withdraw-one", expectedVersion: current.version })).resolves.toEqual(withdrawn);
   });
+
+  test("forks a changes-requested submitted revision before the applicant resubmits", async () => {
+    // Break caught: overwriting a reviewed immutable revision instead of preserving correction history.
+    await db.insert(identityUsers).values({ id: "revision-user", name: "Revision User", email: "revision@example.com", canonicalEmail: "revision@example.com", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", createdAt: now, updatedAt: now });
+    const applications = service();
+    const draft = await applications.saveDraft({ userId: "revision-user", idempotencyKey: "revision-draft", ...completeDraft });
+    const submitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-submit", expectedVersion: (draft as { version:number }).version, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true }) as { id:string; version:number; revision:{id:string} };
+    await client.unsafe(`update creator_applications set state = 'changes_requested', version = version + 1 where id = '${submitted.id}'`);
+    const changed = await applications.saveDraft({ userId: "revision-user", idempotencyKey: "revision-change", expectedVersion: submitted.version + 1, ...completeDraft, shortIntroduction: "A corrected practice summary." }) as { version:number; revision:{id:string; revisionNumber:number; submittedAt:null} };
+    expect(changed.revision).toMatchObject({ revisionNumber: 2, submittedAt: null });
+    expect(changed.revision.id).not.toBe(submitted.revision.id);
+    const resubmitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-resubmit", expectedVersion: changed.version, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true });
+    expect(resubmitted).toMatchObject({ state: "submitted", revision: { revisionNumber: 2 } });
+  });
 });
