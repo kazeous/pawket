@@ -32,6 +32,8 @@ const keyring = createEncryptionKeyring({
   keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
 });
 const commandFingerprintKey = Uint8Array.from({ length: 32 }, (_, index) => index + 101);
+const receivingAccountReferences =
+  identity.createCanonicalCreatorReceivingAccountReferenceValidator();
 
 async function migrate(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -69,16 +71,16 @@ const completeDraft = {
   artistDisplayName: "Lan Artist",
   shortIntroduction: "Independent illustrator making gentle character art.",
   dateOfBirth: "2000-08-24",
-  portfolioUrls: ["https://portfolio.example/lan"],
+  portfolioUrls: ["https://portfolio.example.com/lan"],
   primaryArtDiscipline: "illustration",
   practiceDescription: "I create digital illustration commissions and personal work.",
   contentIntent: "general_audience_only",
-  proposedReceivingAccountId: "receiving-onboarding-opaque-1",
+  proposedReceivingAccountId: "a5f6d4bb-2638-4ee1-a847-22f38cd1a2c8",
 };
 
 function service() {
   expect(typeof creatorExports.createCreatorApplicationService).toBe("function");
-  return creatorExports.createCreatorApplicationService!({ db, keyring, commandFingerprintKey, idFactory: randomUUID, now: () => now });
+  return creatorExports.createCreatorApplicationService!({ db, keyring, commandFingerprintKey, receivingAccountReferences, idFactory: randomUUID, now: () => now });
 }
 
 describe("creator application repository", () => {
@@ -90,6 +92,7 @@ describe("creator application repository", () => {
       userId: "creator-user",
       idempotencyKey: "submit-one",
       expectedVersion: (draft as { version: number }).version,
+      ...completeDraft,
       dateOfBirthAcknowledged: true,
       truthfulInformationAccepted: true,
       portfolioRightsAccepted: true,
@@ -118,12 +121,12 @@ describe("creator application repository", () => {
     await db.insert(identityUsers).values({ id: "revision-user", name: "Revision User", email: "revision@example.com", canonicalEmail: "revision@example.com", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", createdAt: now, updatedAt: now });
     const applications = service();
     const draft = await applications.saveDraft({ userId: "revision-user", idempotencyKey: "revision-draft", ...completeDraft });
-    const submitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-submit", expectedVersion: (draft as { version:number }).version, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true }) as { id:string; version:number; revision:{id:string} };
+    const submitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-submit", expectedVersion: (draft as { version:number }).version, ...completeDraft, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true }) as { id:string; version:number; revision:{id:string} };
     await client.unsafe(`update creator_applications set state = 'changes_requested', version = version + 1 where id = '${submitted.id}'`);
     const changed = await applications.saveDraft({ userId: "revision-user", idempotencyKey: "revision-change", expectedVersion: submitted.version + 1, ...completeDraft, shortIntroduction: "A corrected practice summary." }) as { version:number; revision:{id:string; revisionNumber:number; submittedAt:null} };
     expect(changed.revision).toMatchObject({ revisionNumber: 2, submittedAt: null });
     expect(changed.revision.id).not.toBe(submitted.revision.id);
-    const resubmitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-resubmit", expectedVersion: changed.version, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true });
+    const resubmitted = await applications.submit({ userId: "revision-user", idempotencyKey: "revision-resubmit", expectedVersion: changed.version, ...completeDraft, shortIntroduction: "A corrected practice summary.", dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true });
     expect(resubmitted).toMatchObject({ state: "submitted", revision: { revisionNumber: 2 } });
   });
 });

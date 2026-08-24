@@ -17,8 +17,9 @@ import {
 import { createEncryptionKeyring, hashOpaqueToken } from "@pawket/security";
 import {
   CreatorApplicationPolicyError,
+  createCanonicalCreatorReceivingAccountReferenceValidator,
   createCreatorApplicationHttpHandlers,
-  createCreatorApplicationService,
+  createCreatorApplicationService as createRawCreatorApplicationService,
 } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -33,16 +34,30 @@ const keyring = createEncryptionKeyring({
   keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
 });
 const commandFingerprintKey = Uint8Array.from({ length: 32 }, (_, index) => index + 101);
+const canonicalReceivingAccountReferences =
+  createCanonicalCreatorReceivingAccountReferenceValidator();
+
+type CreatorServiceInput = Parameters<typeof createRawCreatorApplicationService>[0];
+
+function createCreatorApplicationService(
+  input: Omit<CreatorServiceInput, "receivingAccountReferences"> &
+    Partial<Pick<CreatorServiceInput, "receivingAccountReferences">>,
+) {
+  return createRawCreatorApplicationService({
+    receivingAccountReferences: canonicalReceivingAccountReferences,
+    ...input,
+  });
+}
 
 const completeDraft = {
   artistDisplayName: "Lan Artist",
   shortIntroduction: "Independent illustrator making gentle character art.",
   dateOfBirth: "2000-08-24",
-  portfolioUrls: ["https://portfolio.example/lan"],
+  portfolioUrls: ["https://portfolio.example.com/lan"],
   primaryArtDiscipline: "illustration",
   practiceDescription: "I create digital illustration commissions and personal work.",
   contentIntent: "general_audience_only",
-  proposedReceivingAccountId: "receiving-onboarding-opaque-1",
+  proposedReceivingAccountId: "a5f6d4bb-2638-4ee1-a847-22f38cd1a2c8",
 };
 
 const completeAttestations = {
@@ -226,6 +241,184 @@ describe("creator application acceptance", () => {
     });
   });
 
+  test("submission atomically persists the complete current form instead of a stale saved draft", async () => {
+    // Break caught: Submit accepting fresh attestations while silently submitting older saved form fields.
+    const userId = "atomic-current-snapshot-user";
+    await createUser(userId);
+    const applications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+    const draft = (await applications.saveDraft({
+      userId,
+      idempotencyKey: "atomic-current-snapshot-draft",
+      ...completeDraft,
+    })) as { version: number };
+
+    const currentForm = {
+      ...completeDraft,
+      artistDisplayName: "Lan Current",
+      shortIntroduction: "This introduction exists only in the current unsaved form.",
+      dateOfBirth: "1999-08-25",
+      portfolioUrls: ["https://portfolio.example.com/current"],
+      practiceDescription: "This corrected practice statement must be immutable on submission.",
+      proposedReceivingAccountId: "2f485fa2-63d7-4f45-945d-e7e268b25b65",
+    };
+    const submitted = await applications.submit({
+      userId,
+      idempotencyKey: "atomic-current-snapshot-submit",
+      expectedVersion: draft.version,
+      ...currentForm,
+      ...completeAttestations,
+    });
+
+    expect(submitted).toMatchObject({
+      state: "submitted",
+      revision: {
+        revisionNumber: 1,
+        artistDisplayName: currentForm.artistDisplayName,
+        shortIntroduction: currentForm.shortIntroduction,
+        dateOfBirth: currentForm.dateOfBirth,
+        portfolioUrls: currentForm.portfolioUrls,
+        practiceDescription: currentForm.practiceDescription,
+        proposedReceivingAccountId: currentForm.proposedReceivingAccountId,
+      },
+    });
+    expect(JSON.stringify(submitted)).not.toContain(completeDraft.shortIntroduction);
+  });
+
+  test("changes requested can directly submit a corrected new immutable revision", async () => {
+    // Break caught: direct resubmission mutating revision 1 or requiring an intermediate Save Draft command.
+    const userId = "direct-resubmission-user";
+    await createUser(userId);
+    const applications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+    const draft = (await applications.saveDraft({
+      userId,
+      idempotencyKey: "direct-resubmission-draft",
+      ...completeDraft,
+    })) as { version: number };
+    const first = (await applications.submit({
+      userId,
+      idempotencyKey: "direct-resubmission-first",
+      expectedVersion: draft.version,
+      ...completeDraft,
+      ...completeAttestations,
+    })) as { id: string; version: number; revision: { id: string } };
+    await db
+      .update(creatorApplications)
+      .set({ state: "changes_requested", version: first.version + 1 })
+      .where(eq(creatorApplications.id, first.id));
+
+    const correctedForm = {
+      ...completeDraft,
+      artistDisplayName: "Lan Revised",
+      dateOfBirth: "1999-08-25",
+      portfolioUrls: ["https://portfolio.example.com/revised"],
+      proposedReceivingAccountId: "c0d8f48a-dbf2-4674-acac-33c1236e6321",
+    };
+    const resubmitted = (await applications.submit({
+      userId,
+      idempotencyKey: "direct-resubmission-second",
+      expectedVersion: first.version + 1,
+      ...correctedForm,
+      ...completeAttestations,
+    })) as { revision: { id: string; revisionNumber: number; artistDisplayName: string; dateOfBirth: string } };
+
+    expect(resubmitted.revision).toMatchObject({
+      revisionNumber: 2,
+      artistDisplayName: correctedForm.artistDisplayName,
+      dateOfBirth: correctedForm.dateOfBirth,
+    });
+    expect(resubmitted.revision.id).not.toBe(first.revision.id);
+    const [firstRevision] = await db
+      .select({
+        artistDisplayName: creatorApplicationRevisions.artistDisplayName,
+        submittedAt: creatorApplicationRevisions.submittedAt,
+      })
+      .from(creatorApplicationRevisions)
+      .where(eq(creatorApplicationRevisions.id, first.revision.id));
+    expect(firstRevision).toMatchObject({
+      artistDisplayName: completeDraft.artistDisplayName,
+      submittedAt: new Date("2026-08-24T03:00:00.000Z"),
+    });
+  });
+
+  test("receiving-account references require applicant-aware port approval before storage", async () => {
+    // Break caught: storing a syntactically opaque reference that the Payments boundary refuses for this applicant.
+    const ownerId = "receiving-reference-owner";
+    const wrongOwnerId = "receiving-reference-wrong-owner";
+    const rawAccountId = "receiving-reference-raw-account";
+    const approvedReference = "f6a302d9-bb36-44e7-b609-5310aa4fa4bb";
+    await createUser(ownerId);
+    await createUser(wrongOwnerId);
+    await createUser(rawAccountId);
+    const canonicalApplications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+    await expect(
+      canonicalApplications.saveDraft({
+        userId: rawAccountId,
+        idempotencyKey: "receiving-reference-raw-account",
+        ...completeDraft,
+        proposedReceivingAccountId: "0123456789",
+      }),
+    ).rejects.toMatchObject({ reason: "invalid_receiving_account_reference" });
+    await expect(
+      canonicalApplications.getForApplicant({ userId: rawAccountId }),
+    ).resolves.toBeNull();
+    const receivingAccountReferences = {
+      async isValidForApplicant(input: { applicantUserId: string; reference: string }) {
+        return input.applicantUserId === ownerId && input.reference === approvedReference;
+      },
+    };
+    const applications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      receivingAccountReferences,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+
+    await expect(
+      applications.saveDraft({
+        userId: wrongOwnerId,
+        idempotencyKey: "receiving-reference-refused",
+        ...completeDraft,
+        proposedReceivingAccountId: approvedReference,
+      }),
+    ).rejects.toMatchObject({ reason: "invalid_receiving_account_reference" });
+    await expect(applications.getForApplicant({ userId: wrongOwnerId })).resolves.toBeNull();
+
+    const approvedDraft = (await applications.saveDraft({
+      userId: ownerId,
+      idempotencyKey: "receiving-reference-approved-draft",
+      ...completeDraft,
+      proposedReceivingAccountId: approvedReference,
+    })) as { version: number };
+    const submitted = await applications.submit({
+      userId: ownerId,
+      idempotencyKey: "receiving-reference-approved-submit",
+      expectedVersion: approvedDraft.version,
+      ...completeDraft,
+      proposedReceivingAccountId: approvedReference,
+      ...completeAttestations,
+    });
+    expect(submitted).toMatchObject({
+      state: "submitted",
+      revision: { proposedReceivingAccountId: approvedReference },
+    });
+  });
+
   test("submission uses the current verified email and rejects invalid content or a non-opaque account value", async () => {
     // Break caught: accepting an unverified/stale email, invalid content intent, or plaintext account object.
     const unverifiedUserId = "unverified-submit-user";
@@ -246,6 +439,7 @@ describe("creator application acceptance", () => {
         userId: unverifiedUserId,
         idempotencyKey: "unverified-submit",
         expectedVersion: unverifiedDraft.version,
+        ...completeDraft,
         ...completeAttestations,
       }),
     ).rejects.toMatchObject({ reason: "email_unverified" });
@@ -263,6 +457,8 @@ describe("creator application acceptance", () => {
         userId: invalidContentUserId,
         idempotencyKey: "invalid-content-submit",
         expectedVersion: invalidContentDraft.version,
+        ...completeDraft,
+        contentIntent: undefined,
         ...completeAttestations,
       }),
     ).rejects.toMatchObject({ reason: "invalid_content_intent" });
@@ -280,6 +476,8 @@ describe("creator application acceptance", () => {
         userId: accountUserId,
         idempotencyKey: "opaque-account-submit",
         expectedVersion: accountDraft.version,
+        ...completeDraft,
+        proposedReceivingAccountId: { accountNumber: "0123456789" } as unknown as string,
         ...completeAttestations,
       }),
     ).rejects.toMatchObject({ reason: "incomplete_draft" });
@@ -304,6 +502,8 @@ describe("creator application acceptance", () => {
           userId,
           idempotencyKey: `missing-${field}`,
           expectedVersion: draft.version,
+          ...completeDraft,
+          contentIntent: "may_include_age_restricted",
           ...completeAttestations,
           [field]: false,
         }),
@@ -322,6 +522,8 @@ describe("creator application acceptance", () => {
       userId,
       idempotencyKey: "attestation-submit",
       expectedVersion: draft.version,
+      ...completeDraft,
+      contentIntent: "may_include_age_restricted",
       ...completeAttestations,
       creatorTermsPolicyVersion: "attacker-controlled-version",
       acceptedAt: "1900-01-01T00:00:00.000Z",
@@ -428,6 +630,7 @@ describe("creator application acceptance", () => {
       userId,
       idempotencyKey: "idempotent-submit",
       expectedVersion: draft.version,
+      ...completeDraft,
       ...completeAttestations,
     };
     const submitted = (await applications.submit(submitCommand)) as { id: string; version: number };
@@ -487,7 +690,7 @@ describe("creator application acceptance", () => {
       ...completeDraft,
       dateOfBirth: "2000-08-24",
       portfolioUrls: ["https://portfolio.example/lan?private=not-for-storage"],
-      proposedReceivingAccountId: "receiving-reference-sensitive-1",
+      proposedReceivingAccountId: "79fe922e-6d40-4d0a-bb67-9aca093aee2d",
     };
     const saved = await applications.saveDraft(command);
     await expect(applications.saveDraft(command)).resolves.toEqual(saved);
@@ -546,6 +749,7 @@ describe("creator application acceptance", () => {
           userId,
           idempotencyKey: "concurrent-transition-submit",
           expectedVersion: draft.version,
+          ...completeDraft,
           ...completeAttestations,
         }),
         withdrawer.withdraw({
@@ -588,6 +792,7 @@ describe("creator application acceptance", () => {
       userId,
       idempotencyKey: "immutable-delete-submit",
       expectedVersion: draft.version,
+      ...completeDraft,
       ...completeAttestations,
     })) as { revision: { id: string } };
 
@@ -618,6 +823,7 @@ describe("creator application acceptance", () => {
       userId,
       idempotencyKey: "immutable-attestation-submit",
       expectedVersion: draft.version,
+      ...completeDraft,
       ...completeAttestations,
     })) as { revision: { id: string } };
     const [attestation] = await db
@@ -796,7 +1002,7 @@ describe("creator application acceptance", () => {
       authenticate: async () => ({ userId }),
       service,
     });
-    const submitBody = JSON.stringify(completeAttestations);
+    const submitBody = JSON.stringify({ ...completeDraft, ...completeAttestations });
     const request = (headers: Record<string, string>, method = "POST") =>
       new Request(`${origin}/api/v1/creator-application/submit`, {
         method,
@@ -903,6 +1109,22 @@ describe("creator application acceptance", () => {
     expect(await service.getForApplicant({ userId: victimId })).toBeNull();
     expect(await service.getForApplicant({ userId: actorId })).toMatchObject({ state: "draft" });
 
+    const bodyControlledVersion = await actorHandlers.save(
+      new Request(`${origin}/api/v1/creator-application`, {
+        method: "POST",
+        headers: {
+          origin,
+          "content-type": "application/json",
+          "idempotency-key": "http-body-version-draft",
+        },
+        body: JSON.stringify({ ...completeDraft, expectedVersion: 1 }),
+      }),
+    );
+    expect(bodyControlledVersion.status).toBe(422);
+    await expect(service.getForApplicant({ userId: actorId })).resolves.toMatchObject({
+      version: 1,
+    });
+
     expect(
       (await anonymousHandlers.get(new Request(`${origin}/api/v1/creator-application`))).status,
     ).toBe(401);
@@ -921,7 +1143,11 @@ describe("creator application acceptance", () => {
           "idempotency-key": "http-policy-error",
           "if-match": "1",
         },
-        body: JSON.stringify({ ...completeAttestations, privacyAccepted: false }),
+        body: JSON.stringify({
+          ...completeDraft,
+          ...completeAttestations,
+          privacyAccepted: false,
+        }),
       }),
     );
     expect(policyError.status).toBe(422);

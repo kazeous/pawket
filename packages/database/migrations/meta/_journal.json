@@ -50,6 +50,20 @@
       "when": 1787562175074,
       "tag": "0006_faithful_vivisector",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787582952583,
+      "tag": "0007_creator-applications",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787582959831,
+      "tag": "0008_creator-application-attestation-immutability",
+      "breakpoints": true
     }
   ]
 }

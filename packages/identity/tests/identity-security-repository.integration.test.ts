@@ -79,6 +79,8 @@ beforeAll(async () => {
     absoluteExpiresAt: new Date(now.getTime() + 12 * 60 * 60_000),
     idleExpiresAt: new Date(now.getTime() + 30 * 60_000),
     authorizationVersion: 1,
+    createdAt: now,
+    updatedAt: now,
   });
 
   const authenticatorId = "security-authenticator";

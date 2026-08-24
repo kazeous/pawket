@@ -3,6 +3,7 @@ import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
+  createCanonicalCreatorReceivingAccountReferenceValidator,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
   createIdentityService,
@@ -103,6 +104,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     db: database.db,
     keyring,
     commandFingerprintKey: lookupHmacKey,
+    receivingAccountReferences: createCanonicalCreatorReceivingAccountReferenceValidator(),
   });
 
   async function authenticate(headers: Headers) {

@@ -7,5 +7,6 @@ export default defineConfig({
     "./src/schema/system-outbox.ts",
     "./src/schema/shared-controls.ts",
     "./src/schema/identity-core.ts",
+    "./src/schema/creator-applications.ts",
   ],
 });

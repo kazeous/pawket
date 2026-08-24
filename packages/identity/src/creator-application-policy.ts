@@ -61,20 +61,47 @@ export function parseCreatorDateOfBirth(value: string, now: Date): { value: stri
   return { value, age };
 }
 
-function isPublicHostname(hostname: string): boolean {
+const specialUseDnsSuffixes = new Set([
+  "alt",
+  "arpa",
+  "example",
+  "internal",
+  "invalid",
+  "local",
+  "localhost",
+  "onion",
+  "test",
+]);
+
+function canonicalPublicHostname(hostname: string): string | null {
   const lower = hostname.toLowerCase();
   const literal = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
   if (ipaddr.isValid(literal)) {
-    if (ipaddr.IPv4.isIPv4(literal)) return ipaddr.IPv4.parse(literal).range() === "unicast";
+    if (ipaddr.IPv4.isIPv4(literal)) {
+      return ipaddr.IPv4.parse(literal).range() === "unicast" ? lower : null;
+    }
     const parsed = ipaddr.IPv6.parse(literal);
     const address = parsed.isIPv4MappedAddress() ? parsed.toIPv4Address() : parsed;
-    return address.range() === "unicast";
+    return address.range() === "unicast" ? lower : null;
   }
-  if (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".local")) return false;
-  if (/^127\./u.test(lower) || /^0\.0\.0\.0$/u.test(lower) || /^::1$/u.test(lower)) return false;
-  if (/^10\./u.test(lower) || /^192\.168\./u.test(lower) || /^169\.254\./u.test(lower)) return false;
-  const private172 = /^172\.(\d{1,3})\./u.exec(lower);
-  return !(private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31);
+
+  const canonical = lower.endsWith(".") ? lower.slice(0, -1) : lower;
+  if (!canonical || canonical.length > 253) return null;
+  const labels = canonical.split(".");
+  if (labels.length < 2 || specialUseDnsSuffixes.has(labels.at(-1)!)) return null;
+  if (
+    labels.some(
+      (label) =>
+        !label ||
+        label.length > 63 ||
+        label.startsWith("-") ||
+        label.endsWith("-") ||
+        !/^[a-z0-9-]+$/u.test(label),
+    )
+  ) {
+    return null;
+  }
+  return canonical;
 }
 
 export function validateCreatorPortfolioUrls(value: unknown): string[] {
@@ -91,14 +118,11 @@ export function validateCreatorPortfolioUrls(value: unknown): string[] {
     } catch {
       throw new CreatorApplicationPolicyError("invalid_portfolio_urls");
     }
-    if (
-      parsed.protocol !== "https:" ||
-      parsed.username ||
-      parsed.password ||
-      !isPublicHostname(parsed.hostname)
-    ) {
+    const hostname = canonicalPublicHostname(parsed.hostname);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || !hostname) {
       throw new CreatorApplicationPolicyError("invalid_portfolio_urls");
     }
+    parsed.hostname = hostname;
     return parsed.toString();
   });
 }

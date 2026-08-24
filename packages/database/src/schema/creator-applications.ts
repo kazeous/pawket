@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
-import { identityUsers } from "./identity-core.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires this extensionless TypeScript schema import.
+// @ts-ignore Drizzle Kit 0.31 resolves this TypeScript schema only without the emitted .js suffix.
+import { identityUsers } from "./identity-core";
 
 type Envelope = { version: 1; algorithm: "A256GCM"; keyId: string; nonce: string; ciphertext: string; authenticationTag: string };
 
