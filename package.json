@@ -5,6 +5,7 @@
   "engines": { "node": ">=24 <25" },
   "scripts": {
     "compose:validate": "node scripts/validate-coolify-compose.mjs",
+    "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
     "docker:context:validate": "node scripts/validate-docker-context.mjs",
     "dev": "pnpm --parallel --filter @pawket/web --filter @pawket/worker dev",
     "build": "pnpm -r --if-present build",
@@ -12,10 +13,12 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:browser": "playwright test --config apps/web/playwright.config.ts",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
   "devDependencies": {
     "@eslint/compat": "2.1.0",
+    "@playwright/test": "1.62.1",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",

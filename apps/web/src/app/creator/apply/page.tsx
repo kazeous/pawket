@@ -1,0 +1,299 @@
+"use client";
+
+import { type FormEvent, useEffect, useState } from "react";
+
+const warning =
+  "Tôi xác nhận ngày, tháng, năm sinh đã khai là đúng sự thật. Nếu sau này giấy tờ hoặc thông tin xác minh hợp lệ không khớp vì tôi đã cung cấp thông tin không trung thực khi đăng ký, Pawket sẽ không giải quyết các yêu cầu dựa trên thông tin sai lệch đó và có thể áp dụng biện pháp tài khoản theo chính sách, trừ trường hợp pháp luật bắt buộc Pawket phải tiếp nhận hoặc xử lý.";
+
+type FormState = {
+  artistDisplayName: string;
+  shortIntroduction: string;
+  dateOfBirth: string;
+  portfolioUrls: string;
+  primaryArtDiscipline: string;
+  practiceDescription: string;
+  contentIntent: string;
+  proposedReceivingAccountId: string;
+};
+
+const empty: FormState = {
+  artistDisplayName: "",
+  shortIntroduction: "",
+  dateOfBirth: "",
+  portfolioUrls: "",
+  primaryArtDiscipline: "",
+  practiceDescription: "",
+  contentIntent: "general_audience_only",
+  proposedReceivingAccountId: "",
+};
+
+type Application = {
+  id: string;
+  state: string;
+  version: number;
+  cooldownUntil?: string | null;
+  revision?: Omit<Partial<FormState>, "portfolioUrls"> & {
+    portfolioUrls?: string | string[] | null;
+  };
+};
+
+export default function CreatorApplyPage() {
+  const [application, setApplication] = useState<Application | null>(null);
+  const [form, setForm] = useState(empty);
+  const [dobAcknowledged, setDobAcknowledged] = useState(false);
+  const [accepted, setAccepted] = useState({
+    truthfulInformationAccepted: false,
+    portfolioRightsAccepted: false,
+    creatorTermsAccepted: false,
+    privacyAccepted: false,
+  });
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    fetch("/api/v1/creator-application", { cache: "no-store" })
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((value) => {
+        const item = value?.application as Application | null;
+        setApplication(item);
+        const revision = item?.revision;
+        if (revision) {
+          setForm((current) => ({
+            ...current,
+            ...revision,
+            portfolioUrls: Array.isArray(revision.portfolioUrls)
+              ? revision.portfolioUrls.join("\n")
+              : (revision.portfolioUrls ?? current.portfolioUrls),
+          }));
+        }
+      })
+      .catch(() => setMessage("Không thể tải hồ sơ lúc này."));
+  }, []);
+
+  const call = async (path: string, payload: unknown, requireVersion = true) => {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": crypto.randomUUID(),
+        ...(requireVersion && application
+          ? { "if-match": String(application.version) }
+          : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    const value = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(value?.code ?? "REQUEST_FAILED");
+    setApplication(value.application);
+    return value.application as Application;
+  };
+
+  const currentSnapshot = () => ({
+    ...form,
+    portfolioUrls: form.portfolioUrls
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  });
+
+  const save = async () => {
+    setMessage("");
+    try {
+      await call("/api/v1/creator-application", currentSnapshot());
+      setMessage("Đã lưu bản nháp riêng tư.");
+    } catch {
+      setMessage("Không thể lưu. Kiểm tra lại thông tin và đăng nhập.");
+    }
+  };
+
+  const submit = async () => {
+    setMessage("");
+    try {
+      await call("/api/v1/creator-application/submit", {
+        ...currentSnapshot(),
+        dateOfBirthAcknowledged: dobAcknowledged,
+        ...accepted,
+      });
+      setMessage("Đã gửi hồ sơ.");
+    } catch {
+      setMessage("Chưa thể gửi hồ sơ. Vui lòng hoàn tất các xác nhận và thông tin bắt buộc.");
+    }
+  };
+
+  const withdraw = async () => {
+    try {
+      await call("/api/v1/creator-application/withdraw", {});
+      setMessage("Đã rút hồ sơ.");
+    } catch {
+      setMessage("Không thể rút hồ sơ lúc này.");
+    }
+  };
+
+  const handleFormSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if ((event.nativeEvent as SubmitEvent).submitter?.getAttribute("data-action") === "submit") {
+      void submit();
+    } else {
+      void save();
+    }
+  };
+
+  return (
+    <main>
+      <h1>Đăng ký trở thành nhà sáng tạo</h1>
+      <p>
+        Pawket chưa xác minh giấy tờ định danh của chính phủ. Hồ sơ này chỉ hiển thị riêng cho
+        bạn và nhóm xét duyệt được ủy quyền.
+      </p>
+      {application?.state === "rejected" && application.cooldownUntil ? (
+        <p>
+          Bạn có thể nộp lại từ{" "}
+          {new Date(application.cooldownUntil).toLocaleDateString("vi-VN", {
+            timeZone: "Asia/Ho_Chi_Minh",
+          })}
+          .
+        </p>
+      ) : null}
+      <form onSubmit={handleFormSubmit}>
+        <label>
+          Tên nghệ sĩ
+          <input
+            required
+            value={form.artistDisplayName}
+            onChange={(event) => setForm({ ...form, artistDisplayName: event.target.value })}
+          />
+        </label>
+        <label>
+          Giới thiệu ngắn
+          <textarea
+            required
+            value={form.shortIntroduction}
+            onChange={(event) => setForm({ ...form, shortIntroduction: event.target.value })}
+          />
+        </label>
+        <label>
+          Ngày sinh
+          <input
+            required
+            type="date"
+            value={form.dateOfBirth}
+            onChange={(event) => setForm({ ...form, dateOfBirth: event.target.value })}
+          />
+        </label>
+        <label>
+          Liên kết portfolio công khai HTTPS (mỗi dòng một liên kết)
+          <textarea
+            required
+            value={form.portfolioUrls}
+            onChange={(event) => setForm({ ...form, portfolioUrls: event.target.value })}
+          />
+        </label>
+        <label>
+          Chuyên ngành nghệ thuật
+          <input
+            required
+            value={form.primaryArtDiscipline}
+            onChange={(event) => setForm({ ...form, primaryArtDiscipline: event.target.value })}
+          />
+        </label>
+        <label>
+          Mô tả thực hành
+          <textarea
+            required
+            value={form.practiceDescription}
+            onChange={(event) => setForm({ ...form, practiceDescription: event.target.value })}
+          />
+        </label>
+        <label>
+          Nội dung
+          <select
+            value={form.contentIntent}
+            onChange={(event) => setForm({ ...form, contentIntent: event.target.value })}
+          >
+            <option value="general_audience_only">Phù hợp khán giả chung</option>
+            <option value="may_include_age_restricted">Có thể có nội dung giới hạn độ tuổi</option>
+          </select>
+        </label>
+        <label>
+          Mã tham chiếu tài khoản nhận VND
+          <input
+            required
+            value={form.proposedReceivingAccountId}
+            onChange={(event) =>
+              setForm({ ...form, proposedReceivingAccountId: event.target.value })
+            }
+          />
+        </label>
+        <section>
+          <p>{warning}</p>
+          <label>
+            <input
+              type="checkbox"
+              checked={dobAcknowledged}
+              onChange={(event) => setDobAcknowledged(event.target.checked)}
+            />{" "}
+            Tôi đã đọc và xác nhận cảnh báo ngày sinh.
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={accepted.truthfulInformationAccepted}
+              onChange={(event) =>
+                setAccepted({ ...accepted, truthfulInformationAccepted: event.target.checked })
+              }
+            />{" "}
+            Thông tin tôi cung cấp là trung thực.
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={accepted.portfolioRightsAccepted}
+              onChange={(event) =>
+                setAccepted({ ...accepted, portfolioRightsAccepted: event.target.checked })
+              }
+            />{" "}
+            Tôi có quyền chia sẻ các liên kết portfolio.
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={accepted.creatorTermsAccepted}
+              onChange={(event) =>
+                setAccepted({ ...accepted, creatorTermsAccepted: event.target.checked })
+              }
+            />{" "}
+            Tôi đồng ý Điều khoản dành cho nhà sáng tạo v1.
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={accepted.privacyAccepted}
+              onChange={(event) =>
+                setAccepted({ ...accepted, privacyAccepted: event.target.checked })
+              }
+            />{" "}
+            Tôi đồng ý Chính sách quyền riêng tư v1.
+          </label>
+        </section>
+        <button type="submit" formNoValidate data-action="save">
+          Lưu bản nháp
+        </button>
+        <button
+          type="submit"
+          data-action="submit"
+          disabled={!application || application.state === "submitted"}
+        >
+          Gửi hồ sơ
+        </button>
+        {application &&
+        ["draft", "submitted", "under_review", "changes_requested"].includes(
+          application.state,
+        ) ? (
+          <button type="button" onClick={withdraw}>
+            Rút hồ sơ
+          </button>
+        ) : null}
+      </form>
+      <p role="status">{message}</p>
+    </main>
+  );
+}

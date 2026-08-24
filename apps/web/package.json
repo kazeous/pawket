@@ -3,15 +3,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@node-rs/argon2": "2.1.0",
+    "@pawket/admin": "workspace:*",
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
+    "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/queue": "workspace:*",
+    "@pawket/security": "workspace:*",
     "next": "16.3.2",
     "react": "19.2.8",
     "react-dom": "19.2.8"

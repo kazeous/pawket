@@ -22,8 +22,7 @@ import {
 } from "@pawket/database";
 import {
   getRequestContext,
-  workerJobDurationSeconds,
-  workerJobsTotal,
+  metricsRegistry,
   type RequestContext,
 } from "@pawket/observability";
 import {
@@ -129,8 +128,13 @@ async function workerMetricSnapshot(
   outcome: "completed" | "failed",
   name = OUTBOX_JOB,
 ) {
-  const counter = await workerJobsTotal.get();
-  const duration = await workerJobDurationSeconds.get();
+  const counterMetric = metricsRegistry.getSingleMetric("pawket_worker_jobs_total");
+  const durationMetric = metricsRegistry.getSingleMetric("pawket_worker_job_duration_seconds");
+  if (!counterMetric || !durationMetric) {
+    throw new Error("Worker metrics are not registered");
+  }
+  const counter = await counterMetric.get();
+  const duration = await durationMetric.get();
   const labels = { queue: SYSTEM_QUEUE, name, outcome };
   const matchesLabels = (candidate: Record<string, string | number>) =>
     Object.entries(labels).every(([key, value]) => candidate[key] === value);
@@ -247,20 +251,36 @@ describe("outbox dispatcher", () => {
 
   test("forbidden nested payload data is rejected before enqueue with a safe category", async () => {
     const now = new Date();
-    const eventId = await db.transaction((tx) =>
+    const unsafePayload = {
+      profile: { apiToken: "dummy-secret-token" },
+      callback: "postgresql://dummy:dummy@database.invalid/pawket",
+    };
+    const repositoryRejection = db.transaction((tx) =>
       insertOutboxEvent(tx, {
         eventType: "system.foundation.ping.v1",
         eventVersion: 1,
         aggregateType: "system",
         aggregateId: randomUUID(),
-        payload: {
-          profile: { apiToken: "dummy-secret-token" },
-          callback: "postgresql://dummy:dummy@database.invalid/pawket",
-        },
+        payload: unsafePayload,
         occurredAt: now,
         availableAt: now,
       }),
     );
+    await expect(repositoryRejection).rejects.toThrow("Unsafe outbox data");
+    await expect(repositoryRejection).rejects.not.toThrow("dummy-secret-token");
+
+    // Simulate a legacy or externally inserted row to prove the queue boundary is independent.
+    const eventId = randomUUID();
+    await db.insert(systemOutbox).values({
+      id: eventId,
+      eventType: "system.foundation.ping.v1",
+      eventVersion: 1,
+      aggregateType: "system",
+      aggregateId: randomUUID(),
+      payload: unsafePayload,
+      occurredAt: now,
+      availableAt: now,
+    });
 
     await expect(
       dispatchOutboxBatch(
@@ -803,7 +823,9 @@ describe("worker runtime integration", () => {
     const metricsAfter = await workerMetricSnapshot("failed", "unsupported");
     expect(metricsAfter.jobs - metricsBefore.jobs).toBe(2);
     expect(metricsAfter.durations - metricsBefore.durations).toBe(2);
-    const metricNames = (await workerJobsTotal.get()).values.map((value) => value.labels.name);
+    const counterMetric = metricsRegistry.getSingleMetric("pawket_worker_jobs_total");
+    if (!counterMetric) throw new Error("Worker counter is not registered");
+    const metricNames = (await counterMetric.get()).values.map((value) => value.labels.name);
     expect(metricNames).not.toContain(arbitraryNames[0]);
     expect(metricNames).not.toContain(arbitraryNames[1]);
   });

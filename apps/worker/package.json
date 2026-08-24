@@ -10,8 +10,14 @@
   "dependencies": {
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
+    "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/queue": "workspace:*",
-    "bullmq": "6.2.0"
+    "@pawket/security": "workspace:*",
+    "bullmq": "6.2.0",
+    "nodemailer": "9.0.5"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.1"
   }
 }

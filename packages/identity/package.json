@@ -1,0 +1,29 @@
+{
+  "name": "@pawket/identity",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./security-email": "./src/security-email.ts",
+    "./security-email-handoff": "./src/security-email-handoff.ts"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-auth/utils": "0.5.0",
+    "@node-rs/argon2": "2.1.0",
+    "@pawket/database": "workspace:*",
+    "@pawket/security": "workspace:*",
+    "better-auth": "1.7.1",
+    "drizzle-orm": "0.45.2",
+    "ipaddr.js": "2.2.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "drizzle-kit": "0.31.9",
+    "postgres": "3.4.9"
+  }
+}

@@ -5,11 +5,8 @@ export {
 } from "./request-context.js";
 export { createLogger } from "./logger.js";
 export {
-  httpRequestDurationSeconds,
-  httpRequestsTotal,
   metricsRegistry,
-  outboxOldestAgeSeconds,
-  outboxPendingTotal,
-  workerJobDurationSeconds,
-  workerJobsTotal,
+  recordHttpRequestMetrics,
+  recordWorkerJobMetrics,
+  setOutboxMetrics,
 } from "./metrics.js";

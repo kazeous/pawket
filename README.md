@@ -13,12 +13,25 @@ the data services publish no host ports.
 
 Configure these required values in Coolify:
 
-- Non-secret variables: `APP_ENV=production` and `APP_REVISION`, where
-  `APP_REVISION` is the exact deployed commit SHA.
+- Non-secret variables: `APP_ENV=production`, `APP_REVISION`, `APP_BASE_URL`,
+  `AUTH_TRUSTED_ORIGINS`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=disabled`,
+  `VERIFICATION_DEPOSIT_AMOUNT_VND`, `VN_BUSINESS_CALENDAR_VERSION`,
+  `VN_BUSINESS_HOLIDAYS`, and the explicit `AUTH_*` lifetime and lockout values.
+  `APP_REVISION` is the exact deployed commit SHA. The business-calendar version
+  and holiday list are immutable inputs used to compute the 5–7 business-day
+  verification-transfer refund window.
 - Secrets: `DATABASE_URL`, `VALKEY_URL`, `METRICS_TOKEN`, `POSTGRES_DB`,
-  `POSTGRES_USER`, and `POSTGRES_PASSWORD`. The PostgreSQL URL and the three
-  PostgreSQL bootstrap values must describe the same database and credentials.
-  `METRICS_TOKEN` must contain at least 32 characters.
+  `POSTGRES_USER`, `POSTGRES_PASSWORD`, `BETTER_AUTH_SECRETS`,
+  `PII_KEYRING_JSON`, `PII_LOOKUP_HMAC_KEY`, `BOOTSTRAP_OWNER_EMAIL`, and the
+  `OPERATING_BANK_*` values. The PostgreSQL URL and the three PostgreSQL
+  bootstrap values must describe the same database and credentials.
+  `METRICS_TOKEN` must contain at least 32 characters. Keep retired PII keys in
+  the keyring until all matching envelopes have been rotated.
+
+Google and Discord OAuth are optional. Enable either provider only by setting
+both its client ID and client secret; leaving both blank disables it. Phone and
+SMS verification are intentionally absent from Increment 2 and require a later
+system addition.
 
 The release sequence is part of the topology: healthy PostgreSQL starts the
 `migrate` service, and that one-shot service must complete successfully before

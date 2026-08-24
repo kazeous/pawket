@@ -1,4 +1,5 @@
 import { and, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { canonicalizeSafeStructuredData } from "@pawket/security/structured-data";
 
 import type { PawketDatabase } from "./client.js";
 import { systemOutbox } from "./schema.js";
@@ -83,7 +84,7 @@ export async function insertOutboxEvent(
       eventVersion: event.eventVersion,
       aggregateType: event.aggregateType,
       aggregateId: event.aggregateId,
-      payload: event.payload,
+      payload: canonicalizeSafeStructuredData(event.payload, "outbox"),
       occurredAt,
       availableAt: event.availableAt ?? occurredAt,
     })

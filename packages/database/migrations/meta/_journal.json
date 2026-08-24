@@ -22,6 +22,48 @@
       "when": 1787483944260,
       "tag": "0002_guard-legacy-leases",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787515598864,
+      "tag": "0003_shared-controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787552109415,
+      "tag": "0004_equal_expediter",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787553313373,
+      "tag": "0005_faulty_patch",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787562175074,
+      "tag": "0006_faithful_vivisector",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787582952583,
+      "tag": "0007_creator-applications",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787582959831,
+      "tag": "0008_creator-application-attestation-immutability",
+      "breakpoints": true
     }
   ]
 }

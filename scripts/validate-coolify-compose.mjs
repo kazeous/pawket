@@ -11,6 +11,17 @@ const SENSITIVE_ENVIRONMENT_VARIABLES = [
   "POSTGRES_DB",
   "POSTGRES_USER",
   "POSTGRES_PASSWORD",
+  "BETTER_AUTH_SECRETS",
+  "PII_KEYRING_JSON",
+  "PII_LOOKUP_HMAC_KEY",
+  "GOOGLE_CLIENT_SECRET",
+  "DISCORD_CLIENT_SECRET",
+  "SMTP_USERNAME",
+  "SMTP_PASSWORD",
+  "BOOTSTRAP_OWNER_EMAIL",
+  "OPERATING_BANK_BIN",
+  "OPERATING_BANK_ACCOUNT_NUMBER",
+  "OPERATING_BANK_ACCOUNT_NAME",
 ];
 
 function splitLinesPreservingEndings(source) {
@@ -119,7 +130,7 @@ export function projectCoolifyCompose(source) {
     .join("");
 }
 
-function redactSensitiveValues(message, environment) {
+export function redactSensitiveValues(message, environment) {
   let redacted = message;
 
   for (const name of SENSITIVE_ENVIRONMENT_VARIABLES) {

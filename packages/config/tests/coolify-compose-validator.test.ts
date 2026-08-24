@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { projectCoolifyCompose } from "../../../scripts/validate-coolify-compose.mjs";
+import * as composeValidator from "../../../scripts/validate-coolify-compose.mjs";
+
+const { projectCoolifyCompose } = composeValidator;
+const redaction = composeValidator as typeof composeValidator & {
+  redactSensitiveValues(message: string, environment: Record<string, string>): string;
+};
 
 const validCompose = [
   "services:",
@@ -32,6 +37,18 @@ describe("projectCoolifyCompose", () => {
         "    image: pawket-web:test",
         "",
       ].join("\r\n"),
+    );
+  });
+
+  it("redacts SMTP credentials from Compose validation failures", () => {
+    // Catches newly introduced SMTP secrets being printed by deployment diagnostics.
+    expect(typeof redaction.redactSensitiveValues).toBe("function");
+    const output = redaction.redactSensitiveValues(
+      "authentication failed for smtp-user with smtp-password",
+      { SMTP_USERNAME: "smtp-user", SMTP_PASSWORD: "smtp-password" },
+    );
+    expect(output).toBe(
+      "authentication failed for [REDACTED SMTP_USERNAME] with [REDACTED SMTP_PASSWORD]",
     );
   });
 
