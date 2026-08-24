@@ -3,6 +3,8 @@ import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
+  createCreatorApplicationHttpHandlers,
+  createCreatorApplicationService,
   createIdentityService,
   createPawketAuth,
   getIdentityUserSummary,
@@ -18,6 +20,7 @@ import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 type WebIdentityRuntime = {
   auth: ReturnType<typeof createPawketAuth>;
   handlers: ReturnType<typeof createIdentityHttpHandlers>;
+  creatorHandlers: ReturnType<typeof createCreatorApplicationHttpHandlers>;
   authenticate(headers: Headers): Promise<{
     userId: string;
     sessionId: string;
@@ -96,6 +99,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     lookupHmacKey,
     compromisedPasswordChecker: createRuntimeCompromisedPasswordChecker(env.APP_ENV),
   });
+  const creatorService = createCreatorApplicationService({ db: database.db, keyring });
 
   async function authenticate(headers: Headers) {
     const resolved = (await auth.api.getSession({ headers })) as
@@ -155,10 +159,16 @@ export function getIdentityRuntime(): WebIdentityRuntime {
       return { allowed: account.allowed && network.allowed };
     },
   });
+  const creatorHandlers = createCreatorApplicationHttpHandlers({
+    trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
+    authenticate,
+    service: creatorService,
+  });
 
   runtime = {
     auth,
     handlers,
+    creatorHandlers,
     authenticate,
     async authorizeOwner(headers) {
       const session = await authenticate(headers);

@@ -13,6 +13,7 @@ export {
   identityUsers,
   identityVerifications,
 } from "./identity-core.js";
+export { creatorApplications, creatorApplicationRevisions, creatorApplicationAttestations } from "./creator-applications.js";
 export {
   adminAuditEvents,
   systemBusinessCalendarHolidays,

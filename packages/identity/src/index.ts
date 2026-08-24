@@ -1,6 +1,9 @@
 export const identityConformanceCandidate = "better-auth@1.7.1";
 
 export * from "./core-identity-policy.js";
+export * from "./creator-application-policy.js";
+export * from "./creator-application-service.js";
+export * from "./creator-application-http.js";
 export * from "./identity-repository.js";
 export * from "./identity-security-repository.js";
 export * from "./recovery-code-plugin.js";
