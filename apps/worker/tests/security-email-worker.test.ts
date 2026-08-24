@@ -1,5 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 
+import {
+  createSecurityEmailSender,
+  createSecurityEmailSenderFromEnv,
+  type SmtpMail,
+  type SmtpTransportOptions,
+} from "../src/security-email.js";
 import * as workerRuntime from "../src/worker-runtime.js";
 
 type ProcessorFactory = {
@@ -107,5 +113,150 @@ describe("security email worker contract", () => {
         }),
       ),
     ).rejects.toThrow("Invalid security email job");
+  });
+});
+
+describe("production SMTP security email sender", () => {
+  const smtp = {
+    host: "smtp.transactional.example",
+    port: 587,
+    tlsMode: "starttls" as const,
+    username: "pawket-production",
+    password: "smtp-password-that-must-not-leak",
+    fromEmail: "security@pawket.example",
+    fromName: "Pawket Security",
+  };
+
+  test("requires STARTTLS and sends a purpose-bound password reset message", async () => {
+    // Catches plaintext SMTP or sending a challenge without its Pawket URL.
+    let transportOptions: SmtpTransportOptions | undefined;
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport(options) {
+        transportOptions = options;
+        return {
+          async sendMail(message) {
+            delivered = message;
+            return { accepted: [message.to] };
+          },
+        };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose: "password_reset",
+      destination: "artist@example.com",
+      secret: "one-time-secret",
+      templateData: { returnPath: "/reset-password" },
+    });
+
+    expect(transportOptions).toEqual({
+      host: "smtp.transactional.example",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: "pawket-production",
+        pass: "smtp-password-that-must-not-leak",
+      },
+    });
+    expect(delivered).toEqual({
+      from: { name: "Pawket Security", address: "security@pawket.example" },
+      to: "artist@example.com",
+      subject: "Reset your Pawket password",
+      text:
+        "Reset your Pawket password\n\n" +
+        "Open this Pawket link to continue:\n" +
+        "https://pawket.example/reset-password?token=one-time-secret\n\n" +
+        "This link expires in 30 minutes. If you did not request this, you can ignore this email.",
+    });
+  });
+
+  test("uses implicit TLS when the provider requires port 465", () => {
+    // Catches treating implicit TLS as plaintext or attempting STARTTLS after connection.
+    let transportOptions: SmtpTransportOptions | undefined;
+    createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp: { ...smtp, port: 465, tlsMode: "tls" },
+      createTransport(options) {
+        transportOptions = options;
+        return { async sendMail() {} };
+      },
+    });
+
+    expect(transportOptions).toEqual({
+      host: "smtp.transactional.example",
+      port: 465,
+      secure: true,
+      auth: {
+        user: "pawket-production",
+        pass: "smtp-password-that-must-not-leak",
+      },
+    });
+  });
+
+  test("fails before opening a transport when SMTP configuration is incomplete", () => {
+    // Catches a deployed worker starting with partial credentials or exposing their values.
+    const leakedPassword = "smtp-password-that-must-not-leak";
+    let transportCreated = false;
+    let thrown: unknown;
+
+    try {
+      createSecurityEmailSender({
+        adapter: "smtp",
+        appBaseUrl: "https://pawket.example",
+        smtp: { password: leakedPassword },
+        createTransport() {
+          transportCreated = true;
+          return { async sendMail() {} };
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("Invalid SMTP security email configuration");
+    expect((thrown as Error).message).not.toContain(leakedPassword);
+    expect(transportCreated).toBe(false);
+  });
+
+  test("maps the worker environment into the SMTP transport without exposing it to web", () => {
+    // Catches swapping or dropping deployment variables at the worker boundary.
+    let transportOptions: SmtpTransportOptions | undefined;
+
+    createSecurityEmailSenderFromEnv({
+      env: {
+        APP_BASE_URL: "https://pawket.example",
+        SECURITY_EMAIL_ADAPTER: "smtp",
+        SMTP_HOST: "smtp.transactional.example",
+        SMTP_PORT: 587,
+        SMTP_TLS_MODE: "starttls",
+        SMTP_USERNAME: "pawket-production",
+        SMTP_PASSWORD: "smtp-password-that-must-not-leak",
+        SMTP_FROM_EMAIL: "security@pawket.example",
+        SMTP_FROM_NAME: "Pawket Security",
+      },
+      createTransport(options) {
+        transportOptions = options;
+        return { async sendMail() {} };
+      },
+    });
+
+    expect(transportOptions).toEqual({
+      host: "smtp.transactional.example",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: "pawket-production",
+        pass: "smtp-password-that-must-not-leak",
+      },
+    });
   });
 });

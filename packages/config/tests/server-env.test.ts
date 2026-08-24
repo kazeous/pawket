@@ -17,7 +17,7 @@ const completeProductionEnv = {
     "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
   }),
   PII_LOOKUP_HMAC_KEY: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
-  SECURITY_EMAIL_ADAPTER: "disabled",
+  SECURITY_EMAIL_ADAPTER: "smtp",
   BOOTSTRAP_OWNER_EMAIL: "owner@pawket.example",
   VERIFICATION_DEPOSIT_AMOUNT_VND: "1000",
   OPERATING_BANK_BIN: "970436",
@@ -137,6 +137,51 @@ describe("parseServerEnv", () => {
     expect(local.APP_BASE_URL).toBe("http://localhost:3000");
     expect(local.SECURITY_EMAIL_ADAPTER).toBe("local");
     expect(Object.keys(local).join(" ")).not.toMatch(/phone|sms/i);
+  });
+
+  it("accepts provider-neutral SMTP settings without requiring them in the web process", () => {
+    // Catches rejecting the approved production adapter or dropping its typed settings.
+    const parsed = parseServerEnv({
+      ...completeProductionEnv,
+      SECURITY_EMAIL_ADAPTER: "smtp",
+      SMTP_HOST: "smtp.transactional.example",
+      SMTP_PORT: "587",
+      SMTP_TLS_MODE: "starttls",
+      SMTP_USERNAME: "pawket-production",
+      SMTP_PASSWORD: "smtp-password-that-must-not-leak",
+      SMTP_FROM_EMAIL: "security@pawket.example",
+      SMTP_FROM_NAME: "Pawket Security",
+    });
+
+    expect(parsed).toEqual(
+      expect.objectContaining({
+        SECURITY_EMAIL_ADAPTER: "smtp",
+        SMTP_HOST: "smtp.transactional.example",
+        SMTP_PORT: 587,
+        SMTP_TLS_MODE: "starttls",
+        SMTP_USERNAME: "pawket-production",
+        SMTP_PASSWORD: "smtp-password-that-must-not-leak",
+        SMTP_FROM_EMAIL: "security@pawket.example",
+        SMTP_FROM_NAME: "Pawket Security",
+      }),
+    );
+
+    const webProcess = parseServerEnv({
+      ...completeProductionEnv,
+      SECURITY_EMAIL_ADAPTER: "smtp",
+    });
+    expect(webProcess.SECURITY_EMAIL_ADAPTER).toBe("smtp");
+    expect(webProcess.SMTP_PASSWORD).toBeUndefined();
+  });
+
+  it("requires the approved SMTP adapter in production", () => {
+    // Catches a production deployment silently disabling all identity email.
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        SECURITY_EMAIL_ADAPTER: "disabled",
+      }),
+    ).toThrow("SECURITY_EMAIL_ADAPTER must be smtp in production");
   });
 
   it("fails deployed configuration closed without echoing sensitive material", () => {

@@ -21,6 +21,26 @@ type WebIdentityRuntime = {
 
 let runtime: WebIdentityRuntime | undefined;
 
+export function isSecurityEmailDeliveryAvailable(
+  adapter: "disabled" | "local" | "smtp",
+): boolean {
+  return adapter !== "disabled";
+}
+
+export function createRuntimeCompromisedPasswordChecker(
+  appEnv: "local" | "test" | "staging" | "production",
+): { isCompromised(password: string): Promise<boolean> } {
+  return {
+    async isCompromised(password): Promise<boolean> {
+      void password;
+      if (appEnv === "staging" || appEnv === "production") {
+        throw new Error("Compromised password check is unavailable");
+      }
+      return false;
+    },
+  };
+}
+
 export function getIdentityRuntime(): WebIdentityRuntime {
   if (runtime) return runtime;
 
@@ -36,7 +56,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     ),
   });
   const lookupHmacKey = Buffer.from(env.PII_LOOKUP_HMAC_KEY, "base64");
-  const emailDeliveryAvailable = env.SECURITY_EMAIL_ADAPTER === "local";
+  const emailDeliveryAvailable = isSecurityEmailDeliveryAvailable(env.SECURITY_EMAIL_ADAPTER);
   const auth = createPawketAuth({
     db: database.db,
     baseURL: env.APP_BASE_URL,
@@ -48,14 +68,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     db: database.db,
     keyring,
     lookupHmacKey,
-    compromisedPasswordChecker: {
-      async isCompromised(): Promise<boolean> {
-        if (!emailDeliveryAvailable) {
-          throw new Error("Compromised password check is unavailable");
-        }
-        return false;
-      },
-    },
+    compromisedPasswordChecker: createRuntimeCompromisedPasswordChecker(env.APP_ENV),
   });
 
   const handlers = createIdentityHttpHandlers({

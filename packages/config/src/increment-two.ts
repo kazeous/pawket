@@ -117,6 +117,11 @@ const optionalProviderValue = (maximum: number) =>
     z.string().min(1).max(maximum).optional(),
   );
 
+const optionalEmailAddress = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.email().max(254).optional(),
+);
+
 export const incrementTwoEnvShape = {
   APP_BASE_URL: z.string().max(2_048).url().optional(),
   AUTH_TRUSTED_ORIGINS: trustedOriginsSchema.optional(),
@@ -128,7 +133,14 @@ export const incrementTwoEnvShape = {
   GOOGLE_CLIENT_SECRET: optionalProviderValue(2048),
   DISCORD_CLIENT_ID: optionalProviderValue(512),
   DISCORD_CLIENT_SECRET: optionalProviderValue(2048),
-  SECURITY_EMAIL_ADAPTER: z.enum(["disabled", "local"]).optional(),
+  SECURITY_EMAIL_ADAPTER: z.enum(["disabled", "local", "smtp"]).optional(),
+  SMTP_HOST: optionalProviderValue(253),
+  SMTP_PORT: optionalBoundedInteger(1, 65_535),
+  SMTP_TLS_MODE: z.enum(["starttls", "tls"]).optional(),
+  SMTP_USERNAME: optionalProviderValue(512),
+  SMTP_PASSWORD: optionalProviderValue(2_048),
+  SMTP_FROM_EMAIL: optionalEmailAddress,
+  SMTP_FROM_NAME: optionalProviderValue(100),
   BOOTSTRAP_OWNER_EMAIL: z.email().max(254).optional(),
   VERIFICATION_DEPOSIT_AMOUNT_VND: optionalBoundedInteger(1_000, 50_000),
   OPERATING_BANK_BIN: z.string().regex(/^\d{6}$/).optional(),
@@ -163,7 +175,14 @@ export type IncrementTwoServerEnv = {
   GOOGLE_CLIENT_SECRET?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
-  SECURITY_EMAIL_ADAPTER: "disabled" | "local";
+  SECURITY_EMAIL_ADAPTER: "disabled" | "local" | "smtp";
+  SMTP_HOST?: string;
+  SMTP_PORT?: number;
+  SMTP_TLS_MODE?: "starttls" | "tls";
+  SMTP_USERNAME?: string;
+  SMTP_PASSWORD?: string;
+  SMTP_FROM_EMAIL?: string;
+  SMTP_FROM_NAME?: string;
   BOOTSTRAP_OWNER_EMAIL: string;
   VERIFICATION_DEPOSIT_AMOUNT_VND: number;
   OPERATING_BANK_BIN: string;
@@ -285,6 +304,9 @@ export function resolveIncrementTwoEnv(
   }
   if (deployed && resolved.SECURITY_EMAIL_ADAPTER === "local") {
     failures.push({ field: "SECURITY_EMAIL_ADAPTER", reason: "cannot use the local sink when deployed" });
+  }
+  if (appEnv === "production" && resolved.SECURITY_EMAIL_ADAPTER !== "smtp") {
+    failures.push({ field: "SECURITY_EMAIL_ADAPTER", reason: "must be smtp in production" });
   }
   if (deployed && resolved.VN_BUSINESS_HOLIDAYS.length === 0) {
     failures.push({ field: "VN_BUSINESS_HOLIDAYS", reason: "must contain an approved deployed calendar" });

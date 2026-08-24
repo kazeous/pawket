@@ -1,11 +1,9 @@
 import { loadServerEnv } from "@pawket/config";
-import {
-  DeterministicLocalSecurityEmailSink,
-  DisabledSecurityEmailSender,
-} from "@pawket/identity/security-email";
 import { createLogger } from "@pawket/observability";
 import { createEncryptionKeyring } from "@pawket/security";
+import nodemailer from "nodemailer";
 
+import { createSecurityEmailSenderFromEnv } from "./security-email.js";
 import { startWorker } from "./worker-runtime.js";
 
 const env = loadServerEnv();
@@ -24,10 +22,10 @@ const worker = await startWorker({
   leaseMs: env.OUTBOX_LEASE_MS,
   securityEmail: {
     keyring,
-    sender:
-      env.SECURITY_EMAIL_ADAPTER === "local"
-        ? new DeterministicLocalSecurityEmailSink()
-        : new DisabledSecurityEmailSender(),
+    sender: createSecurityEmailSenderFromEnv({
+      env,
+      createTransport: (options) => nodemailer.createTransport(options),
+    }),
   },
   logger,
 });
