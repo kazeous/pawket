@@ -40,8 +40,13 @@ describe("identity persistence schema", () => {
       "identity_accounts",
       "identity_email_addresses",
       "identity_email_handoffs",
+      "identity_external_link_transactions",
+      "identity_recovery_codes",
+      "identity_role_grants",
       "identity_security_throttles",
       "identity_sessions",
+      "identity_step_up_proofs",
+      "identity_totp_authenticators",
       "identity_users",
       "identity_verifications",
     ];
@@ -58,8 +63,13 @@ describe("identity persistence schema", () => {
       "identityAccounts",
       "identityEmailAddresses",
       "identityEmailHandoffs",
+      "identityExternalLinkTransactions",
+      "identityRecoveryCodes",
+      "identityRoleGrants",
       "identitySecurityThrottles",
       "identitySessions",
+      "identityStepUpProofs",
+      "identityTotpAuthenticators",
       "identityUsers",
       "identityVerifications",
     ]) {
@@ -79,10 +89,35 @@ describe("identity persistence schema", () => {
 
     expect(names).toContain("identity_users.canonical_email");
     expect(names).toContain("identity_users.email_verification_provenance");
+    expect(names).toContain("identity_users.two_factor_enabled");
     expect(names).toContain("identity_sessions.token_hash");
     expect(names).not.toContain("identity_sessions.token");
     expect(names).toContain("identity_verifications.token_hash");
     expect(names).not.toContain("identity_verifications.value");
+  });
+
+  test("stores only protected TOTP, recovery, OAuth state, and step-up evidence", async () => {
+    const columns = await client<{ table_name: string; column_name: string }[]>`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = ${schemaName}
+        and table_name in (
+          'identity_totp_authenticators',
+          'identity_recovery_codes',
+          'identity_external_link_transactions',
+          'identity_step_up_proofs'
+        )
+      order by table_name, column_name
+    `;
+    const names = columns.map((row) => `${row.table_name}.${row.column_name}`);
+
+    expect(names).toContain("identity_totp_authenticators.secret_envelope");
+    expect(names).not.toContain("identity_totp_authenticators.secret");
+    expect(names).toContain("identity_recovery_codes.code_hash");
+    expect(names).not.toContain("identity_recovery_codes.code");
+    expect(names).toContain("identity_external_link_transactions.state_hash");
+    expect(names).not.toContain("identity_external_link_transactions.state");
+    expect(names).toContain("identity_step_up_proofs.assurance_method");
   });
 
   test("database checks reject an invalid access state and inconsistent session expiry", async () => {

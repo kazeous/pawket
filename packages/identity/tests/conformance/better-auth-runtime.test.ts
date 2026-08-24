@@ -4,6 +4,7 @@ import { twoFactor } from "better-auth/plugins";
 import { convertSetCookieToCookie } from "better-auth/test";
 import { base32 } from "@better-auth/utils/base32";
 import { describe, expect, test } from "vitest";
+import { createEncryptionKeyring } from "@pawket/security";
 
 import { candidateAuthPolicy } from "../../src/auth-candidate/identity-policy.js";
 import { hashPassword, verifyPassword } from "../../src/auth-candidate/password.js";
@@ -18,6 +19,10 @@ import {
 
 const baseURL = "http://localhost:3000";
 const secret = "local-conformance-secret-at-least-32-characters";
+const keyring = createEncryptionKeyring({
+  activeKeyId: "conformance-v1",
+  keys: { "conformance-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
+});
 
 function createAuth(
   db: MemoryDB,
@@ -31,7 +36,7 @@ function createAuth(
     appName: "Pawket",
     baseURL,
     secret,
-    database: createPawketAuthAdapter(memoryAdapter(db)),
+    database: createPawketAuthAdapter(memoryAdapter(db), { keyring }),
     emailAndPassword: {
       ...candidateAuthPolicy.emailAndPassword,
       requireEmailVerification,
@@ -174,8 +179,9 @@ describe("Better Auth 1.7.1 runtime conformance", () => {
     expect(verifyResponse.status).toBe(200);
     expect(enrollment.backupCodes).toEqual([]);
     expect(encodedSecret).toBeTruthy();
-    expect(stored?.secret).toBeTruthy();
-    expect(stored?.secret).not.toContain(encodedSecret);
+    expect(stored?.secret).toEqual(
+      expect.objectContaining({ version: 1, algorithm: "A256GCM", keyId: "conformance-v1" }),
+    );
     expect(stored?.backupCodes).not.toContain("-");
     expect(JSON.stringify(db)).not.toContain(encodedSecret);
     expect(db.session?.[0]?.mfaVerifiedAt).toBeInstanceOf(Date);

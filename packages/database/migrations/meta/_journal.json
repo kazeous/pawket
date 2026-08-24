@@ -43,6 +43,13 @@
       "when": 1787553313373,
       "tag": "0005_faulty_patch",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787562175074,
+      "tag": "0006_faithful_vivisector",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { resolveOwnerSessionPermission } from "@pawket/admin";
 import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
@@ -17,6 +18,12 @@ import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 type WebIdentityRuntime = {
   auth: ReturnType<typeof createPawketAuth>;
   handlers: ReturnType<typeof createIdentityHttpHandlers>;
+  authenticate(headers: Headers): Promise<{
+    userId: string;
+    sessionId: string;
+    primaryAuthenticatedAt: Date;
+  } | null>;
+  authorizeOwner(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
 };
 
 let runtime: WebIdentityRuntime | undefined;
@@ -62,7 +69,26 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     baseURL: env.APP_BASE_URL,
     trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
     secret: env.BETTER_AUTH_SECRETS[0]!,
+    keyring,
     lookupHmacKey,
+    socialProviders: {
+      ...(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+        ? {
+            google: {
+              clientId: env.GOOGLE_CLIENT_ID,
+              clientSecret: env.GOOGLE_CLIENT_SECRET,
+            },
+          }
+        : {}),
+      ...(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET
+        ? {
+            discord: {
+              clientId: env.DISCORD_CLIENT_ID,
+              clientSecret: env.DISCORD_CLIENT_SECRET,
+            },
+          }
+        : {}),
+    },
   });
   const service = createIdentityService({
     db: database.db,
@@ -71,22 +97,24 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     compromisedPasswordChecker: createRuntimeCompromisedPasswordChecker(env.APP_ENV),
   });
 
+  async function authenticate(headers: Headers) {
+    const resolved = (await auth.api.getSession({ headers })) as
+      | { session: { id: string }; user: { id: string } }
+      | null;
+    if (!resolved) return null;
+    return resolveAuthoritativeSessionById(database.db, {
+      sessionId: resolved.session.id,
+      userId: resolved.user.id,
+      now: new Date(),
+    });
+  }
+
   const handlers = createIdentityHttpHandlers({
     trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
     emailDeliveryAvailable,
     sessionCookie: resolveSessionCookie(env.APP_BASE_URL),
     service,
-    async authenticate(headers) {
-      const resolved = (await auth.api.getSession({ headers })) as
-        | { session: { id: string }; user: { id: string } }
-        | null;
-      if (!resolved) return null;
-      return resolveAuthoritativeSessionById(database.db, {
-        sessionId: resolved.session.id,
-        userId: resolved.user.id,
-        now: new Date(),
-      });
-    },
+    authenticate,
     getMe: (userId) => getIdentityUserSummary(database.db, userId),
     listSessions: (userId, now) => listUserSessions(database.db, { userId, now }),
     revokeSession: (input) => revokeUserSession(database.db, input),
@@ -128,6 +156,21 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     },
   });
 
-  runtime = { auth, handlers };
+  runtime = {
+    auth,
+    handlers,
+    authenticate,
+    async authorizeOwner(headers) {
+      const session = await authenticate(headers);
+      if (!session) return "unauthenticated";
+      return (await resolveOwnerSessionPermission(database.db, {
+        userId: session.userId,
+        sessionId: session.sessionId,
+        now: new Date(),
+      }))
+        ? "authorized"
+        : "forbidden";
+    },
+  };
   return runtime;
 }

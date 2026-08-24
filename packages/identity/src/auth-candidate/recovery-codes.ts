@@ -44,7 +44,7 @@ export class InMemoryRecoveryCodeStore {
   }
 }
 
-export async function createRecoveryCodeBatch(
+export async function createInMemoryRecoveryCodeBatch(
   userId: string,
   store: InMemoryRecoveryCodeStore,
 ): Promise<{ batchId: string; codes: string[] }> {

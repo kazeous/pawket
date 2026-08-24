@@ -1,9 +1,158 @@
 :root {
   color-scheme: light;
   font-family: system-ui, sans-serif;
+  color: #211f1b;
+  background: #f6f3ed;
 }
 
 body {
   margin: 0;
-  padding: 2rem;
+  min-height: 100vh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #211f1b;
+  border-radius: 0.6rem;
+  background: #211f1b;
+  color: white;
+  cursor: pointer;
+  padding: 0.65rem 0.9rem;
+}
+
+button.secondary {
+  background: transparent;
+  color: #211f1b;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid #a59e92;
+  border-radius: 0.55rem;
+  background: white;
+  padding: 0.65rem 0.75rem;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.page-shell {
+  box-sizing: border-box;
+  width: min(70rem, 100%);
+  margin: 0 auto;
+  padding: 3rem 1.25rem;
+}
+
+.narrow-shell {
+  width: min(34rem, 100%);
+}
+
+.page-header,
+.item-row,
+.button-row,
+.inline-form {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.page-header {
+  margin-bottom: 1.5rem;
+}
+
+.page-header h1,
+.panel h1,
+.panel h2 {
+  margin-top: 0;
+}
+
+.panel {
+  border: 1px solid #d4cec4;
+  border-radius: 1rem;
+  background: white;
+  padding: 1.4rem;
+  box-shadow: 0 0.5rem 1.5rem rgb(32 27 20 / 6%);
+}
+
+.auth-panel {
+  margin-top: 8vh;
+}
+
+.stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.stack.compact {
+  gap: 0.65rem;
+}
+
+.page-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+}
+
+.button-row {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-top: 1rem;
+}
+
+.inline-form input {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  color: #6d6458;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.error-message,
+.status-message {
+  grid-column: 1 / -1;
+  border-radius: 0.6rem;
+  background: #f1ece3;
+  padding: 0.75rem;
+}
+
+.error-message {
+  color: #8c2c24;
+}
+
+.breakable {
+  overflow-wrap: anywhere;
+}
+
+.secret-display,
+.recovery-block {
+  border: 1px dashed #a59e92;
+  border-radius: 0.6rem;
+  background: #faf8f4;
+  padding: 0.75rem;
+}
+
+@media (max-width: 36rem) {
+  .page-header,
+  .item-row,
+  .inline-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

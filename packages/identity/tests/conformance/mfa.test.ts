@@ -2,7 +2,7 @@ import { createOTP } from "@better-auth/utils/otp";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
-  createRecoveryCodeBatch,
+  createInMemoryRecoveryCodeBatch,
   InMemoryRecoveryCodeStore,
 } from "../../src/auth-candidate/recovery-codes.js";
 import {
@@ -80,7 +80,7 @@ describe("MFA and step-up conformance", () => {
 
   test("recovery codes are displayed once, stored only as hashes, single-use, and regenerated as a batch", async () => {
     const store = new InMemoryRecoveryCodeStore();
-    const first = await createRecoveryCodeBatch("user-1", store);
+    const first = await createInMemoryRecoveryCodeBatch("user-1", store);
 
     expect(first.codes).toHaveLength(10);
     expect(store.snapshot().every((record) => record.codeHash.startsWith("sha256:"))).toBe(true);
@@ -88,7 +88,7 @@ describe("MFA and step-up conformance", () => {
     await expect(store.consume("user-1", first.codes[0]!)).resolves.toBe(true);
     await expect(store.consume("user-1", first.codes[0]!)).resolves.toBe(false);
 
-    const second = await createRecoveryCodeBatch("user-1", store);
+    const second = await createInMemoryRecoveryCodeBatch("user-1", store);
     await expect(store.consume("user-1", first.codes[1]!)).resolves.toBe(false);
     await expect(store.consume("user-1", second.codes[0]!)).resolves.toBe(true);
   });

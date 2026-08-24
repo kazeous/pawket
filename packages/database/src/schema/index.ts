@@ -3,8 +3,13 @@ export {
   identityAccounts,
   identityEmailAddresses,
   identityEmailHandoffs,
+  identityExternalLinkTransactions,
+  identityRecoveryCodes,
+  identityRoleGrants,
   identitySecurityThrottles,
   identitySessions,
+  identityStepUpProofs,
+  identityTotpAuthenticators,
   identityUsers,
   identityVerifications,
 } from "./identity-core.js";

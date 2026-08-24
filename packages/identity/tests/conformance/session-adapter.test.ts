@@ -6,7 +6,15 @@ import {
   hashSessionToken,
 } from "../../src/auth-candidate/session-token-adapter.js";
 
-const options = {} as Parameters<ReturnType<typeof memoryAdapter>>[0];
+const options = {
+  session: {
+    additionalFields: {
+      lastUsedAt: { type: "date", required: false },
+      idleExpiresAt: { type: "date", required: false },
+      absoluteExpiresAt: { type: "date", required: false },
+    },
+  },
+} as Parameters<ReturnType<typeof memoryAdapter>>[0];
 
 function createAdapter(db: MemoryDB) {
   return createPawketAuthAdapter(memoryAdapter(db))(options);
@@ -103,6 +111,43 @@ describe("hashed session adapter boundary", () => {
     await expect(
       adapter.findOne({ model: "session", where: [{ field: "token", value: storedHash }] }),
     ).resolves.toBeNull();
+  });
+
+  test("refreshes within the original idle window and absolute deadline", async () => {
+    const db: MemoryDB = {};
+    const adapter = createAdapter(db);
+    const token = "owner-session-with-restricted-idle-window";
+    const createdAt = new Date("2026-08-24T00:00:00.000Z");
+    await adapter.create({
+      model: "session",
+      data: {
+        ...sessionData(token),
+        createdAt,
+        updatedAt: createdAt,
+        lastUsedAt: createdAt,
+        expiresAt: new Date("2026-08-24T00:30:00.000Z"),
+        idleExpiresAt: new Date("2026-08-24T00:30:00.000Z"),
+        absoluteExpiresAt: new Date("2026-08-24T12:00:00.000Z"),
+      },
+    });
+
+    await adapter.update({
+      model: "session",
+      where: [{ field: "token", value: token }],
+      update: {
+        updatedAt: new Date("2026-08-24T00:10:00.000Z"),
+        expiresAt: new Date("2026-09-24T00:10:00.000Z"),
+      },
+    });
+
+    expect(db.session?.[0]).toEqual(
+      expect.objectContaining({
+        lastUsedAt: new Date("2026-08-24T00:10:00.000Z"),
+        idleExpiresAt: new Date("2026-08-24T00:40:00.000Z"),
+        expiresAt: new Date("2026-08-24T00:40:00.000Z"),
+        absoluteExpiresAt: new Date("2026-08-24T12:00:00.000Z"),
+      }),
+    );
   });
 
   test("does not retain sign-in-only OAuth tokens", async () => {
