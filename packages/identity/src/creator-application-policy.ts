@@ -1,3 +1,5 @@
+import * as ipaddr from "ipaddr.js";
+
 const vietnamDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Ho_Chi_Minh",
   year: "numeric",
@@ -61,6 +63,13 @@ export function parseCreatorDateOfBirth(value: string, now: Date): { value: stri
 
 function isPublicHostname(hostname: string): boolean {
   const lower = hostname.toLowerCase();
+  const literal = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+  if (ipaddr.isValid(literal)) {
+    if (ipaddr.IPv4.isIPv4(literal)) return ipaddr.IPv4.parse(literal).range() === "unicast";
+    const parsed = ipaddr.IPv6.parse(literal);
+    const address = parsed.isIPv4MappedAddress() ? parsed.toIPv4Address() : parsed;
+    return address.range() === "unicast";
+  }
   if (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".local")) return false;
   if (/^127\./u.test(lower) || /^0\.0\.0\.0$/u.test(lower) || /^::1$/u.test(lower)) return false;
   if (/^10\./u.test(lower) || /^192\.168\./u.test(lower) || /^169\.254\./u.test(lower)) return false;

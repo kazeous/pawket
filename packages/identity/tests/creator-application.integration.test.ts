@@ -31,6 +31,7 @@ const keyring = createEncryptionKeyring({
   activeKeyId: "test-v1",
   keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
 });
+const commandFingerprintKey = Uint8Array.from({ length: 32 }, (_, index) => index + 101);
 
 async function migrate(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -77,7 +78,7 @@ const completeDraft = {
 
 function service() {
   expect(typeof creatorExports.createCreatorApplicationService).toBe("function");
-  return creatorExports.createCreatorApplicationService!({ db, keyring, idFactory: randomUUID, now: () => now });
+  return creatorExports.createCreatorApplicationService!({ db, keyring, commandFingerprintKey, idFactory: randomUUID, now: () => now });
 }
 
 describe("creator application repository", () => {

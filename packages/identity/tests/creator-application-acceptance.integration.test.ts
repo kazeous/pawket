@@ -11,9 +11,10 @@ import {
   creatorApplicationRevisions,
   creatorApplications,
   identityUsers,
+  systemCommandIdempotency,
   type PawketDatabase,
 } from "@pawket/database";
-import { createEncryptionKeyring } from "@pawket/security";
+import { createEncryptionKeyring, hashOpaqueToken } from "@pawket/security";
 import {
   CreatorApplicationPolicyError,
   createCreatorApplicationHttpHandlers,
@@ -31,6 +32,7 @@ const keyring = createEncryptionKeyring({
   activeKeyId: "test-v1",
   keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
 });
+const commandFingerprintKey = Uint8Array.from({ length: 32 }, (_, index) => index + 101);
 
 const completeDraft = {
   artistDisplayName: "Lan Artist",
@@ -115,7 +117,7 @@ describe("creator application acceptance", () => {
     });
 
     let clock = new Date("2026-03-14T16:59:59.999Z");
-    const applications = createCreatorApplicationService({ db, keyring, now: () => clock });
+    const applications = createCreatorApplicationService({ db, keyring, commandFingerprintKey, now: () => clock });
     const command = { userId, idempotencyKey: "cooldown-boundary", ...completeDraft };
 
     await expect(applications.getForApplicant({ userId })).resolves.toMatchObject({
@@ -143,11 +145,13 @@ describe("creator application acceptance", () => {
       const first = createCreatorApplicationService({
         db: drizzle(firstClient) as PawketDatabase,
         keyring,
+        commandFingerprintKey,
         now: () => new Date("2026-08-24T03:00:00.000Z"),
       });
       const second = createCreatorApplicationService({
         db: drizzle(secondClient) as PawketDatabase,
         keyring,
+        commandFingerprintKey,
         now: () => new Date("2026-08-24T03:00:00.000Z"),
       });
 
@@ -192,6 +196,7 @@ describe("creator application acceptance", () => {
     const applications = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const draft = (await applications.saveDraft({
@@ -228,6 +233,7 @@ describe("creator application acceptance", () => {
     const applications = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const unverifiedDraft = (await applications.saveDraft({
@@ -284,7 +290,7 @@ describe("creator application acceptance", () => {
     const userId = "attestation-user";
     await createUser(userId);
     const submittedAt = new Date("2026-08-24T17:30:00.000Z");
-    const applications = createCreatorApplicationService({ db, keyring, now: () => submittedAt });
+    const applications = createCreatorApplicationService({ db, keyring, commandFingerprintKey, now: () => submittedAt });
     const draft = (await applications.saveDraft({
       userId,
       idempotencyKey: "attestation-draft",
@@ -368,6 +374,7 @@ describe("creator application acceptance", () => {
     const applications = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const owned = (await applications.saveDraft({
@@ -409,6 +416,7 @@ describe("creator application acceptance", () => {
     const applications = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const draft = (await applications.saveDraft({
@@ -463,6 +471,42 @@ describe("creator application acceptance", () => {
     expect(JSON.stringify(events)).not.toMatch(/2000-08-24|example\.com|portfolio|receiving/u);
   });
 
+  test("stores a keyed creator-command fingerprint that raw candidate data cannot reproduce", async () => {
+    // Break caught: persisting an unkeyed digest of DOB, portfolio query, and receiving reference that an offline attacker can enumerate.
+    const userId = "keyed-command-fingerprint-user";
+    await createUser(userId);
+    const applications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+    const command = {
+      userId,
+      idempotencyKey: "keyed-command-fingerprint-draft",
+      ...completeDraft,
+      dateOfBirth: "2000-08-24",
+      portfolioUrls: ["https://portfolio.example/lan?private=not-for-storage"],
+      proposedReceivingAccountId: "receiving-reference-sensitive-1",
+    };
+    const saved = await applications.saveDraft(command);
+    await expect(applications.saveDraft(command)).resolves.toEqual(saved);
+    await expect(
+      applications.saveDraft({ ...command, artistDisplayName: "Conflicting payload" }),
+    ).rejects.toMatchObject({ reason: "idempotency_conflict" });
+
+    const [stored] = await db
+      .select({ requestFingerprint: systemCommandIdempotency.requestFingerprint })
+      .from(systemCommandIdempotency)
+      .where(eq(systemCommandIdempotency.actorUserId, userId));
+    expect(stored?.requestFingerprint).toBeDefined();
+    const legacyOfflineFingerprint = hashOpaqueToken(
+      JSON.stringify({ ...command, idempotencyKey: undefined }),
+      "creator-request",
+    );
+    expect(stored?.requestFingerprint).not.toBe(legacyOfflineFingerprint);
+  });
+
   test("concurrent submit and withdraw with one expected version yield one winner and one domain conflict", async () => {
     // Break caught: both transitions committing, neither committing, or a raw database race escaping.
     const userId = "concurrent-transition-user";
@@ -470,6 +514,7 @@ describe("creator application acceptance", () => {
     const setup = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const draft = (await setup.saveDraft({
@@ -487,11 +532,13 @@ describe("creator application acceptance", () => {
       const submitter = createCreatorApplicationService({
         db: drizzle(firstClient) as PawketDatabase,
         keyring,
+        commandFingerprintKey,
         now: () => new Date("2026-08-24T03:01:00.000Z"),
       });
       const withdrawer = createCreatorApplicationService({
         db: drizzle(secondClient) as PawketDatabase,
         keyring,
+        commandFingerprintKey,
         now: () => new Date("2026-08-24T03:01:00.000Z"),
       });
       const outcomes = await Promise.allSettled([
@@ -529,6 +576,7 @@ describe("creator application acceptance", () => {
     const applications = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const draft = (await applications.saveDraft({
@@ -551,6 +599,107 @@ describe("creator application acceptance", () => {
     ).rejects.toThrow("submitted creator application revisions are immutable");
   });
 
+  test("PostgreSQL rejects both UPDATE and DELETE of attestations for a submitted revision", async () => {
+    // Break caught: changing or deleting the consent evidence after an application has been submitted.
+    const userId = "immutable-attestation-user";
+    await createUser(userId);
+    const applications = createCreatorApplicationService({
+      db,
+      keyring,
+      commandFingerprintKey,
+      now: () => new Date("2026-08-24T03:00:00.000Z"),
+    });
+    const draft = (await applications.saveDraft({
+      userId,
+      idempotencyKey: "immutable-attestation-draft",
+      ...completeDraft,
+    })) as { version: number };
+    const submitted = (await applications.submit({
+      userId,
+      idempotencyKey: "immutable-attestation-submit",
+      expectedVersion: draft.version,
+      ...completeAttestations,
+    })) as { revision: { id: string } };
+    const [attestation] = await db
+      .select({ id: creatorApplicationAttestations.id })
+      .from(creatorApplicationAttestations)
+      .where(eq(creatorApplicationAttestations.revisionId, submitted.revision.id));
+
+    await expect(
+      client`update creator_application_attestations set policy_version = 'changed' where id = ${attestation!.id}`,
+    ).rejects.toThrow("submitted creator application attestations are immutable");
+    await expect(
+      client`delete from creator_application_attestations where id = ${attestation!.id}`,
+    ).rejects.toThrow("submitted creator application attestations are immutable");
+  });
+
+  test("migration 0008 upgrades submitted attestation rows without rewriting migration history", async () => {
+    // Break caught: applying the additive migration only on empty databases or leaving pre-existing submitted evidence mutable.
+    const upgradeSchema = `creator_attestation_upgrade_${process.pid}_${Date.now()}`;
+    const userId = `upgrade-user-${Date.now()}`;
+    const applicationId = randomUUID();
+    const revisionId = randomUUID();
+    const attestationId = randomUUID();
+    const at = new Date("2026-08-24T03:00:00.000Z");
+    try {
+      await client.unsafe(`create schema "${upgradeSchema}"`);
+      await client.unsafe(`set search_path to "${upgradeSchema}", public`);
+      for (const filename of (await readdir(migrationsDirectory)).filter(
+        (entry) => entry.endsWith(".sql") && entry <= "0007_creator-applications.sql",
+      ).sort()) {
+        await migrate(filename);
+      }
+      await db.insert(identityUsers).values({
+        id: userId,
+        name: "Upgrade User",
+        email: "upgrade@example.com",
+        canonicalEmail: "upgrade@example.com",
+        emailVerified: true,
+        emailVerifiedAt: at,
+        emailVerificationProvenance: "password_email_challenge",
+        createdAt: at,
+        updatedAt: at,
+      });
+      await db.insert(creatorApplications).values({
+        id: applicationId,
+        userId,
+        state: "submitted",
+        version: 2,
+        currentRevisionId: revisionId,
+        createdAt: at,
+        updatedAt: at,
+      });
+      await db.insert(creatorApplicationRevisions).values({
+        id: revisionId,
+        applicationId,
+        revisionNumber: 1,
+        submittedAt: at,
+        createdAt: at,
+        updatedAt: at,
+      });
+      await db.insert(creatorApplicationAttestations).values({
+        id: attestationId,
+        revisionId,
+        type: "privacy",
+        policyVersion: "privacy-v1",
+        acceptedAt: at,
+        actorUserId: userId,
+      });
+
+      await migrate("0008_creator-application-attestation-immutability.sql");
+      await expect(
+        client`update creator_application_attestations set policy_version = 'changed' where id = ${attestationId}`,
+      ).rejects.toThrow("submitted creator application attestations are immutable");
+      await expect(
+        client`delete from creator_application_attestations where id = ${attestationId}`,
+      ).rejects.toThrow("submitted creator application attestations are immutable");
+    } finally {
+      await client.unsafe("set search_path to public");
+      await client.unsafe(`drop schema if exists "${upgradeSchema}" cascade`);
+      await client.unsafe(`set search_path to "${schemaName}", public`);
+    }
+  });
+
   test("HTTP commands enforce POST, exact origin and JSON, canonical If-Match, and idempotency", async () => {
     // Break caught: a CSRFable, stale, replay-unsafe, or method-confused browser command.
     const userId = "http-command-user";
@@ -558,6 +707,7 @@ describe("creator application acceptance", () => {
     const service = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const draft = (await service.saveDraft({
@@ -649,6 +799,7 @@ describe("creator application acceptance", () => {
     const service = createCreatorApplicationService({
       db,
       keyring,
+      commandFingerprintKey,
       now: () => new Date("2026-08-24T03:00:00.000Z"),
     });
     const origin = "https://pawket.example";

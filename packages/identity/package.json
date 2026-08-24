@@ -19,6 +19,7 @@
     "@pawket/security": "workspace:*",
     "better-auth": "1.7.1",
     "drizzle-orm": "0.45.2",
+    "ipaddr.js": "2.2.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

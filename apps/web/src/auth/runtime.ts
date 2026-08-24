@@ -99,7 +99,11 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     lookupHmacKey,
     compromisedPasswordChecker: createRuntimeCompromisedPasswordChecker(env.APP_ENV),
   });
-  const creatorService = createCreatorApplicationService({ db: database.db, keyring });
+  const creatorService = createCreatorApplicationService({
+    db: database.db,
+    keyring,
+    commandFingerprintKey: lookupHmacKey,
+  });
 
   async function authenticate(headers: Headers) {
     const resolved = (await auth.api.getSession({ headers })) as

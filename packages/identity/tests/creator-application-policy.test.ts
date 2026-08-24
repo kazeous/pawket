@@ -40,6 +40,26 @@ describe("creator application policy", () => {
     expect(() => validate(Array.from({ length: 6 }, (_, index) => `https://portfolio.example/${index}`))).toThrow();
   });
 
+  test("rejects non-public IPv6 literals while allowing a global public IPv6 literal", () => {
+    // Break caught: treating a bracketed IPv6 literal as an ordinary DNS hostname and allowing a private network target.
+    expect(typeof creatorPolicy.validateCreatorPortfolioUrls).toBe("function");
+    const validate = creatorPolicy.validateCreatorPortfolioUrls!;
+    for (const host of [
+      "fd12:3456:789a::1",
+      "fe80::1",
+      "::1",
+      "ff02::1",
+      "::",
+      "2001:db8::1",
+      "::ffff:192.168.1.20",
+    ]) {
+      expect(() => validate([`https://[${host}]/portfolio`])).toThrow();
+    }
+    expect(validate(["https://[2606:4700:4700::1111]/portfolio"])).toEqual([
+      "https://[2606:4700:4700::1111]/portfolio",
+    ]);
+  });
+
   test("sets the rejection cooldown to the exact fourteenth following calendar day", () => {
     // Break caught: using a 14x24-hour duration instead of the legal local-calendar boundary.
     expect(typeof creatorPolicy.rejectionCooldownUntil).toBe("function");
