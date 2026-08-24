@@ -14,6 +14,16 @@ const securityHeaders = {
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(configDirectory, "../.."),
+  serverExternalPackages: ["@node-rs/argon2"],
+  webpack(config) {
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".ts", ".tsx", ".js"],
+      ".mjs": [".mts", ".mjs"],
+      ".cjs": [".cts", ".cjs"],
+    };
+    return config;
+  },
   async headers() {
     return [
       {

@@ -5,6 +5,11 @@ import { Worker, type Job, type Processor } from "bullmq";
 
 import { acknowledgeOutboxEvent, createDatabase } from "@pawket/database";
 import {
+  deliverSecurityEmailHandoff,
+} from "@pawket/identity/security-email-handoff";
+import type { SecurityEmailSender } from "@pawket/identity/security-email";
+import type { EncryptionKeyring } from "@pawket/security";
+import {
   recordWorkerJobMetrics,
   withRequestContext,
 } from "@pawket/observability";
@@ -64,6 +69,10 @@ export type StartWorkerOptions = {
   signalSource?: SignalSource;
   shutdownTimeoutMs?: number;
   producerOperationTimeoutMs?: number;
+  securityEmail?: {
+    keyring: EncryptionKeyring;
+    sender: SecurityEmailSender;
+  };
   dependencies?: Partial<WorkerRuntimeDependencies>;
 };
 
@@ -98,11 +107,16 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   randomUUID,
 };
 
-function createProcessor(
-  logger: RuntimeLogger,
-  database: DatabaseResource["db"],
-  acknowledge: typeof acknowledgeOutboxEvent,
-): Processor<SystemOutboxJob> {
+export function createWorkerJobProcessor(input: {
+  logger: RuntimeLogger;
+  database: DatabaseResource["db"];
+  acknowledge: typeof acknowledgeOutboxEvent;
+  securityEmail?: {
+    keyring: EncryptionKeyring;
+    sender: SecurityEmailSender;
+    deliver?: typeof deliverSecurityEmailHandoff;
+  };
+}): Processor<SystemOutboxJob> {
   return async (job: Job<SystemOutboxJob>) => {
     if (!job.id) {
       throw new Error("BullMQ job ID is required");
@@ -126,10 +140,36 @@ function createProcessor(
           if (job.id !== job.data.outboxEventId) {
             throw new Error("Outbox job ID does not match outbox event ID");
           }
-          if (job.data.eventType !== "system.foundation.ping.v1") {
+          if (job.data.eventType === "identity.security_email.requested.v1") {
+            const handoffId = job.data.payload.handoffId;
+            const purpose = job.data.payload.purpose;
+            if (
+              typeof handoffId !== "string" ||
+              handoffId !== job.data.aggregateId ||
+              typeof purpose !== "string" ||
+              ![
+                "email_verification",
+                "password_reset",
+                "email_change",
+                "security_notice",
+              ].includes(purpose)
+            ) {
+              throw new Error("Invalid security email job");
+            }
+            if (!input.securityEmail) {
+              throw new Error("Security email delivery unavailable");
+            }
+            await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
+              handoffId,
+              workerId: job.id,
+              keyring: input.securityEmail.keyring,
+              sender: input.securityEmail.sender,
+              now: new Date(),
+            });
+          } else if (job.data.eventType !== "system.foundation.ping.v1") {
             throw new Error("Unsupported outbox event type");
           }
-          const acknowledged = await acknowledge(database, {
+          const acknowledged = await input.acknowledge(input.database, {
             eventId: job.data.outboxEventId,
           });
           if (!acknowledged) {
@@ -137,7 +177,7 @@ function createProcessor(
           }
         } catch (error) {
           outcome = "failed";
-          logger.error(
+          input.logger.error(
             {
               category: "worker_job_failed",
               outboxEventId: job.data.outboxEventId,
@@ -150,6 +190,8 @@ function createProcessor(
             (error.message === "Unsupported system job name" ||
               error.message === "Outbox job ID does not match outbox event ID" ||
               error.message === "Unsupported outbox event type" ||
+              error.message === "Invalid security email job" ||
+              error.message === "Security email delivery unavailable" ||
               error.message === "Outbox event acknowledgement failed")
           ) {
             throw error;
@@ -227,7 +269,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     await connectQueueWorker(workerConnection, options.producerOperationTimeoutMs);
     queue = dependencies.createQueue(producerConnection);
     worker = dependencies.createWorker(
-      createProcessor(logger, database.db, dependencies.acknowledge),
+      createWorkerJobProcessor({
+        logger,
+        database: database.db,
+        acknowledge: dependencies.acknowledge,
+        securityEmail: options.securityEmail,
+      }),
       workerConnection,
       options.concurrency,
     );

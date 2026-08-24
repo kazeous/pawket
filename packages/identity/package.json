@@ -4,7 +4,9 @@
   "type": "module",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./security-email": "./src/security-email.ts",
+    "./security-email-handoff": "./src/security-email-handoff.ts"
   },
   "scripts": {
     "build": "tsup",
@@ -14,6 +16,7 @@
     "@better-auth/utils": "0.5.0",
     "@node-rs/argon2": "2.1.0",
     "@pawket/database": "workspace:*",
+    "@pawket/security": "workspace:*",
     "better-auth": "1.7.1",
     "drizzle-orm": "0.45.2"
   },

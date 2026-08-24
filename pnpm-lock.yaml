@@ -45,18 +45,27 @@ importers:
 
   apps/web:
     dependencies:
+      '@node-rs/argon2':
+        specifier: 2.1.0
+        version: 2.1.0
       '@pawket/config':
         specifier: workspace:*
         version: link:../../packages/config
       '@pawket/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@pawket/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@pawket/observability':
         specifier: workspace:*
         version: link:../../packages/observability
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       next:
         specifier: 16.3.2
         version: 16.3.2(@babel/core@7.29.7(supports-color@7.2.0))(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -75,12 +84,18 @@ importers:
       '@pawket/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@pawket/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@pawket/observability':
         specifier: workspace:*
         version: link:../../packages/observability
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       bullmq:
         specifier: 6.2.0
         version: 6.2.0(ioredis@6.0.0(supports-color@7.2.0))
@@ -118,6 +133,9 @@ importers:
       '@pawket/database':
         specifier: workspace:*
         version: link:../database
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../security
       better-auth:
         specifier: 1.7.1
         version: 1.7.1(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.9(supports-color@7.2.0))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9))(next@16.3.2(@babel/core@7.29.7(supports-color@7.2.0))(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.11)

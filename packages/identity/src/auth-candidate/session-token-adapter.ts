@@ -87,10 +87,33 @@ function wrapOperations<Options extends BetterAuthOptions>(
         input.model === "session" && typeof input.update.token === "string"
           ? input.update.token
           : rawTokenFromWhere(input.model, input.where);
+      const protectedWhere = protectWhere(input.model, input.where);
+      let protectedUpdate = protectWrite(input.model, input.update);
+      if (input.model === "session" && input.update.expiresAt instanceof Date) {
+        const current = await adapter.findOne<Record<string, unknown>>({
+          model: input.model,
+          where: protectedWhere,
+        });
+        if (
+          current?.absoluteExpiresAt instanceof Date &&
+          current.idleExpiresAt instanceof Date
+        ) {
+          const refreshedIdle = new Date(
+            Math.min(input.update.expiresAt.getTime(), current.absoluteExpiresAt.getTime()),
+          );
+          protectedUpdate = {
+            ...protectedUpdate,
+            expiresAt: refreshedIdle,
+            idleExpiresAt: refreshedIdle,
+            lastUsedAt:
+              input.update.updatedAt instanceof Date ? input.update.updatedAt : new Date(),
+          };
+        }
+      }
       const stored = await adapter.update<T>({
         ...input,
-        where: protectWhere(input.model, input.where),
-        update: protectWrite(input.model, input.update),
+        where: protectedWhere,
+        update: protectedUpdate,
       });
       return restoreRawToken(stored, rawToken);
     },
@@ -132,7 +155,7 @@ function wrapOperations<Options extends BetterAuthOptions>(
         where: input.where ? protectWhere(input.model, input.where) : undefined,
       });
     },
-    delete<_T>(input: { model: string; where: Where[] }): Promise<void> {
+    delete(input: { model: string; where: Where[] }): Promise<void> {
       return adapter.delete({ ...input, where: protectWhere(input.model, input.where) });
     },
     deleteMany(input: { model: string; where: Where[] }): Promise<number> {

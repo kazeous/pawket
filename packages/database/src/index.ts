@@ -29,6 +29,13 @@ export {
 } from "./outbox-repository.js";
 export {
   adminAuditEvents,
+  identityAccounts,
+  identityEmailAddresses,
+  identityEmailHandoffs,
+  identitySecurityThrottles,
+  identitySessions,
+  identityUsers,
+  identityVerifications,
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,
   systemCommandIdempotency,

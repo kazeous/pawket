@@ -1,7 +1,9 @@
-import { Algorithm, hash, verify, type Options } from "@node-rs/argon2";
+import { hash, verify, type Algorithm, type Options } from "@node-rs/argon2";
 
 export const passwordHashOptions = {
-  algorithm: Algorithm.Argon2id,
+  // @node-rs/argon2 declares Algorithm as an ambient const enum, which cannot be
+  // referenced from Next.js isolated modules. The published enum value for Argon2id is 2.
+  algorithm: 2 as Algorithm,
   memoryCost: 65_536,
   timeCost: 3,
   parallelism: 1,
