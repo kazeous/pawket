@@ -1,9 +1,18 @@
 import Link from "next/link";
+import { headers } from "next/headers";
+
+import { getIdentityRuntime } from "../auth/runtime";
+import { homeAccountAction, resolvePublicSession } from "../auth/public-session";
 import { AppShell } from "../ui/app-shell";
 
-export default function HomePage() {
+export const dynamic = "force-dynamic";
+
+export default async function HomePage() {
+  const runtime = getIdentityRuntime();
+  const sessionState = await resolvePublicSession(runtime.authenticate, await headers());
+
   return (
-    <AppShell action={{ href: "/sign-in", label: "Đăng nhập" }}>
+    <AppShell action={homeAccountAction(sessionState)}>
       <section className="home-intro reveal">
         <div>
           <h1>Một góc làm việc cho nghệ sĩ.</h1>

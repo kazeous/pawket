@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
 import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
@@ -42,6 +44,7 @@ type WebIdentityRuntime = {
 };
 
 let runtime: WebIdentityRuntime | undefined;
+const pwnedPasswordsMaximumResponseBytes = 256_000;
 
 export function isSecurityEmailDeliveryAvailable(
   adapter: "disabled" | "local" | "smtp",
@@ -51,14 +54,65 @@ export function isSecurityEmailDeliveryAvailable(
 
 export function createRuntimeCompromisedPasswordChecker(
   appEnv: "local" | "test" | "staging" | "production",
+  options: {
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+  } = {},
 ): { isCompromised(password: string): Promise<boolean> } {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? 3_000;
+
   return {
     async isCompromised(password): Promise<boolean> {
-      void password;
-      if (appEnv === "staging" || appEnv === "production") {
-        throw new Error("Compromised password check is unavailable");
+      if (appEnv === "local" || appEnv === "test") return false;
+
+      // SHA-1 is required only by the HIBP range protocol. Pawket never stores
+      // this digest and sends only its first five characters.
+      const digest = createHash("sha1").update(password, "utf8").digest("hex").toUpperCase();
+      const prefix = digest.slice(0, 5);
+      const suffix = digest.slice(5);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetchImpl(`https://api.pwnedpasswords.com/range/${prefix}`, {
+          cache: "no-store",
+          headers: {
+            accept: "text/plain",
+            "add-padding": "true",
+            "user-agent": "Pawket compromised-password checker",
+          },
+          signal: controller.signal,
+        });
+        const declaredLength = Number(response.headers.get("content-length") ?? 0);
+        if (!response.ok || (Number.isFinite(declaredLength) && declaredLength > pwnedPasswordsMaximumResponseBytes)) {
+          throw new Error("Compromised password source unavailable");
+        }
+
+        const body = await response.text();
+        if (body.length > pwnedPasswordsMaximumResponseBytes) {
+          throw new Error("Compromised password response too large");
+        }
+
+        let parsedRecord = false;
+        for (const rawLine of body.split(/\r?\n/u)) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const match = /^([A-F0-9]{35}):(\d+)$/u.exec(line);
+          if (!match) throw new Error("Compromised password response malformed");
+          const count = Number(match[2]);
+          if (!Number.isSafeInteger(count) || count < 0) {
+            throw new Error("Compromised password response malformed");
+          }
+          parsedRecord = true;
+          if (match[1] === suffix && count > 0) return true;
+        }
+
+        if (!parsedRecord) throw new Error("Compromised password response empty");
+        return false;
+      } finally {
+        clearTimeout(timeout);
       }
-      return false;
     },
   };
 }

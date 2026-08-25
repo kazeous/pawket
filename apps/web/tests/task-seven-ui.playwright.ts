@@ -53,3 +53,21 @@ test("challenge tokens leave the visible URL and are sent only in the POST body"
   expect(submittedToken).toBe(token);
   await expect(page.locator("body")).not.toContainText(token);
 });
+
+test("registration explains a temporary password-check outage without leaking internals", async ({ page }) => {
+  await page.route("**/api/v1/auth/register", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ code: "PASSWORD_CHECK_UNAVAILABLE" }),
+    });
+  });
+  await page.goto("/register");
+  await page.getByLabel("Tên hiển thị bắt buộc").fill("Nghệ sĩ thử nghiệm");
+  await page.getByLabel("Email bắt buộc").fill("artist@example.com");
+  await page.getByLabel("Mật khẩu bắt buộc").fill("a unique password phrase");
+  await page.getByRole("button", { name: "Tạo tài khoản" }).click();
+
+  await expect(page.getByText("Pawket chưa thể kiểm tra độ an toàn của mật khẩu.", { exact: false })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/HIBP|SHA-1|provider|IDENTITY_/iu);
+});

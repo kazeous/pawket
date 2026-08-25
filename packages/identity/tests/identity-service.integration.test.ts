@@ -175,6 +175,37 @@ describe("identity account service", () => {
     await expect(db.select().from(identityUsers)).resolves.toHaveLength(1);
   });
 
+  test("turns compromised-password provider outages into a typed safe dependency failure", async () => {
+    const unavailableService = serviceFactory.createIdentityService!({
+      db,
+      keyring: createEncryptionKeyring({
+        activeKeyId: "test-v1",
+        keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => 255 - index) },
+      }),
+      lookupHmacKey: Uint8Array.from({ length: 32 }, (_, index) => index + 10),
+      compromisedPasswordChecker: {
+        async isCompromised() {
+          throw new Error("provider transport details");
+        },
+      },
+      idFactory: randomUUID,
+      tokenFactory: () => "unused-token",
+      now: () => fixedNow,
+      passwordHasher: async () => "unused-hash",
+      passwordVerifier: async () => false,
+    });
+
+    await expect(unavailableService.registerPassword({
+      name: "Outage test",
+      email: "outage@example.com",
+      password: "a unique outage password phrase",
+    })).rejects.toMatchObject({
+      name: "IdentityDependencyError",
+      reason: "compromised_password_check_unavailable",
+      message: "Identity dependency is unavailable",
+    });
+  });
+
   test("resend replaces the active challenge and verification records provenance", async () => {
     const original = latestToken("email_verification");
     await expect(

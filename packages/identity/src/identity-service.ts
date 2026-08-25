@@ -43,6 +43,13 @@ export class IdentityInputError extends Error {
   }
 }
 
+export class IdentityDependencyError extends Error {
+  constructor(readonly reason: "compromised_password_check_unavailable") {
+    super("Identity dependency is unavailable");
+    this.name = "IdentityDependencyError";
+  }
+}
+
 function defaultTokenFactory(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -78,11 +85,16 @@ export function createIdentityService(dependencies: IdentityServiceDependencies)
     password: string,
     contextTerms: readonly string[] = [],
   ): Promise<void> => {
-    const decision = await evaluatePassword({
-      password,
-      contextTerms,
-      compromisedPasswordChecker: dependencies.compromisedPasswordChecker,
-    });
+    let decision: Awaited<ReturnType<typeof evaluatePassword>>;
+    try {
+      decision = await evaluatePassword({
+        password,
+        contextTerms,
+        compromisedPasswordChecker: dependencies.compromisedPasswordChecker,
+      });
+    } catch {
+      throw new IdentityDependencyError("compromised_password_check_unavailable");
+    }
     if (!decision.accepted) throw new IdentityInputError("password_policy");
   };
 
