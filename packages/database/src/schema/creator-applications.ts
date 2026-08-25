@@ -12,13 +12,17 @@ export const creatorApplications = pgTable("creator_applications", {
   state: text("state").notNull(), version: integer("version").notNull().default(1),
   currentRevisionId: uuid("current_revision_id"), rejectedAt: timestamp("rejected_at", { withTimezone: true, mode: "date" }),
   cooldownUntil: timestamp("cooldown_until", { withTimezone: true, mode: "date" }),
+  reviewerUserId: text("reviewer_user_id").references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  reviewClaimedAt: timestamp("review_claimed_at", { withTimezone: true, mode: "date" }),
+  reviewClaimExpiresAt: timestamp("review_claim_expires_at", { withTimezone: true, mode: "date" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 }, (t) => [
   index("creator_applications_user_idx").on(t.userId, t.updatedAt),
   uniqueIndex("creator_applications_one_nonterminal_uidx").on(t.userId).where(sql`${t.state} in ('draft','submitted','under_review','changes_requested')`),
-  check("creator_applications_state_check", sql`${t.state} in ('draft','submitted','under_review','changes_requested','rejected','withdrawn')`),
+  check("creator_applications_state_check", sql`${t.state} in ('draft','submitted','under_review','changes_requested','approved','rejected','withdrawn')`),
   check("creator_applications_version_check", sql`${t.version} > 0`),
   check("creator_applications_cooldown_check", sql`(${t.state} = 'rejected' and ${t.rejectedAt} is not null and ${t.cooldownUntil} is not null) or (${t.state} <> 'rejected' and ${t.rejectedAt} is null and ${t.cooldownUntil} is null)`),
+  check("creator_applications_review_claim_check", sql`(${t.state} = 'under_review' and ${t.reviewerUserId} is not null and ${t.reviewClaimedAt} is not null and ${t.reviewClaimExpiresAt} > ${t.reviewClaimedAt}) or (${t.state} <> 'under_review' and ${t.reviewerUserId} is null and ${t.reviewClaimedAt} is null and ${t.reviewClaimExpiresAt} is null)`),
 ]);
 
 export const creatorApplicationRevisions = pgTable("creator_application_revisions", {
@@ -32,3 +36,14 @@ export const creatorApplicationRevisions = pgTable("creator_application_revision
 export const creatorApplicationAttestations = pgTable("creator_application_attestations", {
   id: uuid("id").primaryKey(), revisionId: uuid("revision_id").notNull().references(() => creatorApplicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }), type: text("type").notNull(), policyVersion: text("policy_version").notNull(), acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }).notNull(), actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
 }, (t) => [uniqueIndex("creator_application_attestations_revision_type_uidx").on(t.revisionId, t.type), check("creator_application_attestations_type_check", sql`${t.type} in ('dob_truthfulness','portfolio_rights','truthful_information','creator_terms','privacy')`)]);
+
+export const creatorApplicationDecisions = pgTable("creator_application_decisions", {
+  id: uuid("id").primaryKey(), applicationId: uuid("application_id").notNull().references(() => creatorApplications.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  revisionId: uuid("revision_id").notNull().references(() => creatorApplicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  action: text("action").notNull(), reasonCode: text("reason_code").notNull(), applicantExplanation: text("applicant_explanation").notNull(), privateNote: text("private_note"),
+  actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }), actorSessionId: text("actor_session_id").notNull(), stepUpProofId: uuid("step_up_proof_id").notNull(), expectedVersion: integer("expected_version").notNull(), requestId: text("request_id").notNull(), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+}, (t) => [
+  index("creator_application_decisions_application_idx").on(t.applicationId, t.createdAt),
+  check("creator_application_decisions_action_check", sql`${t.action} in ('changes_requested','approved','rejected','reopened')`),
+  check("creator_application_decisions_reason_check", sql`${t.reasonCode} in ('portfolio_insufficient','portfolio_control_unclear','contact_unverified','receiving_account_unverified','content_policy_risk','information_inconsistent','eligibility_not_met','other')`),
+]);

@@ -39,16 +39,22 @@ async function expectCreatorHead(
     applications: string | null;
     revisions: string | null;
     attestations: string | null;
+    decisions: string | null;
+    capabilities: string | null;
   }[]>`
     select
       to_regclass('creator_applications')::text as applications,
       to_regclass('creator_application_revisions')::text as revisions,
-      to_regclass('creator_application_attestations')::text as attestations
+      to_regclass('creator_application_attestations')::text as attestations,
+      to_regclass('creator_application_decisions')::text as decisions,
+      to_regclass('identity_creator_capabilities')::text as capabilities
   `;
   expect(tables).toEqual({
     applications: "creator_applications",
     revisions: "creator_application_revisions",
     attestations: "creator_application_attestations",
+    decisions: "creator_application_decisions",
+    capabilities: "identity_creator_capabilities",
   });
 
   const userId = `migrator-user-${randomUUID()}`;
@@ -111,7 +117,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(13);
+  expect(journal?.count).toBe(14);
 }
 
 async function createMigrationsThrough0006(): Promise<string> {

@@ -38,6 +38,7 @@ describe("identity persistence schema", () => {
   test("exports and migrates every authoritative identity record", async () => {
     const expectedTables = [
       "identity_accounts",
+      "identity_creator_capabilities",
       "identity_email_addresses",
       "identity_email_handoffs",
       "identity_external_link_transactions",
@@ -61,6 +62,7 @@ describe("identity persistence schema", () => {
     expect(rows.map((row) => row.table_name)).toEqual(expectedTables);
     for (const exportName of [
       "identityAccounts",
+      "identityCreatorCapabilities",
       "identityEmailAddresses",
       "identityEmailHandoffs",
       "identityExternalLinkTransactions",

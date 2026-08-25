@@ -541,3 +541,14 @@ export const identityRoleGrants = pgTable(
     ),
   ],
 );
+
+export const identityCreatorCapabilities = pgTable("identity_creator_capabilities", {
+  id: uuid("id").primaryKey(), userId: text("user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  state: text("state").notNull(), version: integer("version").notNull().default(1), approvedApplicationId: uuid("approved_application_id").notNull(), approvedRevisionId: uuid("approved_revision_id").notNull(),
+  suspendedAt: timestamp("suspended_at", { withTimezone: true, mode: "date" }), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+}, (t) => [
+  uniqueIndex("identity_creator_capabilities_user_uidx").on(t.userId),
+  check("identity_creator_capabilities_state_check", sql`${t.state} in ('active','suspended')`),
+  check("identity_creator_capabilities_version_check", sql`${t.version} > 0`),
+  check("identity_creator_capabilities_suspension_check", sql`(${t.state} = 'suspended' and ${t.suspendedAt} is not null) or (${t.state} = 'active' and ${t.suspendedAt} is null)`),
+]);

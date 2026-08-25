@@ -1,4 +1,4 @@
-import { resolveOwnerSessionPermission } from "@pawket/admin";
+import { createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
 import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
@@ -30,12 +30,15 @@ type WebIdentityRuntime = {
   handlers: ReturnType<typeof createIdentityHttpHandlers>;
   creatorHandlers: ReturnType<typeof createCreatorApplicationHttpHandlers>;
   paymentsHandlers: ReturnType<typeof createPaymentsHttpHandlers>;
+  creatorReviewHandlers: ReturnType<typeof createCreatorReviewHttpHandlers>;
+  creatorReview: ReturnType<typeof createCreatorReviewService>;
   authenticate(headers: Headers): Promise<{
     userId: string;
     sessionId: string;
     primaryAuthenticatedAt: Date;
   } | null>;
   authorizeOwner(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
+  authorizeCreator(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
 };
 
 let runtime: WebIdentityRuntime | undefined;
@@ -129,6 +132,11 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     receivingAccountReferences: createCreatorReceivingAccountReferenceValidator({
       db: database.db,
     }),
+  });
+  const creatorReview = createCreatorReviewService({
+    db: database.db,
+    commandFingerprintKey: lookupHmacKey,
+    consumeStepUpProof,
   });
   const receivingAccounts = createReceivingAccountService({
     db: database.db,
@@ -240,12 +248,25 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     accounts: receivingAccounts,
     deposits: verificationDeposits,
   });
+  const creatorReviewHandlers = createCreatorReviewHttpHandlers({
+    trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
+    authenticate,
+    async authorizeOwner(headers) {
+      const session = await authenticate(headers);
+      if (!session) return "unauthenticated";
+      return (await resolveOwnerSessionPermission(database.db, { userId: session.userId, sessionId: session.sessionId, now: new Date() })) ? "authorized" : "forbidden";
+    },
+    issueOwnerStepUpProof: ({ userId, sessionId, actionClass, now: issuedAt }) => createStepUpProof(database.db, { userId, sessionId, actionClass, assuranceMethod: "totp", now: issuedAt }),
+    review: creatorReview,
+  });
 
   runtime = {
     auth,
     handlers,
     creatorHandlers,
     paymentsHandlers,
+    creatorReviewHandlers,
+    creatorReview,
     authenticate,
     async authorizeOwner(headers) {
       const session = await authenticate(headers);
@@ -257,6 +278,15 @@ export function getIdentityRuntime(): WebIdentityRuntime {
       }))
         ? "authorized"
         : "forbidden";
+    },
+    async authorizeCreator(headers) {
+      const session = await authenticate(headers);
+      if (!session) return "unauthenticated";
+      const capability = await database.db.query.identityCreatorCapabilities.findFirst({
+        where: (capabilities, { and, eq }) =>
+          and(eq(capabilities.userId, session.userId), eq(capabilities.state, "active")),
+      });
+      return capability ? "authorized" : "forbidden";
     },
   };
   return runtime;

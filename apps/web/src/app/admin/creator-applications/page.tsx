@@ -10,14 +10,22 @@ export default async function CreatorApplicationsAdminPage() {
   if (decision === "unauthenticated") redirect("/sign-in");
   if (decision !== "authorized") notFound();
 
+  const applications = await getIdentityRuntime().creatorReview.listSubmitted();
+
   return (
     <main className="page-shell narrow-shell">
       <section className="panel">
         <p className="eyebrow">Owner-only</p>
         <h1>Creator applications</h1>
-        <p>
-          The owner gate is active. Application review arrives in the later creator-approval task.
-        </p>
+        <p>Submitted applications are ordered oldest first. Receiving-account destinations remain masked here.</p>
+        {applications.length === 0 ? <p>No submitted applications.</p> : <ul>
+          {applications.map((application) => (
+            <li key={application.id}>
+              <strong>{application.artistDisplayName ?? "Unnamed artist"}</strong> — {application.primaryArtDiscipline ?? "Practice not supplied"}; email {application.emailVerified ? "verified" : "unverified"}; age snapshot {application.ageEligible !== null && application.ageEligible >= 18 ? "eligible" : "not eligible"}; {application.bankName ?? "Receiving account unavailable"} {application.maskedSuffix ?? ""} ({application.proofState ?? "unverified"}).
+              <p>Review via the owner API using version {application.version}; full bank data is intentionally unavailable in this view.</p>
+            </li>
+          ))}
+        </ul>}
       </section>
     </main>
   );
