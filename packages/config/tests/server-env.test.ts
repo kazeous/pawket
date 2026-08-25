@@ -123,6 +123,7 @@ describe("parseServerEnv", () => {
         RETENTION_ENFORCEMENT_PAUSED: true,
         RETENTION_BATCH_SIZE: 100,
         RETENTION_SCAN_INTERVAL_MS: 21_600_000,
+        OWNER_MFA_RECOVERY_MODE: "disabled",
         APP_BASE_URL: "https://pawket.example",
         AUTH_TRUSTED_ORIGINS: [
           "https://pawket.example",
@@ -204,6 +205,79 @@ describe("parseServerEnv", () => {
         RETENTION_APPROVED_AT: "2026-08-25T12:00:00.000Z",
         RETENTION_ENFORCEMENT_PAUSED: false,
       }),
+    );
+  });
+
+  it("keeps owner MFA recovery disabled by default in production", () => {
+    // Break caught: a production deployment making break-glass recovery
+    // available without an explicit external-control activation.
+    expect(parseServerEnv(completeProductionEnv)).toEqual(
+      expect.objectContaining({
+        OWNER_MFA_RECOVERY_MODE: "disabled",
+      }),
+    );
+  });
+
+  it("rejects incomplete external-manual owner MFA recovery configuration", () => {
+    // Break caught: selecting external-manual recovery with only one accepted
+    // control, or partially preloading the production control pair.
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+      }),
+    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+      }),
+    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      }),
+    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+      }),
+    ).toThrow("OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE must be configured as a complete pair");
+  });
+
+  it("parses a complete bounded external-manual owner MFA recovery gate", () => {
+    // Break caught: a fully accepted and rehearsed external-control tuple being
+    // dropped, misparsed, or left unavailable to the offline command.
+    expect(
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      }),
+    );
+
+    const oversizedReference = `owner-${"x".repeat(200)}`;
+    expectSafeValidationError(
+      {
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: oversizedReference,
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      },
+      "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+      "is too long or too large",
+      oversizedReference,
     );
   });
 

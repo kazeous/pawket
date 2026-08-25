@@ -323,6 +323,8 @@ describe("one-shot owner bootstrap", () => {
       incidentId: "incident-42",
       repositoryEvidenceId: "repo-ticket-9",
       hostEvidenceId: "host-ticket-8",
+      acceptanceReference: "owner-acceptance-2026-08",
+      rehearsedAt: new Date("2026-08-25T02:30:00.000Z"),
       authorizedAt: new Date("2026-08-25T06:00:00.000Z"),
       confirmation: ownerMfaRecoveryConfirmation("owner-user", "incident-42"),
       applicationRevision: "task8-test-revision",
@@ -350,6 +352,24 @@ describe("one-shot owner bootstrap", () => {
       reasonCode: "completed_wait_period",
       requestId: "breakglass:incident-42",
     });
+    const recoveryAudit = audits.at(-1);
+    expect(recoveryAudit?.assurance).toEqual({
+      category: "external_manual_controls",
+      acceptanceReference: "owner-acceptance-2026-08",
+      rehearsedAt: "2026-08-25T02:30:00.000Z",
+      operatorAttestations: {
+        repositoryControlReference: "repo-ticket-9",
+        hostControlReference: "host-ticket-8",
+        waitStartedAt: "2026-08-25T06:00:00.000Z",
+        emergencyNeed: "none",
+      },
+    });
+    await expect(
+      db
+        .update(adminAuditEvents)
+        .set({ assurance: { category: "rewritten" } })
+        .where(eq(adminAuditEvents.id, recoveryAudit!.id)),
+    ).rejects.toMatchObject({ cause: { code: "55000" } });
     await expect(recoverOwnerMfa(db, input)).rejects.toMatchObject({
       code: "RECOVERY_ALREADY_USED",
     });
@@ -366,6 +386,8 @@ describe("one-shot owner bootstrap", () => {
       incidentId: "incident-43",
       repositoryEvidenceId: "same-proof",
       hostEvidenceId: "same-proof",
+      acceptanceReference: "owner-acceptance-2026-08",
+      rehearsedAt: new Date("2026-08-25T02:30:00.000Z"),
       authorizedAt: new Date("2026-08-25T05:00:00.000Z"),
       confirmation: ownerMfaRecoveryConfirmation("owner-user", "incident-43"),
       applicationRevision: "task8-test-revision",
@@ -381,6 +403,25 @@ describe("one-shot owner bootstrap", () => {
         ...base,
         hostEvidenceId: "host-proof",
         emergencyReason: "free_form" as "active_refund_deadline",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_RECOVERY_INPUT" });
+    await expect(
+      recoverOwnerMfa(db, {
+        ...base,
+        acceptanceReference: `owner-${"x".repeat(200)}`,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_RECOVERY_INPUT" });
+    await expect(
+      recoverOwnerMfa(db, {
+        ...base,
+        rehearsedAt: new Date("invalid"),
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_RECOVERY_INPUT" });
+    await expect(
+      recoverOwnerMfa(db, {
+        ...base,
+        hostEvidenceId: "host-proof",
+        rehearsedAt: new Date(recoveryNow.getTime() + 1),
       }),
     ).rejects.toMatchObject({ code: "INVALID_RECOVERY_INPUT" });
     expect(await db.select().from(systemCommandIdempotency)).toHaveLength(0);

@@ -44,32 +44,39 @@ function assertIdentifier(value: string): void {
   }
 }
 
-export async function recoverOwnerMfa(
-  db: PawketDatabase,
-  input: {
-    userId: string;
-    configuredEmail: string;
-    incidentId: string;
-    repositoryEvidenceId: string;
-    hostEvidenceId: string;
-    authorizedAt: Date;
-    emergencyReason?: "active_refund_deadline";
-    confirmation: string;
-    applicationRevision: string;
-    keyring: EncryptionKeyring;
-    now: Date;
-  },
-): Promise<{
+export type OwnerMfaRecoveryInput = {
+  userId: string;
+  configuredEmail: string;
+  incidentId: string;
+  repositoryEvidenceId: string;
+  hostEvidenceId: string;
+  acceptanceReference: string;
+  rehearsedAt: Date;
+  authorizedAt: Date;
+  emergencyReason?: "active_refund_deadline";
+  confirmation: string;
+  applicationRevision: string;
+  keyring: EncryptionKeyring;
+  now: Date;
+};
+
+export type OwnerMfaRecoveryResult = {
   userId: string;
   authorizationVersion: number;
   revokedSessionCount: number;
   invalidatedAuthenticatorCount: number;
-}> {
+};
+
+export async function recoverOwnerMfa(
+  db: PawketDatabase,
+  input: OwnerMfaRecoveryInput,
+): Promise<OwnerMfaRecoveryResult> {
   for (const identifier of [
     input.userId,
     input.incidentId,
     input.repositoryEvidenceId,
     input.hostEvidenceId,
+    input.acceptanceReference,
     input.applicationRevision,
   ]) {
     assertIdentifier(identifier);
@@ -77,7 +84,9 @@ export async function recoverOwnerMfa(
   if (
     Number.isNaN(input.now.getTime()) ||
     Number.isNaN(input.authorizedAt.getTime()) ||
+    Number.isNaN(input.rehearsedAt.getTime()) ||
     input.authorizedAt > input.now ||
+    input.rehearsedAt > input.now ||
     (input.emergencyReason !== undefined && input.emergencyReason !== "active_refund_deadline")
   ) {
     throw new OwnerMfaRecoveryError("INVALID_RECOVERY_INPUT");
@@ -135,7 +144,7 @@ export async function recoverOwnerMfa(
       commandScope: "owner.mfa_break_glass",
       keyHash: hashOpaqueToken(input.incidentId, "owner-mfa-recovery-incident"),
       requestFingerprint: hashOpaqueToken(
-        `${input.userId}:${input.repositoryEvidenceId}:${input.hostEvidenceId}:${input.authorizedAt.toISOString()}:${input.emergencyReason ?? "standard"}`,
+        `${input.userId}:${input.repositoryEvidenceId}:${input.hostEvidenceId}:${input.acceptanceReference}:${input.rehearsedAt.toISOString()}:${input.authorizedAt.toISOString()}:${input.emergencyReason ?? "standard"}`,
         "owner-mfa-recovery-request",
       ),
       now: input.now,
@@ -190,11 +199,15 @@ export async function recoverOwnerMfa(
         ownerRoleChanged: false,
       },
       assurance: {
-        method: "offline_break_glass",
-        repositoryEvidenceId: input.repositoryEvidenceId,
-        hostEvidenceId: input.hostEvidenceId,
-        wait: input.emergencyReason ? "emergency_exception" : "twenty_four_hours",
-        reenrollmentRequired: true,
+        category: "external_manual_controls",
+        acceptanceReference: input.acceptanceReference,
+        rehearsedAt: input.rehearsedAt.toISOString(),
+        operatorAttestations: {
+          repositoryControlReference: input.repositoryEvidenceId,
+          hostControlReference: input.hostEvidenceId,
+          waitStartedAt: input.authorizedAt.toISOString(),
+          emergencyNeed: input.emergencyReason ?? "none",
+        },
       },
       applicationRevision: input.applicationRevision,
       requestId,

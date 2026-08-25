@@ -1,9 +1,41 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+
+import type { PawketDatabase } from "@pawket/database";
+import type { EncryptionKeyring } from "@pawket/security";
 
 import {
   ownerMfaRecoveryConfirmation,
   parseOwnerMfaRecoveryArguments,
+  runOwnerMfaRecoveryCli,
 } from "../src/index.js";
+
+function recoveryArguments(): string[] {
+  return [
+    "--user-id=owner-user",
+    "--incident-id=incident-42",
+    "--repo-proof=repo-ticket-9",
+    "--host-proof=host-ticket-8",
+    "--authorized-at=2026-08-24T00:00:00.000Z",
+    "--revision=af05d661ef806fa7f2e3f63af12ad211e3d8b178",
+    `--confirm=${ownerMfaRecoveryConfirmation("owner-user", "incident-42")}`,
+  ];
+}
+
+function cliEnvironment(
+  mode: "disabled" | "external_manual",
+  rehearsedAt = "2026-08-25T09:30:00+07:00",
+) {
+  return {
+    OWNER_MFA_RECOVERY_MODE: mode,
+    OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+    OWNER_MFA_RECOVERY_REHEARSED_AT: rehearsedAt,
+    APP_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
+    DATABASE_URL: "postgresql://must-not-be-printed@localhost/pawket",
+    BOOTSTRAP_OWNER_EMAIL: "private-owner@example.test",
+    PII_ACTIVE_KEY_ID: "pii-test",
+    PII_KEYRING_JSON: { "pii-test": "private-encryption-key" },
+  } as const;
+}
 
 describe("owner MFA recovery CLI contract", () => {
   test("requires two evidence references, authorization time, revision, and exact confirmation", () => {
@@ -53,5 +85,105 @@ describe("owner MFA recovery CLI contract", () => {
         "--emergency-reason=free-form",
       ]),
     ).toThrow("INVALID_OWNER_MFA_RECOVERY_ARGUMENTS");
+  });
+
+  test("refuses a disabled recovery gate before creating a database handle", async () => {
+    // Break caught: the command reaching PostgreSQL when the externally
+    // accepted and rehearsed control gate has not been enabled.
+    const createDatabase = vi.fn(() => {
+      throw new Error("DATABASE_MUST_NOT_OPEN");
+    });
+    const result = await runOwnerMfaRecoveryCli(recoveryArguments(), {
+      loadServerEnv: vi.fn(() => cliEnvironment("disabled")),
+      createDatabase,
+      createEncryptionKeyring: vi.fn(() => ({}) as EncryptionKeyring),
+      recoverOwnerMfa: vi.fn(async () => {
+        throw new Error("RECOVERY_MUST_NOT_RUN");
+      }),
+      now: () => new Date("2026-08-26T06:00:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "Owner MFA recovery refused: OWNER_MFA_RECOVERY_DISABLED\n",
+    });
+    expect(createDatabase).not.toHaveBeenCalled();
+  });
+
+  test("refuses a future rehearsal timestamp before creating a database handle", async () => {
+    // Break caught: treating a scheduled future rehearsal as a completed
+    // external control and reaching PostgreSQL before that rehearsal occurs.
+    const createDatabase = vi.fn(() => {
+      throw new Error("DATABASE_MUST_NOT_OPEN");
+    });
+    const result = await runOwnerMfaRecoveryCli(recoveryArguments(), {
+      loadServerEnv: vi.fn(() =>
+        cliEnvironment("external_manual", "2026-08-27T09:30:00+07:00"),
+      ),
+      createDatabase,
+      createEncryptionKeyring: vi.fn(() => ({}) as EncryptionKeyring),
+      recoverOwnerMfa: vi.fn(async () => {
+        throw new Error("RECOVERY_MUST_NOT_RUN");
+      }),
+      now: () => new Date("2026-08-26T06:00:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "Owner MFA recovery refused: OWNER_MFA_RECOVERY_DISABLED\n",
+    });
+    expect(createDatabase).not.toHaveBeenCalled();
+  });
+
+  test("passes accepted controls into recovery without exposing private evidence", async () => {
+    // Break caught: a successful command omitting accepted controls from the
+    // service call or printing owner/evidence/security material to its caller.
+    const close = vi.fn(async () => undefined);
+    const database = {} as PawketDatabase;
+    const createDatabase = vi.fn(() => ({ db: database, close }));
+    const recoverOwnerMfa = vi.fn(async () => ({
+      userId: "owner-user",
+      authorizationVersion: 9,
+      revokedSessionCount: 2,
+      invalidatedAuthenticatorCount: 1,
+    }));
+    const result = await runOwnerMfaRecoveryCli(recoveryArguments(), {
+      loadServerEnv: vi.fn(() => cliEnvironment("external_manual")),
+      createDatabase,
+      createEncryptionKeyring: vi.fn(() => ({}) as EncryptionKeyring),
+      recoverOwnerMfa,
+      now: () => new Date("2026-08-26T06:00:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      exitCode: 0,
+      stdout:
+        "Owner MFA recovery completed; 2 session(s) revoked; MFA re-enrollment required.\n",
+      stderr: "",
+    });
+    expect(recoverOwnerMfa).toHaveBeenCalledWith(
+      database,
+      expect.objectContaining({
+        acceptanceReference: "owner-acceptance-2026-08",
+        rehearsedAt: new Date("2026-08-25T02:30:00.000Z"),
+      }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+    const output = `${result.stdout}${result.stderr}`;
+    for (const privateValue of [
+      "owner-user",
+      "role",
+      "repo-ticket-9",
+      "host-ticket-8",
+      "owner-acceptance-2026-08",
+      "private-owner@example.test",
+      "private-encryption-key",
+      "seed",
+      "recovery code",
+    ]) {
+      expect(output.toLowerCase()).not.toContain(privateValue.toLowerCase());
+    }
   });
 });

@@ -7,6 +7,24 @@ import {
   type IncrementTwoServerEnv,
 } from "@pawket/config/increment-two";
 
+const optionalBoundedReference = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed === "" ? undefined : trimmed;
+  },
+  z.string().min(1).max(200).optional(),
+);
+
+const optionalOffsetTimestamp = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed === "" ? undefined : trimmed;
+  },
+  z.string().datetime({ offset: true }).optional(),
+);
+
 const serverEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]),
   APP_ENV: z.enum(["local", "test", "staging", "production"]),
@@ -49,6 +67,9 @@ const serverEnvSchema = z.object({
     .min(60_000)
     .max(86_400_000)
     .default(21_600_000),
+  OWNER_MFA_RECOVERY_MODE: z.enum(["disabled", "external_manual"]).default("disabled"),
+  OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: optionalBoundedReference,
+  OWNER_MFA_RECOVERY_REHEARSED_AT: optionalOffsetTimestamp,
   ...incrementTwoEnvShape,
 });
 
@@ -138,6 +159,34 @@ export function parseServerEnv(
         {
           field: "RETENTION_MODE",
           reason: "enforce requires RETENTION_POLICY_VERSION and RETENTION_APPROVED_AT",
+        },
+      ]);
+    }
+    const recoveryAcceptanceConfigured =
+      parsed.data.OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE !== undefined;
+    const recoveryRehearsalConfigured =
+      parsed.data.OWNER_MFA_RECOVERY_REHEARSED_AT !== undefined;
+    if (
+      parsed.data.OWNER_MFA_RECOVERY_MODE === "external_manual" &&
+      (!recoveryAcceptanceConfigured || !recoveryRehearsalConfigured)
+    ) {
+      throw new IncrementTwoConfigError([
+        {
+          field: "OWNER_MFA_RECOVERY_MODE",
+          reason:
+            "external_manual requires OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE and OWNER_MFA_RECOVERY_REHEARSED_AT",
+        },
+      ]);
+    }
+    if (
+      parsed.data.APP_ENV === "production" &&
+      recoveryAcceptanceConfigured !== recoveryRehearsalConfigured
+    ) {
+      throw new IncrementTwoConfigError([
+        {
+          field: "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+          reason:
+            "must be configured as a complete pair with OWNER_MFA_RECOVERY_REHEARSED_AT in production",
         },
       ]);
     }
