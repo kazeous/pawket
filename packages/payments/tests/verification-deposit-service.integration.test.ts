@@ -277,7 +277,18 @@ describe("verification-deposit service", () => {
       where id = ${applicationId}
     `;
     await client`
-      update creator_application_revisions set submitted_at = ${clock.toISOString()}, updated_at = ${clock.toISOString()}
+      update creator_application_revisions
+      set short_introduction = 'A complete submitted verification-deposit fixture.',
+          applicant_email = 'deposit-applicant@example.com',
+          dob_envelope = '{"version":1}'::jsonb,
+          portfolio_urls = '["https://portfolio.example.com/deposit-artist"]'::jsonb,
+          primary_art_discipline = 'illustration',
+          practice_description = 'Verification-deposit fixture practice description.',
+          content_intent = 'general_audience_only',
+          age_at_submission = 26,
+          age_evaluated_on = '2026-08-28',
+          submitted_at = ${clock.toISOString()},
+          updated_at = ${clock.toISOString()}
       where id = ${revisionId}
     `;
     await expect(
@@ -642,10 +653,17 @@ describe("verification-deposit service", () => {
     `;
     await client`
       insert into creator_application_revisions (
-        id, application_id, revision_number, proposed_receiving_account_id,
-        submitted_at, created_at, updated_at
+        id, application_id, revision_number, artist_display_name, short_introduction,
+        applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+        practice_description, content_intent, proposed_receiving_account_id,
+        age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
       ) values (
-        ${secondRevisionId}, ${secondApplicationId}, 1, ${replacementAccountVersionId},
+        ${secondRevisionId}, ${secondApplicationId}, 1, 'Deposit Artist Two',
+        'A complete second verification-deposit fixture.',
+        'deposit-applicant@example.com', '{"version":1}'::jsonb,
+        '["https://portfolio.example.com/deposit-artist-two"]'::jsonb,
+        'illustration', 'Second verification-deposit fixture practice description.',
+        'general_audience_only', ${replacementAccountVersionId}, 26, '2026-09-07',
         ${clock.toISOString()}, ${clock.toISOString()}, ${clock.toISOString()}
       )
     `;

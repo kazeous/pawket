@@ -68,6 +68,27 @@ const completeAttestations = {
   privacyAccepted: true,
 };
 
+const completeSubmittedRevision = {
+  artistDisplayName: "Submitted Artist",
+  shortIntroduction: "A complete submitted revision fixture.",
+  applicantEmail: "submitted-fixture@example.com",
+  dobEnvelope: {
+    version: 1 as const,
+    algorithm: "A256GCM" as const,
+    keyId: "test-v1",
+    nonce: "fixture-nonce",
+    ciphertext: "fixture-ciphertext",
+    authenticationTag: "fixture-authentication-tag",
+  },
+  portfolioUrls: ["https://portfolio.example.com/submitted-fixture"],
+  primaryArtDiscipline: "illustration",
+  practiceDescription: "A complete practice description for a submitted fixture.",
+  contentIntent: "general_audience_only",
+  proposedReceivingAccountId: "a5f6d4bb-2638-4ee1-a847-22f38cd1a2c8",
+  ageAtSubmission: 26,
+  ageEvaluatedOn: "2026-08-24",
+};
+
 async function migrate(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
   for (const statement of migration.split("--> statement-breakpoint")) {
@@ -859,6 +880,7 @@ describe("creator application acceptance", () => {
       id: revisionId,
       applicationId,
       revisionNumber: 1,
+      ...completeSubmittedRevision,
       submittedAt: at,
       createdAt: at,
       updatedAt: at,
@@ -887,7 +909,15 @@ describe("creator application acceptance", () => {
       updatedAt: at,
     });
     await db.insert(creatorApplicationRevisions).values([
-      { id: submittedRevisionId, applicationId, revisionNumber: 1, submittedAt: at, createdAt: at, updatedAt: at },
+      {
+        id: submittedRevisionId,
+        applicationId,
+        revisionNumber: 1,
+        ...completeSubmittedRevision,
+        submittedAt: at,
+        createdAt: at,
+        updatedAt: at,
+      },
       { id: draftRevisionId, applicationId, revisionNumber: 2, createdAt: at, updatedAt: at },
     ]);
     await db.insert(creatorApplicationAttestations).values({
