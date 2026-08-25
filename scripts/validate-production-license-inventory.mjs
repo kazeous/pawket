@@ -18,6 +18,10 @@ function normalizeLicense(license) {
   return undefined;
 }
 
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export function validateProductionLicenseMetadata(records) {
   return records.flatMap((record) => {
     const identifier = `${record.name}@${record.version}`;
@@ -33,27 +37,58 @@ export function validateProductionLicenseMetadata(records) {
 
 function collectProductionLicenseMetadata(licenseGroups) {
   const records = [];
+  const failures = [];
+
+  if (!licenseGroups || typeof licenseGroups !== "object" || Array.isArray(licenseGroups)) {
+    return { records, failures: ["license inventory: expected an object"] };
+  }
 
   for (const [groupLicense, entries] of Object.entries(licenseGroups)) {
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (!entry || typeof entry !== "object" || typeof entry.name !== "string") continue;
-      const versions = Array.isArray(entry.versions) ? entry.versions : ["unknown"];
-      for (const version of versions) {
+    if (!Array.isArray(entries)) {
+      failures.push(`${groupLicense}: expected an array of package entries`);
+      continue;
+    }
+    for (const [index, entry] of entries.entries()) {
+      const entryLabel = `${groupLicense}[${index}]`;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || !isNonEmptyString(entry.name)) {
+        failures.push(`${entryLabel}: expected an object with a non-empty name`);
+        continue;
+      }
+      if (!Array.isArray(entry.versions) || entry.versions.length === 0) {
+        failures.push(`${entryLabel}: versions must be a non-empty array`);
+        continue;
+      }
+      if (!isNonEmptyString(entry.license)) {
+        failures.push(`${entryLabel}: expected a non-empty license`);
+        continue;
+      }
+      const invalidVersionIndex = entry.versions.findIndex((version) => !isNonEmptyString(version));
+      if (invalidVersionIndex >= 0) {
+        failures.push(`${entryLabel}.versions[${invalidVersionIndex}]: expected a non-empty string`);
+        continue;
+      }
+      for (const version of entry.versions) {
         records.push({
           name: entry.name,
-          version: typeof version === "string" ? version : "unknown",
-          license: entry.license ?? groupLicense,
+          version,
+          license: entry.license,
         });
       }
     }
   }
-  return records.sort((left, right) => `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`));
+  return {
+    records: records.sort((left, right) => `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)),
+    failures,
+  };
 }
 
 export function validateProductionLicenseInventory(licenseGroups) {
-  const records = collectProductionLicenseMetadata(licenseGroups);
-  return { records, failures: validateProductionLicenseMetadata(records) };
+  const collected = collectProductionLicenseMetadata(licenseGroups);
+  const failures = [...collected.failures, ...validateProductionLicenseMetadata(collected.records)];
+  if (collected.records.length === 0 && failures.length === 0) {
+    failures.push("license inventory: contains no package records");
+  }
+  return { records: collected.records, failures };
 }
 
 function main() {
@@ -61,12 +96,7 @@ function main() {
   try {
     listedProjects = JSON.parse(readFileSync(0, "utf8"));
   } catch {
-    console.error("Production license inventory validation requires pnpm list JSON on stdin.");
-    return 1;
-  }
-
-  if (!listedProjects || typeof listedProjects !== "object" || Array.isArray(listedProjects)) {
-    console.error("Production license inventory validation expected pnpm license-group JSON.");
+    console.error("Production license inventory validation requires pnpm licenses list JSON on stdin.");
     return 1;
   }
 
