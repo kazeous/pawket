@@ -1,0 +1,13 @@
+{
+  "date": "2026-08-25",
+  "framework": "Next.js 16.3.2 App Router",
+  "font_stack": "system-ui, sans-serif",
+  "palette": "direct hex values in apps/web/src/app/globals.css",
+  "motion": "motion-cut; no motion library",
+  "spacing": "ad hoc rem values; no shared scale",
+  "sources": [
+    "package.json",
+    "apps/web/package.json",
+    "apps/web/src/app/globals.css"
+  ]
+}

@@ -1,0 +1,87 @@
+/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 · macrostructure: Workbench · genre: editorial
+ * theme: custom · vibe: "warm paper, studio ink, creator utility" · paper: oklch(95% 0.018 82) · accent: oklch(49% 0.18 258)
+ * display: Chivo · body: Be Vietnam Pro · axes: light / geometric-sans / cool
+ * enrichment: none · nav: N9 · footer: Ft2 · contrast: pass (40–41) · slop: pass (42–45)
+ * honest: pass (46) · chrome: pass (47) · tokens: pass (48) · responsive: pass (49) · mobile: pass (34, 49–57) · icons: pass (30) · studied: no · context: explicit · v1.1.0
+ */
+
+:root {
+  color-scheme: light;
+
+  --color-paper: oklch(95% 0.018 82);
+  --color-paper-2: oklch(92% 0.02 82);
+  --color-paper-3: oklch(88% 0.022 82);
+  --color-surface: oklch(98% 0.01 82);
+  --color-surface-strong: oklch(99% 0.008 82);
+  --color-ink: oklch(22% 0.018 65);
+  --color-ink-2: oklch(31% 0.016 65);
+  --color-neutral: oklch(38% 0.014 70);
+  --color-muted: oklch(46% 0.014 72);
+  --color-rule: oklch(76% 0.018 80);
+  --color-rule-2: oklch(85% 0.018 82);
+  --color-accent: oklch(49% 0.18 258);
+  --color-accent-soft: oklch(91% 0.045 258);
+  --color-accent-ink: oklch(98% 0.01 82);
+  --color-warm: oklch(75% 0.15 78);
+  --color-warm-soft: oklch(93% 0.055 78);
+  --color-success: oklch(47% 0.11 157);
+  --color-success-soft: oklch(92% 0.035 157);
+  --color-warning: oklch(47% 0.12 72);
+  --color-warning-soft: oklch(93% 0.05 78);
+  --color-error: oklch(47% 0.15 25);
+  --color-error-soft: oklch(94% 0.035 25);
+  --color-focus: oklch(51% 0.22 258);
+  --color-overlay: oklch(18% 0.014 65 / 0.58);
+  --color-shadow: oklch(20% 0.012 65 / 0.09);
+
+  --font-display: "Chivo", "Arial Narrow", sans-serif;
+  --font-body: "Be Vietnam Pro", "Segoe UI", sans-serif;
+  --font-mono: "Cascadia Mono", "SFMono-Regular", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.25rem;
+  --text-lg: 1.5625rem;
+  --text-xl: 1.953rem;
+  --text-2xl: 2.441rem;
+  --text-display-s: clamp(2.2rem, 5vw, 3.8rem);
+  --text-display: clamp(2.6rem, 7vw, 5.25rem);
+
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+  --space-4xl: 9rem;
+
+  --radius-control: 0.5rem;
+  --radius-surface: 0.75rem;
+  --radius-pill: 999px;
+  --rule-thin: 1px;
+  --control-height: 2.75rem;
+  --page-gutter: clamp(1rem, 4vw, 4rem);
+  --content-max: 74rem;
+  --reading-max: 65ch;
+  --banner-height: 4.75rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 200ms;
+  --dur-long: 300ms;
+
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-sticky-nav: 220;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+}
