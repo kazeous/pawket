@@ -9,19 +9,27 @@ import {
 } from "../src/http/readiness.js";
 import { createValkeyReadinessCheck } from "../src/http/readiness-checks.js";
 
+const revision = {
+  revision: "revision-123",
+  buildRevision: "revision-123",
+  revisionMatch: true,
+} as const;
+
 describe("health probes", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
   it("returns the exact liveness payload without consulting dependencies", async () => {
-    const response = createLivenessResponse("revision-123");
+    const response = createLivenessResponse(revision);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       status: "ok",
       service: "web",
       revision: "revision-123",
+      buildRevision: "revision-123",
+      revisionMatch: true,
     });
   });
 
@@ -29,7 +37,7 @@ describe("health probes", () => {
     const probe = createReadinessProbe({
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
-      revision: "revision-123",
+      revision,
     });
 
     const response = await createReadinessResponse(probe);
@@ -40,6 +48,8 @@ describe("health probes", () => {
       database: "up",
       valkey: "up",
       revision: "revision-123",
+      buildRevision: "revision-123",
+      revisionMatch: true,
     });
   });
 
@@ -49,7 +59,7 @@ describe("health probes", () => {
         throw new Error("postgresql://artist:password@db.internal:5432/pawket");
       },
       checkValkey: async () => undefined,
-      revision: "revision-123",
+      revision,
     });
 
     const response = await createReadinessResponse(probe);
@@ -61,6 +71,8 @@ describe("health probes", () => {
       database: "down",
       valkey: "up",
       revision: "revision-123",
+      buildRevision: "revision-123",
+      revisionMatch: true,
     });
     expect(body).not.toMatch(/postgresql|artist|password|db\.internal|pawket/i);
   });
@@ -71,7 +83,7 @@ describe("health probes", () => {
       checkValkey: async () => {
         throw new Error("redis://:password@cache.internal:6379/0");
       },
-      revision: "revision-123",
+      revision,
     });
 
     const response = await createReadinessResponse(probe);
@@ -82,6 +94,8 @@ describe("health probes", () => {
       database: "up",
       valkey: "down",
       revision: "revision-123",
+      buildRevision: "revision-123",
+      revisionMatch: true,
     });
   });
 
@@ -103,7 +117,7 @@ describe("health probes", () => {
           );
         }),
       checkValkey: async () => undefined,
-      revision: "revision-123",
+      revision,
     });
 
     const responsePromise = createReadinessResponse(probe);
@@ -130,7 +144,7 @@ describe("health probes", () => {
           );
         }),
       checkValkey: async () => undefined,
-      revision: "revision-123",
+      revision,
     });
 
     const responsePromise = createReadinessResponse(probe);
@@ -144,8 +158,34 @@ describe("health probes", () => {
       database: "down",
       valkey: "up",
       revision: "revision-123",
+      buildRevision: "revision-123",
+      revisionMatch: true,
     });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("fails readiness when build and runtime revisions do not match", async () => {
+    const probe = createReadinessProbe({
+      checkDatabase: async () => undefined,
+      checkValkey: async () => undefined,
+      revision: {
+        revision: "runtime-revision",
+        buildRevision: "build-revision",
+        revisionMatch: false,
+      },
+    });
+
+    const response = await createReadinessResponse(probe);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      status: "not_ready",
+      database: "up",
+      valkey: "up",
+      revision: "runtime-revision",
+      buildRevision: "build-revision",
+      revisionMatch: false,
+    });
   });
 
   it("waits for asynchronous Valkey socket cleanup before rejecting an aborted check", async () => {

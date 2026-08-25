@@ -13,12 +13,14 @@ the data services publish no host ports.
 
 Configure these required values in Coolify:
 
-- Non-secret variables: `APP_ENV=production`, `APP_REVISION`, `APP_BASE_URL`,
+- Non-secret variables: `APP_ENV=production`, `APP_BASE_URL`,
   `AUTH_TRUSTED_ORIGINS`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=smtp`,
   `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS_MODE`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`,
   `VERIFICATION_DEPOSIT_AMOUNT_VND`, `VN_BUSINESS_CALENDAR_VERSION`,
   `VN_BUSINESS_HOLIDAYS`, and the explicit `AUTH_*` lifetime and lockout values.
-  `APP_REVISION` is the exact deployed commit SHA. The business-calendar version
+  Coolify's predefined `SOURCE_COMMIT` is the exact deployed commit SHA; enable
+  **Include Source Commit in Build** and do not maintain a separate manual
+  production `APP_REVISION`. The business-calendar version
   and holiday list are immutable inputs used to compute the 5–7 business-day
   verification-transfer refund window.
 - Secrets: `DATABASE_URL`, `VALKEY_URL`, `METRICS_TOKEN`, `POSTGRES_DB`,
@@ -45,6 +47,11 @@ Coolify starts web or worker or shifts traffic. Use
 `/api/health/ready` as the traffic health gate. `/api/metrics` is private and
 requires `Authorization: Bearer <METRICS_TOKEN>`; never expose or log the
 token.
+
+The worker exposes internal-only liveness, readiness, and protected metrics on
+port 9464. Compose does not publish this port to the host or proxy. Production
+readiness fails when the runtime revision differs from the source revision
+embedded in the image.
 
 Production runs on Oracle Ampere A1, so release images must be built for
 `linux/arm64`. The Dockerfile also supports native local images for validation;

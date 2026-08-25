@@ -9,11 +9,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import {
   adminAuditEvents,
   identityEmailHandoffs,
+  identityRecoveryCodes,
   identityRoleGrants,
   identitySessions,
   identityTotpAuthenticators,
   identityUsers,
   systemOutbox,
+  systemCommandIdempotency,
   type PawketDatabase,
 } from "@pawket/database";
 import * as schema from "@pawket/database";
@@ -22,6 +24,8 @@ import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security
 import {
   bootstrapOwner,
   ownerBootstrapConfirmation,
+  ownerMfaRecoveryConfirmation,
+  recoverOwnerMfa,
   resolveOwnerSessionPermission,
 } from "../src/index.js";
 
@@ -107,6 +111,7 @@ beforeEach(async () => {
     identity_role_grants,
     identity_sessions,
     identity_totp_authenticators,
+    system_command_idempotency,
     identity_email_addresses,
     identity_accounts,
     identity_users,
@@ -287,5 +292,97 @@ describe("one-shot owner bootstrap", () => {
         now: new Date(now.getTime() + 60_000),
       }),
     ).resolves.toBe(false);
+  });
+
+  test("break-glass recovery atomically invalidates MFA and sessions without changing the owner role", async () => {
+    await insertEligibleUser("owner-user", "owner@example.com");
+    await bootstrapOwner(db, bootstrapInput());
+    const recoveryNow = new Date("2026-08-26T06:00:00.000Z");
+    const authenticatorId = randomUUID();
+    await db.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, "owner-user"));
+    await db.insert(identityTotpAuthenticators).values({
+      id: authenticatorId,
+      userId: "owner-user",
+      secret: encryptSensitiveField({
+        plaintext: "owner-totp-seed",
+        binding: { recordType: "identity_totp_authenticator", recordId: authenticatorId, fieldName: "secret" },
+        keyring,
+      }),
+      verified: true,
+    });
+    await db.insert(identityRecoveryCodes).values({
+      authenticatorId,
+      batchId: randomUUID(),
+      codeHash: "sha256:recovery-code",
+    });
+    await insertSession("owner-breakglass-session", "owner-user");
+
+    const input = {
+      userId: "owner-user",
+      configuredEmail: "owner@example.com",
+      incidentId: "incident-42",
+      repositoryEvidenceId: "repo-ticket-9",
+      hostEvidenceId: "host-ticket-8",
+      authorizedAt: new Date("2026-08-25T06:00:00.000Z"),
+      confirmation: ownerMfaRecoveryConfirmation("owner-user", "incident-42"),
+      applicationRevision: "task8-test-revision",
+      keyring,
+      now: recoveryNow,
+    } as const;
+    await expect(recoverOwnerMfa(db, input)).resolves.toMatchObject({
+      authorizationVersion: 5,
+      revokedSessionCount: 1,
+      invalidatedAuthenticatorCount: 1,
+    });
+
+    const [user] = await db.select().from(identityUsers).where(eq(identityUsers.id, "owner-user"));
+    const [session] = await db.select().from(identitySessions).where(eq(identitySessions.id, "owner-breakglass-session"));
+    const roles = await db.select().from(identityRoleGrants);
+    const audits = await db.select().from(adminAuditEvents);
+    expect(user).toMatchObject({ twoFactorEnabled: false, authorizationVersion: 5 });
+    expect(session?.revocationReason).toBe("owner_mfa_break_glass");
+    expect(await db.select().from(identityTotpAuthenticators)).toHaveLength(0);
+    expect(await db.select().from(identityRecoveryCodes)).toHaveLength(0);
+    expect(roles).toHaveLength(1);
+    expect(roles[0]).toMatchObject({ userId: "owner-user", role: "owner", state: "active" });
+    expect(audits.at(-1)).toMatchObject({
+      action: "identity.owner_mfa_break_glass",
+      reasonCode: "completed_wait_period",
+      requestId: "breakglass:incident-42",
+    });
+    await expect(recoverOwnerMfa(db, input)).rejects.toMatchObject({
+      code: "RECOVERY_ALREADY_USED",
+    });
+    expect(await db.select().from(systemCommandIdempotency)).toHaveLength(1);
+  });
+
+  test("break-glass recovery refuses missing independent evidence and an incomplete wait", async () => {
+    await insertEligibleUser("owner-user", "owner@example.com");
+    await bootstrapOwner(db, bootstrapInput());
+    const recoveryNow = new Date("2026-08-25T06:00:00.000Z");
+    const base = {
+      userId: "owner-user",
+      configuredEmail: "owner@example.com",
+      incidentId: "incident-43",
+      repositoryEvidenceId: "same-proof",
+      hostEvidenceId: "same-proof",
+      authorizedAt: new Date("2026-08-25T05:00:00.000Z"),
+      confirmation: ownerMfaRecoveryConfirmation("owner-user", "incident-43"),
+      applicationRevision: "task8-test-revision",
+      keyring,
+      now: recoveryNow,
+    } as const;
+    await expect(recoverOwnerMfa(db, base)).rejects.toMatchObject({ code: "EVIDENCE_REQUIRED" });
+    await expect(
+      recoverOwnerMfa(db, { ...base, hostEvidenceId: "host-proof" }),
+    ).rejects.toMatchObject({ code: "WAIT_PERIOD_REQUIRED" });
+    await expect(
+      recoverOwnerMfa(db, {
+        ...base,
+        hostEvidenceId: "host-proof",
+        emergencyReason: "free_form" as "active_refund_deadline",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_RECOVERY_INPUT" });
+    expect(await db.select().from(systemCommandIdempotency)).toHaveLength(0);
   });
 });

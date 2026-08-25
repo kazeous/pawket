@@ -3,15 +3,28 @@ import { hostname } from "node:os";
 
 import { Worker, type Job, type Processor } from "bullmq";
 
-import { acknowledgeOutboxEvent, createDatabase } from "@pawket/database";
+import {
+  acknowledgeOutboxEvent,
+  createDatabase,
+  readOperationalBacklogMetrics,
+  runRetentionSweep,
+} from "@pawket/database";
 import {
   deliverSecurityEmailHandoff,
 } from "@pawket/identity/security-email-handoff";
-import type { SecurityEmailSender } from "@pawket/identity/security-email";
+import type {
+  SecurityEmailPurpose,
+  SecurityEmailSender,
+} from "@pawket/identity/security-email";
 import type { EncryptionKeyring } from "@pawket/security";
 import {
   recordWorkerJobMetrics,
+  recordSecurityEmailMetrics,
+  recordRetentionMetrics,
+  setOutboxMetrics,
   setRefundLiabilityMetrics,
+  setSecurityEmailBacklogMetrics,
+  setWorkerLastSuccessMetric,
   withRequestContext,
 } from "@pawket/observability";
 import { scanVerificationDepositRefundWindows } from "@pawket/payments";
@@ -27,6 +40,9 @@ import {
   type SystemOutboxJob,
 } from "@pawket/queue";
 
+import type { WorkerHealthState } from "./worker-health.js";
+import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-email.js";
+
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 const REFUND_SCAN_INTERVAL_MS = 60_000;
@@ -39,6 +55,21 @@ const SAFE_PAYMENTS_EVENTS = new Set([
   "payments.verification_deposit_refund_overdue.v1",
   "payments.verification_deposit_refund_sent.v1",
   "payments.verification_deposit_refund_attention_required.v1",
+]);
+const SAFE_DOMAIN_EVENTS = new Set([
+  "identity.user_registered.v1",
+  "identity.email_verified.v1",
+  "identity.password_changed.v1",
+  "identity.primary_email_changed.v1",
+  "identity.user_access_changed.v1",
+  "creator.application.submitted.v1",
+  "creator.application.withdrawn.v1",
+  "creator.application_changes_requested.v1",
+  "creator.application_approved.v1",
+  "creator.application_rejected.v1",
+  "creator.application_reopened.v1",
+  "creator.capability_suspended.v1",
+  "creator.capability_reinstated.v1",
 ]);
 
 type RuntimeLogger = {
@@ -69,6 +100,8 @@ export type WorkerRuntimeDependencies = {
   dispatch: typeof dispatchOutboxBatch;
   acknowledge: typeof acknowledgeOutboxEvent;
   scanRefundWindows: typeof scanVerificationDepositRefundWindows;
+  readBacklogMetrics: typeof readOperationalBacklogMetrics;
+  runRetention: typeof runRetentionSweep;
   hostname(): string;
   randomUUID(): string;
 };
@@ -86,6 +119,14 @@ export type StartWorkerOptions = {
   securityEmail?: {
     keyring: EncryptionKeyring;
     sender: SecurityEmailSender;
+  };
+  healthState?: WorkerHealthState;
+  retention?: {
+    mode: "report_only" | "enforce";
+    policyVersion: string;
+    enforcementPaused: boolean;
+    batchSize: number;
+    scanIntervalMs: number;
   };
   dependencies?: Partial<WorkerRuntimeDependencies>;
 };
@@ -118,6 +159,8 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   dispatch: dispatchOutboxBatch,
   acknowledge: acknowledgeOutboxEvent,
   scanRefundWindows: scanVerificationDepositRefundWindows,
+  readBacklogMetrics: readOperationalBacklogMetrics,
+  runRetention: runRetentionSweep,
   hostname,
   randomUUID,
 };
@@ -130,6 +173,7 @@ export function createWorkerJobProcessor(input: {
     keyring: EncryptionKeyring;
     sender: SecurityEmailSender;
     deliver?: typeof deliverSecurityEmailHandoff;
+    materialize?: typeof materializeDomainEmailHandoff;
   };
 }): Processor<SystemOutboxJob> {
   return async (job: Job<SystemOutboxJob>) => {
@@ -167,6 +211,9 @@ export function createWorkerJobProcessor(input: {
                 "password_reset",
                 "email_change",
                 "security_notice",
+                "application_outcome",
+                "creator_status",
+                "refund_status",
               ].includes(purpose)
             ) {
               throw new Error("Invalid security email job");
@@ -174,16 +221,44 @@ export function createWorkerJobProcessor(input: {
             if (!input.securityEmail) {
               throw new Error("Security email delivery unavailable");
             }
-            await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
+            const delivery = await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
               handoffId,
               workerId: job.id,
               keyring: input.securityEmail.keyring,
               sender: input.securityEmail.sender,
               now: new Date(),
             });
+            if (delivery === "delivered") {
+              recordSecurityEmailMetrics({
+                purpose: purpose as SecurityEmailPurpose,
+                outcome: "delivered",
+              });
+            }
+          } else if (DOMAIN_EMAIL_EVENTS.has(job.data.eventType)) {
+            if (!input.securityEmail) {
+              throw new Error("Security email delivery unavailable");
+            }
+            const materialized = await (input.securityEmail.materialize ?? materializeDomainEmailHandoff)({
+              db: input.database,
+              event: job.data,
+              keyring: input.securityEmail.keyring,
+              now: new Date(),
+            });
+            if (materialized !== "already_materialized") {
+              const purpose = job.data.eventType.startsWith("creator.application")
+                ? "application_outcome"
+                : job.data.eventType.startsWith("creator.capability")
+                  ? "creator_status"
+                  : "refund_status";
+              recordSecurityEmailMetrics({
+                purpose,
+                outcome: materialized === "created" ? "materialized" : "attention_required",
+              });
+            }
           } else if (
             job.data.eventType !== "system.foundation.ping.v1" &&
-            !SAFE_PAYMENTS_EVENTS.has(job.data.eventType)
+            !SAFE_PAYMENTS_EVENTS.has(job.data.eventType) &&
+            !SAFE_DOMAIN_EVENTS.has(job.data.eventType)
           ) {
             throw new Error("Unsupported outbox event type");
           }
@@ -296,6 +371,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       workerConnection,
       options.concurrency,
     );
+    if (options.healthState) {
+      options.healthState.initializedAt = Date.now();
+      options.healthState.stopping = false;
+    }
   } catch {
     await startupCleanup();
     throw new Error("Worker startup failed");
@@ -305,6 +384,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let currentDispatch: Promise<void> | undefined;
   let lastRefundScanAt = 0;
+  let lastRetentionScanAt = 0;
   let stopPromise: Promise<void> | undefined;
   let resolveStopped!: () => void;
   const whenStopped = new Promise<void>((resolve) => {
@@ -326,6 +406,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
             now: new Date(scanAt),
           });
           setRefundLiabilityMetrics(liabilities);
+          setWorkerLastSuccessMetric({ scan: "refund", timestampSeconds: scanAt / 1_000 });
+          if (options.healthState) options.healthState.lastRefundScanSucceededAt = scanAt;
           if (liabilities.dueSoon + liabilities.dueToday + liabilities.overdue > 0) {
             logger.info(
               {
@@ -353,8 +435,70 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
           leaseMs: options.leaseMs,
         },
       );
+      const pollSucceededAt = Date.now();
+      const backlog = await dependencies.readBacklogMetrics(database.db, new Date(pollSucceededAt));
+      setOutboxMetrics(backlog.outbox);
+      setSecurityEmailBacklogMetrics(backlog.email);
+      setWorkerLastSuccessMetric({ scan: "outbox", timestampSeconds: pollSucceededAt / 1_000 });
+      if (options.healthState) options.healthState.lastPollSucceededAt = pollSucceededAt;
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, "Outbox batch dispatched");
+      }
+      if (
+        options.retention &&
+        pollSucceededAt - lastRetentionScanAt >= options.retention.scanIntervalMs
+      ) {
+        lastRetentionScanAt = pollSucceededAt;
+        const retention = await dependencies.runRetention({
+          db: database.db,
+          now: new Date(pollSucceededAt),
+          mode: options.retention.mode,
+          policyVersion: options.retention.policyVersion,
+          enforcementPaused: options.retention.enforcementPaused,
+          batchSize: options.retention.batchSize,
+        });
+        for (const result of retention) {
+          recordRetentionMetrics({
+            dataset: result.dataset,
+            mode: options.retention.mode,
+            disposition: result.outcome === "failed" ? "failed" : "candidate",
+            count: result.outcome === "failed" ? 1 : result.candidateCount,
+          });
+          recordRetentionMetrics({
+            dataset: result.dataset,
+            mode: options.retention.mode,
+            disposition: "protected",
+            count: result.protectedCount,
+          });
+          recordRetentionMetrics({
+            dataset: result.dataset,
+            mode: options.retention.mode,
+            disposition: "processed",
+            count: result.processedCount,
+          });
+        }
+        if (retention.some((result) => result.outcome === "failed")) {
+          logger.error(
+            { category: "retention_scan_failed", workerId, mode: options.retention.mode },
+            "Retention scan failed",
+          );
+        } else {
+          setWorkerLastSuccessMetric({
+            scan: "retention",
+            timestampSeconds: pollSucceededAt / 1_000,
+          });
+          logger.info(
+            {
+              workerId,
+              mode: options.retention.mode,
+              paused: options.retention.enforcementPaused,
+              candidateCount: retention.reduce((sum, result) => sum + result.candidateCount, 0),
+              protectedCount: retention.reduce((sum, result) => sum + result.protectedCount, 0),
+              processedCount: retention.reduce((sum, result) => sum + result.processedCount, 0),
+            },
+            "Retention scan completed",
+          );
+        }
       }
     } catch {
       logger.error(
@@ -375,6 +519,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
 
   const shutdown = async (): Promise<void> => {
     running = false;
+    if (options.healthState) options.healthState.stopping = true;
     if (pollTimer !== undefined) {
       clearTimeout(pollTimer);
       pollTimer = undefined;

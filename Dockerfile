@@ -26,9 +26,12 @@ RUN pnpm build \
 
 FROM node:24.16.0-bookworm-slim AS web
 
+ARG SOURCE_COMMIT=local
+
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
+ENV APP_BUILD_REVISION=$SOURCE_COMMIT
 
 WORKDIR /app
 
@@ -41,7 +44,10 @@ CMD ["apps/web/server.js"]
 
 FROM node:24.16.0-bookworm-slim AS worker
 
+ARG SOURCE_COMMIT=local
+
 ENV NODE_ENV=production
+ENV APP_BUILD_REVISION=$SOURCE_COMMIT
 
 WORKDIR /app
 
@@ -53,7 +59,10 @@ CMD ["worker.js"]
 
 FROM node:24.16.0-bookworm-slim AS migrate
 
+ARG SOURCE_COMMIT=local
+
 ENV NODE_ENV=production
+ENV APP_BUILD_REVISION=$SOURCE_COMMIT
 
 WORKDIR /app/packages/database/dist
 

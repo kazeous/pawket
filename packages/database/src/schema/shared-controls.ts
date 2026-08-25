@@ -3,6 +3,7 @@ import {
   check,
   date,
   index,
+  integer,
   jsonb,
   pgTable,
   primaryKey,
@@ -11,6 +12,31 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+export const systemRetentionRuns = pgTable(
+  "system_retention_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyVersion: text("policy_version").notNull(),
+    mode: text("mode").notNull(),
+    dataset: text("dataset").notNull(),
+    cutoff: timestamp("cutoff", { withTimezone: true, mode: "date" }).notNull(),
+    candidateCount: integer("candidate_count").notNull(),
+    protectedCount: integer("protected_count").notNull(),
+    processedCount: integer("processed_count").notNull(),
+    outcome: text("outcome").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [
+    index("system_retention_runs_started_idx").on(table.startedAt),
+    check("system_retention_runs_mode_check", sql`${table.mode} in ('report_only', 'enforce')`),
+    check("system_retention_runs_dataset_check", sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'receiving_accounts', 'application_content', 'security_throttles')`),
+    check("system_retention_runs_outcome_check", sql`${table.outcome} in ('completed', 'paused', 'failed')`),
+    check("system_retention_runs_counts_check", sql`${table.candidateCount} >= 0 and ${table.protectedCount} >= 0 and ${table.processedCount} >= 0 and ${table.processedCount} <= ${table.candidateCount}`),
+    check("system_retention_runs_time_check", sql`${table.completedAt} >= ${table.startedAt}`),
+  ],
+);
 
 export const adminAuditEvents = pgTable(
   "admin_audit_events",

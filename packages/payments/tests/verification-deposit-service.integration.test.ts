@@ -103,6 +103,7 @@ type PaymentsExports = {
     dueSoon: number;
     dueToday: number;
     overdue: number;
+    attention: number;
     outstandingAmountVnd: number;
   }>;
 };
@@ -464,6 +465,7 @@ describe("verification-deposit service", () => {
       dueSoon: 1,
       dueToday: 0,
       overdue: 0,
+      attention: 0,
       outstandingAmountVnd: 20_000,
     });
     await api.scanVerificationDepositRefundWindows!({

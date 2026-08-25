@@ -5,10 +5,17 @@ import { describe, expect, it } from "vitest";
 import {
   createLogger,
   metricsRegistry,
+  recordAuthAbuseControl,
   recordHttpRequestMetrics,
+  recordOperationalOutcome,
+  recordRetentionMetrics,
+  recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
   setOutboxMetrics,
+  setRevisionAttestationMetric,
   setRefundLiabilityMetrics,
+  setSecurityEmailBacklogMetrics,
+  setWorkerLastSuccessMetric,
   withRequestContext,
 } from "../src/index.js";
 
@@ -223,6 +230,7 @@ describe("operational metrics", () => {
       dueSoon: 2,
       dueToday: 1,
       overdue: 3,
+      attention: 1,
       outstandingAmountVnd: 60_000,
     });
     recordWorkerJobMetrics({
@@ -230,6 +238,18 @@ describe("operational metrics", () => {
       outcome: "completed",
       durationSeconds: 0.25,
     });
+    recordOperationalOutcome({ area: "creator", operation: "application", outcome: "success" });
+    recordSecurityEmailMetrics({ purpose: "refund_status", outcome: "materialized" });
+    setSecurityEmailBacklogMetrics({ pending: 4, oldestAgeSeconds: 90, attention: 1 });
+    setWorkerLastSuccessMetric({ scan: "retention", timestampSeconds: 1_787_671_200 });
+    recordRetentionMetrics({
+      dataset: "application_content",
+      mode: "report_only",
+      disposition: "protected",
+      count: 2,
+    });
+    recordAuthAbuseControl("password_sign_in");
+    setRevisionAttestationMetric({ service: "worker", revisionMatch: true });
 
     const serializedMetrics = await metricsRegistry.metrics();
     expect(serializedMetrics).toContain(
@@ -241,11 +261,31 @@ describe("operational metrics", () => {
     expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="due_soon"} 2');
     expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="due_today"} 1');
     expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="overdue"} 3');
+    expect(serializedMetrics).toContain('pawket_refund_liabilities_total{window="attention_required"} 1');
     expect(serializedMetrics).toContain("pawket_refund_liability_outstanding_vnd 60000");
     expect(serializedMetrics).toContain(
       'pawket_worker_jobs_total{queue="pawket.system",name="system.outbox-event",outcome="completed"} 1',
     );
     expect(serializedMetrics).toContain("pawket_worker_job_duration_seconds_sum");
+    expect(serializedMetrics).toContain(
+      'pawket_operational_outcomes_total{area="creator",operation="application",outcome="success"} 1',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_security_emails_total{purpose="refund_status",outcome="materialized"} 1',
+    );
+    expect(serializedMetrics).toContain("pawket_security_email_pending_total 4");
+    expect(serializedMetrics).toContain("pawket_security_email_oldest_age_seconds 90");
+    expect(serializedMetrics).toContain("pawket_security_email_attention_total 1");
+    expect(serializedMetrics).toContain(
+      'pawket_worker_last_success_timestamp_seconds{scan="retention"} 1787671200',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_retention_records_total{dataset="application_content",mode="report_only",disposition="protected"} 2',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_auth_abuse_controls_total{control="password_sign_in"} 1',
+    );
+    expect(serializedMetrics).toContain('pawket_revision_match{service="worker"} 1');
     expect(serializedMetrics).not.toContain("actor-demo");
   });
 
@@ -266,6 +306,7 @@ describe("operational metrics", () => {
         durationSeconds: Number.NaN,
       }),
     ).toThrow("Unsafe metric data");
+    expect(() => recordAuthAbuseControl("artist@example.test")).toThrow("Unsafe metric data");
     expect(await metricsRegistry.metrics()).not.toContain("private-account-number");
   });
 });

@@ -5,9 +5,24 @@ const routeDependencies = vi.hoisted(() => ({
   closeReadinessConnection: vi.fn(),
   createReadinessConnection: vi.fn(),
   loadServerEnv: vi.fn(),
+  resolveRevisionAttestation: vi.fn((revision: string | undefined, buildRevision: string | undefined) => {
+    const normalizedRevision = revision?.trim() || "unknown";
+    const normalizedBuildRevision = buildRevision?.trim() || "unknown";
+    return {
+      revision: normalizedRevision,
+      buildRevision: normalizedBuildRevision,
+      revisionMatch:
+        normalizedRevision !== "unknown" &&
+        normalizedBuildRevision !== "unknown" &&
+        normalizedRevision === normalizedBuildRevision,
+    };
+  }),
 }));
 
-vi.mock("@pawket/config", () => ({ loadServerEnv: routeDependencies.loadServerEnv }));
+vi.mock("@pawket/config", () => ({
+  loadServerEnv: routeDependencies.loadServerEnv,
+  resolveRevisionAttestation: routeDependencies.resolveRevisionAttestation,
+}));
 vi.mock("@pawket/database/readiness", () => ({
   checkDatabaseReadiness: routeDependencies.checkDatabaseReadiness,
 }));
@@ -25,6 +40,7 @@ describe("operational route wiring", () => {
 
   it("returns liveness even when unrelated server configuration is invalid", async () => {
     vi.stubEnv("APP_REVISION", "live-revision");
+    vi.stubEnv("APP_BUILD_REVISION", "live-revision");
     vi.stubEnv("DATABASE_URL", "not-a-postgres-url");
     vi.stubEnv("VALKEY_URL", "not-a-redis-url");
     vi.stubEnv("METRICS_TOKEN", "too-short");
@@ -37,11 +53,14 @@ describe("operational route wiring", () => {
       status: "ok",
       service: "web",
       revision: "live-revision",
+      buildRevision: "live-revision",
+      revisionMatch: true,
     });
   });
 
   it("uses unknown when the liveness revision is absent", async () => {
     vi.stubEnv("APP_REVISION", "");
+    vi.stubEnv("APP_BUILD_REVISION", "");
     const { GET } = await import("../src/app/api/health/live/route.js");
 
     const response = await GET(new Request("http://localhost/api/health/live"));
@@ -50,12 +69,15 @@ describe("operational route wiring", () => {
       status: "ok",
       service: "web",
       revision: "unknown",
+      buildRevision: "unknown",
+      revisionMatch: false,
     });
   });
 
   it("wires the ready route through both dependency checks", async () => {
     routeDependencies.loadServerEnv.mockReturnValue({
       APP_REVISION: "ready-revision",
+      APP_BUILD_REVISION: "ready-revision",
       DATABASE_URL: "postgresql://localhost/pawket",
       VALKEY_URL: "redis://localhost:6379",
     });
@@ -76,6 +98,8 @@ describe("operational route wiring", () => {
       database: "up",
       valkey: "up",
       revision: "ready-revision",
+      buildRevision: "ready-revision",
+      revisionMatch: true,
     });
     expect(routeDependencies.checkDatabaseReadiness).toHaveBeenCalledWith(
       "postgresql://localhost/pawket",

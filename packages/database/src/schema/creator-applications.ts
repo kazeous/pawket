@@ -30,8 +30,13 @@ export const creatorApplicationRevisions = pgTable("creator_application_revision
   revisionNumber: integer("revision_number").notNull(), artistDisplayName: text("artist_display_name"), shortIntroduction: text("short_introduction"),
   applicantEmail: text("applicant_email"), dobEnvelope: jsonb("dob_envelope").$type<Envelope | null>(), portfolioUrls: jsonb("portfolio_urls").$type<string[] | null>(),
   primaryArtDiscipline: text("primary_art_discipline"), practiceDescription: text("practice_description"), contentIntent: text("content_intent"), proposedReceivingAccountId: text("proposed_receiving_account_id"),
-  ageAtSubmission: integer("age_at_submission"), ageEvaluatedOn: text("age_evaluated_on"), submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "date" }), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
-}, (t) => [uniqueIndex("creator_application_revisions_number_uidx").on(t.applicationId, t.revisionNumber), index("creator_application_revisions_app_idx").on(t.applicationId), check("creator_application_revisions_content_intent_check", sql`${t.contentIntent} is null or ${t.contentIntent} in ('general_audience_only','may_include_age_restricted')`)]);
+  ageAtSubmission: integer("age_at_submission"), ageEvaluatedOn: text("age_evaluated_on"), submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "date" }), minimizedAt: timestamp("minimized_at", { withTimezone: true, mode: "date" }), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+}, (t) => [
+  uniqueIndex("creator_application_revisions_number_uidx").on(t.applicationId, t.revisionNumber),
+  index("creator_application_revisions_app_idx").on(t.applicationId),
+  check("creator_application_revisions_content_intent_check", sql`${t.contentIntent} is null or ${t.contentIntent} in ('general_audience_only','may_include_age_restricted')`),
+  check("creator_application_revisions_minimized_check", sql`${t.minimizedAt} is null or (${t.artistDisplayName} is null and ${t.applicantEmail} is null and ${t.dobEnvelope} is null and ${t.portfolioUrls} is null and ${t.shortIntroduction} is null and ${t.primaryArtDiscipline} is null and ${t.practiceDescription} is null and ${t.contentIntent} is null and ${t.proposedReceivingAccountId} is null)`),
+]);
 
 export const creatorApplicationAttestations = pgTable("creator_application_attestations", {
   id: uuid("id").primaryKey(), revisionId: uuid("revision_id").notNull().references(() => creatorApplicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }), type: text("type").notNull(), policyVersion: text("policy_version").notNull(), acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }).notNull(), actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),

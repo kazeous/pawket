@@ -21,6 +21,8 @@ jobs:
       NODE_ENV: test
       APP_ENV: test
       APP_REVISION: ci
+      APP_BUILD_REVISION: ci
+      SOURCE_COMMIT: 0000000000000000000000000000000000000000
       POSTGRES_DB: pawket_ci
       POSTGRES_USER: pawket
       POSTGRES_PASSWORD: pawket_ci_only
@@ -128,10 +130,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build web image for linux/arm64
-        run: docker buildx build --platform linux/arm64 --target web --output type=cacheonly .
+        run: docker buildx build --build-arg SOURCE_COMMIT=${{ github.sha }} --platform linux/arm64 --target web --output type=cacheonly .
 
       - name: Build worker image for linux/arm64
-        run: docker buildx build --platform linux/arm64 --target worker --output type=cacheonly .
+        run: docker buildx build --build-arg SOURCE_COMMIT=${{ github.sha }} --platform linux/arm64 --target worker --output type=cacheonly .
 
       - name: Build migration image for linux/arm64
-        run: docker buildx build --platform linux/arm64 --target migrate --output type=cacheonly .
+        run: docker buildx build --build-arg SOURCE_COMMIT=${{ github.sha }} --platform linux/arm64 --target migrate --output type=cacheonly .

@@ -17,6 +17,7 @@ type ProcessorFactory = {
       keyring: never;
       sender: never;
       deliver: (db: never, input: Record<string, unknown>) => Promise<"delivered" | "already_delivered">;
+      materialize?: (input: Record<string, unknown>) => Promise<"created" | "attention_required" | "already_materialized">;
     };
   }): (job: unknown) => Promise<void>;
 };
@@ -40,13 +41,26 @@ function job(eventType: string, payload: Record<string, unknown>) {
 }
 
 describe("security email worker contract", () => {
-  test("acknowledges safe Payments liability events without moving funds", async () => {
-    // Break caught: treating a notification event as a transfer command or poisoning the outbox.
-    const acknowledge = vi.fn(async () => true);
+  test("materializes Payments liability email before acknowledging without moving funds", async () => {
+    const calls: string[] = [];
+    const acknowledge = vi.fn(async () => {
+      calls.push("acknowledge");
+      return true;
+    });
+    const materialize = vi.fn(async () => {
+      calls.push("materialize");
+      return "created" as const;
+    });
     const processor = runtime.createWorkerJobProcessor!({
       logger: { info() {}, error() {} },
       database: {} as never,
       acknowledge,
+      securityEmail: {
+        keyring: {} as never,
+        sender: {} as never,
+        deliver: vi.fn(async () => "delivered" as const),
+        materialize,
+      },
     });
     await expect(
       processor(
@@ -56,6 +70,14 @@ describe("security email worker contract", () => {
         }),
       ),
     ).resolves.toBeUndefined();
+    expect(calls).toEqual(["materialize", "acknowledge"]);
+    expect(materialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          eventType: "payments.verification_deposit_refund_due_today.v1",
+        }),
+      }),
+    );
     expect(acknowledge).toHaveBeenCalledOnce();
   });
 
@@ -186,12 +208,12 @@ describe("production SMTP security email sender", () => {
     expect(delivered).toEqual({
       from: { name: "Pawket Security", address: "security@pawket.example" },
       to: "artist@example.com",
-      subject: "Reset your Pawket password",
+      subject: "Đặt lại mật khẩu Pawket",
       text:
-        "Reset your Pawket password\n\n" +
-        "Open this Pawket link to continue:\n" +
+        "Đặt lại mật khẩu Pawket\n\n" +
+        "Mở liên kết Pawket này để tiếp tục:\n" +
         "https://pawket.example/reset-password?token=one-time-secret\n\n" +
-        "This link expires in 30 minutes. If you did not request this, you can ignore this email.",
+        "Liên kết hết hạn sau 30 phút. Nếu bạn không yêu cầu thao tác này, hãy bỏ qua email.",
     });
   });
 
@@ -242,6 +264,87 @@ describe("production SMTP security email sender", () => {
       "https://pawket.example/settings/security/confirm-email?token=email-change-secret",
     );
     expect(delivered?.text).not.toContain("https://pawket.example/verify-email?");
+  });
+
+  test.each([
+    ["application_outcome", { state: "approved" }, "Hồ sơ creator của bạn đã được chấp thuận", "/creator/apply"],
+    ["creator_status", { state: "suspended" }, "đã bị tạm ngưng", "/creator"],
+    [
+      "refund_status",
+      { state: "due_today", refundNotBefore: "2026-08-30", refundDue: "2026-09-02" },
+      "Hôm nay là ngày đến hạn",
+      "/creator/apply",
+    ],
+  ] as const)("renders the fixed %s template without sensitive fields", async (purpose, templateData, expectedText, expectedPath) => {
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered = message; } };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose,
+      destination: "artist@example.com",
+      secret: null,
+      templateData,
+    });
+
+    expect(delivered?.text).toContain(expectedText);
+    expect(delivered?.text).toContain(`https://pawket.example${expectedPath}`);
+    expect(delivered?.text).not.toMatch(/account number|challenge|portfolio|date of birth/i);
+  });
+
+  test.each([
+    ["session_revoked", "Một phiên đăng nhập Pawket đã được thu hồi"],
+    ["sessions_revoked", "Tất cả phiên đăng nhập Pawket đã được thu hồi"],
+    ["owner_mfa_break_glass_completed", "Khôi phục MFA khẩn cấp cho owner đã hoàn tất"],
+  ] as const)("renders the allowlisted %s security notice", async (event, expectedText) => {
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered = message; } };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose: "security_notice",
+      destination: "owner@example.com",
+      secret: null,
+      templateData: { event },
+    });
+
+    expect(delivered?.subject).toBe("Thông báo bảo mật Pawket");
+    expect(delivered?.text).toContain(expectedText);
+  });
+
+  test("fails closed for a security notice event outside the fixed allowlist", async () => {
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail() {} };
+      },
+    });
+
+    await expect(
+      sender.send({
+        handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+        purpose: "security_notice",
+        destination: "owner@example.com",
+        secret: null,
+        templateData: { event: "unbounded-runtime-event" },
+      }),
+    ).rejects.toThrow("Invalid security email message");
   });
 
   test("fails before opening a transport when SMTP configuration is incomplete", () => {

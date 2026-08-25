@@ -5,7 +5,8 @@ import { parseServerEnv } from "../src/index.js";
 const completeProductionEnv = {
   NODE_ENV: "production",
   APP_ENV: "production",
-  APP_REVISION: "abc123",
+  APP_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
+  APP_BUILD_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
   DATABASE_URL: "postgresql://pawket:secret@localhost:5432/pawket",
   VALKEY_URL: "redis://localhost:6379",
   METRICS_TOKEN: "12345678901234567890123456789012",
@@ -56,6 +57,14 @@ const numericFields = [
     defaultValue: 10,
   },
   {
+    field: "WORKER_TELEMETRY_PORT",
+    belowMinimum: 0,
+    minimum: 1,
+    maximum: 65535,
+    aboveMaximum: 65536,
+    defaultValue: 9464,
+  },
+  {
     field: "OUTBOX_BATCH_SIZE",
     belowMinimum: 0,
     minimum: 1,
@@ -102,12 +111,18 @@ describe("parseServerEnv", () => {
       expect.objectContaining({
         NODE_ENV: "production",
         APP_ENV: "production",
-        APP_REVISION: "abc123",
+        APP_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
+        APP_BUILD_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
         LOG_LEVEL: "info",
         PORT: 8080,
+        WORKER_TELEMETRY_PORT: 9464,
         WORKER_CONCURRENCY: 10,
         OUTBOX_BATCH_SIZE: 100,
         OUTBOX_LEASE_MS: 30000,
+        RETENTION_MODE: "report_only",
+        RETENTION_ENFORCEMENT_PAUSED: true,
+        RETENTION_BATCH_SIZE: 100,
+        RETENTION_SCAN_INTERVAL_MS: 21_600_000,
         APP_BASE_URL: "https://pawket.example",
         AUTH_TRUSTED_ORIGINS: [
           "https://pawket.example",
@@ -139,8 +154,57 @@ describe("parseServerEnv", () => {
     });
 
     expect(local.APP_BASE_URL).toBe("http://localhost:3000");
+    expect(local.APP_BUILD_REVISION).toBe("local");
     expect(local.SECURITY_EMAIL_ADAPTER).toBe("local");
     expect(Object.keys(local).join(" ")).not.toMatch(/phone|sms/i);
+  });
+
+  it("requires a matching exact source revision in production", () => {
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        APP_REVISION: "stale-revision",
+      }),
+    ).toThrow("APP_REVISION must be the exact 40-character lowercase source commit in production");
+
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        APP_BUILD_REVISION: "0000000000000000000000000000000000000000",
+      }),
+    ).toThrow("APP_REVISION must match APP_BUILD_REVISION in production");
+
+    const withoutEmbeddedRevision = { ...completeProductionEnv } as Record<string, string>;
+    delete withoutEmbeddedRevision.APP_BUILD_REVISION;
+    expect(() => parseServerEnv(withoutEmbeddedRevision)).toThrow(
+      "APP_BUILD_REVISION must be embedded as the exact 40-character lowercase source commit in production",
+    );
+  });
+
+  it("requires explicit approved policy metadata before retention enforcement", () => {
+    expect(() =>
+      parseServerEnv({
+        ...completeProductionEnv,
+        RETENTION_MODE: "enforce",
+      }),
+    ).toThrow("RETENTION_MODE enforce requires RETENTION_POLICY_VERSION and RETENTION_APPROVED_AT");
+
+    expect(
+      parseServerEnv({
+        ...completeProductionEnv,
+        RETENTION_MODE: "enforce",
+        RETENTION_POLICY_VERSION: "owner-approved-v1",
+        RETENTION_APPROVED_AT: "2026-08-25T12:00:00.000Z",
+        RETENTION_ENFORCEMENT_PAUSED: "false",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        RETENTION_MODE: "enforce",
+        RETENTION_POLICY_VERSION: "owner-approved-v1",
+        RETENTION_APPROVED_AT: "2026-08-25T12:00:00.000Z",
+        RETENTION_ENFORCEMENT_PAUSED: false,
+      }),
+    );
   });
 
   it("accepts provider-neutral SMTP settings without requiring them in the web process", () => {

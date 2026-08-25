@@ -14,10 +14,12 @@ import {
   completeIdempotentCommand,
   importBusinessCalendarVersion,
   insertOutboxEvent,
+  runRetentionSweep,
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,
   systemCommandIdempotency,
   systemOutbox,
+  systemRetentionRuns,
   type PawketDatabase,
 } from "../src/index.js";
 import * as schema from "../src/schema.js";
@@ -234,5 +236,124 @@ describe("shared control repositories", () => {
     ).rejects.toThrow("Unsafe outbox data");
     const rows = await db.execute<{ count: string }>(sql`select count(*)::text as count from ${systemOutbox}`);
     expect(rows[0]?.count).toBe("0");
+  });
+
+  test("retention reports without mutation, honors pause, and enforces only eligible rows", async () => {
+    const now = new Date("2026-08-25T12:00:00.000Z");
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at, email_verification_provenance,
+         two_factor_enabled, access_status, authorization_version, created_at, updated_at)
+      values
+        ('retention-eligible', 'Eligible', 'eligible@example.test', 'eligible@example.test', false, null, null, false, 'active', 1, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
+        ('retention-protected', 'Protected', 'protected@example.test', 'protected@example.test', false, null, null, false, 'active', 1, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
+        ('retention-boundary', 'Boundary', 'boundary@example.test', 'boundary@example.test', false, null, null, false, 'active', 1, '2026-08-18T12:00:00Z', '2026-08-18T12:00:00Z'),
+        ('retention-business-eligible', 'Business Eligible', 'business-eligible@example.test', 'business-eligible@example.test', true, '2026-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('retention-business-protected', 'Business Protected', 'business-protected@example.test', 'business-protected@example.test', true, '2026-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('retention-business-boundary', 'Business Boundary', 'business-boundary@example.test', 'business-boundary@example.test', true, '2026-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+      insert into identity_role_grants
+        (user_id, role, state, grant_source, version, granted_at, created_at, updated_at)
+      values ('retention-protected', 'owner', 'active', 'bootstrap_cli', 1, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+      insert into identity_verifications
+        (id, identifier_hash, token_hash, purpose, expires_at, attempt_count, created_at, updated_at)
+      values ('retention-verification', 'identifier-retention', 'token-retention', 'password_reset', '2026-08-01T01:00:00Z', 0, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+      insert into identity_sessions
+        (id, expires_at, token_hash, created_at, updated_at, user_id, assurance_state, last_used_at, absolute_expires_at, idle_expires_at, authorization_version)
+      values ('retention-session', '2026-07-01T01:00:00Z', 'session-token-retention', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z', 'retention-protected', 'provisional', '2026-07-01T00:00:00Z', '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z', 1);
+      insert into identity_security_throttles
+        (scope, subject_hmac, action, attempt_count, window_started_at, risk_level, updated_at)
+      values ('network', 'retention-network-hmac', 'sign_in', 1, '2026-07-01T00:00:00Z', 'normal', '2026-07-01T00:00:00Z');
+      insert into payments_receiving_account_onboarding
+        (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name, account_number_envelope, account_holder_label_envelope, masked_suffix, account_fingerprint, proof_state, retired_at, created_at, updated_at)
+      values
+        ('10000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', 'retention-business-eligible', 1, '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb, '•••• 0001', 'hmac-sha256:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'unverified', '2026-07-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-07-01T00:00:00Z'),
+        ('10000000-0000-4000-8000-000000000002', '11000000-0000-4000-8000-000000000002', 'retention-business-protected', 1, '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb, '•••• 0002', 'hmac-sha256:v1:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 'unverified', '2026-07-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-07-01T00:00:00Z'),
+        ('10000000-0000-4000-8000-000000000003', '11000000-0000-4000-8000-000000000003', 'retention-business-boundary', 1, '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb, '•••• 0003', 'hmac-sha256:v1:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', 'unverified', '2026-07-26T12:00:00Z', '2026-01-01T00:00:00Z', '2026-07-26T12:00:00Z');
+      insert into creator_applications (id, user_id, state, version, created_at, updated_at)
+      values
+        ('20000000-0000-4000-8000-000000000001', 'retention-business-eligible', 'withdrawn', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('20000000-0000-4000-8000-000000000002', 'retention-business-protected', 'withdrawn', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('20000000-0000-4000-8000-000000000003', 'retention-business-boundary', 'withdrawn', 1, '2026-01-01T00:00:00Z', '2026-02-26T12:00:00Z');
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction, applicant_email, dob_envelope, portfolio_urls, primary_art_discipline, practice_description, content_intent, proposed_receiving_account_id, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values
+        ('30000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 1, 'Eligible artist', 'Private intro', 'business-eligible@example.test', '{"version":1}'::jsonb, '["https://example.test/private"]'::jsonb, 'illustration', 'Private practice', 'general_audience_only', '10000000-0000-4000-8000-000000000001', 21, '2026-01-01', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('30000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000002', 1, 'Protected artist', 'Private intro', 'business-protected@example.test', '{"version":1}'::jsonb, '["https://example.test/private"]'::jsonb, 'illustration', 'Private practice', 'general_audience_only', '10000000-0000-4000-8000-000000000002', 21, '2026-01-01', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+        ('30000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000003', 1, 'Boundary artist', 'Private intro', 'business-boundary@example.test', '{"version":1}'::jsonb, '["https://example.test/private"]'::jsonb, 'illustration', 'Private practice', 'general_audience_only', '10000000-0000-4000-8000-000000000003', 21, '2026-01-01', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-02-26T12:00:00Z');
+      insert into identity_creator_capabilities
+        (id, user_id, state, version, approved_application_id, approved_revision_id, suspended_at, created_at, updated_at)
+      values ('40000000-0000-4000-8000-000000000002', 'retention-business-protected', 'suspended', 1, '20000000-0000-4000-8000-000000000002', '30000000-0000-4000-8000-000000000002', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    `);
+
+    const report = await runRetentionSweep({
+      db,
+      now,
+      mode: "report_only",
+      policyVersion: "task8-test-v1",
+      enforcementPaused: true,
+      batchSize: 100,
+    });
+    expect(report.find((item) => item.dataset === "provisional_accounts")).toEqual(
+      expect.objectContaining({ candidateCount: 2, protectedCount: 1, processedCount: 0 }),
+    );
+    expect(report.find((item) => item.dataset === "verifications")?.candidateCount).toBe(1);
+    expect(report.find((item) => item.dataset === "receiving_accounts")).toEqual(
+      expect.objectContaining({ candidateCount: 2, protectedCount: 1, processedCount: 0 }),
+    );
+    expect(report.find((item) => item.dataset === "application_content")).toEqual(
+      expect.objectContaining({ candidateCount: 2, protectedCount: 1, processedCount: 0 }),
+    );
+    expect(await client`select id from identity_users where id = 'retention-eligible'`).toHaveLength(1);
+
+    const paused = await runRetentionSweep({
+      db,
+      now,
+      mode: "enforce",
+      policyVersion: "task8-test-v1",
+      enforcementPaused: true,
+      batchSize: 100,
+    });
+    expect(paused.every((item) => item.outcome === "paused")).toBe(true);
+    expect(await client`select id from identity_users where id = 'retention-eligible'`).toHaveLength(1);
+
+    const enforced = await runRetentionSweep({
+      db,
+      now,
+      mode: "enforce",
+      policyVersion: "task8-test-v1",
+      enforcementPaused: false,
+      batchSize: 100,
+    });
+    expect(enforced.find((item) => item.dataset === "provisional_accounts")?.processedCount).toBe(1);
+    expect(await client`select id from identity_users where id = 'retention-eligible'`).toHaveLength(0);
+    expect(await client`select id from identity_users where id = 'retention-protected'`).toHaveLength(1);
+    expect(await client`select id from identity_users where id = 'retention-boundary'`).toHaveLength(1);
+    expect(await client`select id from identity_verifications where id = 'retention-verification'`).toHaveLength(0);
+    expect(await client`select id from identity_sessions where id = 'retention-session'`).toHaveLength(0);
+    const [eligibleAccount] = await client<{ minimized_at: Date | null; account_number_envelope: unknown }[]>`
+      select minimized_at, account_number_envelope from payments_receiving_account_onboarding
+      where id = '10000000-0000-4000-8000-000000000001'`;
+    const [protectedAccount] = await client<{ minimized_at: Date | null; account_number_envelope: unknown }[]>`
+      select minimized_at, account_number_envelope from payments_receiving_account_onboarding
+      where id = '10000000-0000-4000-8000-000000000002'`;
+    const [eligibleRevision] = await client<{ minimized_at: Date | null; artist_display_name: string | null }[]>`
+      select minimized_at, artist_display_name from creator_application_revisions
+      where id = '30000000-0000-4000-8000-000000000001'`;
+    const [protectedRevision] = await client<{ minimized_at: Date | null; artist_display_name: string | null }[]>`
+      select minimized_at, artist_display_name from creator_application_revisions
+      where id = '30000000-0000-4000-8000-000000000002'`;
+    expect(new Date(String(eligibleAccount?.minimized_at)).toISOString()).toBe(now.toISOString());
+    expect(eligibleAccount).toMatchObject({ account_number_envelope: null });
+    expect(protectedAccount).toMatchObject({ minimized_at: null, account_number_envelope: { version: 1 } });
+    expect(new Date(String(eligibleRevision?.minimized_at)).toISOString()).toBe(now.toISOString());
+    expect(eligibleRevision).toMatchObject({ artist_display_name: null });
+    expect(protectedRevision).toMatchObject({ minimized_at: null, artist_display_name: "Protected artist" });
+    expect(await db.select().from(systemRetentionRuns)).toHaveLength(18);
+    await expect(
+      client`update system_retention_runs set outcome = 'failed'`,
+    ).rejects.toThrow("immutable control record");
+    await expect(client`delete from system_retention_runs`).rejects.toThrow(
+      "immutable control record",
+    );
   });
 });

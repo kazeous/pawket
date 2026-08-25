@@ -945,14 +945,11 @@ describe("creator application acceptance", () => {
           id, user_id, state, version, current_revision_id, created_at, updated_at
         ) values (${applicationId}, ${userId}, 'submitted', 2, ${revisionId}, ${at.toISOString()}, ${at.toISOString()})
       `;
-      await db.insert(creatorApplicationRevisions).values({
-        id: revisionId,
-        applicationId,
-        revisionNumber: 1,
-        submittedAt: at,
-        createdAt: at,
-        updatedAt: at,
-      });
+      await client`
+        insert into creator_application_revisions (
+          id, application_id, revision_number, submitted_at, created_at, updated_at
+        ) values (${revisionId}, ${applicationId}, 1, ${at.toISOString()}, ${at.toISOString()}, ${at.toISOString()})
+      `;
       await db.insert(creatorApplicationAttestations).values({
         id: attestationId,
         revisionId,

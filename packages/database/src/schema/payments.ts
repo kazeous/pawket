@@ -42,15 +42,15 @@ export const paymentsReceivingAccountOnboarding = pgTable(
     version: integer("version").notNull(),
     bankBin: text("bank_bin").notNull(),
     bankName: text("bank_name").notNull(),
-    accountNumberEnvelope: jsonb("account_number_envelope").$type<Envelope>().notNull(),
+    accountNumberEnvelope: jsonb("account_number_envelope").$type<Envelope | null>(),
     accountHolderLabelEnvelope: jsonb("account_holder_label_envelope")
-      .$type<Envelope>()
-      .notNull(),
+      .$type<Envelope | null>(),
     maskedSuffix: text("masked_suffix").notNull(),
     accountFingerprint: text("account_fingerprint").notNull(),
     proofState: text("proof_state").notNull().default("unverified"),
     proofVerifiedAt: timestamp("proof_verified_at", { withTimezone: true, mode: "date" }),
     retiredAt: timestamp("retired_at", { withTimezone: true, mode: "date" }),
+    minimizedAt: timestamp("minimized_at", { withTimezone: true, mode: "date" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
   },
@@ -89,6 +89,11 @@ export const paymentsReceivingAccountOnboarding = pgTable(
     check(
       "payments_receiving_account_retired_check",
       sql`${table.retiredAt} is null or ${table.retiredAt} >= ${table.createdAt}`,
+    ),
+    check(
+      "payments_receiving_account_minimized_check",
+      sql`(${table.minimizedAt} is null and ${table.accountNumberEnvelope} is not null and ${table.accountHolderLabelEnvelope} is not null)
+        or (${table.minimizedAt} is not null and ${table.accountNumberEnvelope} is null and ${table.accountHolderLabelEnvelope} is null)`,
     ),
   ],
 );

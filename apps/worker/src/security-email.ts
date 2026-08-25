@@ -80,6 +80,9 @@ function challengePath(purpose: SecurityEmailMessage["purpose"]): string | null 
     case "password_reset":
       return "/reset-password";
     case "security_notice":
+    case "application_outcome":
+    case "creator_status":
+    case "refund_status":
       return null;
   }
 }
@@ -87,36 +90,120 @@ function challengePath(purpose: SecurityEmailMessage["purpose"]): string | null 
 function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
   switch (purpose) {
     case "email_verification":
-      return "Verify your Pawket email";
+      return "Xác minh email Pawket";
     case "password_reset":
-      return "Reset your Pawket password";
+      return "Đặt lại mật khẩu Pawket";
     case "email_change":
-      return "Confirm your new Pawket email";
+      return "Xác nhận email Pawket mới";
     case "security_notice":
-      return "Pawket security notice";
+      return "Thông báo bảo mật Pawket";
+    case "application_outcome":
+      return "Cập nhật hồ sơ creator Pawket";
+    case "creator_status":
+      return "Cập nhật quyền creator Pawket";
+    case "refund_status":
+      return "Cập nhật hoàn khoản xác minh Pawket";
   }
 }
 
 function noticeText(event: string | undefined): string {
-  const eventText =
-    event === "primary_email_changed"
-      ? "Your primary Pawket email was changed."
-      : "Your Pawket password was changed.";
-  return `Pawket security notice\n\n${eventText} If this was not you, contact Pawket support immediately.`;
+  const notices: Record<string, string> = {
+    password_changed: "Mật khẩu Pawket của bạn đã được thay đổi.",
+    primary_email_changed: "Email chính của tài khoản Pawket đã được thay đổi.",
+    recovery_codes_regenerated: "Bộ mã khôi phục Pawket đã được tạo lại.",
+    recovery_code_used_factor_reset_required:
+      "Một mã khôi phục Pawket vừa được dùng. Các phiên khác đã bị thu hồi và bạn cần thiết lập lại bước xác thực.",
+    session_revoked: "Một phiên đăng nhập Pawket đã được thu hồi.",
+    sessions_revoked: "Tất cả phiên đăng nhập Pawket đã được thu hồi.",
+    social_identity_linked: "Một danh tính đăng nhập bên ngoài đã được liên kết với Pawket.",
+    social_identity_unlinked: "Một danh tính đăng nhập bên ngoài đã được gỡ khỏi Pawket.",
+    totp_enrolled: "Ứng dụng xác thực TOTP đã được thiết lập cho Pawket.",
+    owner_bootstrap_completed:
+      "Quyền owner Pawket đã được khởi tạo. Bạn cần thiết lập TOTP trước khi thực hiện thao tác owner.",
+    owner_mfa_break_glass_completed:
+      "Khôi phục MFA khẩn cấp cho owner đã hoàn tất. Tất cả phiên và yếu tố cũ đã bị vô hiệu hóa; hãy đăng nhập và thiết lập TOTP mới ngay.",
+  };
+  const eventText = event ? notices[event] : undefined;
+  if (!eventText) throw new Error("Invalid security email message");
+  return `Thông báo bảo mật Pawket\n\n${eventText}\n\nNếu bạn không thực hiện thay đổi này, hãy liên hệ hỗ trợ Pawket ngay.`;
+}
+
+function safePawketLink(appBaseUrl: string, path: string): string {
+  return new URL(path, appBaseUrl).toString();
+}
+
+function applicationOutcomeText(appBaseUrl: string, state: string | undefined): string {
+  const outcomes: Record<string, string> = {
+    changes_requested: "Pawket cần bạn cập nhật một số nội dung trong hồ sơ creator.",
+    approved: "Hồ sơ creator của bạn đã được chấp thuận.",
+    rejected: "Hồ sơ creator của bạn chưa được chấp thuận.",
+  };
+  const outcome = state ? outcomes[state] : undefined;
+  if (!outcome) throw new Error("Invalid security email message");
+  return `Cập nhật hồ sơ creator Pawket\n\n${outcome}\n\nXem trạng thái và hướng dẫn tiếp theo:\n${safePawketLink(appBaseUrl, "/creator/apply")}`;
+}
+
+function creatorStatusText(appBaseUrl: string, state: string | undefined): string {
+  const status =
+    state === "active"
+      ? "Quyền creator Pawket của bạn đang hoạt động."
+      : state === "suspended"
+        ? "Quyền creator Pawket của bạn đã bị tạm ngưng."
+        : undefined;
+  if (!status) throw new Error("Invalid security email message");
+  return `Cập nhật quyền creator Pawket\n\n${status}\n\nXem trạng thái:\n${safePawketLink(appBaseUrl, "/creator")}`;
+}
+
+function refundStatusText(
+  appBaseUrl: string,
+  data: Readonly<Record<string, string>>,
+): string {
+  const statuses: Record<string, string> = {
+    pending_window: "Pawket đã ghi nhận nghĩa vụ hoàn khoản xác minh về đúng tài khoản đã chứng minh.",
+    ready: "Khoản hoàn xác minh đã bước vào thời gian xử lý.",
+    due_today: "Hôm nay là ngày đến hạn hoàn khoản xác minh.",
+    overdue: "Khoản hoàn xác minh đã quá hạn và được chuyển sang xử lý ưu tiên.",
+    sent: "Pawket đã ghi nhận khoản hoàn xác minh là đã gửi.",
+    attention_required: "Khoản hoàn xác minh cần được Pawket xử lý thêm.",
+  };
+  const status = data.state ? statuses[data.state] : undefined;
+  if (!status || !/^\d{4}-\d{2}-\d{2}$/u.test(data.refundNotBefore ?? "") || !/^\d{4}-\d{2}-\d{2}$/u.test(data.refundDue ?? "")) {
+    throw new Error("Invalid security email message");
+  }
+  return (
+    `Cập nhật hoàn khoản xác minh Pawket\n\n${status}\n\n` +
+    `Khung hoàn đã ghi nhận: ${data.refundNotBefore} đến ${data.refundDue}.\n\n` +
+    `Xem trạng thái:\n${safePawketLink(appBaseUrl, "/creator/apply")}`
+  );
 }
 
 function renderText(appBaseUrl: string, message: SecurityEmailMessage): string {
   const path = challengePath(message.purpose);
-  if (path === null) return noticeText(message.templateData.event);
+  if (path === null) {
+    switch (message.purpose) {
+      case "security_notice":
+        return noticeText(message.templateData.event);
+      case "application_outcome":
+        return applicationOutcomeText(appBaseUrl, message.templateData.state);
+      case "creator_status":
+        return creatorStatusText(appBaseUrl, message.templateData.state);
+      case "refund_status":
+        return refundStatusText(appBaseUrl, message.templateData);
+      case "email_verification":
+      case "password_reset":
+      case "email_change":
+        throw new Error("Invalid security email message");
+    }
+  }
   if (!message.secret) throw new Error("Invalid security email message");
 
   const link = new URL(path, appBaseUrl);
   link.searchParams.set("token", message.secret);
   return (
     `${subjectFor(message.purpose)}\n\n` +
-    "Open this Pawket link to continue:\n" +
+    "Mở liên kết Pawket này để tiếp tục:\n" +
     `${link.toString()}\n\n` +
-    "This link expires in 30 minutes. If you did not request this, you can ignore this email."
+    "Liên kết hết hạn sau 30 phút. Nếu bạn không yêu cầu thao tác này, hãy bỏ qua email."
   );
 }
 

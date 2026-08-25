@@ -325,6 +325,28 @@ export async function revokeUserSession(
   return rows.length === 1;
 }
 
+export async function revokeUserSessionInTransaction(
+  tx: PawketTransaction,
+  input: { userId: string; sessionId: string; reason: string; now: Date },
+): Promise<boolean> {
+  const rows = await tx
+    .update(identitySessions)
+    .set({
+      revokedAt: input.now,
+      revocationReason: input.reason.slice(0, 100),
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(identitySessions.id, input.sessionId),
+        eq(identitySessions.userId, input.userId),
+        isNull(identitySessions.revokedAt),
+      ),
+    )
+    .returning({ id: identitySessions.id });
+  return rows.length === 1;
+}
+
 export async function revokeAllUserSessions(
   tx: PawketTransaction,
   input: { userId: string; reason: string; now: Date; exceptSessionId?: string },

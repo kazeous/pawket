@@ -28,10 +28,12 @@ services:
       start_period: 5s
 
   migrate:
-    image: pawket-migrate:${APP_REVISION:?Set APP_REVISION in Coolify}
+    image: pawket-migrate:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     build:
       context: .
       target: migrate
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     restart: "no"
     exclude_from_hc: true
     environment:
@@ -41,16 +43,18 @@ services:
         condition: service_healthy
 
   web:
-    image: pawket-web:${APP_REVISION:?Set APP_REVISION in Coolify}
+    image: pawket-web:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     build:
       context: .
       target: web
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
       NODE_ENV: production
       APP_ENV: ${APP_ENV:?Set APP_ENV in Coolify}
-      APP_REVISION: ${APP_REVISION:?Set APP_REVISION in Coolify}
+      APP_REVISION: ${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
       VALKEY_URL: ${VALKEY_URL:?Set VALKEY_URL in Coolify}
       METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in Coolify}
@@ -103,16 +107,18 @@ services:
         condition: service_healthy
 
   worker:
-    image: pawket-worker:${APP_REVISION:?Set APP_REVISION in Coolify}
+    image: pawket-worker:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     build:
       context: .
       target: worker
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
       NODE_ENV: production
       APP_ENV: ${APP_ENV:?Set APP_ENV in Coolify}
-      APP_REVISION: ${APP_REVISION:?Set APP_REVISION in Coolify}
+      APP_REVISION: ${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
       VALKEY_URL: ${VALKEY_URL:?Set VALKEY_URL in Coolify}
       METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in Coolify}
@@ -151,6 +157,25 @@ services:
       AUTH_TOTP_MAX_FAILED_ATTEMPTS: ${AUTH_TOTP_MAX_FAILED_ATTEMPTS:?Set AUTH_TOTP_MAX_FAILED_ATTEMPTS in Coolify}
       AUTH_TOTP_LOCKOUT_SECONDS: ${AUTH_TOTP_LOCKOUT_SECONDS:?Set AUTH_TOTP_LOCKOUT_SECONDS in Coolify}
       AUTH_PASSWORD_RESET_TTL_SECONDS: ${AUTH_PASSWORD_RESET_TTL_SECONDS:?Set AUTH_PASSWORD_RESET_TTL_SECONDS in Coolify}
+      WORKER_TELEMETRY_PORT: 9464
+      RETENTION_MODE: ${RETENTION_MODE:-report_only}
+      RETENTION_POLICY_VERSION: ${RETENTION_POLICY_VERSION:-}
+      RETENTION_APPROVED_AT: ${RETENTION_APPROVED_AT:-}
+      RETENTION_ENFORCEMENT_PAUSED: ${RETENTION_ENFORCEMENT_PAUSED:-true}
+      RETENTION_BATCH_SIZE: ${RETENTION_BATCH_SIZE:-100}
+      RETENTION_SCAN_INTERVAL_MS: ${RETENTION_SCAN_INTERVAL_MS:-21600000}
+    expose:
+      - "9464"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:9464/health/ready').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
     depends_on:
       migrate:
         condition: service_completed_successfully
