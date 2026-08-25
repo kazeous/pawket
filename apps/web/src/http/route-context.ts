@@ -50,7 +50,7 @@ function outcomeForStatus(status: number): Exclude<BusinessOutcome, "attention_r
   return "succeeded";
 }
 
-function recordBusinessOperation(
+export function recordBusinessOperationOutcome(
   input: BusinessOperation,
   outcome: BusinessOutcome,
 ): void {
@@ -75,19 +75,40 @@ export async function readBusinessMetricField(
   request: Request,
   field: "action" | "outcome",
 ): Promise<unknown> {
-  const contentLength = request.headers.get("content-length");
-  if (!contentLength || !/^\d+$/u.test(contentLength)) return undefined;
-  const bytes = Number(contentLength);
-  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_BUSINESS_METRIC_BODY_BYTES) {
-    return undefined;
-  }
+  const clone = request.clone();
+  if (!clone.body) return undefined;
+  const reader = clone.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let cancelled = false;
   try {
-    const value = await request.clone().json() as Record<string, unknown>;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      totalBytes += chunk.value.byteLength;
+      if (totalBytes > MAX_BUSINESS_METRIC_BODY_BYTES) {
+        cancelled = true;
+        void reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(chunk.value);
+    }
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
     return value && typeof value === "object" && !Array.isArray(value)
-      ? value[field]
+      ? (value as Record<string, unknown>)[field]
       : undefined;
   } catch {
+    cancelled = true;
+    void reader.cancel().catch(() => undefined);
     return undefined;
+  } finally {
+    if (!cancelled) reader.releaseLock();
   }
 }
 
@@ -105,7 +126,7 @@ export async function withBusinessOperation(
       input.domain === "refund" && input.operation === "attention_required" && status < 400
         ? "attention_required"
         : outcomeForStatus(status);
-    recordBusinessOperation(input, outcome);
+    recordBusinessOperationOutcome(input, outcome);
   }
 }
 

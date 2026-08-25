@@ -460,10 +460,18 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       const backlog = await dependencies.readBacklogMetrics(database.db, new Date(pollSucceededAt));
       setOutboxMetrics(backlog.outbox);
       setSecurityEmailBacklogMetrics(backlog.email);
-      setWorkerLastSuccessMetric({ scan: "outbox", timestampSeconds: pollSucceededAt / 1_000 });
-      setWorkerScanHealthMetric({ scan: "outbox", healthy: true });
-      if (options.healthState) options.healthState.lastPollSucceededAt = pollSucceededAt;
-      if (result.claimed > 0) {
+      if (result.failed > 0) {
+        setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
+        logger.error(
+          { category: "outbox_dispatch_incomplete", workerId, ...result },
+          "Outbox dispatch completed with enqueue failures",
+        );
+      } else {
+        setWorkerLastSuccessMetric({ scan: "outbox", timestampSeconds: pollSucceededAt / 1_000 });
+        setWorkerScanHealthMetric({ scan: "outbox", healthy: true });
+        if (options.healthState) options.healthState.lastPollSucceededAt = pollSucceededAt;
+      }
+      if (result.claimed > 0 && result.failed === 0) {
         logger.info({ workerId, ...result }, "Outbox batch dispatched");
       }
       if (

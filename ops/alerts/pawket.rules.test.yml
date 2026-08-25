@@ -45,7 +45,7 @@ tests:
               summary: Worker refund scan has missed three intervals
               runbook: ops/runbooks/overdue-refunds.md
 
-  - name: retention scan fires on the third configured interval
+  - name: retention scan remains unhealthy for eighteen hours
     interval: 1m
     input_series:
       - series: 'pawket_worker_scan_healthy{scan="retention"}'
@@ -61,7 +61,7 @@ tests:
               scan: retention
               severity: critical
             exp_annotations:
-              summary: Worker retention scan has missed three intervals
+              summary: Worker retention scan has remained unhealthy for eighteen hours
               runbook: ops/runbooks/retention-operations.md
 
   - name: refund due-today boundary waits five minutes

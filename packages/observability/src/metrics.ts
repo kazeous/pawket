@@ -205,10 +205,16 @@ const allowedStandardOperationOutcomes = new Set([
   "rejected",
   "retryable_failure",
 ]);
-const allowedAttentionRequiredOutcomes = new Set([
-  "attention_required",
-  "rejected",
-  "retryable_failure",
+const allowedReceivingProofOutcomes = new Map<string, ReadonlySet<string>>([
+  ["challenge", allowedStandardOperationOutcomes],
+  ["report", allowedStandardOperationOutcomes],
+  ["matched", new Set(["succeeded"])],
+  ["unmatched", new Set(["succeeded"])],
+]);
+const allowedRefundOutcomes = new Map<string, ReadonlySet<string>>([
+  ["window", new Set(["succeeded", "retryable_failure"])],
+  ["sent", allowedStandardOperationOutcomes],
+  ["attention_required", new Set(["attention_required", "rejected", "retryable_failure"])],
 ]);
 const allowedEmailPurposes = new Set([
   "application_outcome",
@@ -369,7 +375,7 @@ export function recordReceivingProofOperation(input: {
     receivingProofOperationsTotal,
     input,
     allowedReceivingProofOperations,
-    allowedStandardOperationOutcomes,
+    allowedReceivingProofOutcomes.get(input.operation) ?? new Set(),
   );
 }
 
@@ -377,15 +383,11 @@ export function recordRefundOperation(input: {
   operation: string;
   outcome: string;
 }): void {
-  const meaningfulOutcomes =
-    input.operation === "attention_required"
-      ? allowedAttentionRequiredOutcomes
-      : allowedStandardOperationOutcomes;
   recordClosedOperation(
     refundOperationsTotal,
     input,
     allowedRefundOperations,
-    meaningfulOutcomes,
+    allowedRefundOutcomes.get(input.operation) ?? new Set(),
   );
 }
 

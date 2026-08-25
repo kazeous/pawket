@@ -464,6 +464,96 @@ describe("production SMTP security email sender", () => {
 });
 
 describe("worker scan health", () => {
+  test.each([
+    ["partial", { claimed: 2, enqueued: 1, failed: 1 }],
+    ["all", { claimed: 2, enqueued: 0, failed: 2 }],
+  ] as const)(
+    "keeps an outbox scan unhealthy when %s dispatch returns enqueue failures",
+    async (_kind, dispatchResult) => {
+      // Catches resolved per-event dispatch failures being reported as a successful poll.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+      metricsRegistry.resetMetrics();
+      const errors: Array<{ data: Record<string, unknown>; message?: string }> = [];
+      const healthState = {
+        initializedAt: null,
+        lastPollSucceededAt: null,
+        lastRefundScanSucceededAt: null,
+        stopping: false,
+      };
+      const resource = {
+        close: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+      const connection = {
+        connect: vi.fn(async () => undefined),
+        quit: vi.fn(async () => undefined),
+        disconnect: vi.fn(),
+      };
+      const handle = await workerRuntime.startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: new EventEmitter(),
+        healthState,
+        logger: {
+          info() {},
+          error(data, message) {
+            errors.push({ data, message });
+          },
+        },
+        dependencies: {
+          createDatabase: () => ({ db: {}, close: resource.close }) as never,
+          createProducerConnection: () => connection as never,
+          createWorkerConnection: () => connection as never,
+          createQueue: () => resource as never,
+          createWorker: () => resource as never,
+          dispatch: vi.fn(async () => dispatchResult) as never,
+          acknowledge: vi.fn() as never,
+          scanRefundWindows: vi.fn(async () => ({
+            dueSoon: 0,
+            dueToday: 0,
+            overdue: 0,
+            attention: 0,
+            outstandingAmountVnd: 0,
+          })) as never,
+          readBacklogMetrics: vi.fn(async () => ({
+            outbox: { pending: 1, oldestAgeSeconds: 1 },
+            email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          })) as never,
+          runRetention: vi.fn() as never,
+          hostname: () => "test-worker",
+          randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(await scanHealth("outbox")).toBe(0);
+      expect(healthState.lastPollSucceededAt).toBeNull();
+      const lastSuccess = metricsRegistry.getSingleMetric(
+        "pawket_worker_last_success_timestamp_seconds",
+      );
+      expect(
+        (await lastSuccess?.get())?.values.some((value) => value.labels.scan === "outbox"),
+      ).toBe(false);
+      expect(errors).toContainEqual({
+        data: {
+          category: "outbox_dispatch_incomplete",
+          workerId: "test-worker:42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+          ...dispatchResult,
+        },
+        message: "Outbox dispatch completed with enqueue failures",
+      });
+      expect(JSON.stringify(errors)).not.toContain("exception");
+      expect(JSON.stringify(errors)).not.toContain("secret");
+
+      await handle.stop();
+    },
+  );
+
   test("starts unhealthy, becomes healthy after success, and returns unhealthy on failure", async () => {
     // Catches startup being reported as success and scan failures leaving stale healthy state.
     vi.useFakeTimers();

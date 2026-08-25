@@ -430,4 +430,91 @@ describe("operational metrics", () => {
     expect(serializedMetrics).not.toMatch(/area=|client_error|server_error|outcome="success"/u);
     expect(serializedMetrics).not.toMatch(/email=|user_id|request_id|account=|subject=/u);
   });
+
+  it("accepts only the meaningful outcome pairs for every domain operation", () => {
+    // Catches broad domain outcome sets admitting impossible operation/outcome pairs.
+    const outcomes = [
+      "succeeded",
+      "rejected",
+      "retryable_failure",
+      "attention_required",
+    ] as const;
+    const standardOutcomes = new Set(["succeeded", "rejected", "retryable_failure"]);
+    const cases = [
+      {
+        record: domainMetrics.recordAuthOperation!,
+        operations: [
+          "registration",
+          "verification",
+          "login",
+          "oauth_callback",
+          "reset",
+          "mfa",
+          "session",
+          "security_change",
+        ],
+        allowed: () => standardOutcomes,
+      },
+      {
+        record: domainMetrics.recordCreatorOperation!,
+        operations: [
+          "draft",
+          "submit",
+          "withdraw",
+          "changes_requested",
+          "approve",
+          "reject",
+          "reopen",
+          "suspend",
+          "reinstate",
+        ],
+        allowed: () => standardOutcomes,
+      },
+      {
+        record: domainMetrics.recordReceivingProofOperation!,
+        operations: ["challenge", "report", "matched", "unmatched"],
+        allowed: (operation: string) =>
+          new Set(
+            operation === "matched" || operation === "unmatched"
+              ? ["succeeded"]
+              : ["succeeded", "rejected", "retryable_failure"],
+          ),
+      },
+      {
+        record: domainMetrics.recordRefundOperation!,
+        operations: ["window", "sent", "attention_required"],
+        allowed: (operation: string) =>
+          new Set(
+            operation === "window"
+              ? ["succeeded", "retryable_failure"]
+              : operation === "sent"
+                ? ["succeeded", "rejected", "retryable_failure"]
+                : ["attention_required", "rejected", "retryable_failure"],
+          ),
+      },
+    ] as const;
+
+    for (const domain of cases) {
+      for (const operation of domain.operations) {
+        const allowed = domain.allowed(operation);
+        for (const outcome of outcomes) {
+          const invoke = () => domain.record({ operation, outcome });
+          if (allowed.has(outcome)) {
+            expect(invoke, `${operation}/${outcome}`).not.toThrow();
+          } else {
+            expect(invoke, `${operation}/${outcome}`).toThrow("Unsafe metric data");
+          }
+        }
+      }
+    }
+
+    for (const record of cases.map((entry) => entry.record)) {
+      expect(() => record({ operation: "unknown", outcome: "succeeded" })).toThrow(
+        "Unsafe metric data",
+      );
+      expect(() => record({ operation: "login", outcome: "unknown" })).toThrow(
+        "Unsafe metric data",
+      );
+    }
+  });
 });

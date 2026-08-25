@@ -172,10 +172,16 @@ type PawketAuthOptions = {
 export type PawketAuthBoundary = {
   handler(request: Request): Promise<Response>;
   enabledProviders: readonly ("google" | "discord")[];
+  consumeOperationTelemetry(request: Request): AuthOperationTelemetry | null;
   api: {
     getSession(input: { headers: Headers }): Promise<unknown>;
   };
 };
+
+export type AuthOperationTelemetry = Readonly<{
+  operation: "oauth_callback" | "security_change";
+  outcome: "succeeded" | "rejected" | "retryable_failure";
+}>;
 
 function networkSource(request: Request): string {
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
@@ -629,6 +635,15 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
     },
   });
 
+  const operationTelemetryByRequest = new WeakMap<Request, AuthOperationTelemetry>();
+  const withOperationTelemetry = (
+    request: Request,
+    response: Response,
+    telemetry: AuthOperationTelemetry,
+  ): Response => {
+    operationTelemetryByRequest.set(request, Object.freeze({ ...telemetry }));
+    return response;
+  };
   const baseHandler = auth.handler;
   const handler = async (request: Request): Promise<Response> => {
     const path = authPath(request);
@@ -679,6 +694,7 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
         : path === "/callback/discord"
           ? "discord"
           : null;
+    let callbackTelemetry: AuthOperationTelemetry | undefined;
     if (callbackProvider) {
       const state = new URL(request.url).searchParams.get("state");
       if (state) {
@@ -1005,7 +1021,13 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
           })
           .catch(() => undefined);
       }
-      return fixedJson(503, "AUTHENTICATION_UNAVAILABLE");
+      const unavailable = fixedJson(503, "AUTHENTICATION_UNAVAILABLE");
+      return callbackProvider
+        ? withOperationTelemetry(request, unavailable, {
+            operation: externalCallbackContext ? "security_change" : "oauth_callback",
+            outcome: "retryable_failure",
+          })
+        : unavailable;
     }
 
     if (externalCallbackContext) {
@@ -1051,6 +1073,7 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
             return true;
           });
           if (!completedWithNotice) throw new Error("External link completion was not claimable");
+          callbackTelemetry = { operation: "security_change", outcome: "succeeded" };
         } else {
           const rejectedLinkedAccountId = linkedAccountToCompensate;
           const finalized = await options.db.transaction(async (tx) => {
@@ -1072,7 +1095,14 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
               now: new Date(),
             });
           });
-          if (!finalized) return fixedJson(400, "EXTERNAL_LINK_TRANSACTION_INVALID");
+          if (!finalized) {
+            return withOperationTelemetry(
+              request,
+              fixedJson(400, "EXTERNAL_LINK_TRANSACTION_INVALID"),
+              { operation: "security_change", outcome: "rejected" },
+            );
+          }
+          callbackTelemetry = { operation: "security_change", outcome: "rejected" };
         }
       } catch {
         const compensatingAccountId = linkedAccountToCompensate;
@@ -1097,77 +1127,107 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
             })
             .catch(() => undefined);
         }
-        return fixedJson(503, "AUTHENTICATION_UNAVAILABLE");
+        return withOperationTelemetry(
+          request,
+          fixedJson(503, "AUTHENTICATION_UNAVAILABLE"),
+          { operation: "security_change", outcome: "retryable_failure" },
+        );
       }
     }
 
-    if (callbackProvider && !externalCallbackContext && response.status >= 300 && response.status < 400) {
-      const createdSessionCookie = response.headers
-        .getSetCookie()
-        .map((value) => value.split(";", 1)[0] ?? "")
-        .find((value) => value.startsWith(`${sessionCookie.name}=`) && value !== `${sessionCookie.name}=`);
-      if (createdSessionCookie) {
-        try {
-          const createdSession = (await auth.api.getSession({
-            headers: new Headers({ cookie: createdSessionCookie }),
-          })) as
-            | {
-                session: { id: string };
-                user: { id: string; email: string; emailVerified: boolean };
-              }
-            | null;
-          if (!createdSession?.user.emailVerified) {
-            return clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie);
-          }
-          const email = canonicalizeEmailAddress(createdSession.user.email);
-          const now = new Date();
-          await options.db
-            .insert(identityEmailAddresses)
-            .values({
-              userId: createdSession.user.id,
-              displayEmail: email.display,
-              canonicalEmail: email.canonical,
-              status: "primary",
-              verifiedAt: now,
-              verificationProvenance: "provider_assertion",
-              createdAt: now,
-              updatedAt: now,
-            })
-            .onConflictDoNothing();
-          const [primaryEmail] = await options.db
-            .select({ userId: identityEmailAddresses.userId })
-            .from(identityEmailAddresses)
-            .where(
-              and(
-                eq(identityEmailAddresses.userId, createdSession.user.id),
-                eq(identityEmailAddresses.status, "primary"),
-              ),
-            )
-            .limit(1);
-          if (!primaryEmail) {
+    if (callbackProvider && !externalCallbackContext) {
+      if (response.status >= 300 && response.status < 400) {
+        const createdSessionCookie = response.headers
+          .getSetCookie()
+          .map((value) => value.split(";", 1)[0] ?? "")
+          .find((value) => value.startsWith(`${sessionCookie.name}=`) && value !== `${sessionCookie.name}=`);
+        if (createdSessionCookie) {
+          try {
+            const createdSession = (await auth.api.getSession({
+              headers: new Headers({ cookie: createdSessionCookie }),
+            })) as
+              | {
+                  session: { id: string };
+                  user: { id: string; email: string; emailVerified: boolean };
+                }
+              | null;
+            if (!createdSession?.user.emailVerified) {
+              return withOperationTelemetry(
+                request,
+                clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie),
+                { operation: "oauth_callback", outcome: "retryable_failure" },
+              );
+            }
+            const email = canonicalizeEmailAddress(createdSession.user.email);
+            const now = new Date();
             await options.db
-              .delete(identitySessions)
-              .where(eq(identitySessions.id, createdSession.session.id));
-            return clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie);
-          }
-          const challenge = await auth.api.beginSocialMfaChallenge({
-            headers: new Headers({ cookie: createdSessionCookie }),
-            body: {},
-            asResponse: true,
-          });
-          if (!challenge.ok) {
-            return clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie);
-          }
-          const payload = (await challenge.clone().json()) as { challenged?: unknown };
-          if (payload.challenged === true) {
-            response = replaceRedirectLocation(
-              appendSetCookies(response, challenge),
-              mfaContinuationLocation(response, options.baseURL),
+              .insert(identityEmailAddresses)
+              .values({
+                userId: createdSession.user.id,
+                displayEmail: email.display,
+                canonicalEmail: email.canonical,
+                status: "primary",
+                verifiedAt: now,
+                verificationProvenance: "provider_assertion",
+                createdAt: now,
+                updatedAt: now,
+              })
+              .onConflictDoNothing();
+            const [primaryEmail] = await options.db
+              .select({ userId: identityEmailAddresses.userId })
+              .from(identityEmailAddresses)
+              .where(
+                and(
+                  eq(identityEmailAddresses.userId, createdSession.user.id),
+                  eq(identityEmailAddresses.status, "primary"),
+                ),
+              )
+              .limit(1);
+            if (!primaryEmail) {
+              await options.db
+                .delete(identitySessions)
+                .where(eq(identitySessions.id, createdSession.session.id));
+              return withOperationTelemetry(
+                request,
+                clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie),
+                { operation: "oauth_callback", outcome: "retryable_failure" },
+              );
+            }
+            const challenge = await auth.api.beginSocialMfaChallenge({
+              headers: new Headers({ cookie: createdSessionCookie }),
+              body: {},
+              asResponse: true,
+            });
+            if (!challenge.ok) {
+              return withOperationTelemetry(
+                request,
+                clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie),
+                { operation: "oauth_callback", outcome: "retryable_failure" },
+              );
+            }
+            const payload = (await challenge.clone().json()) as { challenged?: unknown };
+            if (payload.challenged === true) {
+              response = replaceRedirectLocation(
+                appendSetCookies(response, challenge),
+                mfaContinuationLocation(response, options.baseURL),
+              );
+            }
+            callbackTelemetry = { operation: "oauth_callback", outcome: "succeeded" };
+          } catch {
+            return withOperationTelemetry(
+              request,
+              clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie),
+              { operation: "oauth_callback", outcome: "retryable_failure" },
             );
           }
-        } catch {
-          return clearMfaCookies(fixedJson(503, "AUTHENTICATION_UNAVAILABLE"), sessionCookie);
+        } else {
+          callbackTelemetry = { operation: "oauth_callback", outcome: "rejected" };
         }
+      } else {
+        callbackTelemetry = {
+          operation: "oauth_callback",
+          outcome: response.status >= 500 ? "retryable_failure" : "rejected",
+        };
       }
     }
 
@@ -1291,12 +1351,20 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
         ?.observe({ action: "password_sign_in", ...signInSubjects, outcome })
         .catch(() => undefined);
     }
-    return stripSessionToken(response);
+    const safeResponse = await stripSessionToken(response);
+    return callbackTelemetry
+      ? withOperationTelemetry(request, safeResponse, callbackTelemetry)
+      : safeResponse;
   };
 
   return {
     handler,
     enabledProviders,
+    consumeOperationTelemetry(request) {
+      const telemetry = operationTelemetryByRequest.get(request) ?? null;
+      operationTelemetryByRequest.delete(request);
+      return telemetry;
+    },
     api: {
       getSession: (input) => auth.api.getSession(input),
     },

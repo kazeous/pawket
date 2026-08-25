@@ -87,7 +87,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: Worker retention scan has missed three intervals
+          summary: Worker retention scan has remained unhealthy for eighteen hours
           runbook: ops/runbooks/retention-operations.md
       - alert: PawketMigrationFailed
         expr: increase(pawket_migration_runs_total{outcome="failed"}[15m]) > 0
