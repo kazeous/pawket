@@ -41,6 +41,7 @@ export const systemRetentionRuns = pgTable(
 export const systemRetentionHolds = pgTable(
   "system_retention_holds",
   {
+    id: uuid("id").primaryKey().defaultRandom(),
     dataset: text("dataset").notNull(),
     subjectType: text("subject_type").notNull(),
     subjectId: text("subject_id").notNull(),
@@ -61,6 +62,15 @@ export const systemRetentionHolds = pgTable(
     check(
       "system_retention_holds_subject_type_check",
       sql`${table.subjectType} in ('user', 'verification', 'session', 'security_throttle', 'receiving_account', 'creator_application')`,
+    ),
+    check(
+      "system_retention_holds_dataset_subject_check",
+      sql`(${table.dataset} = 'provisional_accounts' and ${table.subjectType} = 'user')
+        or (${table.dataset} = 'verifications' and ${table.subjectType} in ('user', 'verification'))
+        or (${table.dataset} = 'sessions' and ${table.subjectType} in ('user', 'session'))
+        or (${table.dataset} = 'security_throttles' and ${table.subjectType} = 'security_throttle')
+        or (${table.dataset} = 'receiving_accounts' and ${table.subjectType} in ('user', 'receiving_account'))
+        or (${table.dataset} = 'application_content' and ${table.subjectType} in ('user', 'creator_application'))`,
     ),
     check(
       "system_retention_holds_reason_category_check",

@@ -357,6 +357,11 @@ export async function runRetentionSweep(input: {
     const cutoff = cutoffFor(dataset, input.now);
     try {
       const result = await input.db.transaction(async (tx) => {
+        await tx.execute(sql`
+          select pg_advisory_xact_lock(
+            hashtextextended('pawket.retention.' || ${dataset}::text, 0)
+          )
+        `);
         const counts = await countCandidates(tx, dataset, cutoff, input.now);
         const paused = input.mode === "enforce" && input.enforcementPaused;
         const processedCount =

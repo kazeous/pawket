@@ -39,6 +39,26 @@ async function executeMigration(filename: string): Promise<void> {
   }
 }
 
+async function waitForAdvisoryLockWait(
+  observer: postgres.Sql,
+  applicationName: string,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const [row] = await observer<{ waiting: number }[]>`
+      select count(*)::int as waiting
+      from pg_locks locks
+      join pg_stat_activity activity on activity.pid = locks.pid
+      where activity.application_name = ${applicationName}
+        and locks.locktype = 'advisory'
+        and locks.granted = false
+    `;
+    if ((row?.waiting ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${applicationName} to block on an advisory lock`);
+}
+
 beforeAll(async () => {
   await client.unsafe(`create schema "${schemaName}"`);
   await client.unsafe(`set search_path to "${schemaName}", public`);
@@ -496,6 +516,225 @@ describe("shared control repositories", () => {
     expect(await client`select id from identity_security_throttles where id = '50000000-0000-4000-8000-000000000002'`).toHaveLength(0);
     expect(await client`select id from payments_receiving_account_onboarding where minimized_at is null and id in ('51000000-0000-4000-8000-000000000001', '51000000-0000-4000-8000-000000000002')`).toHaveLength(2);
     expect(await client`select id from creator_application_revisions where minimized_at is null and id in ('54000000-0000-4000-8000-000000000001', '54000000-0000-4000-8000-000000000002')`).toHaveLength(2);
+  });
+
+  test("retention holds reject every incompatible dataset and subject pair", async () => {
+    // Break caught: independently valid enum values forming a hold no retention
+    // query can ever observe.
+    const subjectTypes = [
+      "user",
+      "verification",
+      "session",
+      "security_throttle",
+      "receiving_account",
+      "creator_application",
+    ] as const;
+    const allowed = {
+      provisional_accounts: ["user"],
+      verifications: ["user", "verification"],
+      sessions: ["user", "session"],
+      security_throttles: ["security_throttle"],
+      receiving_accounts: ["user", "receiving_account"],
+      application_content: ["user", "creator_application"],
+    } as const;
+
+    for (const [dataset, compatibleTypes] of Object.entries(allowed)) {
+      for (const subjectType of subjectTypes) {
+        const insertion = client.unsafe(`
+          insert into system_retention_holds
+            (dataset, subject_type, subject_id, reason_category, reference_id,
+             starts_at, released_at, created_at)
+          values ('${dataset}', '${subjectType}',
+            'task9-compatibility-${dataset}-${subjectType}', 'incident',
+            'task9-ref-compatibility-${dataset}-${subjectType}',
+            '2025-01-01T00:00:00Z', '2025-01-02T00:00:00Z',
+            '2025-01-01T00:00:00Z')
+        `);
+        if ((compatibleTypes as readonly string[]).includes(subjectType)) {
+          await expect(insertion).resolves.toBeDefined();
+        } else {
+          await expect(insertion).rejects.toThrow();
+        }
+      }
+    }
+  });
+
+  test("retention holds are append-only and may be released exactly once", async () => {
+    // Break caught: hold evidence being rewritten, deleted, reactivated, or
+    // released more than once after creation.
+    const [hold] = await client<{ id: string }[]>`
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id,
+         starts_at, created_at)
+      values ('sessions', 'user', 'task9-lifecycle-user', 'incident',
+        'task9-ref-lifecycle', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')
+      returning id
+    `;
+    expect(hold?.id).toMatch(/^[0-9a-f-]{36}$/);
+
+    const immutableRewrites = [
+      `id = '71000000-0000-4000-8000-000000000001'`,
+      `dataset = 'verifications'`,
+      `subject_type = 'session'`,
+      `subject_id = 'task9-lifecycle-rewritten'`,
+      `reason_category = 'legal'`,
+      `reference_id = 'task9-ref-lifecycle-rewritten'`,
+      `starts_at = '2025-01-01T01:00:00Z'`,
+      `created_at = '2025-01-01T01:00:00Z'`,
+    ];
+    for (const rewrite of immutableRewrites) {
+      await expect(
+        client.unsafe(`update system_retention_holds set ${rewrite} where id = '${hold?.id}'`),
+      ).rejects.toThrow("retention hold records are append-only");
+    }
+
+    await expect(client.unsafe(`
+      update system_retention_holds
+      set released_at = '2025-01-02T00:00:00Z'
+      where id = '${hold?.id}'
+    `)).resolves.toBeDefined();
+    await expect(client.unsafe(`
+      update system_retention_holds
+      set released_at = '2025-01-03T00:00:00Z'
+      where id = '${hold?.id}'
+    `)).rejects.toThrow("retention hold release is final");
+    await expect(client.unsafe(`
+      update system_retention_holds set released_at = null where id = '${hold?.id}'
+    `)).rejects.toThrow("retention hold release is final");
+    await expect(client.unsafe(`
+      delete from system_retention_holds where id = '${hold?.id}'
+    `)).rejects.toThrow("retention hold records are append-only");
+  });
+
+  test("an uncommitted hold insertion linearizes before and blocks enforcement", async () => {
+    // Break caught: enforcement counting and deleting before a pre-existing
+    // uncommitted hold becomes visible.
+    const now = new Date("2021-02-01T12:00:00.000Z");
+    const applicationName = `task9_hold_insert_sweep_${process.pid}`;
+    const holdClient = postgres(databaseUrl, { max: 1 });
+    const observer = postgres(databaseUrl, { max: 1 });
+    let holdTransactionOpen = false;
+    let sweepPromise: ReturnType<typeof runRetentionSweep> | undefined;
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values ('task9-concurrent-held', 'Concurrent Held', 'concurrent-held@example.test',
+        'concurrent-held@example.test', false, null, null, false, 'active', 1,
+        '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')
+    `);
+    await client.unsafe(`set application_name = '${applicationName}'`);
+    try {
+      await holdClient.unsafe(`set search_path to "${schemaName}", public`);
+      await holdClient.unsafe("begin");
+      holdTransactionOpen = true;
+      await holdClient.unsafe(`
+        insert into system_retention_holds
+          (dataset, subject_type, subject_id, reason_category, reference_id,
+           starts_at, created_at)
+        values ('provisional_accounts', 'user', 'task9-concurrent-held',
+          'incident', 'task9-ref-concurrent-held', '2021-01-01T00:00:00Z',
+          '2021-01-01T00:00:00Z')
+      `);
+
+      let sweepCompleted = false;
+      sweepPromise = runRetentionSweep({
+        db,
+        now,
+        mode: "enforce",
+        policyVersion: "task9-concurrency-v1",
+        enforcementPaused: false,
+        batchSize: 100,
+      }).then((result) => {
+        sweepCompleted = true;
+        return result;
+      });
+      await waitForAdvisoryLockWait(observer, applicationName);
+      expect(sweepCompleted).toBe(false);
+
+      await holdClient.unsafe("commit");
+      holdTransactionOpen = false;
+      const result = await sweepPromise;
+      expect(result.find((item) => item.dataset === "provisional_accounts")).toEqual(
+        expect.objectContaining({ candidateCount: 1, protectedCount: 1, processedCount: 0 }),
+      );
+      expect(await client`select id from identity_users where id = 'task9-concurrent-held'`).toHaveLength(1);
+    } finally {
+      if (holdTransactionOpen) await holdClient.unsafe("rollback");
+      if (sweepPromise) await sweepPromise.catch(() => undefined);
+      await holdClient.end();
+      await observer.end();
+    }
+  });
+
+  test("an uncommitted hold release linearizes before and blocks enforcement", async () => {
+    // Break caught: release becoming invisible to a sweep that races past its
+    // uncommitted lifecycle transition.
+    const now = new Date("2019-02-01T12:00:00.000Z");
+    const applicationName = `task9_hold_release_sweep_${process.pid}`;
+    const releaseClient = postgres(databaseUrl, { max: 1 });
+    const observer = postgres(databaseUrl, { max: 1 });
+    let releaseTransactionOpen = false;
+    let sweepPromise: ReturnType<typeof runRetentionSweep> | undefined;
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values ('task9-concurrent-released', 'Concurrent Released',
+        'concurrent-released@example.test', 'concurrent-released@example.test',
+        false, null, null, false, 'active', 1,
+        '2018-01-01T00:00:00Z', '2018-01-01T00:00:00Z');
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id,
+         starts_at, created_at)
+      values ('provisional_accounts', 'user', 'task9-concurrent-released',
+        'incident', 'task9-ref-concurrent-released', '2019-01-01T00:00:00Z',
+        '2019-01-01T00:00:00Z')
+    `);
+    await client.unsafe(`set application_name = '${applicationName}'`);
+    try {
+      await releaseClient.unsafe(`set search_path to "${schemaName}", public`);
+      await releaseClient.unsafe("begin");
+      releaseTransactionOpen = true;
+      await releaseClient.unsafe(`
+        update system_retention_holds
+        set released_at = '2019-01-02T00:00:00Z'
+        where dataset = 'provisional_accounts'
+          and subject_type = 'user'
+          and subject_id = 'task9-concurrent-released'
+          and released_at is null
+      `);
+
+      let sweepCompleted = false;
+      sweepPromise = runRetentionSweep({
+        db,
+        now,
+        mode: "enforce",
+        policyVersion: "task9-concurrency-v1",
+        enforcementPaused: false,
+        batchSize: 100,
+      }).then((result) => {
+        sweepCompleted = true;
+        return result;
+      });
+      await waitForAdvisoryLockWait(observer, applicationName);
+      expect(sweepCompleted).toBe(false);
+
+      await releaseClient.unsafe("commit");
+      releaseTransactionOpen = false;
+      const result = await sweepPromise;
+      expect(result.find((item) => item.dataset === "provisional_accounts")).toEqual(
+        expect.objectContaining({ candidateCount: 1, protectedCount: 0, processedCount: 1 }),
+      );
+      expect(await client`select id from identity_users where id = 'task9-concurrent-released'`).toHaveLength(0);
+    } finally {
+      if (releaseTransactionOpen) await releaseClient.unsafe("rollback");
+      if (sweepPromise) await sweepPromise.catch(() => undefined);
+      await releaseClient.end();
+      await observer.end();
+    }
   });
 
   test("retention minimizes the current account referenced by an old final application", async () => {

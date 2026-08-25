@@ -179,7 +179,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(19);
+  expect(journal?.count).toBe(20);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -304,6 +304,47 @@ describe("configured Drizzle creator migrator", () => {
     } finally {
       await client.end();
       await rm(through0017, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades compatible 0018 hold rows with stable identities and lifecycle guards", async () => {
+    // Break caught: adding the hold primary key or compatibility constraint in
+    // a way that only works for blank databases.
+    const { client, journalSchema } = await createIsolatedClient("task9-hold-upgrade");
+    const through0018 = await createMigrationsThrough(18);
+    try {
+      await migrate(drizzle(client), {
+        migrationsFolder: through0018,
+        migrationsSchema: journalSchema,
+      });
+      await client.unsafe(`
+        insert into system_retention_holds
+          (dataset, subject_type, subject_id, reason_category, reference_id,
+           starts_at, created_at)
+        values ('sessions', 'user', 'task9-upgrade-held-user', 'incident',
+          'task9-upgrade-hold-reference', '2026-08-24T03:00:00Z',
+          '2026-08-24T03:00:00Z')
+      `);
+
+      await expect(
+        migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema }),
+      ).resolves.toBeUndefined();
+      const [hold] = await client<{ id: string }[]>`
+        select id from system_retention_holds
+        where reference_id = 'task9-upgrade-hold-reference'
+      `;
+      expect(hold?.id).toMatch(/^[0-9a-f-]{36}$/);
+      await expect(client.unsafe(`
+        update system_retention_holds
+        set released_at = '2026-08-25T03:00:00Z'
+        where id = '${hold?.id}'
+      `)).resolves.toBeDefined();
+      await expect(client.unsafe(`
+        delete from system_retention_holds where id = '${hold?.id}'
+      `)).rejects.toThrow("retention hold records are append-only");
+    } finally {
+      await client.end();
+      await rm(through0018, { recursive: true, force: true });
     }
   });
 });
