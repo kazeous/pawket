@@ -135,6 +135,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
   });
   const creatorReview = createCreatorReviewService({
     db: database.db,
+    keyring,
     commandFingerprintKey: lookupHmacKey,
     consumeStepUpProof,
   });

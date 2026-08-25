@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
+import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 
 import * as admin from "../src/index.js";
 
@@ -22,11 +23,18 @@ const at = now.toISOString();
 const challengeExpiresAt = new Date(now.getTime() + 72 * 60 * 60_000).toISOString();
 const applicationId = "10000000-0000-4000-8000-000000000001";
 const revisionId = "10000000-0000-4000-8000-000000000002";
+const priorSubmissionRevisionId = "10000000-0000-4000-8000-000000000014";
 const accountVersionId = "10000000-0000-4000-8000-000000000003";
 const challengeId = "10000000-0000-4000-8000-000000000004";
 const receiptId = "10000000-0000-4000-8000-000000000005";
 const obligationId = "10000000-0000-4000-8000-000000000006";
 const proofId = "10000000-0000-4000-8000-000000000007";
+const priorApplicationId = "10000000-0000-4000-8000-000000000011";
+const priorRevisionId = "10000000-0000-4000-8000-000000000012";
+const keyring = createEncryptionKeyring({
+  activeKeyId: "test-v1",
+  keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
+});
 
 async function executeMigration(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -54,10 +62,11 @@ async function seedSubmittedApplication(): Promise<void> {
   await client`
     insert into creator_application_revisions (
       id, application_id, revision_number, artist_display_name, applicant_email,
-      portfolio_urls, primary_art_discipline, content_intent, proposed_receiving_account_id,
+      dob_envelope, portfolio_urls, primary_art_discipline, content_intent, proposed_receiving_account_id,
       age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
     ) values (
-      ${revisionId}, ${applicationId}, 1, 'Test Artist', 'artist@pawket.test',
+      ${revisionId}, ${applicationId}, 2, 'Test Artist', 'artist@pawket.test',
+      ${JSON.stringify(encryptSensitiveField({ plaintext: "2002-08-25", binding: { recordType: "creator_application_revision", recordId: revisionId, fieldName: "date_of_birth" }, keyring }))}::jsonb,
       ${JSON.stringify(["https://portfolio.example/artist"]) }::jsonb, 'illustration',
       'general_audience_only', ${accountVersionId}, 23, '2026-08-25', null, ${at}, ${at}
     )
@@ -77,6 +86,35 @@ async function seedSubmittedApplication(): Promise<void> {
   await client`
     update creator_application_revisions set submitted_at = ${at}, updated_at = ${at}
     where id = ${revisionId}
+  `;
+  await client`
+    insert into creator_application_revisions (
+      id, application_id, revision_number, artist_display_name, applicant_email, portfolio_urls,
+      primary_art_discipline, content_intent, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
+    ) values (${priorSubmissionRevisionId}, ${applicationId}, 1, 'Earlier Submission Name', 'artist@pawket.test',
+      ${JSON.stringify(["https://portfolio.example/earlier-submission"]) }::jsonb, 'painting',
+      'general_audience_only', 23, '2026-08-01', ${at}, ${at}, ${at})
+  `;
+  await client`
+    insert into creator_applications (
+      id, user_id, state, version, current_revision_id, rejected_at, cooldown_until, created_at, updated_at
+    ) values (${priorApplicationId}, 'review-artist', 'rejected', 3, ${priorRevisionId}, ${at}, ${at}, ${at}, ${at})
+  `;
+  await client`
+    insert into creator_application_revisions (
+      id, application_id, revision_number, artist_display_name, applicant_email, portfolio_urls,
+      primary_art_discipline, content_intent, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
+    ) values (${priorRevisionId}, ${priorApplicationId}, 1, 'Earlier Artist Name', 'artist@pawket.test',
+      ${JSON.stringify(["https://portfolio.example/earlier"]) }::jsonb, 'painting', 'general_audience_only',
+      23, '2026-08-01', ${at}, ${at}, ${at})
+  `;
+  await client`
+    insert into creator_application_decisions (
+      id, application_id, revision_id, action, reason_code, applicant_explanation,
+      actor_user_id, actor_session_id, step_up_proof_id, expected_version, request_id, created_at
+    ) values ('10000000-0000-4000-8000-000000000013', ${priorApplicationId}, ${priorRevisionId},
+      'rejected', 'portfolio_insufficient', 'Earlier portfolio needed more evidence.', 'review-owner',
+      'owner-session', ${proofId}, 2, 'prior-decision-request', ${at})
   `;
   await client`
     insert into payments_receiving_account_onboarding (
@@ -151,6 +189,63 @@ afterAll(async () => {
 });
 
 describe("owner creator review", () => {
+  test("reveals only the requested applicant DOB after a scoped proof, with immutable comparison and masked review facts", async () => {
+    // Break caught: a normal owner read exposing DOB, omitted revision/decision history, or leaking full payment data.
+    type Factory = {
+      createCreatorReviewService(input: Record<string, unknown>): {
+        getDetail(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+        listSubmitted(): Promise<unknown>;
+      };
+    };
+    const api = admin as unknown as Partial<Factory>;
+    expect(typeof api.createCreatorReviewService).toBe("function");
+    const service = api.createCreatorReviewService!({
+      db,
+      keyring,
+      commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
+      now: () => now,
+      consumeStepUpProof: async (_tx: unknown, proof: { actionClass: string; proofId: string }) =>
+        proof.actionClass === "owner.creator_application_detail" && proof.proofId === proofId,
+    });
+    expect(typeof service.getDetail).toBe("function");
+    await expect(service.getDetail({
+      ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: "wrong-detail-proof",
+      applicationId, requestId: "detail-wrong-proof",
+    })).rejects.toMatchObject({ code: "owner_totp_required" });
+
+    const queue = await service.listSubmitted();
+    expect(JSON.stringify(queue)).not.toContain("2002-08-25");
+
+    const detail = await service.getDetail({
+      ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId,
+      applicationId, requestId: "detail-success",
+    });
+    expect(detail).toMatchObject({
+      application: { id: applicationId, state: "submitted", version: 2 },
+      revision: { id: revisionId, artistDisplayName: "Test Artist", dateOfBirth: "2002-08-25" },
+      payment: { bankName: "Vietcombank", maskedSuffix: "•••• 7890", proofState: "verified", refundState: "pending_window" },
+      priorOutcomes: [{ applicationId: priorApplicationId, action: "rejected", reasonCode: "portfolio_insufficient" }],
+    });
+    expect((detail.revisions as Array<Record<string, unknown>>).map((revision) => revision.artistDisplayName)).toEqual([
+      "Test Artist",
+      "Earlier Submission Name",
+    ]);
+    expect(detail).toHaveProperty("attestations");
+    expect(detail.attestations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "creator_terms", policyVersion: "increment-2-v1" }),
+      expect.objectContaining({ type: "dob_truthfulness", policyVersion: "increment-2-v1" }),
+    ]));
+    expect(JSON.stringify(detail)).not.toContain("001234567890");
+    expect(JSON.stringify(detail)).not.toContain("account_number_envelope");
+    const [audit] = await client<{ action: string; after_state: Record<string, unknown> }[]>`
+      select action, after_state from admin_audit_events where request_id = 'detail-success'
+    `;
+    expect(audit).toEqual({ action: "creator.application.detail.reveal", after_state: { applicationId, revisionId } });
+    expect(JSON.stringify(audit)).not.toContain("2002-08-25");
+    expect(JSON.stringify(audit)).not.toContain("artist@pawket.test");
+    expect(JSON.stringify(audit)).not.toContain("portfolio.example");
+  });
+
   test("approval atomically records the decision, grants creator capability, refreshes authorization, audits, and emits safe facts", async () => {
     // Break caught: approval that changes application state without every required capability, audit, authorization, and outbox fact.
     type Factory = {

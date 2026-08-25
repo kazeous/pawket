@@ -5,6 +5,7 @@ import { CreatorReviewError, type CreatorDecisionAction } from "./creator-review
 type Session = { userId: string; sessionId: string; primaryAuthenticatedAt: Date };
 type ReviewService = {
   listSubmitted(): Promise<unknown>;
+  getDetail(input: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; requestId: string }): Promise<unknown>;
   claim(input: { ownerUserId: string; ownerSessionId: string; applicationId: string; expectedVersion: number; requestId: string }): Promise<unknown>;
   decide(input: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; revisionId: string; expectedVersion: number; idempotencyKey: string; requestId: string; action: CreatorDecisionAction; reasonCode: string; applicantExplanation: string; privateNote?: string }): Promise<unknown>;
   setCreatorCapability(input: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; userId: string; action: "suspend" | "reinstate"; reasonCode: string; applicantExplanation: string; privateNote?: string; idempotencyKey: string; requestId: string }): Promise<unknown>;
@@ -46,6 +47,15 @@ export function createCreatorReviewHttpHandlers(input: Input) {
       if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
       const actor = await owner(request); if (actor instanceof Response) return actor;
       try { return json(200, { applications: await input.review.listSubmitted() }); } catch (error) { return failure(error); }
+    },
+    async detail(request: Request, applicationId: string): Promise<Response> {
+      const rejected = mutation(request); if (rejected) return rejected;
+      if (!uuidPattern.test(applicationId)) return json(400, { code: "INVALID_REQUEST" });
+      const actor = await owner(request); if (actor instanceof Response) return actor;
+      try {
+        const proof = await input.issueOwnerStepUpProof({ userId: actor.userId, sessionId: actor.sessionId, actionClass: "owner.creator_application_detail", now: now() });
+        return json(200, { detail: await input.review.getDetail({ ownerUserId: actor.userId, ownerSessionId: actor.sessionId, stepUpProofId: proof.id, applicationId, requestId: requestId(request) }) });
+      } catch (error) { return failure(error); }
     },
     async claim(request: Request, applicationId: string): Promise<Response> {
       const rejected = mutation(request); if (rejected) return rejected;

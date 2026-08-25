@@ -19,8 +19,8 @@ import {
   type PawketTransaction,
 } from "@pawket/database";
 import { rejectionCooldownUntil } from "@pawket/identity";
-import { createLookupHmac } from "@pawket/security";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -61,6 +61,7 @@ type StepUpInput = {
 
 type ServiceInput = {
   db: PawketDatabase;
+  keyring: EncryptionKeyring;
   commandFingerprintKey: Uint8Array;
   consumeStepUpProof: (tx: PawketTransaction, input: StepUpInput) => Promise<boolean>;
   idFactory?: () => string;
@@ -129,8 +130,57 @@ export function createCreatorReviewService(input: ServiceInput) {
   const id = input.idFactory ?? randomUUID;
 
   return {
+    async getDetail(command: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; requestId: string }) {
+      const at = now();
+      return input.db.transaction(async (tx) => {
+        const [application] = await tx.select().from(creatorApplications).where(eq(creatorApplications.id, command.applicationId)).limit(1).for("update");
+        policy(application && application.currentRevisionId, "application_not_found");
+        await requireStepUp(input, tx, { proofId: command.stepUpProofId, sessionId: command.ownerSessionId, userId: command.ownerUserId, actionClass: "owner.creator_application_detail", now: at });
+        const revisions = await tx.select().from(creatorApplicationRevisions).where(eq(creatorApplicationRevisions.applicationId, application.id)).orderBy(desc(creatorApplicationRevisions.revisionNumber));
+        const currentRevision = revisions.find((revision) => revision.id === application.currentRevisionId);
+        policy(currentRevision && currentRevision.submittedAt, "missing_submitted_revision");
+        const attestations = await tx.select({ type: creatorApplicationAttestations.type, policyVersion: creatorApplicationAttestations.policyVersion, acceptedAt: creatorApplicationAttestations.acceptedAt }).from(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.revisionId, currentRevision.id));
+        const [account] = currentRevision.proposedReceivingAccountId
+          ? await tx.select({ id: paymentsReceivingAccountOnboarding.id, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(paymentsReceivingAccountOnboarding).where(eq(paymentsReceivingAccountOnboarding.id, currentRevision.proposedReceivingAccountId)).limit(1)
+          : [];
+        const [challenge] = account
+          ? await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, currentRevision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id))).orderBy(desc(paymentsVerificationDepositChallenges.createdAt)).limit(1)
+          : [];
+        const [obligation] = challenge
+          ? await tx.select({ state: paymentsVerificationDepositRefundObligations.state, refundNotBefore: paymentsVerificationDepositRefundObligations.refundNotBefore, refundDue: paymentsVerificationDepositRefundObligations.refundDue }).from(paymentsVerificationDepositRefundObligations).where(eq(paymentsVerificationDepositRefundObligations.challengeId, challenge.id)).limit(1)
+          : [];
+        const decisions = await tx.select({ applicationId: creatorApplicationDecisions.applicationId, action: creatorApplicationDecisions.action, reasonCode: creatorApplicationDecisions.reasonCode, createdAt: creatorApplicationDecisions.createdAt }).from(creatorApplicationDecisions).innerJoin(creatorApplications, eq(creatorApplications.id, creatorApplicationDecisions.applicationId)).where(eq(creatorApplications.userId, application.userId)).orderBy(desc(creatorApplicationDecisions.createdAt));
+        const projectRevision = (revision: typeof creatorApplicationRevisions.$inferSelect) => ({
+          id: revision.id,
+          revisionNumber: revision.revisionNumber,
+          artistDisplayName: revision.artistDisplayName,
+          shortIntroduction: revision.shortIntroduction,
+          applicantEmail: revision.applicantEmail,
+          dateOfBirth: revision.dobEnvelope
+            ? decryptSensitiveField({ envelope: revision.dobEnvelope as EncryptionEnvelope<"creator_application_revision", "date_of_birth">, binding: { recordType: "creator_application_revision", recordId: revision.id, fieldName: "date_of_birth" }, keyring: input.keyring })
+            : null,
+          portfolioUrls: revision.portfolioUrls,
+          primaryArtDiscipline: revision.primaryArtDiscipline,
+          practiceDescription: revision.practiceDescription,
+          contentIntent: revision.contentIntent,
+          ageAtSubmission: revision.ageAtSubmission,
+          ageEvaluatedOn: revision.ageEvaluatedOn,
+          submittedAt: revision.submittedAt,
+        });
+        await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_application", subjectId: application.id, action: "creator.application.detail.reveal", outcome: "succeeded", beforeState: null, afterState: { applicationId: application.id, revisionId: currentRevision.id }, assurance: { method: "totp", actionClass: "owner.creator_application_detail" }, applicationRevision: currentRevision.id, requestId: command.requestId, occurredAt: at });
+        return {
+          application: { id: application.id, state: application.state, version: application.version, currentRevisionId: currentRevision.id },
+          revision: projectRevision(currentRevision),
+          revisions: revisions.map(projectRevision),
+          attestations,
+          priorOutcomes: decisions.filter((decision) => decision.applicationId !== application.id),
+          payment: { bankName: account?.bankName ?? null, maskedSuffix: account?.maskedSuffix ?? null, proofState: account?.proofState ?? "unverified", refundState: obligation?.state ?? null, refundNotBefore: obligation?.refundNotBefore ?? null, refundDue: obligation?.refundDue ?? null },
+        };
+      });
+    },
+
     async listSubmitted() {
-      return input.db.select({ id: creatorApplications.id, version: creatorApplications.version, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: creatorApplicationRevisions.ageAtSubmission, portfolioUrls: creatorApplicationRevisions.portfolioUrls, contentIntent: creatorApplicationRevisions.contentIntent, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, eq(paymentsReceivingAccountOnboarding.id, creatorApplicationRevisions.proposedReceivingAccountId)).where(eq(creatorApplications.state, "submitted")).orderBy(asc(creatorApplicationRevisions.submittedAt));
+      return input.db.select({ id: creatorApplications.id, version: creatorApplications.version, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: creatorApplicationRevisions.ageAtSubmission, portfolioUrls: creatorApplicationRevisions.portfolioUrls, contentIntent: creatorApplicationRevisions.contentIntent, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(eq(creatorApplications.state, "submitted")).orderBy(asc(creatorApplicationRevisions.submittedAt));
     },
 
     async claim(command: { ownerUserId: string; ownerSessionId: string; applicationId: string; expectedVersion: number; requestId: string }) {

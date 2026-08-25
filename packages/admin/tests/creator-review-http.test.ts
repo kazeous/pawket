@@ -11,11 +11,12 @@ describe("creator review HTTP boundary", () => {
     type Factory = {
       createCreatorReviewHttpHandlers(input: Record<string, unknown>): {
         decide(request: Request, applicationId: string): Promise<Response>;
+        detail(request: Request, applicationId: string): Promise<Response>;
       };
     };
     const api = admin as unknown as Partial<Factory>;
     expect(typeof api.createCreatorReviewHttpHandlers).toBe("function");
-    const review = { decide: vi.fn(async () => ({ state: "approved" })) };
+    const review = { decide: vi.fn(async () => ({ state: "approved" })), getDetail: vi.fn(async () => ({ application: { id: "10000000-0000-4000-8000-000000000001" }, revision: { dateOfBirth: "2002-08-25" } })) };
     const issueOwnerStepUpProof = vi.fn(async ({ actionClass }: { actionClass: string }) => ({ id: `server-proof:${actionClass}` }));
     const handlers = api.createCreatorReviewHttpHandlers!({
       trustedOrigins: [origin], authenticate: vi.fn(async () => session), authorizeOwner: vi.fn(async () => "forbidden"),
@@ -30,5 +31,12 @@ describe("creator review HTTP boundary", () => {
     expect(allowed.status).toBe(200);
     expect(issueOwnerStepUpProof).toHaveBeenCalledWith({ userId: "owner-1", sessionId: "owner-session", actionClass: "owner.creator_application_approve", now: expect.any(Date) });
     expect(review.decide).toHaveBeenCalledWith(expect.objectContaining({ ownerUserId: "owner-1", ownerSessionId: "owner-session", stepUpProofId: "server-proof:owner.creator_application_approve", expectedVersion: 3 }));
+
+    const detailDenied = await handlers.detail(new Request(`${origin}/detail`, { method: "POST", headers: { origin } }), "10000000-0000-4000-8000-000000000001");
+    expect(detailDenied.status).toBe(403);
+    const detailAllowed = await permitted.detail(new Request(`${origin}/detail`, { method: "POST", headers: { origin, "x-request-id": "detail-request" } }), "10000000-0000-4000-8000-000000000001");
+    expect(detailAllowed.status).toBe(200);
+    await expect(detailAllowed.json()).resolves.toEqual({ detail: { application: { id: "10000000-0000-4000-8000-000000000001" }, revision: { dateOfBirth: "2002-08-25" } } });
+    expect(issueOwnerStepUpProof).toHaveBeenCalledWith({ userId: "owner-1", sessionId: "owner-session", actionClass: "owner.creator_application_detail", now: expect.any(Date) });
   });
 });
