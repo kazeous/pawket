@@ -4,7 +4,8 @@ import { CreatorReviewError, type CreatorDecisionAction } from "./creator-review
 
 type Session = { userId: string; sessionId: string; primaryAuthenticatedAt: Date };
 type ReviewService = {
-  listSubmitted(): Promise<unknown>;
+  listSubmitted(ownerUserId?: string, at?: Date): Promise<unknown>;
+  listCapabilities(): Promise<unknown>;
   getDetail(input: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; requestId: string }): Promise<unknown>;
   claim(input: { ownerUserId: string; ownerSessionId: string; applicationId: string; expectedVersion: number; requestId: string }): Promise<unknown>;
   decide(input: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; revisionId: string; expectedVersion: number; idempotencyKey: string; requestId: string; action: CreatorDecisionAction; reasonCode: string; applicantExplanation: string; privateNote?: string }): Promise<unknown>;
@@ -40,13 +41,18 @@ export function createCreatorReviewHttpHandlers(input: Input) {
     } catch { return json(503, { code: "CREATOR_REVIEW_UNAVAILABLE" }); }
   }
   function mutation(request: Request): Response | null { if (request.method !== "POST") return json(405, { code: "METHOD_NOT_ALLOWED" }); return trusted(request, input.trustedOrigins) ? null : json(403, { code: "UNTRUSTED_ORIGIN" }); }
-  function failure(error: unknown): Response { return error instanceof CreatorReviewError ? json(409, { code: error.code.toUpperCase() }) : json(503, { code: "CREATOR_REVIEW_UNAVAILABLE" }); }
+  function failure(error: unknown): Response { if (error && typeof error === "object" && "code" in error && error.code === "OWNER_TOTP_REQUIRED") return json(403, { code: "OWNER_TOTP_REQUIRED" }); return error instanceof CreatorReviewError ? json(409, { code: error.code.toUpperCase() }) : json(503, { code: "CREATOR_REVIEW_UNAVAILABLE" }); }
 
   return {
     async list(request: Request): Promise<Response> {
       if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
       const actor = await owner(request); if (actor instanceof Response) return actor;
-      try { return json(200, { applications: await input.review.listSubmitted() }); } catch (error) { return failure(error); }
+      try { return json(200, { applications: await input.review.listSubmitted(actor.userId, now()) }); } catch (error) { return failure(error); }
+    },
+    async capabilities(request: Request): Promise<Response> {
+      if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
+      const actor = await owner(request); if (actor instanceof Response) return actor;
+      try { return json(200, { capabilities: await input.review.listCapabilities() }); } catch (error) { return failure(error); }
     },
     async detail(request: Request, applicationId: string): Promise<Response> {
       const rejected = mutation(request); if (rejected) return rejected;

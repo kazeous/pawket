@@ -27,7 +27,7 @@ import {
   type EncryptionEnvelope,
   type EncryptionKeyring,
 } from "@pawket/security";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
 
 import { fingerprintReceivingAccount } from "./receiving-account-policy.js";
 
@@ -292,6 +292,11 @@ export function createVerificationDepositService(input: VerificationDepositServi
   }
 
   return {
+    async listRefundObligations() {
+      const recentSentSince = new Date(now().getTime() - 30 * 24 * 60 * 60_000);
+      return input.db.select({ id: paymentsVerificationDepositRefundObligations.id, applicantUserId: paymentsVerificationDepositRefundObligations.applicantUserId, artistDisplayName: creatorApplicationRevisions.artistDisplayName, amountVnd: paymentsVerificationDepositRefundObligations.amountVnd, bankName: paymentsVerificationDepositRefundObligations.lockedBankName, maskedSuffix: paymentsVerificationDepositRefundObligations.lockedMaskedSuffix, refundNotBefore: paymentsVerificationDepositRefundObligations.refundNotBefore, refundDue: paymentsVerificationDepositRefundObligations.refundDue, state: paymentsVerificationDepositRefundObligations.state, updatedAt: paymentsVerificationDepositRefundObligations.updatedAt }).from(paymentsVerificationDepositRefundObligations).innerJoin(paymentsVerificationDepositChallenges, eq(paymentsVerificationDepositChallenges.id, paymentsVerificationDepositRefundObligations.challengeId)).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, paymentsVerificationDepositChallenges.revisionId)).where(or(ne(paymentsVerificationDepositRefundObligations.state, "sent"), gte(paymentsVerificationDepositRefundObligations.updatedAt, recentSentSince))).orderBy(asc(paymentsVerificationDepositRefundObligations.refundDue)).limit(200);
+    },
+
     async issueChallenge(command: {
       ownerUserId: string;
       ownerSessionId: string;

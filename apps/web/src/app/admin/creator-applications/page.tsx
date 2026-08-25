@@ -2,6 +2,8 @@ import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { getIdentityRuntime } from "../../../auth/runtime";
+import { AppShell } from "../../../ui/app-shell";
+import { OwnerWorkbench } from "./owner-workbench";
 
 export const dynamic = "force-dynamic";
 
@@ -10,23 +12,10 @@ export default async function CreatorApplicationsAdminPage() {
   if (decision === "unauthenticated") redirect("/sign-in");
   if (decision !== "authorized") notFound();
 
-  const applications = await getIdentityRuntime().creatorReview.listSubmitted();
-
   return (
-    <main className="page-shell narrow-shell">
-      <section className="panel">
-        <p className="eyebrow">Owner-only</p>
-        <h1>Creator applications</h1>
-        <p>Submitted applications are ordered oldest first. Receiving-account destinations remain masked here.</p>
-        {applications.length === 0 ? <p>No submitted applications.</p> : <ul>
-          {applications.map((application) => (
-            <li key={application.id}>
-              <strong>{application.artistDisplayName ?? "Unnamed artist"}</strong> — {application.primaryArtDiscipline ?? "Practice not supplied"}; email {application.emailVerified ? "verified" : "unverified"}; age snapshot {application.ageEligible ? "eligible" : "not eligible"}; {application.bankName ?? "Receiving account unavailable"} {application.maskedSuffix ?? ""} ({application.proofState ?? "unverified"}).
-              <p>Review via the owner API using version {application.version}; full bank data is intentionally unavailable in this view.</p>
-            </li>
-          ))}
-        </ul>}
-      </section>
-    </main>
+    <AppShell context="Owner workspace" action={{ href: "/settings/security", label: "Bảo mật" }}>
+      <header className="workspace-header reveal"><div><p className="eyebrow">Owner-only</p><h1>Vận hành creator</h1><p className="lede">Xét duyệt hồ sơ, đối soát khoản xác minh và quản lý quyền creator trong một workspace có audit.</p></div></header>
+      <OwnerWorkbench />
+    </AppShell>
   );
 }

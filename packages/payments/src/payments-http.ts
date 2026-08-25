@@ -27,6 +27,7 @@ type AccountsService = {
 };
 
 type DepositsService = {
+  listRefundObligations(): Promise<unknown>;
   getApplicantStatus(input: { applicantUserId: string; applicationId: string }): Promise<unknown>;
   reportSent(input: {
     applicantUserId: string;
@@ -115,6 +116,9 @@ function requestId(request: Request): string {
 }
 
 function failure(error: unknown): Response {
+  if (error && typeof error === "object" && "code" in error && error.code === "OWNER_TOTP_REQUIRED") {
+    return json(403, { code: "OWNER_TOTP_REQUIRED" });
+  }
   return error instanceof ReceivingAccountPolicyError ||
     error instanceof ReceivingAccountServiceError ||
     error instanceof VerificationDepositServiceError
@@ -165,6 +169,12 @@ export function createPaymentsHttpHandlers(input: PaymentsHttpInput) {
   }
 
   return {
+    async listRefundObligations(request: Request): Promise<Response> {
+      if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
+      const actor = await owner(request);
+      if (actor instanceof Response) return actor;
+      try { return json(200, { obligations: await input.deposits.listRefundObligations() }); } catch (error) { return failure(error); }
+    },
     async getReceivingAccount(request: Request): Promise<Response> {
       if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
       const actor = await applicant(request);

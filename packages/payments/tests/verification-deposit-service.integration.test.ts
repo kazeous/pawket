@@ -32,6 +32,7 @@ type ReconciliationProjection = {
 };
 
 type VerificationDepositService = {
+  listRefundObligations(): Promise<Array<Record<string, unknown>>>;
   issueChallenge(input: {
     ownerUserId: string;
     ownerSessionId: string;
@@ -206,10 +207,10 @@ beforeAll(async () => {
   `;
   await client`
     insert into creator_application_revisions (
-      id, application_id, revision_number, proposed_receiving_account_id,
+      id, application_id, revision_number, artist_display_name, proposed_receiving_account_id,
       submitted_at, created_at, updated_at
     ) values (
-      ${revisionId}, ${applicationId}, 1, ${accountVersionId}, null, ${clock.toISOString()}, ${clock.toISOString()}
+      ${revisionId}, ${applicationId}, 1, 'Deposit Artist', ${accountVersionId}, null, ${clock.toISOString()}, ${clock.toISOString()}
     )
   `;
   await client`
@@ -379,6 +380,20 @@ describe("verification-deposit service", () => {
       refund_not_before: "2026-09-07",
       refund_due: "2026-09-09",
     });
+    const ownerList = await deposits.listRefundObligations();
+    expect(ownerList).toEqual([
+      expect.objectContaining({
+        id: matched.obligationId,
+        applicantUserId: "deposit-applicant",
+        artistDisplayName: "Deposit Artist",
+        amountVnd: 20_000,
+        bankName: "Vietcombank",
+        maskedSuffix: "•••• 7890",
+        state: "pending_window",
+      }),
+    ]);
+    expect(JSON.stringify(ownerList)).not.toContain("001234567890");
+    expect(JSON.stringify(ownerList)).not.toContain("accountHolderLabel");
     expect(
       decryptSensitiveField({
         envelope: obligation!.locked_account_number_envelope,
