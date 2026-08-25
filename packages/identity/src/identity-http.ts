@@ -3,7 +3,7 @@ import {
   isTrustedMutationOrigin,
   productionSessionCookie,
 } from "./core-identity-policy.js";
-import { IdentityInputError } from "./identity-service.js";
+import { IdentityDependencyError, IdentityInputError } from "./identity-service.js";
 
 type SessionContext = {
   userId: string;
@@ -121,6 +121,9 @@ function boundedString(
 }
 
 function serviceFailure(error: unknown): Response {
+  if (error instanceof IdentityDependencyError) {
+    return json(503, { code: "PASSWORD_CHECK_UNAVAILABLE" });
+  }
   if (error instanceof IdentityInputError) {
     return json(error.reason === "recent_authentication_required" ? 403 : 422, {
       code: error.reason === "recent_authentication_required" ? "RECENT_AUTH_REQUIRED" : "POLICY_REJECTED",

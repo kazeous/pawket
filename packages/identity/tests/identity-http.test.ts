@@ -280,6 +280,24 @@ describe("identity HTTP v1 handlers", () => {
     expect(publicBody).not.toMatch(/do-not-leak|raw-reset-secret|postgresql/iu);
   });
 
+  test("returns a stable unavailable code when compromised-password screening is down", async () => {
+    const harness = createHarness();
+    harness.service.registerPassword.mockRejectedValueOnce(
+      new identity.IdentityDependencyError("compromised_password_check_unavailable"),
+    );
+    const response = await harness.handlers.register(
+      post("/api/v1/auth/register", {
+        name: "Artist",
+        email: "artist@example.com",
+        password: "a unique password phrase",
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ code: "PASSWORD_CHECK_UNAVAILABLE" });
+  });
+
   test("clears the configured local cookie when the current session is revoked", async () => {
     const harness = createHarness();
     expect(typeof httpExports.createIdentityHttpHandlers).toBe("function");

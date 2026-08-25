@@ -36,7 +36,7 @@ describe("HTTP hardening", () => {
 
   it("marks identity, creator, security, and owner pages as private no-store surfaces", async () => {
     const configuredHeaders = await nextConfig.headers?.();
-    const sensitiveSources = ["/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*"];
+    const sensitiveSources = ["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*"];
 
     for (const source of sensitiveSources) {
       const headers = configuredHeaders?.find((entry) => entry.source === source)?.headers ?? [];

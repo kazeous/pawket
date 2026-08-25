@@ -23,6 +23,7 @@ function errorMessage(code: string): string {
     case "POLICY_REJECTED": return "Mật khẩu chưa đạt yêu cầu. Dùng ít nhất 15 ký tự và tránh thông tin dễ đoán.";
     case "RATE_LIMITED": return "Bạn thao tác quá nhanh. Hãy đợi một lúc rồi thử lại.";
     case "SECURITY_EMAIL_UNAVAILABLE": return "Dịch vụ email bảo mật đang tạm gián đoạn. Hãy thử lại sau.";
+    case "PASSWORD_CHECK_UNAVAILABLE": return "Pawket chưa thể kiểm tra độ an toàn của mật khẩu. Hãy thử lại sau.";
     case "AUTHENTICATION_REQUIRED": return "Bạn cần đăng nhập lại trước khi xác nhận email mới.";
     case "EMAIL_UNAVAILABLE": return "Email này không thể sử dụng. Hãy chọn địa chỉ khác.";
     default: return "Pawket chưa thể hoàn tất yêu cầu. Hãy thử lại sau.";
