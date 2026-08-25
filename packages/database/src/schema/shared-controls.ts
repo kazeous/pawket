@@ -38,6 +38,41 @@ export const systemRetentionRuns = pgTable(
   ],
 );
 
+export const systemRetentionHolds = pgTable(
+  "system_retention_holds",
+  {
+    dataset: text("dataset").notNull(),
+    subjectType: text("subject_type").notNull(),
+    subjectId: text("subject_id").notNull(),
+    reasonCategory: text("reason_category").notNull(),
+    referenceId: text("reference_id").notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true, mode: "date" }).notNull(),
+    releasedAt: timestamp("released_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("system_retention_holds_active_subject_uidx")
+      .on(table.dataset, table.subjectType, table.subjectId)
+      .where(sql`${table.releasedAt} is null`),
+    check(
+      "system_retention_holds_dataset_check",
+      sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'security_throttles', 'receiving_accounts', 'application_content')`,
+    ),
+    check(
+      "system_retention_holds_subject_type_check",
+      sql`${table.subjectType} in ('user', 'verification', 'session', 'security_throttle', 'receiving_account', 'creator_application')`,
+    ),
+    check(
+      "system_retention_holds_reason_category_check",
+      sql`${table.reasonCategory} in ('incident', 'legal')`,
+    ),
+    check(
+      "system_retention_holds_release_check",
+      sql`${table.releasedAt} is null or ${table.releasedAt} > ${table.startsAt}`,
+    ),
+  ],
+);
+
 export const adminAuditEvents = pgTable(
   "admin_audit_events",
   {

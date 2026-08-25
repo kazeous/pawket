@@ -35,7 +35,31 @@ export const creatorApplicationRevisions = pgTable("creator_application_revision
   uniqueIndex("creator_application_revisions_number_uidx").on(t.applicationId, t.revisionNumber),
   index("creator_application_revisions_app_idx").on(t.applicationId),
   check("creator_application_revisions_content_intent_check", sql`${t.contentIntent} is null or ${t.contentIntent} in ('general_audience_only','may_include_age_restricted')`),
-  check("creator_application_revisions_minimized_check", sql`${t.minimizedAt} is null or (${t.artistDisplayName} is null and ${t.applicantEmail} is null and ${t.dobEnvelope} is null and ${t.portfolioUrls} is null and ${t.shortIntroduction} is null and ${t.primaryArtDiscipline} is null and ${t.practiceDescription} is null and ${t.contentIntent} is null and ${t.proposedReceivingAccountId} is null)`),
+  check("creator_application_revisions_minimized_check", sql`
+    (${t.minimizedAt} is not null
+      and ${t.artistDisplayName} is null
+      and ${t.shortIntroduction} is null
+      and ${t.applicantEmail} is null
+      and ${t.dobEnvelope} is null
+      and ${t.portfolioUrls} is null
+      and ${t.primaryArtDiscipline} is null
+      and ${t.practiceDescription} is null
+      and ${t.contentIntent} is null
+      and ${t.proposedReceivingAccountId} is null)
+    or (${t.minimizedAt} is null and ${t.submittedAt} is null)
+    or (${t.minimizedAt} is null
+      and ${t.submittedAt} is not null
+      and ${t.artistDisplayName} is not null
+      and ${t.shortIntroduction} is not null
+      and ${t.applicantEmail} is not null
+      and ${t.dobEnvelope} is not null
+      and ${t.portfolioUrls} is not null
+      and ${t.primaryArtDiscipline} is not null
+      and ${t.practiceDescription} is not null
+      and ${t.contentIntent} is not null
+      and ${t.proposedReceivingAccountId} is not null
+      and ${t.ageAtSubmission} is not null
+      and ${t.ageEvaluatedOn} is not null)`),
 ]);
 
 export const creatorApplicationAttestations = pgTable("creator_application_attestations", {

@@ -38,6 +38,26 @@ function cutoffFor(dataset: RetentionDataset, now: Date): Date {
   return new Date(now.getTime() - days * DAY_MS);
 }
 
+function activeHold(
+  dataset: RetentionDataset,
+  subjectType:
+    | "user"
+    | "verification"
+    | "session"
+    | "security_throttle"
+    | "receiving_account"
+    | "creator_application",
+  subjectId: SQL,
+): SQL {
+  return sql`exists(
+    select 1 from system_retention_holds h
+    where h.dataset = ${dataset}
+      and h.subject_type = ${subjectType}
+      and h.subject_id = ${subjectId}
+      and h.released_at is null
+  )`;
+}
+
 function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
   const cutoffIso = cutoff.toISOString();
   const nowIso = now.toISOString();
@@ -60,7 +80,13 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
             exists(select 1 from payments_verification_deposit_refunds p where p.recorded_by_owner_user_id = u.id) or
             exists(select 1 from payments_unmatched_deposits p where p.reconciled_by_owner_user_id = u.id) or
             exists(select 1 from admin_audit_events a where a.actor_user_id = u.id or (a.subject_type = 'user' and a.subject_id = u.id)) or
-            exists(select 1 from system_command_idempotency c where c.actor_user_id = u.id)
+            exists(select 1 from system_command_idempotency c where c.actor_user_id = u.id) or
+            ${activeHold("provisional_accounts", "user", sql`u.id`)} or
+            exists(
+              select 1 from identity_verifications v
+              where v.user_id = u.id and v.purpose = 'email_verification'
+                and v.consumed_at is null and v.expires_at >= ${nowIso}::timestamptz
+            )
               as protected
           from identity_users u
           where u.email_verified = false and u.created_at < ${cutoffIso}::timestamptz
@@ -69,16 +95,40 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
           count(*) filter (where not protected)::int eligible_count
         from candidates`;
     case "verifications":
-      return sql`select count(*)::int candidate_count, count(*)::int eligible_count
-        from identity_verifications
-        where coalesce(consumed_at, expires_at) < ${cutoffIso}::timestamptz`;
+      return sql`
+        with candidates as (
+          select v.id,
+            ${activeHold("verifications", "verification", sql`v.id`)} or
+            ${activeHold("verifications", "user", sql`v.user_id`)} as protected
+          from identity_verifications v
+          where coalesce(v.consumed_at, v.expires_at) < ${cutoffIso}::timestamptz
+        )
+        select count(*)::int candidate_count,
+          count(*) filter (where not protected)::int eligible_count
+        from candidates`;
     case "sessions":
-      return sql`select count(*)::int candidate_count, count(*)::int eligible_count
-        from identity_sessions
-        where coalesce(revoked_at, expires_at) < ${cutoffIso}::timestamptz`;
+      return sql`
+        with candidates as (
+          select s.id,
+            ${activeHold("sessions", "session", sql`s.id`)} or
+            ${activeHold("sessions", "user", sql`s.user_id`)} as protected
+          from identity_sessions s
+          where coalesce(s.revoked_at, s.expires_at) < ${cutoffIso}::timestamptz
+        )
+        select count(*)::int candidate_count,
+          count(*) filter (where not protected)::int eligible_count
+        from candidates`;
     case "security_throttles":
-      return sql`select count(*)::int candidate_count, count(*)::int eligible_count
-        from identity_security_throttles where updated_at < ${cutoffIso}::timestamptz`;
+      return sql`
+        with candidates as (
+          select s.id,
+            ${activeHold("security_throttles", "security_throttle", sql`s.id::text`)} as protected
+          from identity_security_throttles s
+          where s.updated_at < ${cutoffIso}::timestamptz
+        )
+        select count(*)::int candidate_count,
+          count(*) filter (where not protected)::int eligible_count
+        from candidates`;
     case "receiving_accounts":
       return sql`
         with candidates as (
@@ -89,9 +139,11 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
               select 1 from payments_unmatched_deposits u
               join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
               where c.account_version_id = p.id and u.refund_liability_state in ('unknown','pending','attention_required')
-            ) as protected
+            ) or
+            ${activeHold("receiving_accounts", "receiving_account", sql`p.id::text`)} or
+            ${activeHold("receiving_accounts", "user", sql`p.applicant_user_id`)} as protected
           from payments_receiving_account_onboarding p
-          where p.retired_at < ${cutoffIso}::timestamptz and p.minimized_at is null
+          where p.minimized_at is null
             and exists (
               select 1 from creator_application_revisions r
               join creator_applications a on a.id = r.application_id
@@ -117,7 +169,9 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
               select 1 from payments_unmatched_deposits u
               join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
               where c.application_id = a.id and u.refund_liability_state in ('unknown','pending','attention_required')
-            ) as protected
+            ) or
+            ${activeHold("application_content", "creator_application", sql`a.id::text`)} or
+            ${activeHold("application_content", "user", sql`a.user_id`)} as protected
           from creator_applications a
           where a.state in ('withdrawn','rejected') and a.updated_at < ${cutoffIso}::timestamptz
             and (a.state <> 'rejected' or a.cooldown_until < ${nowIso}::timestamptz)
@@ -157,26 +211,32 @@ async function enforceDataset(
     case "verifications":
       rows = await tx.execute(sql`
         with selected as (
-          select id from identity_verifications
-          where coalesce(consumed_at, expires_at) < ${cutoffIso}::timestamptz
-          order by coalesce(consumed_at, expires_at), id
+          select v.id from identity_verifications v
+          where coalesce(v.consumed_at, v.expires_at) < ${cutoffIso}::timestamptz
+            and not ${activeHold("verifications", "verification", sql`v.id`)}
+            and not ${activeHold("verifications", "user", sql`v.user_id`)}
+          order by coalesce(v.consumed_at, v.expires_at), v.id
           limit ${batchSize} for update skip locked
         ) delete from identity_verifications v using selected s where v.id = s.id returning v.id`);
       break;
     case "sessions":
       rows = await tx.execute(sql`
         with selected as (
-          select id from identity_sessions
-          where coalesce(revoked_at, expires_at) < ${cutoffIso}::timestamptz
-          order by coalesce(revoked_at, expires_at), id
+          select s.id from identity_sessions s
+          where coalesce(s.revoked_at, s.expires_at) < ${cutoffIso}::timestamptz
+            and not ${activeHold("sessions", "session", sql`s.id`)}
+            and not ${activeHold("sessions", "user", sql`s.user_id`)}
+          order by coalesce(s.revoked_at, s.expires_at), s.id
           limit ${batchSize} for update skip locked
         ) delete from identity_sessions s using selected x where s.id = x.id returning s.id`);
       break;
     case "security_throttles":
       rows = await tx.execute(sql`
         with selected as (
-          select id from identity_security_throttles where updated_at < ${cutoffIso}::timestamptz
-          order by updated_at, id limit ${batchSize} for update skip locked
+          select s.id from identity_security_throttles s
+          where s.updated_at < ${cutoffIso}::timestamptz
+            and not ${activeHold("security_throttles", "security_throttle", sql`s.id::text`)}
+          order by s.updated_at, s.id limit ${batchSize} for update skip locked
         ) delete from identity_security_throttles s using selected x where s.id = x.id returning s.id`);
       break;
     case "provisional_accounts":
@@ -199,6 +259,12 @@ async function enforceDataset(
             and not exists(select 1 from payments_unmatched_deposits p where p.reconciled_by_owner_user_id = u.id)
             and not exists(select 1 from admin_audit_events a where a.actor_user_id = u.id or (a.subject_type = 'user' and a.subject_id = u.id))
             and not exists(select 1 from system_command_idempotency c where c.actor_user_id = u.id)
+            and not ${activeHold("provisional_accounts", "user", sql`u.id`)}
+            and not exists(
+              select 1 from identity_verifications v
+              where v.user_id = u.id and v.purpose = 'email_verification'
+                and v.consumed_at is null and v.expires_at >= ${nowIso}::timestamptz
+            )
           order by u.created_at, u.id limit ${batchSize} for update skip locked
         ) delete from identity_users u using selected s where u.id = s.id returning u.id`);
       break;
@@ -206,7 +272,7 @@ async function enforceDataset(
       rows = await tx.execute(sql`
         with selected as (
           select p.id from payments_receiving_account_onboarding p
-          where p.retired_at < ${cutoffIso}::timestamptz and p.minimized_at is null
+          where p.minimized_at is null
             and exists (
               select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
               where r.proposed_receiving_account_id = p.id::text and a.state in ('withdrawn','rejected')
@@ -218,7 +284,9 @@ async function enforceDataset(
               select 1 from payments_unmatched_deposits u join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
               where c.account_version_id = p.id and u.refund_liability_state in ('unknown','pending','attention_required')
             )
-          order by p.retired_at, p.id limit ${batchSize} for update skip locked
+            and not ${activeHold("receiving_accounts", "receiving_account", sql`p.id::text`)}
+            and not ${activeHold("receiving_accounts", "user", sql`p.applicant_user_id`)}
+          order by p.updated_at, p.id limit ${batchSize} for update skip locked
         ) update payments_receiving_account_onboarding p
           set account_number_envelope = null, account_holder_label_envelope = null,
               minimized_at = ${nowIso}::timestamptz, updated_at = ${nowIso}::timestamptz
@@ -240,6 +308,8 @@ async function enforceDataset(
               select 1 from payments_unmatched_deposits u join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
               where c.application_id = a.id and u.refund_liability_state in ('unknown','pending','attention_required')
             )
+            and not ${activeHold("application_content", "creator_application", sql`a.id::text`)}
+            and not ${activeHold("application_content", "user", sql`a.user_id`)}
           order by a.updated_at, a.id limit ${batchSize} for update skip locked
         ), updated as (
           update creator_application_revisions r

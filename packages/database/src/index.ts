@@ -70,6 +70,7 @@ export {
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,
   systemCommandIdempotency,
+  systemRetentionHolds,
   systemRetentionRuns,
   systemOutbox,
 } from "./schema.js";

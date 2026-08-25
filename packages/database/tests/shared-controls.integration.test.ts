@@ -298,7 +298,7 @@ describe("shared control repositories", () => {
     );
     expect(report.find((item) => item.dataset === "verifications")?.candidateCount).toBe(1);
     expect(report.find((item) => item.dataset === "receiving_accounts")).toEqual(
-      expect.objectContaining({ candidateCount: 2, protectedCount: 1, processedCount: 0 }),
+      expect.objectContaining({ candidateCount: 3, protectedCount: 1, processedCount: 0 }),
     );
     expect(report.find((item) => item.dataset === "application_content")).toEqual(
       expect.objectContaining({ candidateCount: 2, protectedCount: 1, processedCount: 0 }),
@@ -355,5 +355,223 @@ describe("shared control repositories", () => {
     await expect(client`delete from system_retention_runs`).rejects.toThrow(
       "immutable control record",
     );
+  });
+
+  test("retention protects active verification challenges and every active hold", async () => {
+    // Break caught: count and enforcement queries omitting either direct-row holds,
+    // owning-user holds, or a live reissued email-verification challenge.
+    const now = new Date("2025-02-01T12:00:00.000Z");
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values
+        ('task9-provisional-held', 'Held', 'held@example.test', 'held@example.test', false, null, null, false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-provisional-challenge', 'Challenge', 'challenge@example.test', 'challenge@example.test', false, null, null, false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-provisional-released', 'Released', 'released@example.test', 'released@example.test', false, null, null, false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-session-owner', 'Session Owner', 'session-owner@example.test', 'session-owner@example.test', true, '2024-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-session-released-owner', 'Released Session Owner', 'released-session-owner@example.test', 'released-session-owner@example.test', true, '2024-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-business-direct', 'Direct Business', 'direct-business@example.test', 'direct-business@example.test', true, '2024-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-business-owner', 'Owner Business', 'owner-business@example.test', 'owner-business@example.test', true, '2024-01-01T00:00:00Z', 'password_email_challenge', false, 'active', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+      insert into identity_verifications
+        (id, identifier_hash, token_hash, purpose, user_id, expires_at, consumed_at,
+         attempt_count, created_at, updated_at)
+      values
+        ('task9-live-email-verification', 'task9-live-identifier', 'task9-live-token', 'email_verification', 'task9-provisional-challenge', '2025-02-02T12:00:00Z', null, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
+        ('task9-verification-direct', 'task9-direct-identifier', 'task9-direct-token', 'password_reset', null, '2024-01-02T00:00:00Z', null, 0, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-verification-owner', 'task9-owner-identifier', 'task9-owner-token', 'password_reset', 'task9-session-owner', '2024-01-02T00:00:00Z', null, 0, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('task9-verification-released', 'task9-released-identifier', 'task9-released-token', 'password_reset', null, '2024-01-02T00:00:00Z', null, 0, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+      insert into identity_sessions
+        (id, expires_at, token_hash, created_at, updated_at, user_id, assurance_state,
+         last_used_at, absolute_expires_at, idle_expires_at, authorization_version)
+      values
+        ('task9-session-direct', '2024-01-02T00:00:00Z', 'task9-session-direct-token', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'task9-session-owner', 'provisional', '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z', '2024-01-03T00:00:00Z', 1),
+        ('task9-session-owner-held', '2024-01-02T00:00:00Z', 'task9-session-owner-token', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'task9-session-owner', 'provisional', '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z', '2024-01-03T00:00:00Z', 1),
+        ('task9-session-released', '2024-01-02T00:00:00Z', 'task9-session-released-token', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'task9-session-released-owner', 'provisional', '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z', '2024-01-03T00:00:00Z', 1);
+      insert into identity_security_throttles
+        (id, scope, subject_hmac, action, attempt_count, window_started_at, risk_level, updated_at)
+      values
+        ('50000000-0000-4000-8000-000000000001', 'network', 'task9-throttle-direct-hmac', 'sign_in', 1, '2024-01-01T00:00:00Z', 'normal', '2024-01-01T00:00:00Z'),
+        ('50000000-0000-4000-8000-000000000002', 'network', 'task9-throttle-released-hmac', 'sign_in', 1, '2024-01-01T00:00:00Z', 'normal', '2024-01-01T00:00:00Z');
+      insert into payments_receiving_account_onboarding
+        (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name,
+         account_number_envelope, account_holder_label_envelope, masked_suffix,
+         account_fingerprint, proof_state, created_at, updated_at)
+      values
+        ('51000000-0000-4000-8000-000000000001', '52000000-0000-4000-8000-000000000001', 'task9-business-direct', 1, '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb, '•••• 1001', 'hmac-sha256:v1:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD', 'unverified', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('51000000-0000-4000-8000-000000000002', '52000000-0000-4000-8000-000000000002', 'task9-business-owner', 1, '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb, '•••• 1002', 'hmac-sha256:v1:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE', 'unverified', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+      insert into creator_applications (id, user_id, state, version, created_at, updated_at)
+      values
+        ('53000000-0000-4000-8000-000000000001', 'task9-business-direct', 'withdrawn', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('53000000-0000-4000-8000-000000000002', 'task9-business-owner', 'withdrawn', 1, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction,
+         applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+         practice_description, content_intent, proposed_receiving_account_id,
+         age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values
+        ('54000000-0000-4000-8000-000000000001', '53000000-0000-4000-8000-000000000001', 1, 'Direct artist', 'Introduction', 'direct-business@example.test', '{"version":1}'::jsonb, '["https://example.test/direct"]'::jsonb, 'illustration', 'Practice', 'general_audience_only', '51000000-0000-4000-8000-000000000001', 21, '2024-01-01', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z'),
+        ('54000000-0000-4000-8000-000000000002', '53000000-0000-4000-8000-000000000002', 1, 'Owner artist', 'Introduction', 'owner-business@example.test', '{"version":1}'::jsonb, '["https://example.test/owner"]'::jsonb, 'illustration', 'Practice', 'general_audience_only', '51000000-0000-4000-8000-000000000002', 21, '2024-01-01', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z');
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id, starts_at, released_at, created_at)
+      values
+        ('provisional_accounts', 'user', 'task9-provisional-held', 'incident', 'task9-ref-provisional-active', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('provisional_accounts', 'user', 'task9-provisional-released', 'incident', 'task9-ref-provisional-released', '2025-01-01T00:00:00Z', '2025-01-02T00:00:00Z', '2025-01-01T00:00:00Z'),
+        ('verifications', 'verification', 'task9-verification-direct', 'legal', 'task9-ref-verification-direct', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('verifications', 'user', 'task9-session-owner', 'incident', 'task9-ref-verification-owner', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('verifications', 'verification', 'task9-verification-released', 'incident', 'task9-ref-verification-released', '2025-01-01T00:00:00Z', '2025-01-02T00:00:00Z', '2025-01-01T00:00:00Z'),
+        ('sessions', 'session', 'task9-session-direct', 'incident', 'task9-ref-session-direct', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('sessions', 'user', 'task9-session-owner', 'legal', 'task9-ref-session-owner', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('sessions', 'session', 'task9-session-released', 'incident', 'task9-ref-session-released', '2025-01-01T00:00:00Z', '2025-01-02T00:00:00Z', '2025-01-01T00:00:00Z'),
+        ('security_throttles', 'security_throttle', '50000000-0000-4000-8000-000000000001', 'incident', 'task9-ref-throttle-active', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('security_throttles', 'security_throttle', '50000000-0000-4000-8000-000000000002', 'incident', 'task9-ref-throttle-released', '2025-01-01T00:00:00Z', '2025-01-02T00:00:00Z', '2025-01-01T00:00:00Z'),
+        ('receiving_accounts', 'receiving_account', '51000000-0000-4000-8000-000000000001', 'legal', 'task9-ref-account-direct', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('receiving_accounts', 'user', 'task9-business-owner', 'incident', 'task9-ref-account-owner', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('application_content', 'creator_application', '53000000-0000-4000-8000-000000000001', 'legal', 'task9-ref-application-direct', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z'),
+        ('application_content', 'user', 'task9-business-owner', 'incident', 'task9-ref-application-owner', '2025-01-01T00:00:00Z', null, '2025-01-01T00:00:00Z');
+    `);
+
+    await expect(client.unsafe(`
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id, starts_at, created_at)
+      values ('provisional_accounts', 'user', 'task9-provisional-held', 'legal',
+        'task9-ref-duplicate-active', '2025-01-02T00:00:00Z', '2025-01-02T00:00:00Z')
+    `)).rejects.toThrow();
+    await expect(client.unsafe(`
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id, starts_at, created_at)
+      values ('unknown', 'user', 'task9-invalid', 'legal', 'task9-ref-invalid',
+        '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')
+    `)).rejects.toThrow();
+    await expect(client.unsafe(`
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id, starts_at, released_at, created_at)
+      values ('sessions', 'session', 'task9-invalid-time', 'incident', 'task9-ref-invalid-time',
+        '2025-01-02T00:00:00Z', '2025-01-02T00:00:00Z', '2025-01-02T00:00:00Z')
+    `)).rejects.toThrow();
+
+    const report = await runRetentionSweep({
+      db,
+      now,
+      mode: "report_only",
+      policyVersion: "task9-test-v1",
+      enforcementPaused: true,
+      batchSize: 100,
+    });
+    expect(report).toEqual(expect.arrayContaining([
+      expect.objectContaining({ dataset: "provisional_accounts", candidateCount: 3, protectedCount: 2, processedCount: 0 }),
+      expect.objectContaining({ dataset: "verifications", candidateCount: 3, protectedCount: 2, processedCount: 0 }),
+      expect.objectContaining({ dataset: "sessions", candidateCount: 3, protectedCount: 2, processedCount: 0 }),
+      expect.objectContaining({ dataset: "security_throttles", candidateCount: 2, protectedCount: 1, processedCount: 0 }),
+      expect.objectContaining({ dataset: "receiving_accounts", candidateCount: 2, protectedCount: 2, processedCount: 0 }),
+      expect.objectContaining({ dataset: "application_content", candidateCount: 2, protectedCount: 2, processedCount: 0 }),
+    ]));
+    expect(await client`select id from identity_users where id = 'task9-provisional-released'`).toHaveLength(1);
+    expect(await client`select id from identity_verifications where id = 'task9-verification-released'`).toHaveLength(1);
+
+    const enforced = await runRetentionSweep({
+      db,
+      now,
+      mode: "enforce",
+      policyVersion: "task9-test-v1",
+      enforcementPaused: false,
+      batchSize: 100,
+    });
+    expect(enforced).toEqual(expect.arrayContaining([
+      expect.objectContaining({ dataset: "provisional_accounts", processedCount: 1 }),
+      expect.objectContaining({ dataset: "verifications", processedCount: 1 }),
+      expect.objectContaining({ dataset: "sessions", processedCount: 1 }),
+      expect.objectContaining({ dataset: "security_throttles", processedCount: 1 }),
+      expect.objectContaining({ dataset: "receiving_accounts", processedCount: 0 }),
+      expect.objectContaining({ dataset: "application_content", processedCount: 0 }),
+    ]));
+    expect(await client`select id from identity_users where id in ('task9-provisional-held', 'task9-provisional-challenge') order by id`).toHaveLength(2);
+    expect(await client`select id from identity_users where id = 'task9-provisional-released'`).toHaveLength(0);
+    expect(await client`select id from identity_verifications where id in ('task9-verification-direct', 'task9-verification-owner') order by id`).toHaveLength(2);
+    expect(await client`select id from identity_verifications where id = 'task9-verification-released'`).toHaveLength(0);
+    expect(await client`select id from identity_sessions where id in ('task9-session-direct', 'task9-session-owner-held') order by id`).toHaveLength(2);
+    expect(await client`select id from identity_sessions where id = 'task9-session-released'`).toHaveLength(0);
+    expect(await client`select id from identity_security_throttles where id = '50000000-0000-4000-8000-000000000001'`).toHaveLength(1);
+    expect(await client`select id from identity_security_throttles where id = '50000000-0000-4000-8000-000000000002'`).toHaveLength(0);
+    expect(await client`select id from payments_receiving_account_onboarding where minimized_at is null and id in ('51000000-0000-4000-8000-000000000001', '51000000-0000-4000-8000-000000000002')`).toHaveLength(2);
+    expect(await client`select id from creator_application_revisions where minimized_at is null and id in ('54000000-0000-4000-8000-000000000001', '54000000-0000-4000-8000-000000000002')`).toHaveLength(2);
+  });
+
+  test("retention minimizes the current account referenced by an old final application", async () => {
+    // Break caught: eligibility and the binding trigger requiring retired_at even
+    // though final application timing is the approved retention clock.
+    const now = new Date("2023-02-01T12:00:00.000Z");
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values ('task9-current-account-owner', 'Current Owner', 'current-owner@example.test',
+        'current-owner@example.test', true, '2022-01-01T00:00:00Z',
+        'password_email_challenge', false, 'active', 1,
+        '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into payments_receiving_account_onboarding
+        (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name,
+         account_number_envelope, account_holder_label_envelope, masked_suffix,
+         account_fingerprint, proof_state, created_at, updated_at)
+      values ('61000000-0000-4000-8000-000000000001', '62000000-0000-4000-8000-000000000001',
+        'task9-current-account-owner', 1, '970436', 'Test Bank', '{"version":1}'::jsonb,
+        '{"version":1}'::jsonb, '•••• 2001',
+        'hmac-sha256:v1:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF',
+        'unverified', '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into creator_applications (id, user_id, state, version, created_at, updated_at)
+      values ('63000000-0000-4000-8000-000000000001', 'task9-current-account-owner',
+        'withdrawn', 1, '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction,
+         applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+         practice_description, content_intent, proposed_receiving_account_id,
+         age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values ('64000000-0000-4000-8000-000000000001', '63000000-0000-4000-8000-000000000001',
+        1, 'Current artist', 'Introduction', 'current-owner@example.test',
+        '{"version":1}'::jsonb, '["https://example.test/current"]'::jsonb,
+        'illustration', 'Practice', 'general_audience_only',
+        '61000000-0000-4000-8000-000000000001', 21, '2022-01-01',
+        '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id,
+         starts_at, released_at, created_at)
+      values
+        ('receiving_accounts', 'receiving_account', '61000000-0000-4000-8000-000000000001',
+         'incident', 'task9-ref-current-account-released', '2022-01-01T00:00:00Z',
+         '2022-01-02T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('application_content', 'creator_application', '63000000-0000-4000-8000-000000000001',
+         'incident', 'task9-ref-current-application-released', '2022-01-01T00:00:00Z',
+         '2022-01-02T00:00:00Z', '2022-01-01T00:00:00Z');
+    `);
+
+    const enforced = await runRetentionSweep({
+      db,
+      now,
+      mode: "enforce",
+      policyVersion: "task9-test-v1",
+      enforcementPaused: false,
+      batchSize: 100,
+    });
+    expect(enforced.find((item) => item.dataset === "receiving_accounts")).toEqual(
+      expect.objectContaining({ candidateCount: 1, protectedCount: 0, processedCount: 1, outcome: "completed" }),
+    );
+    const [account] = await client<{
+      retired_at: Date | null;
+      minimized_at: Date | null;
+      account_number_envelope: unknown;
+      account_holder_label_envelope: unknown;
+    }[]>`
+      select retired_at, minimized_at, account_number_envelope, account_holder_label_envelope
+      from payments_receiving_account_onboarding
+      where id = '61000000-0000-4000-8000-000000000001'
+    `;
+    expect(account).toMatchObject({
+      retired_at: null,
+      account_number_envelope: null,
+      account_holder_label_envelope: null,
+    });
+    expect(new Date(String(account?.minimized_at)).toISOString()).toBe(now.toISOString());
   });
 });
