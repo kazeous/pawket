@@ -20,7 +20,7 @@ type ProcessorFactory = {
     securityEmail?: {
       keyring: never;
       sender: never;
-      deliver: (db: never, input: Record<string, unknown>) => Promise<"delivered" | "already_delivered">;
+      deliver: (db: never, input: Record<string, unknown>) => Promise<"delivered" | "already_delivered" | "attention_required">;
       materialize?: (input: Record<string, unknown>) => Promise<"created" | "attention_required" | "already_materialized">;
     };
   }): (job: unknown) => Promise<void>;
@@ -129,6 +129,40 @@ describe("security email worker contract", () => {
         handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
         workerId: "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
       }),
+    );
+  });
+
+  test("acknowledges a terminal unknown delivery outcome and records bounded attention", async () => {
+    // Break caught: exhausting SMTP uncertainty by rethrowing forever instead of surfacing durable attention.
+    metricsRegistry.resetMetrics();
+    const calls: string[] = [];
+    const deliver = vi.fn(async () => {
+      calls.push("deliver");
+      return "attention_required" as const;
+    });
+    const acknowledge = vi.fn(async () => {
+      calls.push("acknowledge");
+      return true;
+    });
+    const processor = runtime.createWorkerJobProcessor!({
+      logger: { info() {}, error() {} },
+      database: {} as never,
+      acknowledge,
+      securityEmail: { keyring: {} as never, sender: {} as never, deliver },
+    });
+
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(calls).toEqual(["deliver", "acknowledge"]);
+    expect(await metricsRegistry.metrics()).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
     );
   });
 

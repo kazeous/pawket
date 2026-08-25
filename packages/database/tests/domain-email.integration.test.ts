@@ -1,15 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 import {
+  adminAuditEvents,
+  appendAdminAuditEvent,
+  creatorApplicationDecisions,
+  creatorApplicationRevisions,
+  creatorApplications,
   findEmailHandoffBySourceEvent,
   identityEmailHandoffs,
   identityUsers,
+  insertOutboxEvent,
   systemOutbox,
   type PawketDatabase,
 } from "../src/index.js";
@@ -22,6 +28,7 @@ import {
   deliverSecurityEmailHandoff,
   queueSecurityEmailHandoff,
 } from "../../identity/src/security-email-handoff.js";
+import type { SecurityEmailMessage } from "../../identity/src/security-email.js";
 import { metricsRegistry } from "../../observability/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -215,8 +222,281 @@ describe("domain email materialization", () => {
     expect(JSON.stringify(handoff)).not.toContain("private owner note");
   });
 
-  test("retries an acknowledgement-unknown SMTP delivery with one durable sent row and safe observability", async () => {
-    // Break caught: claiming single-send delivery, losing the stable handoff ID, or leaking delivery material on retry.
+  test("retries a provider-accepted reopen outcome without rolling back its committed domain facts", async () => {
+    // Break caught: testing delivery against an unrelated row instead of the transaction that caused the email.
+    const domainAt = new Date("2026-08-25T12:15:00.000Z");
+    const firstDeliveryAt = new Date(domainAt.getTime() + 1);
+    const applicationId = randomUUID();
+    const revisionId = randomUUID();
+    const artistUserId = `reopen-artist-${randomUUID()}`;
+    const ownerUserId = `reopen-owner-${randomUUID()}`;
+    const destination = `${artistUserId}@example.com`;
+    const decisionExplanation = `private-explanation-${randomUUID()}`;
+    const privateNote = `private-owner-note-${randomUUID()}`;
+    const requestId = `reopen-request-${randomUUID()}`;
+    const handoffId = randomUUID();
+    await db.insert(identityUsers).values([
+      {
+        id: artistUserId,
+        name: "Artist",
+        email: destination,
+        canonicalEmail: destination,
+        emailVerified: true,
+        emailVerifiedAt: domainAt,
+        emailVerificationProvenance: "password_email_challenge",
+        createdAt: domainAt,
+        updatedAt: domainAt,
+      },
+      {
+        id: ownerUserId,
+        name: "Owner",
+        email: `${ownerUserId}@example.com`,
+        canonicalEmail: `${ownerUserId}@example.com`,
+        emailVerified: true,
+        emailVerifiedAt: domainAt,
+        emailVerificationProvenance: "password_email_challenge",
+        createdAt: domainAt,
+        updatedAt: domainAt,
+      },
+    ]);
+    await db.insert(creatorApplications).values({
+      id: applicationId,
+      userId: artistUserId,
+      state: "rejected",
+      version: 3,
+      currentRevisionId: revisionId,
+      rejectedAt: domainAt,
+      cooldownUntil: domainAt,
+      createdAt: domainAt,
+      updatedAt: domainAt,
+    });
+    await db.insert(creatorApplicationRevisions).values({
+      id: revisionId,
+      applicationId,
+      revisionNumber: 1,
+      minimizedAt: domainAt,
+      createdAt: domainAt,
+      updatedAt: domainAt,
+    });
+
+    const sourceOutboxEventId = await db.transaction(async (tx) => {
+      const reopened = await tx.update(creatorApplications).set({
+        state: "changes_requested",
+        version: 4,
+        rejectedAt: null,
+        cooldownUntil: null,
+        updatedAt: domainAt,
+      }).where(and(
+        eq(creatorApplications.id, applicationId),
+        eq(creatorApplications.version, 3),
+      )).returning({ id: creatorApplications.id });
+      if (reopened.length !== 1) throw new Error("Expected committed reopen transition");
+      await tx.insert(creatorApplicationDecisions).values({
+        id: randomUUID(),
+        applicationId,
+        revisionId,
+        action: "reopened",
+        reasonCode: "other",
+        applicantExplanation: decisionExplanation,
+        privateNote,
+        actorUserId: ownerUserId,
+        actorSessionId: "owner-session",
+        stepUpProofId: randomUUID(),
+        expectedVersion: 3,
+        requestId,
+        createdAt: domainAt,
+      });
+      await appendAdminAuditEvent(tx, {
+        actorUserId: ownerUserId,
+        actorSessionId: "owner-session",
+        subjectType: "creator_application",
+        subjectId: applicationId,
+        action: "creator.application.reopen",
+        outcome: "succeeded",
+        reasonCode: "other",
+        beforeState: { state: "rejected", version: 3 },
+        afterState: { state: "changes_requested", version: 4 },
+        assurance: { method: "totp", actionClass: "owner.creator_application_reopen" },
+        applicationRevision: revisionId,
+        requestId,
+        occurredAt: domainAt,
+      });
+      const payload = {
+        applicationId,
+        applicantUserId: artistUserId,
+        revisionId,
+        state: "changes_requested",
+        decisionAction: "reopened",
+        correlationId: requestId,
+      };
+      await insertOutboxEvent(tx, {
+        eventType: "creator.application_reopened.v1",
+        eventVersion: 1,
+        aggregateType: "creator_application",
+        aggregateId: applicationId,
+        payload,
+        occurredAt: domainAt,
+      });
+      return insertOutboxEvent(tx, {
+        eventType: "creator.application_outcome_email.v1",
+        eventVersion: 1,
+        aggregateType: "creator_application",
+        aggregateId: applicationId,
+        payload,
+        occurredAt: domainAt,
+      });
+    });
+
+    const readCommittedFacts = async () => ({
+      application: await db.select({
+        state: creatorApplications.state,
+        version: creatorApplications.version,
+      }).from(creatorApplications).where(eq(creatorApplications.id, applicationId)),
+      decisions: await db.select({
+        action: creatorApplicationDecisions.action,
+        requestId: creatorApplicationDecisions.requestId,
+      }).from(creatorApplicationDecisions).where(eq(creatorApplicationDecisions.applicationId, applicationId)),
+      audits: await db.select({
+        action: adminAuditEvents.action,
+        outcome: adminAuditEvents.outcome,
+        requestId: adminAuditEvents.requestId,
+        beforeState: adminAuditEvents.beforeState,
+        afterState: adminAuditEvents.afterState,
+      }).from(adminAuditEvents).where(eq(adminAuditEvents.subjectId, applicationId)),
+      outbox: (await db.select({
+        eventType: systemOutbox.eventType,
+        payload: systemOutbox.payload,
+      }).from(systemOutbox).where(eq(systemOutbox.aggregateId, applicationId)))
+        .sort((left, right) => left.eventType.localeCompare(right.eventType)),
+    });
+    const committedFacts = await readCommittedFacts();
+    expect(committedFacts.application).toEqual([{ state: "changes_requested", version: 4 }]);
+    expect(committedFacts.decisions).toEqual([{ action: "reopened", requestId }]);
+    expect(committedFacts.audits).toEqual([expect.objectContaining({
+      action: "creator.application.reopen",
+      outcome: "succeeded",
+      requestId,
+    })]);
+
+    const [sourceEvent] = await db.select().from(systemOutbox)
+      .where(eq(systemOutbox.id, sourceOutboxEventId));
+    if (!sourceEvent) throw new Error("Expected committed reopen email outcome");
+    await expect(materializeDomainEmailHandoff({
+      db,
+      event: {
+        outboxEventId: sourceEvent.id,
+        eventType: sourceEvent.eventType,
+        eventVersion: sourceEvent.eventVersion,
+        aggregateType: sourceEvent.aggregateType,
+        aggregateId: sourceEvent.aggregateId,
+        payload: sourceEvent.payload,
+        occurredAt: sourceEvent.occurredAt.toISOString(),
+      },
+      keyring,
+      now: firstDeliveryAt,
+      id: () => handoffId,
+    })).resolves.toBe("created");
+
+    const providerDetail = `smtp-provider-private-${randomUUID()}`;
+    const providerCalls: Array<{ handoffId: string; state: string | undefined }> = [];
+    const sender = {
+      async send(message: SecurityEmailMessage) {
+        providerCalls.push({ handoffId: message.handoffId, state: message.templateData.state });
+        if (providerCalls.length === 1) throw new Error(providerDetail);
+      },
+    };
+    let firstError: unknown;
+    try {
+      await deliverSecurityEmailHandoff(db, {
+        handoffId,
+        workerId: sourceOutboxEventId,
+        keyring,
+        sender,
+        now: firstDeliveryAt,
+      });
+    } catch (error) {
+      firstError = error;
+    }
+    expect(firstError).toMatchObject({ message: "Security email delivery failed" });
+    expect(JSON.stringify(firstError)).not.toContain(providerDetail);
+    expect(await readCommittedFacts()).toEqual(committedFacts);
+
+    const finalDeliveryAt = new Date(firstDeliveryAt.getTime() + 60_001);
+    await expect(deliverSecurityEmailHandoff(db, {
+      handoffId,
+      workerId: sourceOutboxEventId,
+      keyring,
+      sender,
+      now: finalDeliveryAt,
+    })).resolves.toBe("delivered");
+    expect(await readCommittedFacts()).toEqual(committedFacts);
+    expect(providerCalls).toEqual([
+      { handoffId, state: "reopened" },
+      { handoffId, state: "reopened" },
+    ]);
+    const [delivered] = await db.select({
+      id: identityEmailHandoffs.id,
+      status: identityEmailHandoffs.status,
+      attempts: identityEmailHandoffs.attempts,
+      sentAt: identityEmailHandoffs.sentAt,
+      templateData: identityEmailHandoffs.templateData,
+    }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
+    expect(delivered).toEqual({
+      id: handoffId,
+      status: "sent",
+      attempts: 2,
+      sentAt: finalDeliveryAt,
+      templateData: { state: "reopened", returnPath: "/creator/apply" },
+    });
+    expect(JSON.stringify(delivered)).not.toContain(decisionExplanation);
+    expect(JSON.stringify(delivered)).not.toContain(privateNote);
+  });
+
+  test.each([
+    ["malformed", { state: "changes_requested", decisionAction: { privateNote: "must-not-escape" } }],
+    ["unknown", { state: "changes_requested", decisionAction: "reopened_with_private_detail" }],
+    ["mismatched", { state: "approved", decisionAction: "reopened" }],
+  ] as const)("fails closed for a %s application outcome without writing email work", async (_case, outcome) => {
+    // Characterization guard: invalid projections must fail before either durable email row is written.
+    const userId = `invalid-domain-email-${randomUUID()}`;
+    const sourceOutboxEventId = randomUUID();
+    const now = new Date("2026-08-25T12:30:00.000Z");
+    await db.insert(identityUsers).values({
+      id: userId,
+      name: "Artist",
+      email: `${userId}@example.com`,
+      canonicalEmail: `${userId}@example.com`,
+      emailVerified: true,
+      emailVerifiedAt: now,
+      emailVerificationProvenance: "password_email_challenge",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const handoffsBefore = (await db.select({ id: identityEmailHandoffs.id }).from(identityEmailHandoffs)).length;
+    const outboxBefore = (await db.select({ id: systemOutbox.id }).from(systemOutbox)).length;
+
+    await expect(materializeDomainEmailHandoff({
+      db,
+      event: {
+        outboxEventId: sourceOutboxEventId,
+        eventType: "creator.application_outcome_email.v1",
+        eventVersion: 1,
+        aggregateType: "creator_application",
+        aggregateId: randomUUID(),
+        payload: { applicantUserId: userId, ...outcome },
+        occurredAt: now.toISOString(),
+      },
+      keyring,
+      now,
+    })).rejects.toThrow("Invalid domain email event");
+
+    expect(await db.transaction((tx) => findEmailHandoffBySourceEvent(tx, sourceOutboxEventId))).toBeUndefined();
+    expect((await db.select({ id: identityEmailHandoffs.id }).from(identityEmailHandoffs))).toHaveLength(handoffsBefore);
+    expect((await db.select({ id: systemOutbox.id }).from(systemOutbox))).toHaveLength(outboxBefore);
+  });
+
+  test("bounds acknowledgement-unknown SMTP sends at three attempts and acknowledges durable attention", async () => {
+    // Break caught: endless provider sends, retaining delivery material after terminal uncertainty, or leaking provider text.
     metricsRegistry.resetMetrics();
     const firstAttemptAt = new Date("2026-08-25T13:00:00.000Z");
     let deliveryNow = firstAttemptAt;
@@ -277,52 +557,74 @@ describe("domain email materialization", () => {
         sender: {
           async send(message) {
             providerCalls.push({ ...message, templateData: { ...message.templateData } });
-            if (providerCalls.length === 1) throw new Error(providerDetail);
+            throw new Error(providerDetail);
           },
         },
       },
     });
 
-    let firstError: unknown;
-    try {
-      await processor(deliveryJob as never);
-    } catch (error) {
-      firstError = error;
+    const errors: unknown[] = [];
+    for (const attemptAt of [
+      firstAttemptAt,
+      new Date(firstAttemptAt.getTime() + 60_001),
+    ]) {
+      deliveryNow = attemptAt;
+      try {
+        await processor(deliveryJob as never);
+      } catch (error) {
+        errors.push(error);
+      }
+      const [retryable] = await db.select({
+        status: identityEmailHandoffs.status,
+        attempts: identityEmailHandoffs.attempts,
+        availableAt: identityEmailHandoffs.availableAt,
+        sentAt: identityEmailHandoffs.sentAt,
+        failureCode: identityEmailHandoffs.failureCode,
+      }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
+      expect(retryable).toEqual({
+        status: "failed",
+        attempts: errors.length,
+        availableAt: new Date(attemptAt.getTime() + 60_000),
+        sentAt: null,
+        failureCode: "delivery_outcome_unknown",
+      });
+      expect(acknowledge).not.toHaveBeenCalled();
     }
-    expect(firstError).toMatchObject({ message: "Worker job processing failed" });
-    const [unknownOutcome] = await db.select({
-      status: identityEmailHandoffs.status,
-      attempts: identityEmailHandoffs.attempts,
-      availableAt: identityEmailHandoffs.availableAt,
-      sentAt: identityEmailHandoffs.sentAt,
-      failureCode: identityEmailHandoffs.failureCode,
-    }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
-    expect(unknownOutcome).toEqual({
-      status: "failed",
-      attempts: 1,
-      availableAt: new Date(firstAttemptAt.getTime() + 60_000),
-      sentAt: null,
-      failureCode: "delivery_outcome_unknown",
-    });
-    expect(acknowledge).not.toHaveBeenCalled();
+    expect(errors).toHaveLength(2);
+    expect(errors).toEqual([
+      expect.objectContaining({ message: "Worker job processing failed" }),
+      expect.objectContaining({ message: "Worker job processing failed" }),
+    ]);
 
-    deliveryNow = new Date(firstAttemptAt.getTime() + 60_001);
+    deliveryNow = new Date(firstAttemptAt.getTime() + 120_002);
     await expect(processor(deliveryJob as never)).resolves.toBeUndefined();
 
-    const [delivered] = await db.select({
+    const [terminal] = await db.select({
+      id: identityEmailHandoffs.id,
       status: identityEmailHandoffs.status,
       attempts: identityEmailHandoffs.attempts,
+      destinationEnvelope: identityEmailHandoffs.destinationEnvelope,
+      secretEnvelope: identityEmailHandoffs.secretEnvelope,
       sentAt: identityEmailHandoffs.sentAt,
       failureCode: identityEmailHandoffs.failureCode,
+      lockedAt: identityEmailHandoffs.lockedAt,
+      lockedBy: identityEmailHandoffs.lockedBy,
+      leaseExpiresAt: identityEmailHandoffs.leaseExpiresAt,
     }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
-    expect(delivered).toEqual({
-      status: "sent",
-      attempts: 2,
-      sentAt: new Date(firstAttemptAt.getTime() + 60_001),
-      failureCode: null,
+    expect(terminal).toEqual({
+      id: handoffId,
+      status: "attention_required",
+      attempts: 3,
+      destinationEnvelope: null,
+      secretEnvelope: null,
+      sentAt: null,
+      failureCode: "delivery_outcome_unknown_retry_limit",
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
     });
-    expect(providerCalls).toHaveLength(2);
-    expect(providerCalls.map((call) => call.handoffId)).toEqual([handoffId, handoffId]);
+    expect(providerCalls).toHaveLength(3);
+    expect(providerCalls.map((call) => call.handoffId)).toEqual([handoffId, handoffId, handoffId]);
     expect(acknowledge).toHaveBeenCalledOnce();
 
     const metrics = await metricsRegistry.metrics();
@@ -330,12 +632,83 @@ describe("domain email materialization", () => {
       job: deliveryJob,
       logs,
       metrics,
-      error: firstError instanceof Error ? { name: firstError.name, message: firstError.message, stack: firstError.stack } : firstError,
+      errors: errors.map((error) => error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : error),
     });
     for (const prohibited of [destination, secret, providerDetail]) {
       expect(safeSnapshot).not.toContain(prohibited);
     }
-    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 1');
-    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="sent"} 1');
+    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 2');
+    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1');
+    expect(metrics).not.toContain('pawket_security_emails_total{purpose="password_reset",outcome="sent"}');
+
+    deliveryNow = new Date(firstAttemptAt.getTime() + 180_003);
+    await expect(processor(deliveryJob as never)).resolves.toBeUndefined();
+    expect(providerCalls).toHaveLength(3);
+    expect(acknowledge).toHaveBeenCalledTimes(2);
+  });
+
+  test("fails closed when a sender completion no longer owns the claimed lease", async () => {
+    // Characterization guard: a stale completion must never terminalize a lease now owned by another worker.
+    const now = new Date("2026-08-25T14:00:00.000Z");
+    const userId = `lease-owner-${randomUUID()}`;
+    const handoffId = randomUUID();
+    const destination = `${userId}@example.com`;
+    const secret = `lease-secret-${randomUUID()}`;
+    const providerDetail = `lease-provider-detail-${randomUUID()}`;
+    await db.insert(identityUsers).values({
+      id: userId,
+      name: "Artist",
+      email: destination,
+      canonicalEmail: destination,
+      emailVerified: true,
+      emailVerifiedAt: now,
+      emailVerificationProvenance: "password_email_challenge",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.transaction((tx) => queueSecurityEmailHandoff(tx, {
+      id: handoffId,
+      userId,
+      purpose: "password_reset",
+      destination,
+      secret,
+      keyring,
+      now,
+    }));
+    await db.update(identityEmailHandoffs).set({
+      status: "failed",
+      attempts: 2,
+      failureCode: "delivery_outcome_unknown",
+    }).where(eq(identityEmailHandoffs.id, handoffId));
+
+    await expect(deliverSecurityEmailHandoff(db, {
+      handoffId,
+      workerId: "original-worker",
+      keyring,
+      now,
+      sender: {
+        async send() {
+          await db.update(identityEmailHandoffs).set({ lockedBy: "new-owner" })
+            .where(eq(identityEmailHandoffs.id, handoffId));
+          throw new Error(providerDetail);
+        },
+      },
+    })).rejects.toThrow("Security email delivery failed");
+
+    const [row] = await db.select().from(identityEmailHandoffs)
+      .where(eq(identityEmailHandoffs.id, handoffId));
+    expect(row).toEqual(expect.objectContaining({
+      id: handoffId,
+      status: "processing",
+      attempts: 3,
+      lockedBy: "new-owner",
+      sentAt: null,
+      failureCode: "delivery_outcome_unknown",
+    }));
+    expect(row?.destinationEnvelope).not.toBeNull();
+    expect(row?.secretEnvelope).not.toBeNull();
+    expect(JSON.stringify(row)).not.toContain(providerDetail);
   });
 });

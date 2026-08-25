@@ -223,7 +223,7 @@ export function createWorkerJobProcessor(input: {
             if (!input.securityEmail) {
               throw new Error("Security email delivery unavailable");
             }
-            let delivery: "delivered" | "already_delivered";
+            let delivery: "delivered" | "already_delivered" | "attention_required";
             try {
               delivery = await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
                 handoffId,
@@ -243,6 +243,11 @@ export function createWorkerJobProcessor(input: {
               recordSecurityEmailMetrics({
                 purpose: purpose as SecurityEmailPurpose,
                 outcome: "sent",
+              });
+            } else if (delivery === "attention_required") {
+              recordSecurityEmailMetrics({
+                purpose: purpose as SecurityEmailPurpose,
+                outcome: "attention_required",
               });
             }
           } else if (DOMAIN_EMAIL_EVENTS.has(job.data.eventType)) {

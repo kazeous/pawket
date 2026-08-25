@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 
 import {
   identityEmailHandoffs,
@@ -21,6 +21,8 @@ import type {
 } from "./security-email.js";
 
 const HANDOFF_RECORD_TYPE = "identity_email_handoff";
+const PROVIDER_SEND_ATTEMPT_LIMIT = 3;
+const UNKNOWN_OUTCOME_RETRY_DELAY_MS = 60_000;
 
 export async function queueUserSecurityNotice(
   tx: PawketTransaction,
@@ -177,7 +179,7 @@ export async function deliverSecurityEmailHandoff(
     now: Date;
     leaseMs?: number;
   },
-): Promise<"delivered" | "already_delivered"> {
+): Promise<"delivered" | "already_delivered" | "attention_required"> {
   const leaseExpiresAt = new Date(input.now.getTime() + (input.leaseMs ?? 30_000));
   const [claimed] = await db
     .update(identityEmailHandoffs)
@@ -194,6 +196,7 @@ export async function deliverSecurityEmailHandoff(
         eq(identityEmailHandoffs.id, input.handoffId),
         isNull(identityEmailHandoffs.sentAt),
         ne(identityEmailHandoffs.status, "attention_required"),
+        lt(identityEmailHandoffs.attempts, PROVIDER_SEND_ATTEMPT_LIMIT),
         isNotNull(identityEmailHandoffs.destinationEnvelope),
         lte(identityEmailHandoffs.availableAt, input.now),
         or(
@@ -206,11 +209,15 @@ export async function deliverSecurityEmailHandoff(
 
   if (!claimed) {
     const [existing] = await db
-      .select({ sentAt: identityEmailHandoffs.sentAt })
+      .select({
+        sentAt: identityEmailHandoffs.sentAt,
+        status: identityEmailHandoffs.status,
+      })
       .from(identityEmailHandoffs)
       .where(eq(identityEmailHandoffs.id, input.handoffId))
       .limit(1);
     if (existing?.sentAt) return "already_delivered";
+    if (existing?.status === "attention_required") return "attention_required";
     throw new Error("Security email handoff is unavailable");
   }
 
@@ -248,23 +255,47 @@ export async function deliverSecurityEmailHandoff(
       templateData: claimed.templateData,
     });
   } catch {
-    await db
+    const ownershipGuard = and(
+      eq(identityEmailHandoffs.id, input.handoffId),
+      isNull(identityEmailHandoffs.sentAt),
+      eq(identityEmailHandoffs.status, "processing"),
+      eq(identityEmailHandoffs.attempts, claimed.attempts),
+      eq(identityEmailHandoffs.lockedAt, input.now),
+      eq(identityEmailHandoffs.lockedBy, input.workerId),
+    );
+    if (claimed.attempts >= PROVIDER_SEND_ATTEMPT_LIMIT) {
+      const terminal = await db
+        .update(identityEmailHandoffs)
+        .set({
+          status: "attention_required",
+          destinationEnvelope: null,
+          secretEnvelope: null,
+          failureCode: "delivery_outcome_unknown_retry_limit",
+          lockedAt: null,
+          lockedBy: null,
+          leaseExpiresAt: null,
+          updatedAt: input.now,
+        })
+        .where(ownershipGuard)
+        .returning({ id: identityEmailHandoffs.id });
+      if (terminal.length !== 1) throw new Error("Security email delivery failed");
+      return "attention_required";
+    }
+
+    const retryable = await db
       .update(identityEmailHandoffs)
       .set({
         status: "failed",
         failureCode: "delivery_outcome_unknown",
-        availableAt: new Date(input.now.getTime() + 60_000),
+        availableAt: new Date(input.now.getTime() + UNKNOWN_OUTCOME_RETRY_DELAY_MS),
         lockedAt: null,
         lockedBy: null,
         leaseExpiresAt: null,
         updatedAt: input.now,
       })
-      .where(
-        and(
-          eq(identityEmailHandoffs.id, input.handoffId),
-          eq(identityEmailHandoffs.lockedBy, input.workerId),
-        ),
-      );
+      .where(ownershipGuard)
+      .returning({ id: identityEmailHandoffs.id });
+    if (retryable.length !== 1) throw new Error("Security email delivery failed");
     throw new Error("Security email delivery failed");
   }
 
@@ -282,6 +313,10 @@ export async function deliverSecurityEmailHandoff(
     .where(
       and(
         eq(identityEmailHandoffs.id, input.handoffId),
+        isNull(identityEmailHandoffs.sentAt),
+        eq(identityEmailHandoffs.status, "processing"),
+        eq(identityEmailHandoffs.attempts, claimed.attempts),
+        eq(identityEmailHandoffs.lockedAt, input.now),
         eq(identityEmailHandoffs.lockedBy, input.workerId),
       ),
     )

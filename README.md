@@ -49,6 +49,21 @@ PostgreSQL domain state, handoff ID, `sent_at`, attempt count, and attention
 status are authoritative; receiving one message is not proof that its related
 business transition succeeded or failed.
 
+Provider sends stop after three unknown outcomes. Attempts one and two leave a
+fixed retryable `delivery_outcome_unknown`; a third sender exception moves the
+handoff to terminal `attention_required`, clears its destination and secret
+envelopes, and leaves `sent_at` unset. This limit is reachable within the
+system queue's eight exponential job attempts despite the handoff's 60-second
+availability delay. The terminal state means delivery is unknown—one or more
+messages may already have been accepted—and is not authorization for a blind
+replay.
+
+For mixed-revision rollout of creator application outcome events, deploy the
+compatible worker before the web/admin producer. The worker accepts the prior
+bounded payload while the updated producer adds `decisionAction`; if worker-first
+ordering cannot be guaranteed, pause and drain application-outcome events until
+both services run the same revision.
+
 The release sequence is part of the topology: healthy PostgreSQL starts the
 `migrate` service, and that one-shot service must complete successfully before
 Coolify starts web or worker or shifts traffic. Use
