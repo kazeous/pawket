@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 
 import {
   identityEmailHandoffs,
@@ -179,7 +179,42 @@ export async function deliverSecurityEmailHandoff(
     now: Date;
     leaseMs?: number;
   },
-): Promise<"delivered" | "already_delivered" | "attention_required"> {
+): Promise<
+  | "delivered"
+  | "already_delivered"
+  | "attention_required"
+  | "already_attention_required"
+> {
+  const recovered = await db
+    .update(identityEmailHandoffs)
+    .set({
+      status: "attention_required",
+      destinationEnvelope: null,
+      secretEnvelope: null,
+      failureCode: "delivery_outcome_unknown_retry_limit",
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(identityEmailHandoffs.id, input.handoffId),
+        isNull(identityEmailHandoffs.sentAt),
+        ne(identityEmailHandoffs.status, "sent"),
+        ne(identityEmailHandoffs.status, "attention_required"),
+        gte(identityEmailHandoffs.attempts, PROVIDER_SEND_ATTEMPT_LIMIT),
+        isNotNull(identityEmailHandoffs.destinationEnvelope),
+        or(
+          isNull(identityEmailHandoffs.leaseExpiresAt),
+          lte(identityEmailHandoffs.leaseExpiresAt, input.now),
+        ),
+      ),
+    )
+    .returning({ id: identityEmailHandoffs.id });
+  if (recovered.length > 1) throw new Error("Security email delivery failed");
+  if (recovered.length === 1) return "attention_required";
+
   const leaseExpiresAt = new Date(input.now.getTime() + (input.leaseMs ?? 30_000));
   const [claimed] = await db
     .update(identityEmailHandoffs)
@@ -217,7 +252,7 @@ export async function deliverSecurityEmailHandoff(
       .where(eq(identityEmailHandoffs.id, input.handoffId))
       .limit(1);
     if (existing?.sentAt) return "already_delivered";
-    if (existing?.status === "attention_required") return "attention_required";
+    if (existing?.status === "attention_required") return "already_attention_required";
     throw new Error("Security email handoff is unavailable");
   }
 

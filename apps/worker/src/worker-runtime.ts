@@ -223,7 +223,11 @@ export function createWorkerJobProcessor(input: {
             if (!input.securityEmail) {
               throw new Error("Security email delivery unavailable");
             }
-            let delivery: "delivered" | "already_delivered" | "attention_required";
+            let delivery:
+              | "delivered"
+              | "already_delivered"
+              | "attention_required"
+              | "already_attention_required";
             try {
               delivery = await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
                 handoffId,

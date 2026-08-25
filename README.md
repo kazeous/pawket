@@ -58,6 +58,16 @@ availability delay. The terminal state means delivery is unknown—one or more
 messages may already have been accepted—and is not authorization for a blind
 replay.
 
+Before rolling out this worker behavior, include unsent nonterminal handoffs
+with `attempts >= 3` in the email-delivery preflight. Do not replay or rewrite
+them manually. On their next job invocation, the compatible worker atomically
+moves rows with no lease or an expired lease to `attention_required` without
+decrypting or contacting SMTP; an unexpired processing lease remains owned
+until it expires. Existing terminal rows are acknowledged without incrementing
+the attention metric again. The three-attempt bound still depends on the
+system queue's eight-attempt exponential policy and the handoff's 60-second
+availability delay, so review those settings together.
+
 For mixed-revision rollout of creator application outcome events, deploy the
 compatible worker before the web/admin producer. The worker accepts the prior
 bounded payload while the updated producer adds `decisionAction`; if worker-first

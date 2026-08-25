@@ -20,7 +20,9 @@ type ProcessorFactory = {
     securityEmail?: {
       keyring: never;
       sender: never;
-      deliver: (db: never, input: Record<string, unknown>) => Promise<"delivered" | "already_delivered" | "attention_required">;
+      deliver: (db: never, input: Record<string, unknown>) => Promise<
+        "delivered" | "already_delivered" | "attention_required" | "already_attention_required"
+      >;
       materialize?: (input: Record<string, unknown>) => Promise<"created" | "attention_required" | "already_materialized">;
     };
   }): (job: unknown) => Promise<void>;
@@ -132,13 +134,17 @@ describe("security email worker contract", () => {
     );
   });
 
-  test("acknowledges a terminal unknown delivery outcome and records bounded attention", async () => {
+  test("records a fresh bounded terminal outcome once while acknowledging its replay", async () => {
     // Break caught: exhausting SMTP uncertainty by rethrowing forever instead of surfacing durable attention.
     metricsRegistry.resetMetrics();
     const calls: string[] = [];
+    let invocation = 0;
     const deliver = vi.fn(async () => {
       calls.push("deliver");
-      return "attention_required" as const;
+      invocation += 1;
+      return invocation === 1
+        ? ("attention_required" as const)
+        : ("already_attention_required" as const);
     });
     const acknowledge = vi.fn(async () => {
       calls.push("acknowledge");
@@ -159,8 +165,16 @@ describe("security email worker contract", () => {
         }),
       ),
     ).resolves.toBeUndefined();
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).resolves.toBeUndefined();
 
-    expect(calls).toEqual(["deliver", "acknowledge"]);
+    expect(calls).toEqual(["deliver", "acknowledge", "deliver", "acknowledge"]);
     expect(await metricsRegistry.metrics()).toContain(
       'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
     );

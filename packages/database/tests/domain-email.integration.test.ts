@@ -40,7 +40,7 @@ const keyring = createEncryptionKeyring({
 });
 const schemaName = `domain_email_${process.pid}_${Date.now()}`;
 const client = postgres(databaseUrl, {
-  max: 1,
+  max: 5,
   connection: { search_path: `${schemaName},public` },
 });
 const db = drizzle(client, { schema }) as PawketDatabase;
@@ -51,6 +51,55 @@ async function executeMigration(filename: string): Promise<void> {
   for (const statement of migration.split("--> statement-breakpoint")) {
     if (statement.trim()) await client.unsafe(statement);
   }
+}
+
+async function queueTestPasswordReset(input: {
+  userId: string;
+  handoffId: string;
+  destination: string;
+  secret: string;
+  now: Date;
+}): Promise<void> {
+  await db.insert(identityUsers).values({
+    id: input.userId,
+    name: "Artist",
+    email: input.destination,
+    canonicalEmail: input.destination,
+    emailVerified: true,
+    emailVerifiedAt: input.now,
+    emailVerificationProvenance: "password_email_challenge",
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+  await db.transaction((tx) => queueSecurityEmailHandoff(tx, {
+    id: input.handoffId,
+    userId: input.userId,
+    purpose: "password_reset",
+    destination: input.destination,
+    secret: input.secret,
+    keyring,
+    now: input.now,
+  }));
+}
+
+async function deliveryJobForHandoff(handoffId: string) {
+  const [event] = (await db.select().from(systemOutbox)).filter(
+    (row) => row.aggregateId === handoffId,
+  );
+  if (!event) throw new Error("Expected the durable delivery event");
+  return {
+    id: event.id,
+    name: "system.outbox-event",
+    data: {
+      outboxEventId: event.id,
+      eventType: event.eventType,
+      eventVersion: event.eventVersion,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      payload: event.payload,
+      occurredAt: event.occurredAt.toISOString(),
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -647,6 +696,295 @@ describe("domain email materialization", () => {
     await expect(processor(deliveryJob as never)).resolves.toBeUndefined();
     expect(providerCalls).toHaveLength(3);
     expect(acknowledge).toHaveBeenCalledTimes(2);
+    const metricsAfterReplay = await metricsRegistry.metrics();
+    expect(metricsAfterReplay).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
+    );
+    expect(metricsAfterReplay).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 2',
+    );
+  });
+
+  test("recovers an expired third-attempt processing lease before decrypting or calling the provider", async () => {
+    // Break caught: attempt three can crash after claiming but before the provider catch terminalizes it.
+    metricsRegistry.resetMetrics();
+    const recoveryNow = new Date("2026-08-26T08:30:00.000Z");
+    const userId = `expired-third-${randomUUID()}`;
+    const handoffId = randomUUID();
+    const destination = `expired-third-${randomUUID()}@example.com`;
+    const secret = `expired-third-secret-${randomUUID()}`;
+    const providerDetail = `expired-third-provider-${randomUUID()}`;
+    await queueTestPasswordReset({
+      userId,
+      handoffId,
+      destination,
+      secret,
+      now: new Date(recoveryNow.getTime() - 120_000),
+    });
+    await db.update(identityEmailHandoffs).set({
+      status: "processing",
+      attempts: 3,
+      failureCode: "delivery_outcome_unknown",
+      lockedAt: new Date(recoveryNow.getTime() - 30_000),
+      lockedBy: "crashed-third-attempt-worker",
+      leaseExpiresAt: recoveryNow,
+    }).where(eq(identityEmailHandoffs.id, handoffId));
+
+    const deliveryJob = await deliveryJobForHandoff(handoffId);
+    const providerCalls: string[] = [];
+    const logs: Array<Record<string, unknown>> = [];
+    const acknowledge = vi.fn(async () => true);
+    const wrongKeyring = createEncryptionKeyring({
+      activeKeyId: "wrong-key",
+      keys: { "wrong-key": Buffer.alloc(32, 17) },
+    });
+    const processor = createWorkerJobProcessor({
+      logger: {
+        info() {},
+        error(data, message) { logs.push({ ...data, message }); },
+      },
+      database: db,
+      acknowledge,
+      securityEmail: {
+        keyring: wrongKeyring,
+        deliver: (database, input) => deliverSecurityEmailHandoff(database, {
+          ...input,
+          now: recoveryNow,
+        }),
+        sender: {
+          async send(message) {
+            providerCalls.push(message.handoffId);
+            throw new Error(`${providerDetail} ${destination} ${secret}`);
+          },
+        },
+      },
+    });
+
+    await expect(processor(deliveryJob as never)).resolves.toBeUndefined();
+
+    const [recovered] = await db.select({
+      id: identityEmailHandoffs.id,
+      status: identityEmailHandoffs.status,
+      attempts: identityEmailHandoffs.attempts,
+      destinationEnvelope: identityEmailHandoffs.destinationEnvelope,
+      secretEnvelope: identityEmailHandoffs.secretEnvelope,
+      sentAt: identityEmailHandoffs.sentAt,
+      failureCode: identityEmailHandoffs.failureCode,
+      lockedAt: identityEmailHandoffs.lockedAt,
+      lockedBy: identityEmailHandoffs.lockedBy,
+      leaseExpiresAt: identityEmailHandoffs.leaseExpiresAt,
+    }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
+    expect(recovered).toEqual({
+      id: handoffId,
+      status: "attention_required",
+      attempts: 3,
+      destinationEnvelope: null,
+      secretEnvelope: null,
+      sentAt: null,
+      failureCode: "delivery_outcome_unknown_retry_limit",
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
+    });
+    expect(providerCalls).toEqual([]);
+    expect(acknowledge).toHaveBeenCalledOnce();
+    const metrics = await metricsRegistry.metrics();
+    expect(metrics).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
+    );
+    expect(metrics).not.toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"}',
+    );
+    const safeSnapshot = JSON.stringify({ deliveryJob, logs, metrics });
+    for (const prohibited of [destination, secret, providerDetail]) {
+      expect(safeSnapshot).not.toContain(prohibited);
+    }
+  });
+
+  test.each([
+    ["failed", 3, "delivery_outcome_unknown"],
+    ["pending", 4, null],
+  ] as const)(
+    "recovers a legacy exhausted %s handoff without provider access",
+    async (status, attempts, failureCode) => {
+      const recoveryNow = new Date("2026-08-26T08:45:00.000Z");
+      const userId = `legacy-${status}-${randomUUID()}`;
+      const handoffId = randomUUID();
+      const destination = `legacy-${status}-${randomUUID()}@example.com`;
+      await queueTestPasswordReset({
+        userId,
+        handoffId,
+        destination,
+        secret: `legacy-${status}-secret-${randomUUID()}`,
+        now: new Date(recoveryNow.getTime() - 120_000),
+      });
+      await db.update(identityEmailHandoffs).set({
+        status,
+        attempts,
+        failureCode,
+        lockedAt: null,
+        lockedBy: null,
+        leaseExpiresAt: null,
+      }).where(eq(identityEmailHandoffs.id, handoffId));
+
+      let providerCalls = 0;
+      const result = await deliverSecurityEmailHandoff(db, {
+        handoffId,
+        workerId: `legacy-${status}-worker`,
+        keyring: createEncryptionKeyring({
+          activeKeyId: "wrong-key",
+          keys: { "wrong-key": Buffer.alloc(32, 19) },
+        }),
+        now: recoveryNow,
+        sender: {
+          async send() { providerCalls += 1; },
+        },
+      });
+
+      expect(result).toBe("attention_required");
+      expect(providerCalls).toBe(0);
+      const [recovered] = await db.select({
+        id: identityEmailHandoffs.id,
+        status: identityEmailHandoffs.status,
+        attempts: identityEmailHandoffs.attempts,
+        destinationEnvelope: identityEmailHandoffs.destinationEnvelope,
+        secretEnvelope: identityEmailHandoffs.secretEnvelope,
+        sentAt: identityEmailHandoffs.sentAt,
+        failureCode: identityEmailHandoffs.failureCode,
+        lockedAt: identityEmailHandoffs.lockedAt,
+        lockedBy: identityEmailHandoffs.lockedBy,
+        leaseExpiresAt: identityEmailHandoffs.leaseExpiresAt,
+      }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
+      expect(recovered).toEqual({
+        id: handoffId,
+        status: "attention_required",
+        attempts,
+        destinationEnvelope: null,
+        secretEnvelope: null,
+        sentAt: null,
+        failureCode: "delivery_outcome_unknown_retry_limit",
+        lockedAt: null,
+        lockedBy: null,
+        leaseExpiresAt: null,
+      });
+    },
+  );
+
+  test("preserves an active exhausted processing lease and fails unavailable without provider or ack", async () => {
+    const deliveryNow = new Date("2026-08-26T09:00:00.000Z");
+    const userId = `active-third-${randomUUID()}`;
+    const handoffId = randomUUID();
+    const destination = `active-third-${randomUUID()}@example.com`;
+    await queueTestPasswordReset({
+      userId,
+      handoffId,
+      destination,
+      secret: `active-third-secret-${randomUUID()}`,
+      now: new Date(deliveryNow.getTime() - 120_000),
+    });
+    await db.update(identityEmailHandoffs).set({
+      status: "processing",
+      attempts: 3,
+      failureCode: "delivery_outcome_unknown",
+      lockedAt: new Date(deliveryNow.getTime() - 30_000),
+      lockedBy: "active-third-attempt-worker",
+      leaseExpiresAt: new Date(deliveryNow.getTime() + 1),
+    }).where(eq(identityEmailHandoffs.id, handoffId));
+    const [before] = await db.select().from(identityEmailHandoffs)
+      .where(eq(identityEmailHandoffs.id, handoffId));
+    const deliveryJob = await deliveryJobForHandoff(handoffId);
+    let providerCalls = 0;
+    const acknowledge = vi.fn(async () => true);
+    const processor = createWorkerJobProcessor({
+      logger: { info() {}, error() {} },
+      database: db,
+      acknowledge,
+      securityEmail: {
+        keyring,
+        deliver: (database, input) => deliverSecurityEmailHandoff(database, {
+          ...input,
+          now: deliveryNow,
+        }),
+        sender: { async send() { providerCalls += 1; } },
+      },
+    });
+
+    await expect(processor(deliveryJob as never)).rejects.toThrow(
+      "Worker job processing failed",
+    );
+
+    const [after] = await db.select().from(identityEmailHandoffs)
+      .where(eq(identityEmailHandoffs.id, handoffId));
+    expect(after).toEqual(before);
+    expect(providerCalls).toBe(0);
+    expect(acknowledge).not.toHaveBeenCalled();
+  });
+
+  test("concurrent exhausted recovery yields one fresh and one existing terminal disposition", async () => {
+    const recoveryNow = new Date("2026-08-26T09:15:00.000Z");
+    const userId = `exhausted-race-${randomUUID()}`;
+    const handoffId = randomUUID();
+    const destination = `exhausted-race-${randomUUID()}@example.com`;
+    await queueTestPasswordReset({
+      userId,
+      handoffId,
+      destination,
+      secret: `exhausted-race-secret-${randomUUID()}`,
+      now: new Date(recoveryNow.getTime() - 120_000),
+    });
+    await db.update(identityEmailHandoffs).set({
+      status: "failed",
+      attempts: 3,
+      failureCode: "delivery_outcome_unknown",
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
+    }).where(eq(identityEmailHandoffs.id, handoffId));
+    let providerCalls = 0;
+    const delivery = (workerId: string) => deliverSecurityEmailHandoff(db, {
+      handoffId,
+      workerId,
+      keyring,
+      now: recoveryNow,
+      sender: { async send() { providerCalls += 1; } },
+    });
+
+    const results = await Promise.allSettled([
+      delivery("recovery-race-a"),
+      delivery("recovery-race-b"),
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ status: "fulfilled" }),
+      expect.objectContaining({ status: "fulfilled" }),
+    ]);
+    expect(results.map((result) => result.status === "fulfilled" ? result.value : "rejected").sort())
+      .toEqual(["already_attention_required", "attention_required"]);
+    expect(providerCalls).toBe(0);
+    const [recovered] = await db.select({
+      id: identityEmailHandoffs.id,
+      status: identityEmailHandoffs.status,
+      attempts: identityEmailHandoffs.attempts,
+      destinationEnvelope: identityEmailHandoffs.destinationEnvelope,
+      secretEnvelope: identityEmailHandoffs.secretEnvelope,
+      sentAt: identityEmailHandoffs.sentAt,
+      failureCode: identityEmailHandoffs.failureCode,
+      lockedAt: identityEmailHandoffs.lockedAt,
+      lockedBy: identityEmailHandoffs.lockedBy,
+      leaseExpiresAt: identityEmailHandoffs.leaseExpiresAt,
+    }).from(identityEmailHandoffs).where(eq(identityEmailHandoffs.id, handoffId));
+    expect(recovered).toEqual({
+      id: handoffId,
+      status: "attention_required",
+      attempts: 3,
+      destinationEnvelope: null,
+      secretEnvelope: null,
+      sentAt: null,
+      failureCode: "delivery_outcome_unknown_retry_limit",
+      lockedAt: null,
+      lockedBy: null,
+      leaseExpiresAt: null,
+    });
   });
 
   test("fails closed when a sender completion no longer owns the claimed lease", async () => {
