@@ -60,10 +60,31 @@ const workerJobDurationSeconds = new Histogram({
   registers: [metricsRegistry],
 });
 
-const operationalOutcomesTotal = new Counter({
-  name: "pawket_operational_outcomes_total",
-  help: "Bounded operational outcomes for Pawket business and control-plane operations.",
-  labelNames: ["area", "operation", "outcome"],
+const authOperationsTotal = new Counter({
+  name: "pawket_auth_operations_total",
+  help: "Authentication operations by closed operation and outcome.",
+  labelNames: ["operation", "outcome"],
+  registers: [metricsRegistry],
+});
+
+const creatorOperationsTotal = new Counter({
+  name: "pawket_creator_operations_total",
+  help: "Creator operations by closed operation and outcome.",
+  labelNames: ["operation", "outcome"],
+  registers: [metricsRegistry],
+});
+
+const receivingProofOperationsTotal = new Counter({
+  name: "pawket_receiving_proof_operations_total",
+  help: "Receiving-account proof operations by closed operation and outcome.",
+  labelNames: ["operation", "outcome"],
+  registers: [metricsRegistry],
+});
+
+const refundOperationsTotal = new Counter({
+  name: "pawket_refund_operations_total",
+  help: "Refund operations by closed operation and outcome.",
+  labelNames: ["operation", "outcome"],
   registers: [metricsRegistry],
 });
 
@@ -95,6 +116,13 @@ const securityEmailAttentionTotal = new Gauge({
 const workerLastSuccessTimestampSeconds = new Gauge({
   name: "pawket_worker_last_success_timestamp_seconds",
   help: "Unix timestamp of the last successful bounded worker scan.",
+  labelNames: ["scan"],
+  registers: [metricsRegistry],
+});
+
+const workerScanHealthy = new Gauge({
+  name: "pawket_worker_scan_healthy",
+  help: "Whether the most recent configured worker scan completed successfully.",
   labelNames: ["scan"],
   registers: [metricsRegistry],
 });
@@ -134,19 +162,54 @@ const allowedHttpRoutes = new Set([
   "unmatched",
 ]);
 const allowedWorkerJobNames = new Set(["system.outbox-event", "unsupported"]);
-const allowedOperationalAreas = new Set(["admin", "auth", "creator", "health", "platform"]);
-const allowedOperationalOperations = new Set([
-  "access",
-  "application",
-  "authentication",
-  "health",
-  "metrics",
-  "profile",
-  "refund",
+const allowedAuthOperations = new Set([
   "registration",
-  "verification_deposit",
+  "verification",
+  "login",
+  "oauth_callback",
+  "reset",
+  "mfa",
+  "session",
+  "security_change",
 ]);
-const allowedOperationalOutcomes = new Set(["client_error", "server_error", "success"]);
+const allowedCreatorOperations = new Set([
+  "draft",
+  "submit",
+  "withdraw",
+  "changes_requested",
+  "approve",
+  "reject",
+  "reopen",
+  "suspend",
+  "reinstate",
+]);
+const allowedReceivingProofOperations = new Set([
+  "challenge",
+  "report",
+  "matched",
+  "unmatched",
+]);
+const allowedRefundOperations = new Set([
+  "window",
+  "sent",
+  "attention_required",
+]);
+const allowedSharedOutcomes = new Set([
+  "succeeded",
+  "rejected",
+  "retryable_failure",
+  "attention_required",
+]);
+const allowedStandardOperationOutcomes = new Set([
+  "succeeded",
+  "rejected",
+  "retryable_failure",
+]);
+const allowedAttentionRequiredOutcomes = new Set([
+  "attention_required",
+  "rejected",
+  "retryable_failure",
+]);
 const allowedEmailPurposes = new Set([
   "application_outcome",
   "creator_status",
@@ -158,9 +221,9 @@ const allowedEmailPurposes = new Set([
 ]);
 const allowedEmailOutcomes = new Set([
   "attention_required",
-  "delivered",
-  "failed",
-  "materialized",
+  "queued",
+  "retryable_failure",
+  "sent",
 ]);
 const allowedWorkerScans = new Set(["outbox", "refund", "retention"]);
 const allowedRetentionDatasets = new Set([
@@ -254,20 +317,76 @@ export function setRefundLiabilityMetrics(input: {
   refundLiabilityOutstandingVnd.set(input.outstandingAmountVnd);
 }
 
-export function recordOperationalOutcome(input: {
-  area: string;
-  operation: string;
-  outcome: string;
-}): void {
+function recordClosedOperation(
+  counter: Counter,
+  input: {
+    operation: string;
+    outcome: string;
+  },
+  allowedOperations: ReadonlySet<string>,
+  allowedOutcomes: ReadonlySet<string>,
+): void {
   assertSafeStructuredData(input, "metric");
   if (
-    !allowedOperationalAreas.has(input.area) ||
-    !allowedOperationalOperations.has(input.operation) ||
-    !allowedOperationalOutcomes.has(input.outcome)
+    !allowedOperations.has(input.operation) ||
+    !allowedSharedOutcomes.has(input.outcome) ||
+    !allowedOutcomes.has(input.outcome)
   ) {
     rejectUnsafeMetric();
   }
-  operationalOutcomesTotal.inc(input);
+  counter.inc(input);
+}
+
+export function recordAuthOperation(input: {
+  operation: string;
+  outcome: string;
+}): void {
+  recordClosedOperation(
+    authOperationsTotal,
+    input,
+    allowedAuthOperations,
+    allowedStandardOperationOutcomes,
+  );
+}
+
+export function recordCreatorOperation(input: {
+  operation: string;
+  outcome: string;
+}): void {
+  recordClosedOperation(
+    creatorOperationsTotal,
+    input,
+    allowedCreatorOperations,
+    allowedStandardOperationOutcomes,
+  );
+}
+
+export function recordReceivingProofOperation(input: {
+  operation: string;
+  outcome: string;
+}): void {
+  recordClosedOperation(
+    receivingProofOperationsTotal,
+    input,
+    allowedReceivingProofOperations,
+    allowedStandardOperationOutcomes,
+  );
+}
+
+export function recordRefundOperation(input: {
+  operation: string;
+  outcome: string;
+}): void {
+  const meaningfulOutcomes =
+    input.operation === "attention_required"
+      ? allowedAttentionRequiredOutcomes
+      : allowedStandardOperationOutcomes;
+  recordClosedOperation(
+    refundOperationsTotal,
+    input,
+    allowedRefundOperations,
+    meaningfulOutcomes,
+  );
 }
 
 export function recordSecurityEmailMetrics(input: {
@@ -315,6 +434,17 @@ export function setWorkerLastSuccessMetric(input: {
     rejectUnsafeMetric();
   }
   workerLastSuccessTimestampSeconds.set({ scan: input.scan }, input.timestampSeconds);
+}
+
+export function setWorkerScanHealthMetric(input: {
+  scan: string;
+  healthy: boolean;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (!allowedWorkerScans.has(input.scan) || typeof input.healthy !== "boolean") {
+    rejectUnsafeMetric();
+  }
+  workerScanHealthy.set({ scan: input.scan }, input.healthy ? 1 : 0);
 }
 
 export function recordRetentionMetrics(input: {

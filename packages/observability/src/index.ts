@@ -11,10 +11,13 @@ export {
 } from "./http-metrics.js";
 export {
   metricsRegistry,
+  recordAuthOperation,
   recordAuthAbuseControl,
+  recordCreatorOperation,
   recordHttpRequestMetrics,
-  recordOperationalOutcome,
+  recordReceivingProofOperation,
   recordRetentionMetrics,
+  recordRefundOperation,
   recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
   setOutboxMetrics,
@@ -22,4 +25,5 @@ export {
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,
   setWorkerLastSuccessMetric,
+  setWorkerScanHealthMetric,
 } from "./metrics.js";

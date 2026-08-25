@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  recordAuthOperation,
+  recordCreatorOperation,
   recordHttpRequestMetrics,
-  recordOperationalOutcome,
+  recordReceivingProofOperation,
+  recordRefundOperation,
 } from "@pawket/observability/metrics";
 import { withRequestContext } from "@pawket/observability/request-context";
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const MAX_REQUEST_ID_LENGTH = 128;
+const MAX_BUSINESS_METRIC_BODY_BYTES = 8_192;
 
 export function trustedRequestId(incomingRequestId: string | null): string {
   if (
@@ -32,34 +36,77 @@ function boundedRoute(pathname: string): string {
   return "unmatched";
 }
 
-function boundedOperation(pathname: string): { area: string; operation: string } {
-  if (pathname.startsWith("/api/health/")) return { area: "health", operation: "health" };
-  if (pathname === "/api/metrics") return { area: "platform", operation: "metrics" };
-  if (pathname.includes("refund-obligations")) return { area: "admin", operation: "refund" };
-  if (pathname.includes("verification-deposits")) {
-    return { area: "admin", operation: "verification_deposit" };
-  }
-  if (pathname.includes("creator-applications") || pathname.includes("creator-capabilities")) {
-    return { area: "admin", operation: "application" };
-  }
-  if (pathname === "/api/v1/admin/access") return { area: "admin", operation: "access" };
-  if (pathname === "/api/v1/auth/register") return { area: "auth", operation: "registration" };
-  if (pathname.startsWith("/api/auth/") || pathname.startsWith("/api/v1/auth/")) {
-    return { area: "auth", operation: "authentication" };
-  }
-  if (pathname === "/api/v1/me" || pathname.startsWith("/api/v1/me/")) {
-    return { area: "auth", operation: "profile" };
-  }
-  if (pathname.startsWith("/api/v1/creator-application")) {
-    return { area: "creator", operation: "application" };
-  }
-  return { area: "platform", operation: "access" };
+type BusinessOperation =
+  | { domain: "auth"; operation: "registration" | "verification" | "login" | "oauth_callback" | "reset" | "mfa" | "session" | "security_change" }
+  | { domain: "creator"; operation: "draft" | "submit" | "withdraw" | "changes_requested" | "approve" | "reject" | "reopen" | "suspend" | "reinstate" }
+  | { domain: "receiving_proof"; operation: "challenge" | "report" | "matched" | "unmatched" }
+  | { domain: "refund"; operation: "window" | "sent" | "attention_required" };
+
+type BusinessOutcome = "succeeded" | "rejected" | "retryable_failure" | "attention_required";
+
+function outcomeForStatus(status: number): Exclude<BusinessOutcome, "attention_required"> {
+  if (status >= 500) return "retryable_failure";
+  if (status >= 400) return "rejected";
+  return "succeeded";
 }
 
-function outcomeForStatus(status: number): "success" | "client_error" | "server_error" {
-  if (status >= 500) return "server_error";
-  if (status >= 400) return "client_error";
-  return "success";
+function recordBusinessOperation(
+  input: BusinessOperation,
+  outcome: BusinessOutcome,
+): void {
+  const metric = { operation: input.operation, outcome };
+  switch (input.domain) {
+    case "auth":
+      recordAuthOperation(metric);
+      break;
+    case "creator":
+      recordCreatorOperation(metric);
+      break;
+    case "receiving_proof":
+      recordReceivingProofOperation(metric);
+      break;
+    case "refund":
+      recordRefundOperation(metric);
+      break;
+  }
+}
+
+export async function readBusinessMetricField(
+  request: Request,
+  field: "action" | "outcome",
+): Promise<unknown> {
+  const contentLength = request.headers.get("content-length");
+  if (!contentLength || !/^\d+$/u.test(contentLength)) return undefined;
+  const bytes = Number(contentLength);
+  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_BUSINESS_METRIC_BODY_BYTES) {
+    return undefined;
+  }
+  try {
+    const value = await request.clone().json() as Record<string, unknown>;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value[field]
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function withBusinessOperation(
+  input: BusinessOperation,
+  handler: () => Response | Promise<Response>,
+): Promise<Response> {
+  let status = 500;
+  try {
+    const response = await handler();
+    status = response.status;
+    return response;
+  } finally {
+    const outcome =
+      input.domain === "refund" && input.operation === "attention_required" && status < 400
+        ? "attention_required"
+        : outcomeForStatus(status);
+    recordBusinessOperation(input, outcome);
+  }
 }
 
 export function withRouteContext(
@@ -71,7 +118,6 @@ export function withRouteContext(
     const startedAt = performance.now();
     const pathname = new URL(request.url).pathname;
     const route = boundedRoute(pathname);
-    const operation = boundedOperation(pathname);
     let status = 500;
     try {
       const response = await handler();
@@ -83,10 +129,6 @@ export function withRouteContext(
         route,
         statusCode: status,
         durationSeconds: (performance.now() - startedAt) / 1_000,
-      });
-      recordOperationalOutcome({
-        ...operation,
-        outcome: outcomeForStatus(status),
       });
     }
   });

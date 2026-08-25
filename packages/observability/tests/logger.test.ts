@@ -7,7 +7,6 @@ import {
   metricsRegistry,
   recordAuthAbuseControl,
   recordHttpRequestMetrics,
-  recordOperationalOutcome,
   recordRetentionMetrics,
   recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
@@ -18,6 +17,17 @@ import {
   setWorkerLastSuccessMetric,
   withRequestContext,
 } from "../src/index.js";
+import * as observability from "../src/index.js";
+
+type DomainMetricExports = {
+  recordAuthOperation?: (input: { operation: string; outcome: string }) => void;
+  recordCreatorOperation?: (input: { operation: string; outcome: string }) => void;
+  recordReceivingProofOperation?: (input: { operation: string; outcome: string }) => void;
+  recordRefundOperation?: (input: { operation: string; outcome: string }) => void;
+  setWorkerScanHealthMetric?: (input: { scan: string; healthy: boolean }) => void;
+};
+
+const domainMetrics = observability as DomainMetricExports;
 
 const testEnv = parseServerEnv({
   NODE_ENV: "test",
@@ -238,10 +248,25 @@ describe("operational metrics", () => {
       outcome: "completed",
       durationSeconds: 0.25,
     });
-    recordOperationalOutcome({ area: "creator", operation: "application", outcome: "success" });
-    recordSecurityEmailMetrics({ purpose: "refund_status", outcome: "materialized" });
+    expect(domainMetrics.recordAuthOperation).toEqual(expect.any(Function));
+    expect(domainMetrics.recordCreatorOperation).toEqual(expect.any(Function));
+    expect(domainMetrics.recordReceivingProofOperation).toEqual(expect.any(Function));
+    expect(domainMetrics.recordRefundOperation).toEqual(expect.any(Function));
+    expect(domainMetrics.setWorkerScanHealthMetric).toEqual(expect.any(Function));
+    domainMetrics.recordAuthOperation?.({ operation: "login", outcome: "succeeded" });
+    domainMetrics.recordCreatorOperation?.({ operation: "submit", outcome: "rejected" });
+    domainMetrics.recordReceivingProofOperation?.({
+      operation: "matched",
+      outcome: "succeeded",
+    });
+    domainMetrics.recordRefundOperation?.({
+      operation: "attention_required",
+      outcome: "attention_required",
+    });
+    recordSecurityEmailMetrics({ purpose: "refund_status", outcome: "queued" });
     setSecurityEmailBacklogMetrics({ pending: 4, oldestAgeSeconds: 90, attention: 1 });
     setWorkerLastSuccessMetric({ scan: "retention", timestampSeconds: 1_787_671_200 });
+    domainMetrics.setWorkerScanHealthMetric?.({ scan: "retention", healthy: false });
     recordRetentionMetrics({
       dataset: "application_content",
       mode: "report_only",
@@ -267,17 +292,30 @@ describe("operational metrics", () => {
       'pawket_worker_jobs_total{queue="pawket.system",name="system.outbox-event",outcome="completed"} 1',
     );
     expect(serializedMetrics).toContain("pawket_worker_job_duration_seconds_sum");
+    expect(serializedMetrics).not.toContain("pawket_operational_outcomes_total");
     expect(serializedMetrics).toContain(
-      'pawket_operational_outcomes_total{area="creator",operation="application",outcome="success"} 1',
+      'pawket_auth_operations_total{operation="login",outcome="succeeded"} 1',
     );
     expect(serializedMetrics).toContain(
-      'pawket_security_emails_total{purpose="refund_status",outcome="materialized"} 1',
+      'pawket_creator_operations_total{operation="submit",outcome="rejected"} 1',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_receiving_proof_operations_total{operation="matched",outcome="succeeded"} 1',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_refund_operations_total{operation="attention_required",outcome="attention_required"} 1',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_security_emails_total{purpose="refund_status",outcome="queued"} 1',
     );
     expect(serializedMetrics).toContain("pawket_security_email_pending_total 4");
     expect(serializedMetrics).toContain("pawket_security_email_oldest_age_seconds 90");
     expect(serializedMetrics).toContain("pawket_security_email_attention_total 1");
     expect(serializedMetrics).toContain(
       'pawket_worker_last_success_timestamp_seconds{scan="retention"} 1787671200',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_worker_scan_healthy{scan="retention"} 0',
     );
     expect(serializedMetrics).toContain(
       'pawket_retention_records_total{dataset="application_content",mode="report_only",disposition="protected"} 2',
@@ -307,6 +345,89 @@ describe("operational metrics", () => {
       }),
     ).toThrow("Unsafe metric data");
     expect(() => recordAuthAbuseControl("artist@example.test")).toThrow("Unsafe metric data");
+    expect(() =>
+      domainMetrics.recordAuthOperation?.({
+        operation: "artist@example.test",
+        outcome: "succeeded",
+      }),
+    ).toThrow("Unsafe metric data");
+    expect(() =>
+      domainMetrics.recordCreatorOperation?.({ operation: "submit", outcome: "success" }),
+    ).toThrow("Unsafe metric data");
+    expect(() =>
+      domainMetrics.recordRefundOperation?.({
+        operation: "sent",
+        outcome: "attention_required",
+      }),
+    ).toThrow("Unsafe metric data");
+    expect(() =>
+      recordSecurityEmailMetrics({ purpose: "password_reset", outcome: "failed" }),
+    ).toThrow("Unsafe metric data");
     expect(await metricsRegistry.metrics()).not.toContain("private-account-number");
+  });
+
+  it("accepts every closed operation and email outcome without creating extra labels", async () => {
+    // Catches taxonomy drift, missing declared operations, or a generic high-cardinality label.
+    metricsRegistry.resetMetrics();
+    for (const operation of [
+      "registration",
+      "verification",
+      "login",
+      "oauth_callback",
+      "reset",
+      "mfa",
+      "session",
+      "security_change",
+    ]) {
+      domainMetrics.recordAuthOperation?.({ operation, outcome: "succeeded" });
+    }
+    for (const operation of [
+      "draft",
+      "submit",
+      "withdraw",
+      "changes_requested",
+      "approve",
+      "reject",
+      "reopen",
+      "suspend",
+      "reinstate",
+    ]) {
+      domainMetrics.recordCreatorOperation?.({ operation, outcome: "succeeded" });
+    }
+    for (const operation of ["challenge", "report", "matched", "unmatched"]) {
+      domainMetrics.recordReceivingProofOperation?.({ operation, outcome: "succeeded" });
+    }
+    domainMetrics.recordRefundOperation?.({ operation: "window", outcome: "succeeded" });
+    domainMetrics.recordRefundOperation?.({ operation: "sent", outcome: "succeeded" });
+    domainMetrics.recordRefundOperation?.({
+      operation: "attention_required",
+      outcome: "attention_required",
+    });
+    for (const outcome of [
+      "queued",
+      "sent",
+      "retryable_failure",
+      "attention_required",
+    ]) {
+      recordSecurityEmailMetrics({ purpose: "security_notice", outcome });
+    }
+
+    const serializedMetrics = await metricsRegistry.metrics();
+    for (const operation of [
+      "registration",
+      "verification",
+      "login",
+      "oauth_callback",
+      "reset",
+      "mfa",
+      "session",
+      "security_change",
+    ]) {
+      expect(serializedMetrics).toContain(
+        `pawket_auth_operations_total{operation="${operation}",outcome="succeeded"} 1`,
+      );
+    }
+    expect(serializedMetrics).not.toMatch(/area=|client_error|server_error|outcome="success"/u);
+    expect(serializedMetrics).not.toMatch(/email=|user_id|request_id|account=|subject=/u);
   });
 });

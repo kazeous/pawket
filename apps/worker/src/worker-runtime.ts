@@ -18,6 +18,7 @@ import type {
 } from "@pawket/identity/security-email";
 import type { EncryptionKeyring } from "@pawket/security";
 import {
+  recordRefundOperation,
   recordWorkerJobMetrics,
   recordSecurityEmailMetrics,
   recordRetentionMetrics,
@@ -25,6 +26,7 @@ import {
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,
   setWorkerLastSuccessMetric,
+  setWorkerScanHealthMetric,
   withRequestContext,
 } from "@pawket/observability";
 import { scanVerificationDepositRefundWindows } from "@pawket/payments";
@@ -221,17 +223,26 @@ export function createWorkerJobProcessor(input: {
             if (!input.securityEmail) {
               throw new Error("Security email delivery unavailable");
             }
-            const delivery = await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
-              handoffId,
-              workerId: job.id,
-              keyring: input.securityEmail.keyring,
-              sender: input.securityEmail.sender,
-              now: new Date(),
-            });
+            let delivery: "delivered" | "already_delivered";
+            try {
+              delivery = await (input.securityEmail.deliver ?? deliverSecurityEmailHandoff)(input.database, {
+                handoffId,
+                workerId: job.id,
+                keyring: input.securityEmail.keyring,
+                sender: input.securityEmail.sender,
+                now: new Date(),
+              });
+            } catch (error) {
+              recordSecurityEmailMetrics({
+                purpose: purpose as SecurityEmailPurpose,
+                outcome: "retryable_failure",
+              });
+              throw error;
+            }
             if (delivery === "delivered") {
               recordSecurityEmailMetrics({
                 purpose: purpose as SecurityEmailPurpose,
-                outcome: "delivered",
+                outcome: "sent",
               });
             }
           } else if (DOMAIN_EMAIL_EVENTS.has(job.data.eventType)) {
@@ -252,7 +263,7 @@ export function createWorkerJobProcessor(input: {
                   : "refund_status";
               recordSecurityEmailMetrics({
                 purpose,
-                outcome: materialized === "created" ? "materialized" : "attention_required",
+                outcome: materialized === "created" ? "queued" : "attention_required",
               });
             }
           } else if (
@@ -391,6 +402,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     resolveStopped = resolve;
   });
 
+  setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
+  setWorkerScanHealthMetric({ scan: "refund", healthy: false });
+  if (options.retention) {
+    setWorkerScanHealthMetric({ scan: "retention", healthy: false });
+  }
+
   const poll = async (): Promise<void> => {
     if (!running) {
       return;
@@ -407,6 +424,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
           });
           setRefundLiabilityMetrics(liabilities);
           setWorkerLastSuccessMetric({ scan: "refund", timestampSeconds: scanAt / 1_000 });
+          setWorkerScanHealthMetric({ scan: "refund", healthy: true });
+          recordRefundOperation({ operation: "window", outcome: "succeeded" });
           if (options.healthState) options.healthState.lastRefundScanSucceededAt = scanAt;
           if (liabilities.dueSoon + liabilities.dueToday + liabilities.overdue > 0) {
             logger.info(
@@ -421,6 +440,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
             );
           }
         } catch {
+          setWorkerScanHealthMetric({ scan: "refund", healthy: false });
+          recordRefundOperation({ operation: "window", outcome: "retryable_failure" });
           logger.error(
             { category: "refund_liability_scan_failed", workerId },
             "Refund liability scan failed",
@@ -440,6 +461,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       setOutboxMetrics(backlog.outbox);
       setSecurityEmailBacklogMetrics(backlog.email);
       setWorkerLastSuccessMetric({ scan: "outbox", timestampSeconds: pollSucceededAt / 1_000 });
+      setWorkerScanHealthMetric({ scan: "outbox", healthy: true });
       if (options.healthState) options.healthState.lastPollSucceededAt = pollSucceededAt;
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, "Outbox batch dispatched");
@@ -449,58 +471,69 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         pollSucceededAt - lastRetentionScanAt >= options.retention.scanIntervalMs
       ) {
         lastRetentionScanAt = pollSucceededAt;
-        const retention = await dependencies.runRetention({
-          db: database.db,
-          now: new Date(pollSucceededAt),
-          mode: options.retention.mode,
-          policyVersion: options.retention.policyVersion,
-          enforcementPaused: options.retention.enforcementPaused,
-          batchSize: options.retention.batchSize,
-        });
-        for (const result of retention) {
-          recordRetentionMetrics({
-            dataset: result.dataset,
+        try {
+          const retention = await dependencies.runRetention({
+            db: database.db,
+            now: new Date(pollSucceededAt),
             mode: options.retention.mode,
-            disposition: result.outcome === "failed" ? "failed" : "candidate",
-            count: result.outcome === "failed" ? 1 : result.candidateCount,
+            policyVersion: options.retention.policyVersion,
+            enforcementPaused: options.retention.enforcementPaused,
+            batchSize: options.retention.batchSize,
           });
-          recordRetentionMetrics({
-            dataset: result.dataset,
-            mode: options.retention.mode,
-            disposition: "protected",
-            count: result.protectedCount,
-          });
-          recordRetentionMetrics({
-            dataset: result.dataset,
-            mode: options.retention.mode,
-            disposition: "processed",
-            count: result.processedCount,
-          });
-        }
-        if (retention.some((result) => result.outcome === "failed")) {
+          for (const result of retention) {
+            recordRetentionMetrics({
+              dataset: result.dataset,
+              mode: options.retention.mode,
+              disposition: result.outcome === "failed" ? "failed" : "candidate",
+              count: result.outcome === "failed" ? 1 : result.candidateCount,
+            });
+            recordRetentionMetrics({
+              dataset: result.dataset,
+              mode: options.retention.mode,
+              disposition: "protected",
+              count: result.protectedCount,
+            });
+            recordRetentionMetrics({
+              dataset: result.dataset,
+              mode: options.retention.mode,
+              disposition: "processed",
+              count: result.processedCount,
+            });
+          }
+          if (retention.some((result) => result.outcome === "failed")) {
+            setWorkerScanHealthMetric({ scan: "retention", healthy: false });
+            logger.error(
+              { category: "retention_scan_failed", workerId, mode: options.retention.mode },
+              "Retention scan failed",
+            );
+          } else {
+            setWorkerLastSuccessMetric({
+              scan: "retention",
+              timestampSeconds: pollSucceededAt / 1_000,
+            });
+            setWorkerScanHealthMetric({ scan: "retention", healthy: true });
+            logger.info(
+              {
+                workerId,
+                mode: options.retention.mode,
+                paused: options.retention.enforcementPaused,
+                candidateCount: retention.reduce((sum, result) => sum + result.candidateCount, 0),
+                protectedCount: retention.reduce((sum, result) => sum + result.protectedCount, 0),
+                processedCount: retention.reduce((sum, result) => sum + result.processedCount, 0),
+              },
+              "Retention scan completed",
+            );
+          }
+        } catch {
+          setWorkerScanHealthMetric({ scan: "retention", healthy: false });
           logger.error(
             { category: "retention_scan_failed", workerId, mode: options.retention.mode },
             "Retention scan failed",
           );
-        } else {
-          setWorkerLastSuccessMetric({
-            scan: "retention",
-            timestampSeconds: pollSucceededAt / 1_000,
-          });
-          logger.info(
-            {
-              workerId,
-              mode: options.retention.mode,
-              paused: options.retention.enforcementPaused,
-              candidateCount: retention.reduce((sum, result) => sum + result.candidateCount, 0),
-              protectedCount: retention.reduce((sum, result) => sum + result.protectedCount, 0),
-              processedCount: retention.reduce((sum, result) => sum + result.processedCount, 0),
-            },
-            "Retention scan completed",
-          );
         }
       }
     } catch {
+      setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
       logger.error(
         { category: "outbox_poll_failed", workerId },
         "Outbox polling failed",

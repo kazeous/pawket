@@ -66,19 +66,29 @@ groups:
           summary: Authentication abuse controls activated repeatedly
           runbook: ops/runbooks/account-recovery.md
       - alert: PawketWorkerPollStale
-        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="outbox"} > 3
+        expr: pawket_worker_scan_healthy{scan="outbox"} == 0
+        for: 3s
         labels:
           severity: critical
         annotations:
           summary: Worker outbox poll has missed three intervals
           runbook: ops/runbooks/provider-outage.md
       - alert: PawketRefundScanStale
-        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="refund"} > 180
+        expr: pawket_worker_scan_healthy{scan="refund"} == 0
+        for: 3m
         labels:
           severity: critical
         annotations:
           summary: Worker refund scan has missed three intervals
           runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketRetentionScanStale
+        expr: pawket_worker_scan_healthy{scan="retention"} == 0
+        for: 18h
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker retention scan has missed three intervals
+          runbook: ops/runbooks/retention-operations.md
       - alert: PawketMigrationFailed
         expr: increase(pawket_migration_runs_total{outcome="failed"}[15m]) > 0
         labels:

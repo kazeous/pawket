@@ -6,6 +6,7 @@
     "node": ">=24 <25"
   },
   "scripts": {
+    "alerts:validate": "node scripts/validate-prometheus-rules.mjs",
     "compose:validate": "node scripts/validate-coolify-compose.mjs",
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
     "recover:owner-mfa": "tsx scripts/recover-owner-mfa.ts",

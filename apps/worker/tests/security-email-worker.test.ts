@@ -1,4 +1,8 @@
-import { describe, expect, test, vi } from "vitest";
+import { EventEmitter } from "node:events";
+
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { metricsRegistry } from "@pawket/observability";
 
 import {
   createSecurityEmailSender,
@@ -39,6 +43,17 @@ function job(eventType: string, payload: Record<string, unknown>) {
     },
   };
 }
+
+async function scanHealth(scan: string): Promise<number> {
+  const metric = metricsRegistry.getSingleMetric("pawket_worker_scan_healthy");
+  if (!metric) throw new Error("Worker scan-health metric is not registered");
+  const snapshot = await metric.get();
+  return snapshot.values.find((value) => value.labels.scan === scan)?.value ?? -1;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("security email worker contract", () => {
   test("materializes Payments liability email before acknowledging without moving funds", async () => {
@@ -241,6 +256,46 @@ describe("production SMTP security email sender", () => {
     });
   });
 
+  test("records a retryable email failure before rethrowing a fixed safe error", async () => {
+    // Catches worker retries without a bounded failure signal or leaked provider text.
+    metricsRegistry.resetMetrics();
+    const logs: string[] = [];
+    const processor = runtime.createWorkerJobProcessor!({
+      logger: {
+        info() {},
+        error(data, message) {
+          logs.push(JSON.stringify({ data, message }));
+        },
+      },
+      database: {} as never,
+      acknowledge: vi.fn(async () => true),
+      securityEmail: {
+        keyring: {} as never,
+        sender: {} as never,
+        deliver: vi.fn(async () => {
+          throw new Error("smtp://artist@example.test:secret@provider.invalid");
+        }),
+      },
+    });
+
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).rejects.toThrow("Worker job processing failed");
+
+    const snapshot = await metricsRegistry.metrics();
+    expect(snapshot).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 1',
+    );
+    expect(snapshot).not.toContain("artist@example.test");
+    expect(logs.join("\n")).not.toContain("artist@example.test");
+    expect(logs.join("\n")).not.toContain("provider.invalid");
+  });
+
   test("routes authenticated email changes to the purpose-specific confirmation page", async () => {
     let delivered: SmtpMail | undefined;
     const sender = createSecurityEmailSender({
@@ -405,5 +460,117 @@ describe("production SMTP security email sender", () => {
         pass: "smtp-password-that-must-not-leak",
       },
     });
+  });
+});
+
+describe("worker scan health", () => {
+  test("starts unhealthy, becomes healthy after success, and returns unhealthy on failure", async () => {
+    // Catches startup being reported as success and scan failures leaving stale healthy state.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    metricsRegistry.resetMetrics();
+    let releaseFirstRefundScan!: () => void;
+    const firstRefundScan = new Promise<void>((resolve) => {
+      releaseFirstRefundScan = resolve;
+    });
+    const scanRefundWindows = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await firstRefundScan;
+        return {
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        };
+      })
+      .mockRejectedValueOnce(new Error("bank-scan-secret"))
+      .mockResolvedValue({
+        dueSoon: 0,
+        dueToday: 0,
+        overdue: 0,
+        attention: 0,
+        outstandingAmountVnd: 0,
+      });
+    const dispatch = vi
+      .fn()
+      .mockResolvedValueOnce({ claimed: 0, enqueued: 0, failed: 0 })
+      .mockRejectedValueOnce(new Error("outbox-scan-secret"))
+      .mockResolvedValue({ claimed: 0, enqueued: 0, failed: 0 });
+    const runRetention = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          dataset: "sessions",
+          candidateCount: 0,
+          protectedCount: 0,
+          processedCount: 0,
+          outcome: "failed",
+        },
+      ]);
+    const resource = {
+      close: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const connection = {
+      connect: vi.fn(async () => undefined),
+      quit: vi.fn(async () => undefined),
+      disconnect: vi.fn(),
+    };
+    const handle = await workerRuntime.startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      logger: { info() {}, error() {} },
+      retention: {
+        mode: "report_only",
+        policyVersion: "task-9-test",
+        enforcementPaused: true,
+        batchSize: 10,
+        scanIntervalMs: 1_000,
+      },
+      dependencies: {
+        createDatabase: () => ({ db: {}, close: resource.close }) as never,
+        createProducerConnection: () => connection as never,
+        createWorkerConnection: () => connection as never,
+        createQueue: () => resource as never,
+        createWorker: () => resource as never,
+        dispatch: dispatch as never,
+        acknowledge: vi.fn() as never,
+        scanRefundWindows: scanRefundWindows as never,
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        })) as never,
+        runRetention: runRetention as never,
+        hostname: () => "test-worker",
+        randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+      },
+    });
+
+    expect(await scanHealth("outbox")).toBe(0);
+    expect(await scanHealth("refund")).toBe(0);
+    expect(await scanHealth("retention")).toBe(0);
+
+    releaseFirstRefundScan();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await scanHealth("outbox")).toBe(1);
+    expect(await scanHealth("refund")).toBe(1);
+    expect(await scanHealth("retention")).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await scanHealth("outbox")).toBe(0);
+
+    vi.setSystemTime(new Date("2026-08-26T00:01:00.000Z"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await scanHealth("refund")).toBe(0);
+    expect(await scanHealth("retention")).toBe(0);
+
+    await handle.stop();
   });
 });

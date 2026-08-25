@@ -131,6 +131,9 @@ jobs:
       - name: PostgreSQL and Valkey integration tests
         run: corepack pnpm test:integration
 
+      - name: Validate Prometheus alert rules
+        run: corepack pnpm alerts:validate
+
       - name: Application build
         run: corepack pnpm build
 

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { metricsRegistry } from "@pawket/observability";
+
 const identityRuntime = vi.hoisted(() => ({
   authHandler: vi.fn(async () => new Response("auth", { status: 200 })),
   register: vi.fn(async () => Response.json({ accepted: true }, { status: 202 })),
@@ -20,8 +22,8 @@ vi.mock("../src/auth/runtime", () => ({
 
 describe("identity route wiring", () => {
   afterEach(() => {
+    metricsRegistry.resetMetrics();
     vi.clearAllMocks();
-    vi.resetModules();
   });
 
   test("mounts Better Auth at the catch-all protocol boundary", async () => {
@@ -32,6 +34,9 @@ describe("identity route wiring", () => {
     const response = await POST(request);
     expect(await response.text()).toBe("auth");
     expect(identityRuntime.authHandler).toHaveBeenCalledWith(request);
+    expect(await metricsRegistry.metrics()).toContain(
+      'pawket_auth_operations_total{operation="login",outcome="succeeded"} 1',
+    );
   });
 
   test("mounts the Pawket registration handler under the versioned API", async () => {
@@ -42,6 +47,9 @@ describe("identity route wiring", () => {
     const response = await POST(request);
     expect(response.status).toBe(202);
     expect(identityRuntime.register).toHaveBeenCalledWith(request);
+    expect(await metricsRegistry.metrics()).toContain(
+      'pawket_auth_operations_total{operation="registration",outcome="succeeded"} 1',
+    );
   });
 
   test("passes only the decoded route session id to the ownership-checked handler", async () => {
@@ -54,5 +62,17 @@ describe("identity route wiring", () => {
     });
     expect(response.status).toBe(204);
     expect(identityRuntime.session).toHaveBeenCalledWith(request, "session-safe");
+    expect(await metricsRegistry.metrics()).toContain(
+      'pawket_auth_operations_total{operation="session",outcome="succeeded"} 1',
+    );
+  });
+
+  test("does not guess a business operation for an unknown auth protocol path", async () => {
+    const { POST } = await import("../src/app/api/auth/[...all]/route.js");
+    await POST(new Request("https://pawket.example/api/auth/future-provider-command", {
+      method: "POST",
+    }));
+
+    expect(await metricsRegistry.metrics()).not.toContain("pawket_auth_operations_total{");
   });
 });

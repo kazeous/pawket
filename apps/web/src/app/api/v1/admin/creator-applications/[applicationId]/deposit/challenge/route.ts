@@ -1,5 +1,5 @@
 import { getIdentityRuntime } from "../../../../../../../../auth/runtime";
-import { withRouteContext } from "../../../../../../../../http/route-context";
+import { withBusinessOperation, withRouteContext } from "../../../../../../../../http/route-context";
 
 export const runtime = "nodejs";
 
@@ -9,6 +9,9 @@ export async function POST(
 ) {
   const { applicationId } = await context.params;
   return withRouteContext(request, () =>
-    getIdentityRuntime().paymentsHandlers.issueChallenge(request, applicationId),
+    withBusinessOperation(
+      { domain: "receiving_proof", operation: "challenge" },
+      () => getIdentityRuntime().paymentsHandlers.issueChallenge(request, applicationId),
+    ),
   );
 }
