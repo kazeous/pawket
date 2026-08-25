@@ -36,6 +36,7 @@ export {
   identityRecoveryCodes,
   identityRoleGrants,
   identityCreatorCapabilities,
+  identityCreatorCapabilityEvents,
   identitySecurityThrottles,
   identitySessions,
   identityStepUpProofs,

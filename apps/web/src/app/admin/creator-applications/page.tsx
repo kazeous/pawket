@@ -21,7 +21,7 @@ export default async function CreatorApplicationsAdminPage() {
         {applications.length === 0 ? <p>No submitted applications.</p> : <ul>
           {applications.map((application) => (
             <li key={application.id}>
-              <strong>{application.artistDisplayName ?? "Unnamed artist"}</strong> — {application.primaryArtDiscipline ?? "Practice not supplied"}; email {application.emailVerified ? "verified" : "unverified"}; age snapshot {application.ageEligible !== null && application.ageEligible >= 18 ? "eligible" : "not eligible"}; {application.bankName ?? "Receiving account unavailable"} {application.maskedSuffix ?? ""} ({application.proofState ?? "unverified"}).
+              <strong>{application.artistDisplayName ?? "Unnamed artist"}</strong> — {application.primaryArtDiscipline ?? "Practice not supplied"}; email {application.emailVerified ? "verified" : "unverified"}; age snapshot {application.ageEligible ? "eligible" : "not eligible"}; {application.bankName ?? "Receiving account unavailable"} {application.maskedSuffix ?? ""} ({application.proofState ?? "unverified"}).
               <p>Review via the owner API using version {application.version}; full bank data is intentionally unavailable in this view.</p>
             </li>
           ))}

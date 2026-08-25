@@ -6,7 +6,6 @@ export {
   identityExternalLinkTransactions,
   identityRecoveryCodes,
   identityRoleGrants,
-  identityCreatorCapabilities,
   identitySecurityThrottles,
   identitySessions,
   identityStepUpProofs,
@@ -14,7 +13,7 @@ export {
   identityUsers,
   identityVerifications,
 } from "./identity-core.js";
-export { creatorApplications, creatorApplicationRevisions, creatorApplicationAttestations, creatorApplicationDecisions } from "./creator-applications.js";
+export { creatorApplications, creatorApplicationRevisions, creatorApplicationAttestations, creatorApplicationDecisions, identityCreatorCapabilities, identityCreatorCapabilityEvents } from "./creator-applications.js";
 export {
   paymentsReceivingAccountOnboarding,
   paymentsUnmatchedDeposits,

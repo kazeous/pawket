@@ -692,7 +692,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
           );
           const [updated] = await tx
             .update(creatorApplications)
-            .set({ state: "withdrawn", version: application.version + 1, updatedAt: at })
+            .set({ state: "withdrawn", reviewerUserId: null, reviewClaimedAt: null, reviewClaimExpiresAt: null, version: application.version + 1, updatedAt: at })
             .where(
               and(
                 eq(creatorApplications.id, application.id),

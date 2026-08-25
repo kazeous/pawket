@@ -61,13 +61,13 @@ async function seedSubmittedApplication(): Promise<void> {
   `;
   await client`
     insert into creator_application_revisions (
-      id, application_id, revision_number, artist_display_name, applicant_email,
-      dob_envelope, portfolio_urls, primary_art_discipline, content_intent, proposed_receiving_account_id,
+      id, application_id, revision_number, artist_display_name, short_introduction, applicant_email,
+      dob_envelope, portfolio_urls, primary_art_discipline, practice_description, content_intent, proposed_receiving_account_id,
       age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
     ) values (
-      ${revisionId}, ${applicationId}, 2, 'Test Artist', 'artist@pawket.test',
+      ${revisionId}, ${applicationId}, 2, 'Test Artist', 'A working artist.', 'artist@pawket.test',
       ${JSON.stringify(encryptSensitiveField({ plaintext: "2002-08-25", binding: { recordType: "creator_application_revision", recordId: revisionId, fieldName: "date_of_birth" }, keyring }))}::jsonb,
-      ${JSON.stringify(["https://portfolio.example/artist"]) }::jsonb, 'illustration',
+      ${JSON.stringify(["https://portfolio.example/artist"]) }::jsonb, 'illustration', 'A disciplined daily practice.',
       'general_audience_only', ${accountVersionId}, 23, '2026-08-25', null, ${at}, ${at}
     )
   `;
@@ -83,10 +83,7 @@ async function seedSubmittedApplication(): Promise<void> {
       values (${randomUUID()}, ${revisionId}, ${type}, 'increment-2-v1', ${at}, 'review-artist')
     `;
   }
-  await client`
-    update creator_application_revisions set submitted_at = ${at}, updated_at = ${at}
-    where id = ${revisionId}
-  `;
+  await client`update creator_application_revisions set submitted_at = ${at}, updated_at = ${at} where id = ${revisionId}`;
   await client`
     insert into creator_application_revisions (
       id, application_id, revision_number, artist_display_name, applicant_email, portfolio_urls,
@@ -215,6 +212,8 @@ describe("owner creator review", () => {
 
     const queue = await service.listSubmitted();
     expect(JSON.stringify(queue)).not.toContain("2002-08-25");
+    expect(JSON.stringify(queue)).not.toContain("https://portfolio.example");
+    expect(JSON.stringify(queue)).not.toContain("may_include_age_restricted");
 
     const detail = await service.getDetail({
       ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId,
@@ -285,6 +284,11 @@ describe("owner creator review", () => {
     });
 
     expect(result).toEqual({ state: "approved" });
+    await expect(service.decide({
+      ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: "10000000-0000-4000-8000-000000000099",
+      applicationId, revisionId, expectedVersion: claimed.version, idempotencyKey: "approve-creator-one", requestId: "approve-retry-request",
+      action: "approve", reasonCode: "portfolio_insufficient", applicantExplanation: "Portfolio review is complete.",
+    })).resolves.toEqual({ state: "approved" });
     const [facts] = await client<{
       application_state: string;
       capabilities: number;
@@ -350,5 +354,10 @@ describe("owner creator review", () => {
       userId: "review-artist", action: "reinstate", reasonCode: "other", applicantExplanation: "Creator access is restored.",
       idempotencyKey: "reinstate-creator-one", requestId: "reinstate-request",
     })).resolves.toEqual({ state: "active" });
+    const [events] = await client<{ events: number }[]>`
+      select count(*)::int as events from identity_creator_capability_events where capability_id = (select id from identity_creator_capabilities where user_id = 'review-artist')
+    `;
+    expect(events).toEqual({ events: 3 });
+    await expect(client.unsafe("update identity_creator_capability_events set state = 'active' where capability_id = (select id from identity_creator_capabilities where user_id = 'review-artist')")).rejects.toThrow("append-only");
   });
 });

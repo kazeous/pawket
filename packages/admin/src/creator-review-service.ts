@@ -9,6 +9,7 @@ import {
   creatorApplicationRevisions,
   creatorApplications,
   identityCreatorCapabilities,
+  identityCreatorCapabilityEvents,
   identitySessions,
   identityUsers,
   insertOutboxEvent,
@@ -24,12 +25,8 @@ import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
-const requiredAttestations = new Set([
-  "dob_truthfulness",
-  "portfolio_rights",
-  "truthful_information",
-  "creator_terms",
-  "privacy",
+const requiredAttestations = new Map([
+  ["dob_truthfulness", "increment-2-v1"], ["portfolio_rights", "increment-2-v1"], ["truthful_information", "increment-2-v1"], ["creator_terms", "increment-2-v1"], ["privacy", "increment-2-v1"],
 ]);
 const reasonCodes = new Set([
   "portfolio_insufficient",
@@ -109,19 +106,21 @@ async function requireStepUp(input: ServiceInput, tx: PawketTransaction, proof: 
 
 async function revalidateApproval(tx: PawketTransaction, application: typeof creatorApplications.$inferSelect, at: Date): Promise<void> {
   policy(application.currentRevisionId, "missing_revision");
-  const [revision] = await tx.select().from(creatorApplicationRevisions).where(eq(creatorApplicationRevisions.id, application.currentRevisionId)).limit(1);
-  const [user] = await tx.select().from(identityUsers).where(eq(identityUsers.id, application.userId)).limit(1);
-  policy(revision && revision.submittedAt && revision.ageAtSubmission !== null && revision.ageAtSubmission >= 18, "age_snapshot_invalid");
+  const [revision] = await tx.select().from(creatorApplicationRevisions).where(eq(creatorApplicationRevisions.id, application.currentRevisionId)).limit(1).for("update");
+  const [user] = await tx.select().from(identityUsers).where(eq(identityUsers.id, application.userId)).limit(1).for("update");
+  policy(revision && revision.submittedAt && revision.dobEnvelope && revision.ageAtSubmission !== null && revision.ageAtSubmission >= 18 && /^\d{4}-\d{2}-\d{2}$/u.test(revision.ageEvaluatedOn ?? ""), "age_snapshot_invalid");
+  policy(bounded(revision.artistDisplayName, 1, 200) && bounded(revision.shortIntroduction, 1, 2000) && bounded(revision.applicantEmail, 3, 320) && Array.isArray(revision.portfolioUrls) && revision.portfolioUrls.length > 0 && revision.portfolioUrls.length <= 5 && revision.portfolioUrls.every((value) => typeof value === "string" && /^https:\/\//iu.test(value)) && bounded(revision.primaryArtDiscipline, 1, 100) && bounded(revision.practiceDescription, 1, 4000) && (revision.contentIntent === "general_audience_only" || revision.contentIntent === "may_include_age_restricted"), "snapshot_incomplete");
   policy(user && user.accessStatus === "active" && user.emailVerified, "account_ineligible");
   policy(revision.applicantEmail === user.email, "email_changed");
   policy(revision.proposedReceivingAccountId, "missing_receiving_account");
-  const attestations = await tx.select({ type: creatorApplicationAttestations.type }).from(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.revisionId, revision.id));
-  policy(attestations.length === requiredAttestations.size && attestations.every((item) => requiredAttestations.has(item.type)), "attestations_invalid");
-  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt))).limit(1);
-  policy(account && account.proofState === "verified" && account.proofVerifiedAt && at.getTime() - account.proofVerifiedAt.getTime() <= 30 * 24 * 60 * 60_000, "proof_expired");
-  const [proof] = await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, revision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id), eq(paymentsVerificationDepositChallenges.state, "verified"))).limit(1);
+  const attestations = await tx.select({ type: creatorApplicationAttestations.type, policyVersion: creatorApplicationAttestations.policyVersion }).from(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.revisionId, revision.id)).for("update");
+  policy(attestations.length === requiredAttestations.size && attestations.every((item) => requiredAttestations.get(item.type) === item.policyVersion), "attestations_invalid");
+  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt))).limit(1).for("update");
+  const proofAge = account?.proofVerifiedAt ? at.getTime() - account.proofVerifiedAt.getTime() : null;
+  policy(account && account.proofState === "verified" && proofAge !== null && proofAge >= 0 && proofAge <= 30 * 24 * 60 * 60_000, "proof_expired");
+  const [proof] = await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, revision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id), eq(paymentsVerificationDepositChallenges.state, "verified"))).limit(1).for("update");
   policy(proof, "receiving_account_unverified");
-  const [obligation] = await tx.select({ id: paymentsVerificationDepositRefundObligations.id }).from(paymentsVerificationDepositRefundObligations).where(and(eq(paymentsVerificationDepositRefundObligations.challengeId, proof.id), eq(paymentsVerificationDepositRefundObligations.accountVersionId, account.id), eq(paymentsVerificationDepositRefundObligations.applicantUserId, application.userId))).limit(1);
+  const [obligation] = await tx.select({ id: paymentsVerificationDepositRefundObligations.id }).from(paymentsVerificationDepositRefundObligations).where(and(eq(paymentsVerificationDepositRefundObligations.challengeId, proof.id), eq(paymentsVerificationDepositRefundObligations.accountVersionId, account.id), eq(paymentsVerificationDepositRefundObligations.applicantUserId, application.userId))).limit(1).for("update");
   policy(obligation, "refund_obligation_missing");
 }
 
@@ -180,7 +179,7 @@ export function createCreatorReviewService(input: ServiceInput) {
     },
 
     async listSubmitted() {
-      return input.db.select({ id: creatorApplications.id, version: creatorApplications.version, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: creatorApplicationRevisions.ageAtSubmission, portfolioUrls: creatorApplicationRevisions.portfolioUrls, contentIntent: creatorApplicationRevisions.contentIntent, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(eq(creatorApplications.state, "submitted")).orderBy(asc(creatorApplicationRevisions.submittedAt));
+      return input.db.select({ id: creatorApplications.id, version: creatorApplications.version, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: sql<boolean>`coalesce(${creatorApplicationRevisions.ageAtSubmission} >= 18, false)`, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(eq(creatorApplications.state, "submitted")).orderBy(asc(creatorApplicationRevisions.submittedAt));
     },
 
     async claim(command: { ownerUserId: string; ownerSessionId: string; applicationId: string; expectedVersion: number; requestId: string }) {
@@ -201,7 +200,7 @@ export function createCreatorReviewService(input: ServiceInput) {
       const applicantExplanation = bounded(command.applicantExplanation, 1, 2000);
       const privateNote = command.privateNote === undefined ? null : bounded(command.privateNote, 1, 1000);
       policy(reasonCode && reasonCodes.has(reasonCode) && applicantExplanation && (command.privateNote === undefined || privateNote), "invalid_decision");
-      const fingerprint = reviewFingerprint(input, { ...command, applicantExplanation, privateNote });
+      const fingerprint = reviewFingerprint(input, { idempotencyKey: command.idempotencyKey, applicationId: command.applicationId, revisionId: command.revisionId, expectedVersion: command.expectedVersion, action: command.action, reasonCode, applicantExplanation, privateNote });
       return input.db.transaction(async (tx) => {
         const started = await beginIdempotentCommand(tx, { actorUserId: command.ownerUserId, commandScope: `creator.application.${command.action}`, ...fingerprint, now: at, expiresAt: new Date(at.getTime() + IDEMPOTENCY_LIFETIME_MS) });
         if (started.kind === "replay") {
@@ -225,6 +224,7 @@ export function createCreatorReviewService(input: ServiceInput) {
         if (command.action === "approve") {
           const [created] = await tx.insert(identityCreatorCapabilities).values({ id: id(), userId: application.userId, state: "active", version: 1, approvedApplicationId: application.id, approvedRevisionId: command.revisionId, suspendedAt: null, createdAt: at, updatedAt: at }).onConflictDoNothing().returning({ id: identityCreatorCapabilities.id });
           policy(created, "creator_capability_exists");
+          await tx.insert(identityCreatorCapabilityEvents).values({ id: id(), capabilityId: created.id, action: "granted", state: "active", version: 1, actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, stepUpProofId: command.stepUpProofId, reasonCode, requestId: command.requestId, createdAt: at });
           await tx.update(identityUsers).set({ authorizationVersion: sql`${identityUsers.authorizationVersion} + 1`, updatedAt: at }).where(eq(identityUsers.id, application.userId));
           await tx.update(identitySessions).set({ revokedAt: at, revocationReason: "creator_capability_changed", updatedAt: at }).where(and(eq(identitySessions.userId, application.userId), isNull(identitySessions.revokedAt)));
         }
@@ -241,7 +241,7 @@ export function createCreatorReviewService(input: ServiceInput) {
       const applicantExplanation = bounded(command.applicantExplanation, 1, 2000);
       const privateNote = command.privateNote === undefined ? null : bounded(command.privateNote, 1, 1000);
       policy(reasonCode && reasonCodes.has(reasonCode) && applicantExplanation && (command.privateNote === undefined || privateNote), "invalid_decision");
-      const fingerprint = reviewFingerprint(input, { ...command, applicantExplanation, privateNote });
+      const fingerprint = reviewFingerprint(input, { idempotencyKey: command.idempotencyKey, userId: command.userId, action: command.action, reasonCode, applicantExplanation, privateNote });
       return input.db.transaction(async (tx) => {
         const started = await beginIdempotentCommand(tx, { actorUserId: command.ownerUserId, commandScope: `creator.capability.${command.action}`, ...fingerprint, now: at, expiresAt: new Date(at.getTime() + IDEMPOTENCY_LIFETIME_MS) });
         if (started.kind === "replay") {
@@ -262,6 +262,7 @@ export function createCreatorReviewService(input: ServiceInput) {
         const nextState = command.action === "suspend" ? "suspended" : "active";
         const [updated] = await tx.update(identityCreatorCapabilities).set({ state: nextState, version: capability.version + 1, suspendedAt: command.action === "suspend" ? at : null, updatedAt: at }).where(and(eq(identityCreatorCapabilities.id, capability.id), eq(identityCreatorCapabilities.version, capability.version))).returning();
         policy(updated, "stale_version");
+        await tx.insert(identityCreatorCapabilityEvents).values({ id: id(), capabilityId: capability.id, action: command.action === "suspend" ? "suspended" : "reinstated", state: nextState, version: updated.version, actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, stepUpProofId: command.stepUpProofId, reasonCode, requestId: command.requestId, createdAt: at });
         await tx.update(identityUsers).set({ authorizationVersion: sql`${identityUsers.authorizationVersion} + 1`, updatedAt: at }).where(eq(identityUsers.id, command.userId));
         await tx.update(identitySessions).set({ revokedAt: at, revocationReason: "creator_capability_changed", updatedAt: at }).where(and(eq(identitySessions.userId, command.userId), isNull(identitySessions.revokedAt)));
         await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_capability", subjectId: capability.id, action: `creator.capability.${command.action}`, outcome: "succeeded", reasonCode, beforeState: { state: capability.state, version: capability.version }, afterState: { state: nextState, version: updated.version }, assurance: { method: "totp", actionClass: `owner.creator_capability_${command.action}` }, applicationRevision: capability.approvedRevisionId, requestId: command.requestId, occurredAt: at });

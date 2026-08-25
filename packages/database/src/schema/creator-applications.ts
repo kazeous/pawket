@@ -46,4 +46,18 @@ export const creatorApplicationDecisions = pgTable("creator_application_decision
   index("creator_application_decisions_application_idx").on(t.applicationId, t.createdAt),
   check("creator_application_decisions_action_check", sql`${t.action} in ('changes_requested','approved','rejected','reopened')`),
   check("creator_application_decisions_reason_check", sql`${t.reasonCode} in ('portfolio_insufficient','portfolio_control_unclear','contact_unverified','receiving_account_unverified','content_policy_risk','information_inconsistent','eligibility_not_met','other')`),
+  check("creator_application_decisions_text_check", sql`length(${t.applicantExplanation}) between 1 and 2000 and (${t.privateNote} is null or length(${t.privateNote}) between 1 and 1000) and ${t.expectedVersion} > 0`),
 ]);
+
+export const identityCreatorCapabilities = pgTable("identity_creator_capabilities", {
+  id: uuid("id").primaryKey(), userId: text("user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  state: text("state").notNull(), version: integer("version").notNull().default(1),
+  approvedApplicationId: uuid("approved_application_id").notNull().references(() => creatorApplications.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  approvedRevisionId: uuid("approved_revision_id").notNull().references(() => creatorApplicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  suspendedAt: timestamp("suspended_at", { withTimezone: true, mode: "date" }), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+}, (t) => [uniqueIndex("identity_creator_capabilities_user_uidx").on(t.userId), check("identity_creator_capabilities_state_check", sql`${t.state} in ('active','suspended')`), check("identity_creator_capabilities_version_check", sql`${t.version} > 0`), check("identity_creator_capabilities_suspension_check", sql`(${t.state} = 'suspended' and ${t.suspendedAt} is not null) or (${t.state} = 'active' and ${t.suspendedAt} is null)`)]);
+
+export const identityCreatorCapabilityEvents = pgTable("identity_creator_capability_events", {
+  id: uuid("id").primaryKey(), capabilityId: uuid("capability_id").notNull().references(() => identityCreatorCapabilities.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  action: text("action").notNull(), state: text("state").notNull(), version: integer("version").notNull(), actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }), actorSessionId: text("actor_session_id").notNull(), stepUpProofId: uuid("step_up_proof_id").notNull(), reasonCode: text("reason_code").notNull(), requestId: text("request_id").notNull(), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+}, (t) => [index("identity_creator_capability_events_capability_idx").on(t.capabilityId, t.createdAt), check("identity_creator_capability_events_action_check", sql`${t.action} in ('granted','suspended','reinstated')`), check("identity_creator_capability_events_state_check", sql`${t.state} in ('active','suspended')`), check("identity_creator_capability_events_version_check", sql`${t.version} > 0`)]);

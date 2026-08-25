@@ -39,6 +39,7 @@ describe("identity persistence schema", () => {
     const expectedTables = [
       "identity_accounts",
       "identity_creator_capabilities",
+      "identity_creator_capability_events",
       "identity_email_addresses",
       "identity_email_handoffs",
       "identity_external_link_transactions",
@@ -63,6 +64,7 @@ describe("identity persistence schema", () => {
     for (const exportName of [
       "identityAccounts",
       "identityCreatorCapabilities",
+      "identityCreatorCapabilityEvents",
       "identityEmailAddresses",
       "identityEmailHandoffs",
       "identityExternalLinkTransactions",
