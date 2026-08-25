@@ -40,6 +40,7 @@ function fixture(input?: {
   authenticated?: boolean;
   owner?: boolean;
   serviceError?: Error;
+  stepUpError?: Error & { code: string };
 }) {
   const accounts = {
     getCurrentForApplicant: vi.fn(async () => ({ referenceId: "account-version" })),
@@ -65,9 +66,10 @@ function fixture(input?: {
     })),
     recordRefund: vi.fn(async (command: Record<string, unknown>) => ({ state: "sent", command })),
   };
-  const issueOwnerStepUpProof = vi.fn(async (proof: { actionClass: string }) => ({
-    id: `server-proof:${proof.actionClass}`,
-  }));
+  const issueOwnerStepUpProof = vi.fn(async (proof: { actionClass: string }) => {
+    if (input?.stepUpError) throw input.stepUpError;
+    return { id: `server-proof:${proof.actionClass}` };
+  });
   expect(typeof api.createPaymentsHttpHandlers).toBe("function");
   const handlers = api.createPaymentsHttpHandlers!({
     trustedOrigins: [origin],
@@ -82,6 +84,21 @@ function fixture(input?: {
 }
 
 describe("Payments HTTP boundary", () => {
+  test("maps only the typed stale owner assurance error to stable TOTP guidance", async () => {
+    const stepUpError = Object.assign(new Error("do not reflect this"), { code: "OWNER_TOTP_REQUIRED" });
+    const { handlers } = fixture({ owner: true, stepUpError });
+    const response = await handlers.issueChallenge(
+      request("/admin/challenge", {
+        body: { revisionId: "10000000-0000-4000-8000-000000000002", accountVersionId: "10000000-0000-4000-8000-000000000003" },
+        headers: { origin, "idempotency-key": "challenge-step-up" },
+      }),
+      "10000000-0000-4000-8000-000000000001",
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ code: "OWNER_TOTP_REQUIRED" });
+  });
+
   test("requires same-origin authentication and derives account command authority server-side", async () => {
     // Break caught: CSRF or trusting client-supplied applicant/session/recent-auth facts.
     const { handlers, accounts } = fixture();

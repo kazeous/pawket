@@ -350,6 +350,13 @@ export async function recoveryCodeAvailable(
   return Boolean(available);
 }
 
+export class StepUpProofError extends Error {
+  constructor(readonly code: "OWNER_TOTP_REQUIRED" | "RECENT_AUTH_REQUIRED") {
+    super("Recent authentication is required");
+    this.name = "StepUpProofError";
+  }
+}
+
 export async function createStepUpProof(
   db: PawketDatabase,
   input: {
@@ -403,7 +410,8 @@ export async function createStepUpProof(
       ? session.primaryAuthenticatedAt
       : session.mfaVerifiedAt;
   if (!assuranceAt || input.now.getTime() - assuranceAt.getTime() > maximumLifetime) {
-    throw new Error("Recent authentication required");
+    if (input.actionClass.startsWith("owner.")) throw new StepUpProofError("OWNER_TOTP_REQUIRED");
+    throw new StepUpProofError("RECENT_AUTH_REQUIRED");
   }
 
   const expiresAt = new Date(input.now.getTime() + lifetimeMs);

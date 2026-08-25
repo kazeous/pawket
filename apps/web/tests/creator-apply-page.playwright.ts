@@ -4,6 +4,13 @@ test("Save Draft bypasses incomplete required fields while Submit remains browse
   // Break caught: browser constraint validation blocking a private draft save, or allowing an incomplete submission.
   await page.route("**/api/v1/creator-application**", async (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/receiving-account")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ account: { referenceId: "account-1", bankBin: "970436", bankName: "Vietcombank", maskedSuffix: "•••• 1234", proofState: "unverified" } }),
+      });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -26,7 +33,12 @@ test("Save Draft bypasses incomplete required fields while Submit remains browse
 
 test("reapplication cooldown is displayed in the Ho Chi Minh calendar date", async ({ page }) => {
   // Break caught: formatting the absolute cooldown instant in the browser or host machine's time zone.
-  await page.route("**/api/v1/creator-application", async (route) => {
+  await page.route("**/api/v1/creator-application**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/receiving-account")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ account: null }) });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({

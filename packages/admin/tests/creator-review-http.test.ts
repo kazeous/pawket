@@ -6,6 +6,19 @@ const origin = "https://pawket.example";
 const session = { userId: "owner-1", sessionId: "owner-session", primaryAuthenticatedAt: new Date("2026-08-25T03:00:00.000Z") };
 
 describe("creator review HTTP boundary", () => {
+  test("maps the typed stale owner assurance error without reflecting internals", async () => {
+    type Factory = { createCreatorReviewHttpHandlers(input: Record<string, unknown>): { detail(request: Request, applicationId: string): Promise<Response> } };
+    const api = admin as unknown as Factory;
+    const typedError = Object.assign(new Error("internal assurance detail"), { code: "OWNER_TOTP_REQUIRED" });
+    const handlers = api.createCreatorReviewHttpHandlers({
+      trustedOrigins: [origin], authenticate: vi.fn(async () => session), authorizeOwner: vi.fn(async () => "authorized"),
+      issueOwnerStepUpProof: vi.fn(async () => { throw typedError; }), review: {},
+    });
+    const response = await handlers.detail(new Request(`${origin}/detail`, { method: "POST", headers: { origin } }), "10000000-0000-4000-8000-000000000001");
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ code: "OWNER_TOTP_REQUIRED" });
+  });
+
   test("denies non-owners and derives action-scoped TOTP proof on owner decisions", async () => {
     // Break caught: a direct non-owner decision or accepting a client-provided proof ID.
     type Factory = {

@@ -21,7 +21,7 @@ import {
 } from "@pawket/database";
 import { rejectionCooldownUntil } from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -146,7 +146,7 @@ export function createCreatorReviewService(input: ServiceInput) {
           ? await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, currentRevision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id))).orderBy(desc(paymentsVerificationDepositChallenges.createdAt)).limit(1)
           : [];
         const [obligation] = challenge
-          ? await tx.select({ state: paymentsVerificationDepositRefundObligations.state, refundNotBefore: paymentsVerificationDepositRefundObligations.refundNotBefore, refundDue: paymentsVerificationDepositRefundObligations.refundDue }).from(paymentsVerificationDepositRefundObligations).where(eq(paymentsVerificationDepositRefundObligations.challengeId, challenge.id)).limit(1)
+          ? await tx.select({ id: paymentsVerificationDepositRefundObligations.id, state: paymentsVerificationDepositRefundObligations.state, refundNotBefore: paymentsVerificationDepositRefundObligations.refundNotBefore, refundDue: paymentsVerificationDepositRefundObligations.refundDue }).from(paymentsVerificationDepositRefundObligations).where(eq(paymentsVerificationDepositRefundObligations.challengeId, challenge.id)).limit(1)
           : [];
         const decisions = await tx.select({ applicationId: creatorApplicationDecisions.applicationId, action: creatorApplicationDecisions.action, reasonCode: creatorApplicationDecisions.reasonCode, createdAt: creatorApplicationDecisions.createdAt }).from(creatorApplicationDecisions).innerJoin(creatorApplications, eq(creatorApplications.id, creatorApplicationDecisions.applicationId)).where(eq(creatorApplications.userId, application.userId)).orderBy(desc(creatorApplicationDecisions.createdAt));
         const projectRevision = (revision: typeof creatorApplicationRevisions.$inferSelect) => ({
@@ -168,18 +168,25 @@ export function createCreatorReviewService(input: ServiceInput) {
         });
         await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_application", subjectId: application.id, action: "creator.application.detail.reveal", outcome: "succeeded", beforeState: null, afterState: { applicationId: application.id, revisionId: currentRevision.id }, assurance: { method: "totp", actionClass: "owner.creator_application_detail" }, applicationRevision: currentRevision.id, requestId: command.requestId, occurredAt: at });
         return {
-          application: { id: application.id, state: application.state, version: application.version, currentRevisionId: currentRevision.id },
+          application: { id: application.id, creatorUserId: application.userId, state: application.state, version: application.version, currentRevisionId: currentRevision.id },
           revision: projectRevision(currentRevision),
           revisions: revisions.map(projectRevision),
           attestations,
           priorOutcomes: decisions.filter((decision) => decision.applicationId !== application.id),
-          payment: { bankName: account?.bankName ?? null, maskedSuffix: account?.maskedSuffix ?? null, proofState: account?.proofState ?? "unverified", refundState: obligation?.state ?? null, refundNotBefore: obligation?.refundNotBefore ?? null, refundDue: obligation?.refundDue ?? null },
+          payment: { receivingAccountVersionId: account?.id ?? null, challengeId: challenge?.id ?? null, refundObligationId: obligation?.id ?? null, bankName: account?.bankName ?? null, maskedSuffix: account?.maskedSuffix ?? null, proofState: account?.proofState ?? "unverified", refundState: obligation?.state ?? null, refundNotBefore: obligation?.refundNotBefore ?? null, refundDue: obligation?.refundDue ?? null },
         };
       });
     },
 
-    async listSubmitted() {
-      return input.db.select({ id: creatorApplications.id, version: creatorApplications.version, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: sql<boolean>`coalesce(${creatorApplicationRevisions.ageAtSubmission} >= 18, false)`, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(eq(creatorApplications.state, "submitted")).orderBy(asc(creatorApplicationRevisions.submittedAt));
+    async listSubmitted(ownerUserId?: string, at = now()) {
+      const visible = ownerUserId
+        ? or(eq(creatorApplications.state, "submitted"), and(eq(creatorApplications.state, "under_review"), eq(creatorApplications.reviewerUserId, ownerUserId), gt(creatorApplications.reviewClaimExpiresAt, at)))
+        : eq(creatorApplications.state, "submitted");
+      return input.db.select({ id: creatorApplications.id, state: creatorApplications.state, version: creatorApplications.version, claimExpiresAt: creatorApplications.reviewClaimExpiresAt, claimedByCurrentOwner: ownerUserId ? sql<boolean>`${creatorApplications.reviewerUserId} = ${ownerUserId}` : sql<boolean>`false`, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: sql<boolean>`coalesce(${creatorApplicationRevisions.ageAtSubmission} >= 18, false)`, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(visible).orderBy(asc(creatorApplicationRevisions.submittedAt)).limit(100);
+    },
+
+    async listCapabilities() {
+      return input.db.select({ userId: identityCreatorCapabilities.userId, artistDisplayName: creatorApplicationRevisions.artistDisplayName, state: identityCreatorCapabilities.state, version: identityCreatorCapabilities.version, approvedApplicationId: identityCreatorCapabilities.approvedApplicationId, approvedRevisionId: identityCreatorCapabilities.approvedRevisionId, suspendedAt: identityCreatorCapabilities.suspendedAt, updatedAt: identityCreatorCapabilities.updatedAt }).from(identityCreatorCapabilities).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, identityCreatorCapabilities.approvedRevisionId)).orderBy(desc(identityCreatorCapabilities.updatedAt)).limit(200);
     },
 
     async claim(command: { ownerUserId: string; ownerSessionId: string; applicationId: string; expectedVersion: number; requestId: string }) {

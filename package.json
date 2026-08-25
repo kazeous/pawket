@@ -2,7 +2,9 @@
   "name": "pawket",
   "private": true,
   "packageManager": "pnpm@11.22.0",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "compose:validate": "node scripts/validate-coolify-compose.mjs",
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
@@ -17,6 +19,7 @@
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/compat": "2.1.0",
     "@playwright/test": "1.62.1",
     "@types/node": "24.13.3",

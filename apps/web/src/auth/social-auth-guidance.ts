@@ -27,15 +27,15 @@ export function safeSocialAuthError(
 export function socialAuthGuidance(value: string | string[] | undefined): string | null {
   switch (safeSocialAuthError(value)) {
     case "account_not_linked":
-      return "This email already belongs to a Pawket account. Sign in with your existing method, then explicitly link this provider from Security settings.";
+      return "Email này đã thuộc một tài khoản Pawket. Hãy đăng nhập bằng phương thức cũ rồi liên kết nhà cung cấp trong phần Bảo mật.";
     case "email_not_found":
-      return "The provider did not return an email address. Add an email with the provider and try again.";
+      return "Nhà cung cấp chưa trả về email. Hãy bổ sung email ở nhà cung cấp rồi thử lại.";
     case "unable_to_create_user":
-      return "Pawket could not accept this provider identity. Confirm that its email is verified, then try again.";
+      return "Pawket chưa thể chấp nhận danh tính này. Hãy kiểm tra email ở nhà cung cấp đã được xác minh.";
     case "account_already_linked_to_different_user":
-      return "This provider identity is already linked to another Pawket account.";
+      return "Danh tính này đã được liên kết với tài khoản Pawket khác.";
     case "social":
-      return "Social authentication could not be completed. Please try again.";
+      return "Chưa thể hoàn tất đăng nhập qua nhà cung cấp. Hãy thử lại.";
     case null:
       return null;
   }

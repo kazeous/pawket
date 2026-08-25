@@ -263,9 +263,9 @@ describe("owner creator review", () => {
       applicationId, requestId: "detail-success",
     });
     expect(detail).toMatchObject({
-      application: { id: applicationId, state: "submitted", version: 2 },
+      application: { id: applicationId, creatorUserId: "review-artist", state: "submitted", version: 2 },
       revision: { id: revisionId, artistDisplayName: "Test Artist", dateOfBirth: "2002-08-25" },
-      payment: { bankName: "Vietcombank", maskedSuffix: "•••• 7890", proofState: "verified", refundState: "pending_window" },
+      payment: { receivingAccountVersionId: accountVersionId, challengeId, refundObligationId: obligationId, bankName: "Vietcombank", maskedSuffix: "•••• 7890", proofState: "verified", refundState: "pending_window" },
       priorOutcomes: [{ applicationId: priorApplicationId, action: "rejected", reasonCode: "portfolio_insufficient" }],
     });
     expect((detail.revisions as Array<Record<string, unknown>>).map((revision) => revision.artistDisplayName)).toEqual([

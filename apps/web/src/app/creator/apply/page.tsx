@@ -2,6 +2,9 @@
 
 import { type FormEvent, useEffect, useState } from "react";
 
+import { AppShell } from "../../../ui/app-shell";
+import { StatusBanner, StatusTag } from "../../../ui/status-banner";
+
 const warning =
   "Tôi xác nhận ngày, tháng, năm sinh đã khai là đúng sự thật. Nếu sau này giấy tờ hoặc thông tin xác minh hợp lệ không khớp vì tôi đã cung cấp thông tin không trung thực khi đăng ký, Pawket sẽ không giải quyết các yêu cầu dựa trên thông tin sai lệch đó và có thể áp dụng biện pháp tài khoản theo chính sách, trừ trường hợp pháp luật bắt buộc Pawket phải tiếp nhận hoặc xử lý.";
 
@@ -216,6 +219,7 @@ export default function CreatorApplyPage() {
   };
 
   const withdraw = async () => {
+    if (!window.confirm("Rút hồ sơ khỏi hàng đợi xét duyệt? Bản nháp và mọi nghĩa vụ hoàn trả đã phát sinh vẫn được giữ nguyên.")) return;
     try {
       await call("/api/v1/creator-application/withdraw", {});
       setMessage("Đã rút hồ sơ.");
@@ -234,23 +238,23 @@ export default function CreatorApplyPage() {
   };
 
   return (
-    <main className="page-shell stack">
-      <h1>Đăng ký trở thành nhà sáng tạo</h1>
-      <p>
-        Pawket chưa xác minh giấy tờ định danh của chính phủ. Hồ sơ này chỉ hiển thị riêng cho
-        bạn và nhóm xét duyệt được ủy quyền.
-      </p>
+    <AppShell context="Creator workbench" action={{ href: "/settings/security", label: "Bảo mật" }}>
+      <header className="workspace-header reveal"><div><p className="eyebrow">Creator workbench</p><h1>Hồ sơ nhà sáng tạo</h1><p className="lede">Chuẩn bị danh tính nghề nghiệp và tài khoản nhận VND trong một hồ sơ riêng tư.</p></div><StatusTag tone={application?.state === "submitted" ? "success" : "info"}>{application?.state === "submitted" ? "Đã gửi" : application?.state === "draft" ? "Bản nháp" : application?.state ?? "Chưa tạo"}</StatusTag></header>
       {application?.state === "rejected" && application.cooldownUntil ? (
-        <p>
+        <StatusBanner tone="warning"><p>
           Bạn có thể nộp lại từ{" "}
           {new Date(application.cooldownUntil).toLocaleDateString("vi-VN", {
             timeZone: "Asia/Ho_Chi_Minh",
           })}
           .
-        </p>
+        </p></StatusBanner>
       ) : null}
-      <section className="panel stack">
-        <p className="eyebrow">Tài khoản nhận tiền đề xuất</p>
+      {message ? <StatusBanner tone={message.startsWith("Đã") ? "success" : "error"}><p>{message}</p></StatusBanner> : null}
+      <div className="creator-workspace">
+      <nav className="task-rail" aria-label="Các bước hồ sơ"><a href="#creator-profile"><span>01</span>Hồ sơ nghề nghiệp</a><a href="#portfolio"><span>02</span>Portfolio</a><a href="#receiving-account"><span>03</span>Tài khoản nhận tiền</a><a href="#attestations"><span>04</span>Xác nhận chính sách</a><a href="#review-submit"><span>05</span>Kiểm tra &amp; gửi</a>{application?.state === "submitted" ? <a href="#deposit"><span>06</span>Xác minh &amp; hoàn trả</a> : null}</nav>
+      <div className="stack">
+      <section className="work-surface stack" id="receiving-account">
+        <p className="eyebrow">03 · Tài khoản nhận tiền đề xuất</p>
         <h2>Chứng minh quyền kiểm soát mà không tải giấy tờ tùy thân</h2>
         <p>
           Sau khi hồ sơ được gửi, owner có thể phát hành một thử thách chuyển khoản VND có số
@@ -314,8 +318,8 @@ export default function CreatorApplyPage() {
       </section>
 
       {application?.state === "submitted" ? (
-        <section className="panel stack">
-          <p className="eyebrow">Xác minh chuyển khoản</p>
+        <section className="work-surface stack" id="deposit">
+          <p className="eyebrow">06 · Xác minh chuyển khoản &amp; hoàn trả</p>
           <h2>Trạng thái khoản nộp và hoàn trả</h2>
           {deposit?.challengeId && deposit.operatingAccount ? (
             <>
@@ -355,8 +359,8 @@ export default function CreatorApplyPage() {
         </section>
       ) : null}
 
-      <form className="panel stack" onSubmit={handleFormSubmit}>
-        <p className="eyebrow">Hồ sơ xét duyệt riêng tư</p>
+      <form className="work-surface stack" id="creator-profile" onSubmit={handleFormSubmit}>
+        <p className="eyebrow">01 · Hồ sơ xét duyệt riêng tư</p>
         <h2>Thông tin nhà sáng tạo</h2>
         <label>
           Tên nghệ sĩ
@@ -383,7 +387,7 @@ export default function CreatorApplyPage() {
             onChange={(event) => setForm({ ...form, dateOfBirth: event.target.value })}
           />
         </label>
-        <label>
+        <label id="portfolio">
           Liên kết portfolio công khai HTTPS (mỗi dòng một liên kết)
           <textarea
             required
@@ -422,7 +426,7 @@ export default function CreatorApplyPage() {
             ? `Hồ sơ sẽ tham chiếu ${account.bankName} ${account.maskedSuffix}; Pawket không hiển thị số tài khoản đầy đủ trong hồ sơ.`
             : "Hãy lưu một tài khoản nhận VND ở phần trên trước khi gửi hồ sơ."}
         </p>
-        <section className="stack compact">
+        <section className="stack compact" id="attestations">
           <p>{warning}</p>
           <label>
             <input
@@ -473,7 +477,7 @@ export default function CreatorApplyPage() {
             Tôi đồng ý Chính sách quyền riêng tư v1.
           </label>
         </section>
-        <div className="button-row">
+        <div className="button-row" id="review-submit">
           <button type="submit" formNoValidate data-action="save">
             Lưu bản nháp
           </button>
@@ -494,7 +498,8 @@ export default function CreatorApplyPage() {
           ) : null}
         </div>
       </form>
-      <p role="status">{message}</p>
-    </main>
+      </div>
+      </div>
+    </AppShell>
   );
 }

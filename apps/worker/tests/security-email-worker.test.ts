@@ -219,6 +219,31 @@ describe("production SMTP security email sender", () => {
     });
   });
 
+  test("routes authenticated email changes to the purpose-specific confirmation page", async () => {
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered = message; } };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose: "email_change",
+      destination: "artist-new@example.com",
+      secret: "email-change-secret",
+      templateData: { returnPath: "/settings/security/confirm-email" },
+    });
+
+    expect(delivered?.text).toContain(
+      "https://pawket.example/settings/security/confirm-email?token=email-change-secret",
+    );
+    expect(delivered?.text).not.toContain("https://pawket.example/verify-email?");
+  });
+
   test("fails before opening a transport when SMTP configuration is incomplete", () => {
     // Catches a deployed worker starting with partial credentials or exposing their values.
     const leakedPassword = "smtp-password-that-must-not-leak";

@@ -1,5 +1,4 @@
 import { headers } from "next/headers";
-import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getIdentityRuntime } from "../../../auth/runtime";
@@ -8,6 +7,7 @@ import {
   socialAuthGuidance,
 } from "../../../auth/social-auth-guidance";
 import { SecurityPanel } from "./security-panel";
+import { AppShell } from "../../../ui/app-shell";
 
 export const dynamic = "force-dynamic";
 
@@ -29,22 +29,16 @@ export default async function SecuritySettingsPage({
   const initialMessage = params.error
     ? socialAuthGuidance(params.error)
     : params["recover-totp"] === "1"
-      ? "Recovery code accepted. Enroll a new authenticator now."
+      ? "Mã khôi phục đã được chấp nhận. Hãy đăng ký lại ứng dụng xác thực ngay."
       : null;
 
   return (
-    <main className="page-shell">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">Account</p>
-          <h1>Security settings</h1>
-        </div>
-        <Link href="/">Pawket home</Link>
-      </header>
+    <AppShell context="Tài khoản" action={{ href: "/creator/apply", label: "Hồ sơ creator" }}>
+      <header className="workspace-header reveal"><div><p className="eyebrow">Tài khoản</p><h1>Bảo mật &amp; đăng nhập</h1><p className="lede">Kiểm soát cách đăng nhập, xác thực hai bước và những thiết bị đang có quyền truy cập.</p></div></header>
       <SecurityPanel
         enabledProviders={runtime.auth.enabledProviders}
         initialMessage={initialMessage}
       />
-    </main>
+    </AppShell>
   );
 }

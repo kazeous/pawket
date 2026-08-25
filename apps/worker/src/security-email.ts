@@ -74,8 +74,9 @@ function isCompleteSmtpConfig(
 function challengePath(purpose: SecurityEmailMessage["purpose"]): string | null {
   switch (purpose) {
     case "email_verification":
-    case "email_change":
       return "/verify-email";
+    case "email_change":
+      return "/settings/security/confirm-email";
     case "password_reset":
       return "/reset-password";
     case "security_notice":
