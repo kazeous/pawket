@@ -7,6 +7,10 @@ import {
   type OwnerMfaRecoveryResult,
 } from "./owner-mfa-recovery.js";
 
+const operationalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
+const databaseCleanupWarning =
+  "Owner MFA recovery cleanup warning: DATABASE_CLOSE_FAILED\n";
+
 export type OwnerMfaRecoveryCliArguments =
   | { help: true }
   | {
@@ -59,13 +63,13 @@ export type OwnerMfaRecoveryCliDependencies = Readonly<{
 }>;
 
 export type OwnerMfaRecoveryCliResult = Readonly<{
-  exitCode: 0 | 1 | 2;
+  exitCode: 0 | 1 | 2 | 3;
   stdout: string;
   stderr: string;
 }>;
 
 function cliResult(
-  exitCode: 0 | 1 | 2,
+  exitCode: 0 | 1 | 2 | 3,
   output: { stdout?: string; stderr?: string },
 ): OwnerMfaRecoveryCliResult {
   return {
@@ -154,6 +158,9 @@ export async function runOwnerMfaRecoveryCli(
   if (
     environment.OWNER_MFA_RECOVERY_MODE !== "external_manual" ||
     !environment.OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE ||
+    !operationalIdentifierPattern.test(
+      environment.OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE,
+    ) ||
     !environment.OWNER_MFA_RECOVERY_REHEARSED_AT
   ) {
     return cliResult(1, {
@@ -174,6 +181,7 @@ export async function runOwnerMfaRecoveryCli(
   }
 
   let database: OwnerMfaRecoveryDatabaseHandle;
+  let operationResult: OwnerMfaRecoveryCliResult;
   try {
     database = dependencies.createDatabase(environment.DATABASE_URL);
   } catch {
@@ -207,14 +215,25 @@ export async function runOwnerMfaRecoveryCli(
       keyring,
       now,
     });
-    return cliResult(0, {
+    operationResult = cliResult(0, {
       stdout: `Owner MFA recovery completed; ${result.revokedSessionCount} session(s) revoked; MFA re-enrollment required.\n`,
     });
   } catch (error) {
     const code =
       error instanceof OwnerMfaRecoveryError ? error.code : "OWNER_MFA_RECOVERY_FAILED";
-    return cliResult(1, { stderr: `Owner MFA recovery refused: ${code}\n` });
-  } finally {
-    await database.close();
+    operationResult = cliResult(1, {
+      stderr: `Owner MFA recovery refused: ${code}\n`,
+    });
   }
+
+  try {
+    await database.close();
+  } catch {
+    return {
+      ...operationResult,
+      exitCode: operationResult.exitCode === 0 ? 3 : operationResult.exitCode,
+      stderr: `${operationResult.stderr}${databaseCleanupWarning}`,
+    };
+  }
+  return operationResult;
 }

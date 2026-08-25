@@ -281,6 +281,44 @@ describe("parseServerEnv", () => {
     );
   });
 
+  it.each([
+    ["spaces", "owner acceptance"],
+    ["leading punctuation", "-owner-acceptance"],
+    ["control characters", "owner\nacceptance"],
+    ["other punctuation", "owner/acceptance"],
+    ["non-ASCII characters", "owner-é"],
+    ["more than 200 characters", `a${"b".repeat(200)}`],
+  ])("rejects an owner MFA acceptance reference containing %s", (_case, rejectedReference) => {
+    // Break caught: configuration accepting a reference the recovery service
+    // rejects after the command has already created its database handle.
+    expectSafeValidationError(
+      {
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: rejectedReference,
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      },
+      "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+      "has an invalid format",
+      rejectedReference,
+    );
+  });
+
+  it.each([
+    ["one alphanumeric character", "A"],
+    ["every permitted punctuation character", "a._:-Z"],
+    ["the 200-character boundary", `a${"b".repeat(199)}`],
+  ])("accepts an owner MFA acceptance reference with %s", (_case, acceptedReference) => {
+    expect(
+      parseServerEnv({
+        ...completeProductionEnv,
+        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: acceptedReference,
+        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      }).OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE,
+    ).toBe(acceptedReference);
+  });
+
   it("accepts provider-neutral SMTP settings without requiring them in the web process", () => {
     // Catches rejecting the approved production adapter or dropping its typed settings.
     const parsed = parseServerEnv({
