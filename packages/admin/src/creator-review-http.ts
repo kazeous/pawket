@@ -25,7 +25,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}
 function json(status: number, body: unknown): Response { return Response.json(body, { status, headers: { "cache-control": "no-store" } }); }
 function trusted(request: Request, origins: readonly string[]): boolean { const origin = request.headers.get("origin"); return origin !== null && origins.includes(origin); }
 function key(request: Request): string | null { const value = request.headers.get("idempotency-key")?.trim(); return value && /^[A-Za-z0-9._-]{8,200}$/u.test(value) ? value : null; }
-function version(request: Request): number | null { const value = request.headers.get("if-match"); return value && /^\d+$/u.test(value) && Number(value) > 0 ? Number(value) : null; }
+function version(request: Request): number | null { const value = request.headers.get("if-match"); if (!value || !/^\d+$/u.test(value)) return null; const parsed = Number(value); return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null; }
 function text(value: unknown, minimum: number, maximum: number): string | null { if (typeof value !== "string") return null; const normalized = value.trim(); return normalized.length >= minimum && normalized.length <= maximum ? normalized : null; }
 function requestId(request: Request): string { const value = request.headers.get("x-request-id"); return value && /^[A-Za-z0-9._:-]{1,128}$/u.test(value) ? value : randomUUID(); }
 async function body(request: Request): Promise<Record<string, unknown> | null> { try { const value = await request.json(); return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; } catch { return null; } }

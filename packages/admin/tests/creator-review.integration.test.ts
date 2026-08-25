@@ -51,6 +51,8 @@ async function seedSubmittedApplication(): Promise<void> {
     ) values
       ('review-owner', 'Owner', 'owner@pawket.test', 'owner@pawket.test', true, ${at},
        'password_email_challenge', 'active', 1, ${at}, ${at}),
+      ('other-owner', 'Other Owner', 'other-owner@pawket.test', 'other-owner@pawket.test', true, ${at},
+       'password_email_challenge', 'active', 1, ${at}, ${at}),
       ('review-artist', 'Artist', 'artist@pawket.test', 'artist@pawket.test', true, ${at},
        'password_email_challenge', 'active', 1, ${at}, ${at})
   `;
@@ -186,6 +188,47 @@ afterAll(async () => {
 });
 
 describe("owner creator review", () => {
+  test("rejects stale claims and permits a different owner to reclaim only after the 15-minute lease expires", async () => {
+    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number; leaseExpiresAt: Date }> } };
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    await expect(service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 1, requestId: "stale-claim" })).rejects.toMatchObject({ code: "stale_version" });
+    const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "first-claim" });
+    await expect(service.claim({ ownerUserId: "other-owner", ownerSessionId: "other-session", applicationId, expectedVersion: claim.version, requestId: "early-reclaim" })).rejects.toMatchObject({ code: "claim_unavailable" });
+    await client`update creator_applications set review_claimed_at = ${(new Date(now.getTime() - 20 * 60_000)).toISOString()}, review_claim_expires_at = ${(new Date(now.getTime() - 5 * 60_000)).toISOString()} where id = ${applicationId}`;
+    await expect(service.claim({ ownerUserId: "other-owner", ownerSessionId: "other-session", applicationId, expectedVersion: claim.version, requestId: "expired-reclaim" })).resolves.toMatchObject({ version: claim.version + 1 });
+  });
+
+  test("rejects approval without side effects when authoritative proof, account, or applicant state changes", async () => {
+    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<unknown> } };
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "proof-claim" });
+    await client`update payments_receiving_account_onboarding set proof_verified_at = ${(new Date(now.getTime() + 1)).toISOString()} where id = ${accountVersionId}`;
+    await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claim.version, idempotencyKey: "future-proof-approval", requestId: "future-proof", action: "approve", reasonCode: "other", applicantExplanation: "Approved." })).rejects.toMatchObject({ code: "proof_expired" });
+    await client`update payments_receiving_account_onboarding set proof_verified_at = ${(new Date(now.getTime() - 30 * 24 * 60 * 60_000 - 1)).toISOString()} where id = ${accountVersionId}`;
+    await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claim.version, idempotencyKey: "expired-proof-approval", requestId: "expired-proof", action: "approve", reasonCode: "other", applicantExplanation: "Approved." })).rejects.toMatchObject({ code: "proof_expired" });
+    await client`update payments_receiving_account_onboarding set proof_verified_at = ${at} where id = ${accountVersionId}`;
+    await client`update identity_users set access_status = 'access_suspended' where id = 'review-artist'`;
+    await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claim.version, idempotencyKey: "restricted-user-approval", requestId: "restricted-user", action: "approve", reasonCode: "other", applicantExplanation: "Approved." })).rejects.toMatchObject({ code: "account_ineligible" });
+    await client`update identity_users set access_status = 'active' where id = 'review-artist'`;
+    await client`update payments_receiving_account_onboarding set retired_at = ${at} where id = ${accountVersionId}`;
+    await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claim.version, idempotencyKey: "retired-account-approval", requestId: "retired-account", action: "approve", reasonCode: "other", applicantExplanation: "Approved." })).rejects.toMatchObject({ code: "proof_expired" });
+    const [facts] = await client<{ state: string; decisions: number; capabilities: number }[]>`select (select state from creator_applications where id = ${applicationId}) as state, (select count(*)::int from creator_application_decisions where application_id = ${applicationId}) as decisions, (select count(*)::int from identity_creator_capabilities where user_id = 'review-artist') as capabilities`;
+    expect(facts).toEqual({ state: "under_review", decisions: 0, capabilities: 0 });
+  });
+
+  test("serializes conflicting decisions and reopens rejected history as a compensating action", async () => {
+    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<{ state: string }> } };
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "concurrent-claim" });
+    const command = { ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, revisionId, expectedVersion: claim.version, action: "reject" as const, reasonCode: "other", applicantExplanation: "Not approved." };
+    const results = await Promise.allSettled([service.decide({ ...command, stepUpProofId: proofId, idempotencyKey: "concurrent-one", requestId: "concurrent-one" }), service.decide({ ...command, stepUpProofId: "10000000-0000-4000-8000-000000000098", idempotencyKey: "concurrent-two", requestId: "concurrent-two" })]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const [rejected] = await client<{ version: number; state: string }[]>`select version, state from creator_applications where id = ${applicationId}`;
+    await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: "10000000-0000-4000-8000-000000000097", applicationId, revisionId, expectedVersion: rejected!.version, idempotencyKey: "reopen-one", requestId: "reopen-one", action: "reopen", reasonCode: "other", applicantExplanation: "Reopened for correction." })).resolves.toEqual({ state: "changes_requested" });
+    const [history] = await client<{ rejected: number; reopened: number }[]>`select count(*) filter (where action = 'rejected')::int as rejected, count(*) filter (where action = 'reopened')::int as reopened from creator_application_decisions where application_id = ${applicationId}`;
+    expect(history).toEqual({ rejected: 1, reopened: 1 });
+  });
+
   test("reveals only the requested applicant DOB after a scoped proof, with immutable comparison and masked review facts", async () => {
     // Break caught: a normal owner read exposing DOB, omitted revision/decision history, or leaking full payment data.
     type Factory = {
@@ -261,6 +304,10 @@ describe("owner creator review", () => {
       now: () => now,
       consumeStepUpProof: async () => true,
     });
+    await client`
+      insert into identity_sessions (id, expires_at, token_hash, created_at, updated_at, user_id, assurance_state, primary_authenticated_at, last_used_at, absolute_expires_at, idle_expires_at, authorization_version)
+      values ('artist-existing-session', ${new Date(now.getTime() + 60 * 60_000).toISOString()}, 'hashed-existing-session', ${at}, ${at}, 'review-artist', 'active', ${at}, ${at}, ${new Date(now.getTime() + 2 * 60 * 60_000).toISOString()}, ${new Date(now.getTime() + 90 * 60_000).toISOString()}, 1)
+    `;
 
     const claimed = await service.claim({
       ownerUserId: "review-owner",
@@ -296,6 +343,7 @@ describe("owner creator review", () => {
       decisions: number;
       audits: number;
       outbox: number;
+      revoked_sessions: number;
     }[]>`
       select
         (select state from creator_applications where id = ${applicationId}) as application_state,
@@ -304,6 +352,7 @@ describe("owner creator review", () => {
         (select count(*)::int from creator_application_decisions where application_id = ${applicationId} and action = 'approved') as decisions,
         (select count(*)::int from admin_audit_events where action = 'creator.application.approve') as audits,
         (select count(*)::int from system_outbox where aggregate_id = ${applicationId}) as outbox
+        ,(select count(*)::int from identity_sessions where user_id = 'review-artist' and revoked_at is not null and revocation_reason = 'creator_capability_changed') as revoked_sessions
     `;
     expect(facts).toEqual({
       application_state: "approved",
@@ -312,6 +361,7 @@ describe("owner creator review", () => {
       decisions: 1,
       audits: 1,
       outbox: 2,
+      revoked_sessions: 1,
     });
   });
 

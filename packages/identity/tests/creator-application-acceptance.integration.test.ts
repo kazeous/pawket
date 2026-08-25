@@ -938,15 +938,13 @@ describe("creator application acceptance", () => {
         createdAt: at,
         updatedAt: at,
       });
-      await db.insert(creatorApplications).values({
-        id: applicationId,
-        userId,
-        state: "submitted",
-        version: 2,
-        currentRevisionId: revisionId,
-        createdAt: at,
-        updatedAt: at,
-      });
+      // Keep this pre-0008 fixture versioned: the current Drizzle model also
+      // contains review-claim columns introduced by migration 0013.
+      await client`
+        insert into creator_applications (
+          id, user_id, state, version, current_revision_id, created_at, updated_at
+        ) values (${applicationId}, ${userId}, 'submitted', 2, ${revisionId}, ${at.toISOString()}, ${at.toISOString()})
+      `;
       await db.insert(creatorApplicationRevisions).values({
         id: revisionId,
         applicationId,

@@ -39,4 +39,56 @@ describe("creator review HTTP boundary", () => {
     await expect(detailAllowed.json()).resolves.toEqual({ detail: { application: { id: "10000000-0000-4000-8000-000000000001" }, revision: { dateOfBirth: "2002-08-25" } } });
     expect(issueOwnerStepUpProof).toHaveBeenCalledWith({ userId: "owner-1", sessionId: "owner-session", actionClass: "owner.creator_application_detail", now: expect.any(Date) });
   });
+
+  test("enforces origin and owner boundaries on every review route", async () => {
+    type Factory = {
+      createCreatorReviewHttpHandlers(input: Record<string, unknown>): {
+        list(request: Request): Promise<Response>;
+        claim(request: Request, applicationId: string): Promise<Response>;
+        setCapability(request: Request, userId: string): Promise<Response>;
+      };
+    };
+    const api = admin as unknown as Factory;
+    const review = {
+      listSubmitted: vi.fn(async () => [{ id: "10000000-0000-4000-8000-000000000001" }]),
+      claim: vi.fn(async () => ({ version: 3 })),
+      setCreatorCapability: vi.fn(async () => ({ state: "suspended" })),
+    };
+    const issueOwnerStepUpProof = vi.fn(async ({ actionClass }: { actionClass: string }) => ({ id: `server-proof:${actionClass}` }));
+    const authorizeOwner = vi.fn(async () => "authorized" as const);
+    const handlers = api.createCreatorReviewHttpHandlers({
+      trustedOrigins: [origin], authenticate: vi.fn(async () => session), authorizeOwner,
+      issueOwnerStepUpProof, review,
+    });
+    const applicationId = "10000000-0000-4000-8000-000000000001";
+
+    const listed = await handlers.list(new Request(`${origin}/api/v1/admin/creator-applications`, { method: "GET" }));
+    expect(listed.status).toBe(200);
+    expect(review.listSubmitted).toHaveBeenCalledOnce();
+
+    const crossOriginClaim = await handlers.claim(new Request(`${origin}/claim`, { method: "POST", headers: { origin: "https://attacker.example", "if-match": "2" } }), applicationId);
+    expect(crossOriginClaim.status).toBe(403);
+    expect(review.claim).not.toHaveBeenCalled();
+
+    const claimed = await handlers.claim(new Request(`${origin}/claim`, { method: "POST", headers: { origin, "if-match": "2" } }), applicationId);
+    expect(claimed.status).toBe(200);
+    expect(review.claim).toHaveBeenCalledWith(expect.objectContaining({ applicationId, expectedVersion: 2, ownerUserId: "owner-1" }));
+
+    const invalidVersion = await handlers.claim(new Request(`${origin}/claim`, { method: "POST", headers: { origin, "if-match": "9007199254740992" } }), applicationId);
+    expect(invalidVersion.status).toBe(400);
+
+    const forbidden = api.createCreatorReviewHttpHandlers({
+      trustedOrigins: [origin], authenticate: vi.fn(async () => session), authorizeOwner: vi.fn(async () => "forbidden"),
+      issueOwnerStepUpProof, review,
+    });
+    const capabilityBody = JSON.stringify({ action: "suspend", reasonCode: "other", applicantExplanation: "Temporarily suspended." });
+    const denied = await forbidden.setCapability(new Request(`${origin}/capability`, { method: "POST", headers: { origin, "content-type": "application/json", "idempotency-key": "suspend-one" }, body: capabilityBody }), "review-artist");
+    expect(denied.status).toBe(403);
+    expect(review.setCreatorCapability).not.toHaveBeenCalled();
+
+    const allowed = await handlers.setCapability(new Request(`${origin}/capability`, { method: "POST", headers: { origin, "content-type": "application/json", "idempotency-key": "suspend-one" }, body: capabilityBody }), "review-artist");
+    expect(allowed.status).toBe(200);
+    expect(issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass: "owner.creator_capability_suspend" }));
+    expect(review.setCreatorCapability).toHaveBeenCalledWith(expect.objectContaining({ userId: "review-artist", action: "suspend", stepUpProofId: "server-proof:owner.creator_capability_suspend" }));
+  });
 });

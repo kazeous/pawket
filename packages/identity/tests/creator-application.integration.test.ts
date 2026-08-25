@@ -116,6 +116,20 @@ describe("creator application repository", () => {
     await expect(applications.withdraw({ userId: "creator-user", idempotencyKey: "withdraw-one", expectedVersion: current.version })).resolves.toEqual(withdrawn);
   });
 
+  test("withdrawal clears an active owner review claim atomically", async () => {
+    await db.insert(identityUsers).values([
+      { id: "claimed-withdraw-user", name: "Claimed Creator", email: "claimed@example.com", canonicalEmail: "claimed@example.com", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", createdAt: now, updatedAt: now },
+      { id: "claimed-withdraw-owner", name: "Review Owner", email: "claimed-owner@example.com", canonicalEmail: "claimed-owner@example.com", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", createdAt: now, updatedAt: now },
+    ]);
+    const applications = service();
+    const draft = await applications.saveDraft({ userId: "claimed-withdraw-user", idempotencyKey: "claimed-withdraw-draft", ...completeDraft }) as { version: number };
+    const submitted = await applications.submit({ userId: "claimed-withdraw-user", idempotencyKey: "claimed-withdraw-submit", expectedVersion: draft.version, ...completeDraft, dateOfBirthAcknowledged: true, truthfulInformationAccepted: true, portfolioRightsAccepted: true, creatorTermsAccepted: true, privacyAccepted: true }) as { id: string; version: number };
+    await client.unsafe(`update creator_applications set state = 'under_review', reviewer_user_id = 'claimed-withdraw-owner', review_claimed_at = '2026-08-24T03:00:00.000Z', review_claim_expires_at = '2026-08-24T03:15:00.000Z', version = version + 1 where id = '${submitted.id}'`);
+    await expect(applications.withdraw({ userId: "claimed-withdraw-user", idempotencyKey: "claimed-withdraw", expectedVersion: submitted.version + 1 })).resolves.toMatchObject({ id: submitted.id, state: "withdrawn", version: submitted.version + 2 });
+    const [stored] = await client<{ state: string; reviewer_user_id: string | null; review_claimed_at: Date | null; review_claim_expires_at: Date | null }[]>`select state, reviewer_user_id, review_claimed_at, review_claim_expires_at from creator_applications where id = ${submitted.id}`;
+    expect(stored).toEqual({ state: "withdrawn", reviewer_user_id: null, review_claimed_at: null, review_claim_expires_at: null });
+  });
+
   test("forks a changes-requested submitted revision before the applicant resubmits", async () => {
     // Break caught: overwriting a reviewed immutable revision instead of preserving correction history.
     await db.insert(identityUsers).values({ id: "revision-user", name: "Revision User", email: "revision@example.com", canonicalEmail: "revision@example.com", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", createdAt: now, updatedAt: now });
