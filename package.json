@@ -10,6 +10,7 @@
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
     "recover:owner-mfa": "tsx scripts/recover-owner-mfa.ts",
     "docker:context:validate": "node scripts/validate-docker-context.mjs",
+    "licenses:validate": "pnpm licenses list --prod --json | node scripts/validate-production-license-inventory.mjs",
     "dev": "pnpm --parallel --filter @pawket/web --filter @pawket/worker dev",
     "build": "pnpm -r --if-present build",
     "lint": "eslint .",
