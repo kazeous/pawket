@@ -354,6 +354,35 @@ describe("production SMTP security email sender", () => {
     expect(delivered?.text).not.toMatch(/account number|challenge|portfolio|date of birth/i);
   });
 
+  test("renders reopened application copy distinctly from ordinary changes requested", async () => {
+    // Break caught: losing the reopen decision when both outcomes retain the same application database state.
+    const delivered: SmtpMail[] = [];
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered.push(message); } };
+      },
+    });
+
+    for (const state of ["changes_requested", "reopened"] as const) {
+      await sender.send({
+        handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+        purpose: "application_outcome",
+        destination: "artist@example.com",
+        secret: null,
+        templateData: { state },
+      });
+    }
+
+    expect(delivered[0]?.text).toContain("Pawket cần bạn cập nhật một số nội dung trong hồ sơ creator.");
+    expect(delivered[1]?.text).toContain("Pawket đã mở lại hồ sơ creator để bạn tiếp tục cập nhật.");
+    expect(delivered[1]?.text).not.toBe(delivered[0]?.text);
+    expect(delivered.map((message) => message.to)).toEqual(["artist@example.com", "artist@example.com"]);
+    expect(JSON.stringify(delivered)).not.toMatch(/privateNote|applicantExplanation|bank|portfolio|date of birth/i);
+  });
+
   test.each([
     ["session_revoked", "Một phiên đăng nhập Pawket đã được thu hồi"],
     ["sessions_revoked", "Tất cả phiên đăng nhập Pawket đã được thu hồi"],

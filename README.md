@@ -41,6 +41,14 @@ both its client ID and client secret; leaving both blank disables it. Phone and
 SMS verification are intentionally absent from Increment 2 and require a later
 system addition.
 
+Security and domain email delivery is durable at least once. The handoff ID is
+stable at the sender boundary, but ordinary SMTP has no idempotency guarantee:
+if a provider accepts a message before Pawket persists `sent_at`, a lost
+acknowledgement or worker crash can cause the same safe notice to be sent again.
+PostgreSQL domain state, handoff ID, `sent_at`, attempt count, and attention
+status are authoritative; receiving one message is not proof that its related
+business transition succeeded or failed.
+
 The release sequence is part of the topology: healthy PostgreSQL starts the
 `migrate` service, and that one-shot service must complete successfully before
 Coolify starts web or worker or shifts traffic. Use

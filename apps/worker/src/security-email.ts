@@ -137,6 +137,7 @@ function applicationOutcomeText(appBaseUrl: string, state: string | undefined): 
     changes_requested: "Pawket cần bạn cập nhật một số nội dung trong hồ sơ creator.",
     approved: "Hồ sơ creator của bạn đã được chấp thuận.",
     rejected: "Hồ sơ creator của bạn chưa được chấp thuận.",
+    reopened: "Pawket đã mở lại hồ sơ creator để bạn tiếp tục cập nhật.",
   };
   const outcome = state ? outcomes[state] : undefined;
   if (!outcome) throw new Error("Invalid security email message");

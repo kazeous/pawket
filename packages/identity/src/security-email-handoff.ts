@@ -252,7 +252,7 @@ export async function deliverSecurityEmailHandoff(
       .update(identityEmailHandoffs)
       .set({
         status: "failed",
-        failureCode: "delivery_failed",
+        failureCode: "delivery_outcome_unknown",
         availableAt: new Date(input.now.getTime() + 60_000),
         lockedAt: null,
         lockedBy: null,

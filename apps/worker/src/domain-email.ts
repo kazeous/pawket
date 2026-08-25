@@ -31,6 +31,8 @@ type DomainEmailSpec = {
   templateData: Record<string, string>;
 };
 
+type ApplicationOutcomeVariant = "changes_requested" | "approved" | "rejected" | "reopened";
+
 function requiredString(payload: Record<string, unknown>, field: string): string {
   const value = payload[field];
   if (typeof value !== "string" || value.length === 0 || value.length > 200) {
@@ -92,10 +94,18 @@ async function specFor(
     if (!["changes_requested", "approved", "rejected"].includes(state)) {
       throw new Error("Invalid domain email event");
     }
+    const decisionAction = event.payload.decisionAction === undefined
+      ? state
+      : requiredString(event.payload, "decisionAction");
+    if (!["changes_requested", "approved", "rejected", "reopened"].includes(decisionAction)) {
+      throw new Error("Invalid domain email event");
+    }
+    const expectedState = decisionAction === "reopened" ? "changes_requested" : decisionAction;
+    if (state !== expectedState) throw new Error("Invalid domain email event");
     return {
       userId: requiredString(event.payload, "applicantUserId"),
       purpose: "application_outcome",
-      templateData: { state, returnPath: "/creator/apply" },
+      templateData: { state: decisionAction as ApplicationOutcomeVariant, returnPath: "/creator/apply" },
     };
   }
   if (event.eventType === "creator.capability_outcome_email.v1") {
