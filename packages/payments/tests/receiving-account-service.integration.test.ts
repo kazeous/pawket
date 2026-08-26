@@ -26,6 +26,9 @@ type AccountProjection = {
 };
 
 type ReceivingAccountService = {
+  getCurrentForApplicant(input: {
+    applicantUserId: string;
+  }): Promise<AccountProjection | null>;
   propose(input: {
     applicantUserId: string;
     sessionId: string;
@@ -103,6 +106,17 @@ beforeAll(async () => {
       name: "Other Applicant",
       email: "other-payments@example.com",
       canonicalEmail: "other-payments@example.com",
+      emailVerified: true,
+      emailVerifiedAt: now,
+      emailVerificationProvenance: "password_email_challenge",
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "minimized-applicant",
+      name: "Minimized Applicant",
+      email: "minimized-payments@example.com",
+      canonicalEmail: "minimized-payments@example.com",
       emailVerified: true,
       emailVerifiedAt: now,
       emailVerificationProvenance: "password_email_challenge",
@@ -251,5 +265,83 @@ describe("receiving-account service", () => {
         reference: second.referenceId,
       }),
     ).resolves.toBe(false);
+  });
+
+  test("hides minimized current rows and reproposes the same account as a fresh encrypted version", async () => {
+    // Break caught: treating a minimized-but-unretired row as usable or returning
+    // it unchanged when the applicant proposes the same account again.
+    const accounts = service();
+    const proposal = {
+      ...firstProposal,
+      applicantUserId: "minimized-applicant",
+      sessionId: "minimized-session",
+      idempotencyKey: "minimized-account-initial",
+    };
+    const first = await accounts.propose(proposal);
+    await client`
+      update payments_receiving_account_onboarding
+      set account_number_envelope = null,
+          account_holder_label_envelope = null,
+          minimized_at = ${now.toISOString()},
+          updated_at = ${now.toISOString()}
+      where id = ${first.referenceId}
+    `;
+
+    await expect(
+      accounts.getCurrentForApplicant({ applicantUserId: "minimized-applicant" }),
+    ).resolves.toBeNull();
+    await expect(accounts.propose(proposal)).rejects.toThrow(
+      "Receiving account replay is invalid",
+    );
+
+    const references = api.createCreatorReceivingAccountReferenceValidator!({ db });
+    await expect(
+      references.isValidForApplicant({
+        applicantUserId: "minimized-applicant",
+        reference: first.referenceId,
+      }),
+    ).resolves.toBe(false);
+
+    const replacement = await accounts.propose({
+      ...proposal,
+      idempotencyKey: "minimized-account-replacement",
+    });
+    expect(replacement).toMatchObject({
+      onboardingId: first.onboardingId,
+      version: 2,
+      maskedSuffix: first.maskedSuffix,
+      proofState: "unverified",
+    });
+    expect(replacement.referenceId).not.toBe(first.referenceId);
+    await expect(
+      accounts.getCurrentForApplicant({ applicantUserId: "minimized-applicant" }),
+    ).resolves.toEqual(replacement);
+
+    const rows = await client<{
+      id: string;
+      retired_at: Date | string | null;
+      minimized_at: Date | string | null;
+      account_number_envelope: unknown;
+      account_holder_label_envelope: unknown;
+    }[]>`
+      select id, retired_at, minimized_at, account_number_envelope,
+             account_holder_label_envelope
+      from payments_receiving_account_onboarding
+      where onboarding_id = ${first.onboardingId}
+      order by version
+    `;
+    expect(rows).toHaveLength(2);
+    expect(new Date(String(rows[0]?.retired_at)).toISOString()).toBe(now.toISOString());
+    expect(new Date(String(rows[0]?.minimized_at)).toISOString()).toBe(now.toISOString());
+    expect(rows[0]).toMatchObject({
+      account_number_envelope: null,
+      account_holder_label_envelope: null,
+    });
+    expect(rows[1]).toMatchObject({
+      retired_at: null,
+      minimized_at: null,
+    });
+    expect(rows[1]?.account_number_envelope).not.toBeNull();
+    expect(rows[1]?.account_holder_label_envelope).not.toBeNull();
   });
 });

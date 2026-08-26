@@ -106,6 +106,41 @@
       "when": 1787601300000,
       "tag": "0014_creator_capability_events",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1787669283595,
+      "tag": "0015_cute_whistler",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787671156829,
+      "tag": "0016_friendly_skin",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787671430469,
+      "tag": "0017_robust_colossus",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787685863832,
+      "tag": "0018_task9_release_corrections",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787687133650,
+      "tag": "0019_task9_retention_hold_guards",
+      "breakpoints": true
     }
   ]
 }

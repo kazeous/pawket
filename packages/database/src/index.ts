@@ -28,6 +28,19 @@ export {
   type OutboxEvent,
 } from "./outbox-repository.js";
 export {
+  findEmailHandoffBySourceEvent,
+  findOperationalEmailUser,
+  findRefundEmailContext,
+  readOperationalBacklogMetrics,
+} from "./operational-email-repository.js";
+export {
+  RETENTION_DATASETS,
+  runRetentionSweep,
+  type RetentionDataset,
+  type RetentionDatasetResult,
+  type RetentionMode,
+} from "./retention-repository.js";
+export {
   adminAuditEvents,
   identityAccounts,
   identityEmailAddresses,
@@ -57,5 +70,7 @@ export {
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,
   systemCommandIdempotency,
+  systemRetentionHolds,
+  systemRetentionRuns,
   systemOutbox,
 } from "./schema.js";

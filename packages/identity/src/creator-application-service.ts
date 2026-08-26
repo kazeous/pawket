@@ -180,6 +180,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
   const now = input.now ?? (() => new Date());
 
   async function approvedReceivingAccountReference(
+    database: PawketDatabase | PawketTransaction,
     userId: string,
     value: unknown,
     required: boolean,
@@ -193,7 +194,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
       await input.receivingAccountReferences.isValidForApplicant({
         applicantUserId: userId,
         reference,
-      }),
+      }, database),
       "invalid_receiving_account_reference",
     );
     return reference;
@@ -396,6 +397,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
           };
           mergedDraft.proposedReceivingAccountId =
             (await approvedReceivingAccountReference(
+              tx,
               commandInput.userId,
               mergedDraft.proposedReceivingAccountId,
               false,
@@ -489,6 +491,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
         const applicationId = id();
         const revisionId = id();
         const proposedReceivingAccountId = await approvedReceivingAccountReference(
+          tx,
           commandInput.userId,
           commandInput.proposedReceivingAccountId,
           false,
@@ -556,6 +559,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
 
           const snapshot = normalizeDraft(commandInput);
           await approvedReceivingAccountReference(
+            tx,
             commandInput.userId,
             snapshot.proposedReceivingAccountId,
             true,

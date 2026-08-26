@@ -3,6 +3,7 @@ import {
   check,
   date,
   index,
+  integer,
   jsonb,
   pgTable,
   primaryKey,
@@ -11,6 +12,76 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+export const systemRetentionRuns = pgTable(
+  "system_retention_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyVersion: text("policy_version").notNull(),
+    mode: text("mode").notNull(),
+    dataset: text("dataset").notNull(),
+    cutoff: timestamp("cutoff", { withTimezone: true, mode: "date" }).notNull(),
+    candidateCount: integer("candidate_count").notNull(),
+    protectedCount: integer("protected_count").notNull(),
+    processedCount: integer("processed_count").notNull(),
+    outcome: text("outcome").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [
+    index("system_retention_runs_started_idx").on(table.startedAt),
+    check("system_retention_runs_mode_check", sql`${table.mode} in ('report_only', 'enforce')`),
+    check("system_retention_runs_dataset_check", sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'receiving_accounts', 'application_content', 'security_throttles')`),
+    check("system_retention_runs_outcome_check", sql`${table.outcome} in ('completed', 'paused', 'failed')`),
+    check("system_retention_runs_counts_check", sql`${table.candidateCount} >= 0 and ${table.protectedCount} >= 0 and ${table.processedCount} >= 0 and ${table.processedCount} <= ${table.candidateCount}`),
+    check("system_retention_runs_time_check", sql`${table.completedAt} >= ${table.startedAt}`),
+  ],
+);
+
+export const systemRetentionHolds = pgTable(
+  "system_retention_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dataset: text("dataset").notNull(),
+    subjectType: text("subject_type").notNull(),
+    subjectId: text("subject_id").notNull(),
+    reasonCategory: text("reason_category").notNull(),
+    referenceId: text("reference_id").notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true, mode: "date" }).notNull(),
+    releasedAt: timestamp("released_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("system_retention_holds_active_subject_uidx")
+      .on(table.dataset, table.subjectType, table.subjectId)
+      .where(sql`${table.releasedAt} is null`),
+    check(
+      "system_retention_holds_dataset_check",
+      sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'security_throttles', 'receiving_accounts', 'application_content')`,
+    ),
+    check(
+      "system_retention_holds_subject_type_check",
+      sql`${table.subjectType} in ('user', 'verification', 'session', 'security_throttle', 'receiving_account', 'creator_application')`,
+    ),
+    check(
+      "system_retention_holds_dataset_subject_check",
+      sql`(${table.dataset} = 'provisional_accounts' and ${table.subjectType} = 'user')
+        or (${table.dataset} = 'verifications' and ${table.subjectType} in ('user', 'verification'))
+        or (${table.dataset} = 'sessions' and ${table.subjectType} in ('user', 'session'))
+        or (${table.dataset} = 'security_throttles' and ${table.subjectType} = 'security_throttle')
+        or (${table.dataset} = 'receiving_accounts' and ${table.subjectType} in ('user', 'receiving_account'))
+        or (${table.dataset} = 'application_content' and ${table.subjectType} in ('user', 'creator_application'))`,
+    ),
+    check(
+      "system_retention_holds_reason_category_check",
+      sql`${table.reasonCategory} in ('incident', 'legal')`,
+    ),
+    check(
+      "system_retention_holds_release_check",
+      sql`${table.releasedAt} is null or ${table.releasedAt} > ${table.startsAt}`,
+    ),
+  ],
+);
 
 export const adminAuditEvents = pgTable(
   "admin_audit_events",

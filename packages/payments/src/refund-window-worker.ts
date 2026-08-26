@@ -10,6 +10,7 @@ export type RefundWindowScanResult = Readonly<{
   dueSoon: number;
   dueToday: number;
   overdue: number;
+  attention: number;
   outstandingAmountVnd: number;
 }>;
 
@@ -33,10 +34,12 @@ export async function scanVerificationDepositRefundWindows(input: {
       dueSoon: 0,
       dueToday: 0,
       overdue: 0,
+      attention: 0,
       outstandingAmountVnd: 0,
     };
     for (const obligation of obligations) {
       result.outstandingAmountVnd += obligation.amountVnd;
+      if (obligation.state === "attention_required") result.attention += 1;
       const category =
         today > obligation.refundDue
           ? "overdue"

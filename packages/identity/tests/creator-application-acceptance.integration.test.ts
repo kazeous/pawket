@@ -68,6 +68,27 @@ const completeAttestations = {
   privacyAccepted: true,
 };
 
+const completeSubmittedRevision = {
+  artistDisplayName: "Submitted Artist",
+  shortIntroduction: "A complete submitted revision fixture.",
+  applicantEmail: "submitted-fixture@example.com",
+  dobEnvelope: {
+    version: 1 as const,
+    algorithm: "A256GCM" as const,
+    keyId: "test-v1",
+    nonce: "fixture-nonce",
+    ciphertext: "fixture-ciphertext",
+    authenticationTag: "fixture-authentication-tag",
+  },
+  portfolioUrls: ["https://portfolio.example.com/submitted-fixture"],
+  primaryArtDiscipline: "illustration",
+  practiceDescription: "A complete practice description for a submitted fixture.",
+  contentIntent: "general_audience_only",
+  proposedReceivingAccountId: "a5f6d4bb-2638-4ee1-a847-22f38cd1a2c8",
+  ageAtSubmission: 26,
+  ageEvaluatedOn: "2026-08-24",
+};
+
 async function migrate(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
   for (const statement of migration.split("--> statement-breakpoint")) {
@@ -376,8 +397,13 @@ describe("creator application acceptance", () => {
     await expect(
       canonicalApplications.getForApplicant({ userId: rawAccountId }),
     ).resolves.toBeNull();
+    const validationDatabases: unknown[] = [];
     const receivingAccountReferences = {
-      async isValidForApplicant(input: { applicantUserId: string; reference: string }) {
+      async isValidForApplicant(
+        input: { applicantUserId: string; reference: string },
+        database?: unknown,
+      ) {
+        validationDatabases.push(database);
         return input.applicantUserId === ownerId && input.reference === approvedReference;
       },
     };
@@ -417,6 +443,9 @@ describe("creator application acceptance", () => {
       state: "submitted",
       revision: { proposedReceivingAccountId: approvedReference },
     });
+    expect(validationDatabases).toHaveLength(3);
+    expect(validationDatabases.every(Boolean)).toBe(true);
+    expect(validationDatabases.every((database) => database !== db)).toBe(true);
   });
 
   test("submission uses the current verified email and rejects invalid content or a non-opaque account value", async () => {
@@ -859,6 +888,7 @@ describe("creator application acceptance", () => {
       id: revisionId,
       applicationId,
       revisionNumber: 1,
+      ...completeSubmittedRevision,
       submittedAt: at,
       createdAt: at,
       updatedAt: at,
@@ -887,7 +917,15 @@ describe("creator application acceptance", () => {
       updatedAt: at,
     });
     await db.insert(creatorApplicationRevisions).values([
-      { id: submittedRevisionId, applicationId, revisionNumber: 1, submittedAt: at, createdAt: at, updatedAt: at },
+      {
+        id: submittedRevisionId,
+        applicationId,
+        revisionNumber: 1,
+        ...completeSubmittedRevision,
+        submittedAt: at,
+        createdAt: at,
+        updatedAt: at,
+      },
       { id: draftRevisionId, applicationId, revisionNumber: 2, createdAt: at, updatedAt: at },
     ]);
     await db.insert(creatorApplicationAttestations).values({
@@ -945,14 +983,11 @@ describe("creator application acceptance", () => {
           id, user_id, state, version, current_revision_id, created_at, updated_at
         ) values (${applicationId}, ${userId}, 'submitted', 2, ${revisionId}, ${at.toISOString()}, ${at.toISOString()})
       `;
-      await db.insert(creatorApplicationRevisions).values({
-        id: revisionId,
-        applicationId,
-        revisionNumber: 1,
-        submittedAt: at,
-        createdAt: at,
-        updatedAt: at,
-      });
+      await client`
+        insert into creator_application_revisions (
+          id, application_id, revision_number, submitted_at, created_at, updated_at
+        ) values (${revisionId}, ${applicationId}, 1, ${at.toISOString()}, ${at.toISOString()}, ${at.toISOString()})
+      `;
       await db.insert(creatorApplicationAttestations).values({
         id: attestationId,
         revisionId,

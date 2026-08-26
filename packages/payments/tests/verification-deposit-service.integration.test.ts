@@ -103,6 +103,7 @@ type PaymentsExports = {
     dueSoon: number;
     dueToday: number;
     overdue: number;
+    attention: number;
     outstandingAmountVnd: number;
   }>;
 };
@@ -276,7 +277,18 @@ describe("verification-deposit service", () => {
       where id = ${applicationId}
     `;
     await client`
-      update creator_application_revisions set submitted_at = ${clock.toISOString()}, updated_at = ${clock.toISOString()}
+      update creator_application_revisions
+      set short_introduction = 'A complete submitted verification-deposit fixture.',
+          applicant_email = 'deposit-applicant@example.com',
+          dob_envelope = '{"version":1}'::jsonb,
+          portfolio_urls = '["https://portfolio.example.com/deposit-artist"]'::jsonb,
+          primary_art_discipline = 'illustration',
+          practice_description = 'Verification-deposit fixture practice description.',
+          content_intent = 'general_audience_only',
+          age_at_submission = 26,
+          age_evaluated_on = '2026-08-28',
+          submitted_at = ${clock.toISOString()},
+          updated_at = ${clock.toISOString()}
       where id = ${revisionId}
     `;
     await expect(
@@ -299,6 +311,91 @@ describe("verification-deposit service", () => {
 
     const replayed = await deposits.issueChallenge(issue);
     expect(replayed).toMatchObject({ id: issued.id, reference: null, replayed: true });
+  });
+
+  test("rejects a minimized receiving account before issuing a challenge", async () => {
+    // Break caught: accepting a current-looking account whose retention sweep
+    // already destroyed the ciphertext needed by later reconciliation.
+    const minimizedApplicantId = "minimized-challenge-applicant";
+    const minimizedApplicationId = "30000000-0000-4000-8000-000000000001";
+    const minimizedRevisionId = "30000000-0000-4000-8000-000000000002";
+    await db.insert(identityUsers).values({
+      id: minimizedApplicantId,
+      name: "Minimized Challenge Applicant",
+      email: "minimized-challenge@example.com",
+      canonicalEmail: "minimized-challenge@example.com",
+      emailVerified: true,
+      emailVerifiedAt: clock,
+      emailVerificationProvenance: "password_email_challenge",
+      createdAt: clock,
+      updatedAt: clock,
+    });
+    const accountService = api.createReceivingAccountService!({
+      db,
+      keyring,
+      lookupHmacKey,
+      supportedBanks,
+      now: () => clock,
+    });
+    const account = await accountService.propose({
+      applicantUserId: minimizedApplicantId,
+      sessionId: "minimized-challenge-session",
+      primaryAuthenticatedAt: new Date(clock.getTime() - 60_000),
+      idempotencyKey: "minimized-challenge-account",
+      bankBin: "970436",
+      accountNumber: "001234567891",
+      accountHolderLabel: "NGUYEN VAN B",
+    });
+    await client`
+      insert into creator_applications (
+        id, user_id, state, version, current_revision_id, created_at, updated_at
+      ) values (
+        ${minimizedApplicationId}, ${minimizedApplicantId}, 'submitted', 2,
+        ${minimizedRevisionId}, ${clock.toISOString()}, ${clock.toISOString()}
+      )
+    `;
+    await client`
+      insert into creator_application_revisions (
+        id, application_id, revision_number, artist_display_name, short_introduction,
+        applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+        practice_description, content_intent, proposed_receiving_account_id,
+        age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
+      ) values (
+        ${minimizedRevisionId}, ${minimizedApplicationId}, 1, 'Minimized Artist',
+        'A complete minimized-account challenge fixture.',
+        'minimized-challenge@example.com', '{"version":1}'::jsonb,
+        '["https://portfolio.example.com/minimized-artist"]'::jsonb,
+        'illustration', 'Minimized-account fixture practice.',
+        'general_audience_only', ${account.referenceId}, 26, '2026-08-28',
+        ${clock.toISOString()}, ${clock.toISOString()}, ${clock.toISOString()}
+      )
+    `;
+    await client`
+      update payments_receiving_account_onboarding
+      set account_number_envelope = null,
+          account_holder_label_envelope = null,
+          minimized_at = ${clock.toISOString()},
+          updated_at = ${clock.toISOString()}
+      where id = ${account.referenceId}
+    `;
+
+    await expect(
+      service().issueChallenge({
+        ownerUserId: "deposit-owner",
+        ownerSessionId: "deposit-owner-session",
+        stepUpProofId: proofId(20),
+        applicationId: minimizedApplicationId,
+        revisionId: minimizedRevisionId,
+        accountVersionId: account.referenceId,
+        idempotencyKey: "minimized-challenge-issue",
+        requestId: "request.challenge.issue.minimized",
+      }),
+    ).rejects.toThrow("Submitted receiving account required");
+    expect(consumedProofs.has(proofId(20))).toBe(false);
+    expect(await client`
+      select id from payments_verification_deposit_challenges
+      where application_id = ${minimizedApplicationId}
+    `).toHaveLength(0);
   });
 
   test("keeps applicant sent reports untrusted and routes mismatch receipts to unmatched review", async () => {
@@ -464,6 +561,7 @@ describe("verification-deposit service", () => {
       dueSoon: 1,
       dueToday: 0,
       overdue: 0,
+      attention: 0,
       outstandingAmountVnd: 20_000,
     });
     await api.scanVerificationDepositRefundWindows!({
@@ -640,10 +738,17 @@ describe("verification-deposit service", () => {
     `;
     await client`
       insert into creator_application_revisions (
-        id, application_id, revision_number, proposed_receiving_account_id,
-        submitted_at, created_at, updated_at
+        id, application_id, revision_number, artist_display_name, short_introduction,
+        applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+        practice_description, content_intent, proposed_receiving_account_id,
+        age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
       ) values (
-        ${secondRevisionId}, ${secondApplicationId}, 1, ${replacementAccountVersionId},
+        ${secondRevisionId}, ${secondApplicationId}, 1, 'Deposit Artist Two',
+        'A complete second verification-deposit fixture.',
+        'deposit-applicant@example.com', '{"version":1}'::jsonb,
+        '["https://portfolio.example.com/deposit-artist-two"]'::jsonb,
+        'illustration', 'Second verification-deposit fixture practice description.',
+        'general_audience_only', ${replacementAccountVersionId}, 26, '2026-09-07',
         ${clock.toISOString()}, ${clock.toISOString()}, ${clock.toISOString()}
       )
     `;

@@ -88,11 +88,13 @@ async function seedSubmittedApplication(): Promise<void> {
   await client`update creator_application_revisions set submitted_at = ${at}, updated_at = ${at} where id = ${revisionId}`;
   await client`
     insert into creator_application_revisions (
-      id, application_id, revision_number, artist_display_name, applicant_email, portfolio_urls,
-      primary_art_discipline, content_intent, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
-    ) values (${priorSubmissionRevisionId}, ${applicationId}, 1, 'Earlier Submission Name', 'artist@pawket.test',
-      ${JSON.stringify(["https://portfolio.example/earlier-submission"]) }::jsonb, 'painting',
-      'general_audience_only', 23, '2026-08-01', ${at}, ${at}, ${at})
+      id, application_id, revision_number, artist_display_name, short_introduction, applicant_email,
+      dob_envelope, portfolio_urls, primary_art_discipline, practice_description, content_intent,
+      proposed_receiving_account_id, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
+    ) values (${priorSubmissionRevisionId}, ${applicationId}, 1, 'Earlier Submission Name', 'Earlier introduction.', 'artist@pawket.test',
+      ${JSON.stringify(encryptSensitiveField({ plaintext: "2002-08-25", binding: { recordType: "creator_application_revision", recordId: priorSubmissionRevisionId, fieldName: "date_of_birth" }, keyring }))}::jsonb,
+      ${JSON.stringify(["https://portfolio.example/earlier-submission"]) }::jsonb, 'painting', 'Earlier practice description.',
+      'general_audience_only', ${accountVersionId}, 23, '2026-08-01', ${at}, ${at}, ${at})
   `;
   await client`
     insert into creator_applications (
@@ -101,11 +103,13 @@ async function seedSubmittedApplication(): Promise<void> {
   `;
   await client`
     insert into creator_application_revisions (
-      id, application_id, revision_number, artist_display_name, applicant_email, portfolio_urls,
-      primary_art_discipline, content_intent, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
-    ) values (${priorRevisionId}, ${priorApplicationId}, 1, 'Earlier Artist Name', 'artist@pawket.test',
-      ${JSON.stringify(["https://portfolio.example/earlier"]) }::jsonb, 'painting', 'general_audience_only',
-      23, '2026-08-01', ${at}, ${at}, ${at})
+      id, application_id, revision_number, artist_display_name, short_introduction, applicant_email,
+      dob_envelope, portfolio_urls, primary_art_discipline, practice_description, content_intent,
+      proposed_receiving_account_id, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at
+    ) values (${priorRevisionId}, ${priorApplicationId}, 1, 'Earlier Artist Name', 'Prior application introduction.', 'artist@pawket.test',
+      ${JSON.stringify(encryptSensitiveField({ plaintext: "2002-08-25", binding: { recordType: "creator_application_revision", recordId: priorRevisionId, fieldName: "date_of_birth" }, keyring }))}::jsonb,
+      ${JSON.stringify(["https://portfolio.example/earlier"]) }::jsonb, 'painting', 'Prior application practice.', 'general_audience_only',
+      ${accountVersionId}, 23, '2026-08-01', ${at}, ${at}, ${at})
   `;
   await client`
     insert into creator_application_decisions (
@@ -227,6 +231,56 @@ describe("owner creator review", () => {
     await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: "10000000-0000-4000-8000-000000000097", applicationId, revisionId, expectedVersion: rejected!.version, idempotencyKey: "reopen-one", requestId: "reopen-one", action: "reopen", reasonCode: "other", applicantExplanation: "Reopened for correction." })).resolves.toEqual({ state: "changes_requested" });
     const [history] = await client<{ rejected: number; reopened: number }[]>`select count(*) filter (where action = 'rejected')::int as rejected, count(*) filter (where action = 'reopened')::int as reopened from creator_application_decisions where application_id = ${applicationId}`;
     expect(history).toEqual({ rejected: 1, reopened: 1 });
+    const [projection] = await client<{ application_state: string; payload: Record<string, unknown> }[]>`
+      select
+        (select state from creator_applications where id = ${applicationId}) as application_state,
+        payload
+      from system_outbox
+      where event_type = 'creator.application_outcome_email.v1'
+        and payload ->> 'correlationId' = 'reopen-one'
+    `;
+    expect(projection).toEqual({
+      application_state: "changes_requested",
+      payload: {
+        applicationId,
+        applicantUserId: "review-artist",
+        revisionId,
+        state: "changes_requested",
+        decisionAction: "reopened",
+        correlationId: "reopen-one",
+      },
+    });
+    expect(JSON.stringify(projection)).not.toContain("Reopened for correction.");
+  });
+
+  test("rejects a creator decision action outside the closed enum before writing review evidence", async () => {
+    // Break caught: an unbounded runtime action entering command scope, audit, decision, or outbox data.
+    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<{ state: string }> } };
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "invalid-action-claim" });
+
+    await expect(service.decide({
+      ownerUserId: "review-owner",
+      ownerSessionId: "owner-session",
+      stepUpProofId: proofId,
+      applicationId,
+      revisionId,
+      expectedVersion: claim.version,
+      idempotencyKey: "invalid-action-one",
+      requestId: "invalid-action-one",
+      action: "reopened-with-private-note",
+      reasonCode: "other",
+      applicantExplanation: "This must not be persisted.",
+      privateNote: "owner-only note",
+    })).rejects.toMatchObject({ code: "invalid_decision" });
+
+    const [facts] = await client<{ decisions: number; outbox: number; audits: number }[]>`
+      select
+        (select count(*)::int from creator_application_decisions where application_id = ${applicationId}) as decisions,
+        (select count(*)::int from system_outbox where aggregate_id = ${applicationId}) as outbox,
+        (select count(*)::int from admin_audit_events where subject_id = ${applicationId}) as audits
+    `;
+    expect(facts).toEqual({ decisions: 0, outbox: 0, audits: 0 });
   });
 
   test("reveals only the requested applicant DOB after a scoped proof, with immutable comparison and masked review facts", async () => {

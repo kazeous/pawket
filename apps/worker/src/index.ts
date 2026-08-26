@@ -1,13 +1,22 @@
-import { loadServerEnv } from "@pawket/config";
-import { createLogger } from "@pawket/observability";
+import { loadServerEnv, resolveRevisionAttestation } from "@pawket/config";
+import {
+  createLogger,
+  metricsRegistry,
+  setRevisionAttestationMetric,
+} from "@pawket/observability";
 import { createEncryptionKeyring } from "@pawket/security";
 import nodemailer from "nodemailer";
 
 import { createSecurityEmailSenderFromEnv } from "./security-email.js";
+import { startWorkerTelemetryServer } from "./telemetry-server.js";
+import { createWorkerHealthState } from "./worker-health.js";
 import { startWorker } from "./worker-runtime.js";
 
 const env = loadServerEnv();
 const logger = createLogger({ service: "worker", env });
+const healthState = createWorkerHealthState();
+const revision = resolveRevisionAttestation(env.APP_REVISION, env.APP_BUILD_REVISION);
+setRevisionAttestationMetric({ service: "worker", revisionMatch: revision.revisionMatch });
 const keyring = createEncryptionKeyring({
   activeKeyId: env.PII_ACTIVE_KEY_ID,
   keys: Object.fromEntries(
@@ -28,7 +37,36 @@ const worker = await startWorker({
     }),
   },
   logger,
+  healthState,
+  retention: {
+    mode: env.RETENTION_MODE,
+    policyVersion: env.RETENTION_POLICY_VERSION ?? "task8-proposed-v1",
+    enforcementPaused: env.RETENTION_ENFORCEMENT_PAUSED,
+    batchSize: env.RETENTION_BATCH_SIZE,
+    scanIntervalMs: env.RETENTION_SCAN_INTERVAL_MS,
+  },
 });
 
-logger.info({ event: "worker.started" }, "Worker started");
-await worker.whenStopped;
+let telemetry;
+try {
+  telemetry = await startWorkerTelemetryServer({
+    port: env.WORKER_TELEMETRY_PORT,
+    token: env.METRICS_TOKEN,
+    registry: metricsRegistry,
+    revision,
+    state: healthState,
+  });
+} catch {
+  await worker.stop();
+  throw new Error("Worker telemetry startup failed");
+}
+
+logger.info(
+  { event: "worker.started", telemetryPort: telemetry.port },
+  "Worker started",
+);
+try {
+  await worker.whenStopped;
+} finally {
+  await telemetry.stop();
+}

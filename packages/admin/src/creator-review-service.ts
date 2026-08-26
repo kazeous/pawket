@@ -21,7 +21,7 @@ import {
 } from "@pawket/database";
 import { rejectionCooldownUntil } from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -75,11 +75,12 @@ function bounded(value: unknown, minimum: number, maximum: number): string | nul
   return normalized.length >= minimum && normalized.length <= maximum ? normalized : null;
 }
 
-function decisionAction(action: CreatorDecisionAction): "changes_requested" | "approved" | "rejected" | "reopened" {
+function decisionAction(action: unknown): "changes_requested" | "approved" | "rejected" | "reopened" | null {
   if (action === "request_changes") return "changes_requested";
   if (action === "approve") return "approved";
   if (action === "reject") return "rejected";
-  return "reopened";
+  if (action === "reopen") return "reopened";
+  return null;
 }
 
 function resultReference(applicationId: string, state: string): string {
@@ -115,7 +116,7 @@ async function revalidateApproval(tx: PawketTransaction, application: typeof cre
   policy(revision.proposedReceivingAccountId, "missing_receiving_account");
   const attestations = await tx.select({ type: creatorApplicationAttestations.type, policyVersion: creatorApplicationAttestations.policyVersion }).from(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.revisionId, revision.id)).for("update");
   policy(attestations.length === requiredAttestations.size && attestations.every((item) => requiredAttestations.get(item.type) === item.policyVersion), "attestations_invalid");
-  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt))).limit(1).for("update");
+  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt), isNull(paymentsReceivingAccountOnboarding.minimizedAt), isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope), isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope))).limit(1).for("update");
   const proofAge = account?.proofVerifiedAt ? at.getTime() - account.proofVerifiedAt.getTime() : null;
   policy(account && account.proofState === "verified" && proofAge !== null && proofAge >= 0 && proofAge <= 30 * 24 * 60 * 60_000, "proof_expired");
   const [proof] = await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, revision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id), eq(paymentsVerificationDepositChallenges.state, "verified"))).limit(1).for("update");
@@ -203,10 +204,11 @@ export function createCreatorReviewService(input: ServiceInput) {
 
     async decide(command: { ownerUserId: string; ownerSessionId: string; stepUpProofId: string; applicationId: string; revisionId: string; expectedVersion: number; idempotencyKey: string; requestId: string; action: CreatorDecisionAction; reasonCode: string; applicantExplanation: string; privateNote?: string }) {
       const at = now();
+      const action = decisionAction(command.action);
       const reasonCode = bounded(command.reasonCode, 1, 100);
       const applicantExplanation = bounded(command.applicantExplanation, 1, 2000);
       const privateNote = command.privateNote === undefined ? null : bounded(command.privateNote, 1, 1000);
-      policy(reasonCode && reasonCodes.has(reasonCode) && applicantExplanation && (command.privateNote === undefined || privateNote), "invalid_decision");
+      policy(action && reasonCode && reasonCodes.has(reasonCode) && applicantExplanation && (command.privateNote === undefined || privateNote), "invalid_decision");
       const fingerprint = reviewFingerprint(input, { idempotencyKey: command.idempotencyKey, applicationId: command.applicationId, revisionId: command.revisionId, expectedVersion: command.expectedVersion, action: command.action, reasonCode, applicantExplanation, privateNote });
       return input.db.transaction(async (tx) => {
         const started = await beginIdempotentCommand(tx, { actorUserId: command.ownerUserId, commandScope: `creator.application.${command.action}`, ...fingerprint, now: at, expiresAt: new Date(at.getTime() + IDEMPOTENCY_LIFETIME_MS) });
@@ -223,7 +225,6 @@ export function createCreatorReviewService(input: ServiceInput) {
         if (command.action !== "reopen") policy(application.reviewerUserId === command.ownerUserId && application.reviewClaimExpiresAt && application.reviewClaimExpiresAt > at, "claim_expired");
         await requireStepUp(input, tx, { proofId: command.stepUpProofId, sessionId: command.ownerSessionId, userId: command.ownerUserId, actionClass: `owner.creator_application_${command.action}`, now: at });
         if (command.action === "approve") await revalidateApproval(tx, application, at);
-        const action = decisionAction(command.action);
         const nextState = command.action === "request_changes" || command.action === "reopen" ? "changes_requested" : action;
         const [updated] = await tx.update(creatorApplications).set({ state: nextState, reviewerUserId: null, reviewClaimedAt: null, reviewClaimExpiresAt: null, rejectedAt: command.action === "reject" ? at : null, cooldownUntil: command.action === "reject" ? rejectionCooldownUntil(at) : null, version: application.version + 1, updatedAt: at }).where(and(eq(creatorApplications.id, application.id), eq(creatorApplications.version, application.version))).returning();
         policy(updated, "stale_version");
@@ -236,7 +237,7 @@ export function createCreatorReviewService(input: ServiceInput) {
           await tx.update(identitySessions).set({ revokedAt: at, revocationReason: "creator_capability_changed", updatedAt: at }).where(and(eq(identitySessions.userId, application.userId), isNull(identitySessions.revokedAt)));
         }
         await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_application", subjectId: application.id, action: `creator.application.${command.action}`, outcome: "succeeded", reasonCode, beforeState: { state: application.state, version: application.version }, afterState: { state: nextState, version: updated.version }, assurance: { method: "totp", actionClass: `owner.creator_application_${command.action}` }, applicationRevision: command.revisionId, requestId: command.requestId, occurredAt: at });
-        for (const eventType of [`creator.application_${action}.v1`, "creator.application_outcome_email.v1"]) await insertOutboxEvent(tx, { eventType, eventVersion: 1, aggregateType: "creator_application", aggregateId: application.id, payload: { applicationId: application.id, applicantUserId: application.userId, revisionId: command.revisionId, state: nextState, correlationId: command.requestId }, occurredAt: at });
+        for (const eventType of [`creator.application_${action}.v1`, "creator.application_outcome_email.v1"]) await insertOutboxEvent(tx, { eventType, eventVersion: 1, aggregateType: "creator_application", aggregateId: application.id, payload: { applicationId: application.id, applicantUserId: application.userId, revisionId: command.revisionId, state: nextState, decisionAction: action, correlationId: command.requestId }, occurredAt: at });
         policy(await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: resultReference(application.id, nextState), completedAt: at }), "idempotency_failed");
         return { state: nextState };
       });

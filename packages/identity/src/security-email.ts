@@ -2,7 +2,10 @@ export type SecurityEmailPurpose =
   | "email_verification"
   | "password_reset"
   | "email_change"
-  | "security_notice";
+  | "security_notice"
+  | "application_outcome"
+  | "creator_status"
+  | "refund_status";
 
 export type SecurityEmailMessage = Readonly<{
   handoffId: string;

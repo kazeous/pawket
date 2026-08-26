@@ -289,10 +289,11 @@ export const identityEmailHandoffs = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     purpose: text("purpose").notNull(),
+    sourceOutboxEventId: uuid("source_outbox_event_id"),
     userId: text("user_id")
       .notNull()
       .references(() => identityUsers.id, { onDelete: "cascade", onUpdate: "restrict" }),
-    destinationEnvelope: jsonb("destination_envelope").$type<EncryptedFieldEnvelope>().notNull(),
+    destinationEnvelope: jsonb("destination_envelope").$type<EncryptedFieldEnvelope>(),
     secretEnvelope: jsonb("secret_envelope").$type<EncryptedFieldEnvelope | null>(),
     templateData: jsonb("template_data").$type<Record<string, string>>().notNull().default({}),
     status: text("status").notNull().default("pending"),
@@ -314,15 +315,23 @@ export const identityEmailHandoffs = pgTable(
   },
   (table) => [
     index("identity_email_handoffs_pending_idx").on(table.status, table.availableAt),
+    uniqueIndex("identity_email_handoffs_source_outbox_uidx")
+      .on(table.sourceOutboxEventId)
+      .where(sql`${table.sourceOutboxEventId} is not null`),
     check(
       "identity_email_handoffs_purpose_check",
-      sql`${table.purpose} in ('email_verification', 'password_reset', 'email_change', 'security_notice')`,
+      sql`${table.purpose} in ('email_verification', 'password_reset', 'email_change', 'security_notice', 'application_outcome', 'creator_status', 'refund_status')`,
     ),
     check(
       "identity_email_handoffs_status_check",
-      sql`${table.status} in ('pending', 'processing', 'sent', 'failed')`,
+      sql`${table.status} in ('pending', 'processing', 'sent', 'failed', 'attention_required')`,
     ),
     check("identity_email_handoffs_attempts_check", sql`${table.attempts} >= 0`),
+    check(
+      "identity_email_handoffs_destination_check",
+      sql`(${table.status} = 'attention_required' and ${table.destinationEnvelope} is null and ${table.failureCode} is not null)
+        or (${table.status} <> 'attention_required' and ${table.destinationEnvelope} is not null)`,
+    ),
     check(
       "identity_email_handoffs_lease_check",
       sql`(${table.lockedAt} is null and ${table.lockedBy} is null and ${table.leaseExpiresAt} is null)

@@ -5,6 +5,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./http-metrics": "./src/http-metrics.ts",
     "./metrics": "./src/metrics.ts",
     "./request-context": "./src/request-context.ts"
   },

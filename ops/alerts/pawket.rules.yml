@@ -1,0 +1,129 @@
+groups:
+  - name: pawket-task-8-operations
+    rules:
+      - alert: PawketRefundDueToday
+        expr: pawket_refund_liabilities_total{window="due_today"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Verification-deposit refund is due today
+          runbook: ops/runbooks/daily-deposit-reconciliation-and-refunds.md
+      - alert: PawketRefundOverdue
+        expr: pawket_refund_liabilities_total{window="overdue"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Verification-deposit refund is overdue
+          runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketRefundAttentionRequired
+        expr: pawket_refund_liabilities_total{window="attention_required"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Verification-deposit refund requires owner attention
+          runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketOutboxBacklogWarning
+        expr: pawket_outbox_oldest_age_seconds > 300
+        labels:
+          severity: warning
+        annotations:
+          summary: Oldest unpublished outbox event exceeds five minutes
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketOutboxBacklogCritical
+        expr: pawket_outbox_oldest_age_seconds > 900
+        labels:
+          severity: critical
+        annotations:
+          summary: Oldest unpublished outbox event exceeds fifteen minutes
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketEmailBacklogWarning
+        expr: pawket_security_email_oldest_age_seconds > 300
+        labels:
+          severity: warning
+        annotations:
+          summary: Oldest pending email exceeds five minutes
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketEmailBacklogCritical
+        expr: pawket_security_email_oldest_age_seconds > 900
+        labels:
+          severity: critical
+        annotations:
+          summary: Oldest pending email exceeds fifteen minutes
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketEmailAttentionRequired
+        expr: pawket_security_email_attention_total > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Email handoff requires operator attention
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketRepeatedAuthenticationAbuse
+        expr: sum(increase(pawket_auth_abuse_controls_total[5m])) >= 20
+        labels:
+          severity: warning
+        annotations:
+          summary: Authentication abuse controls activated repeatedly
+          runbook: ops/runbooks/account-recovery.md
+      - alert: PawketWorkerPollStale
+        expr: pawket_worker_scan_healthy{scan="outbox"} == 0
+        for: 3s
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker outbox poll has missed three intervals
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketWorkerPollLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="outbox"} > 3
+        for: 3s
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker outbox poll has stopped completing
+          runbook: ops/runbooks/provider-outage.md
+      - alert: PawketRefundScanStale
+        expr: pawket_worker_scan_healthy{scan="refund"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker refund scan has missed three intervals
+          runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketRefundLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="refund"} > 180
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker refund scan has stopped completing
+          runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketRetentionScanStale
+        expr: pawket_worker_scan_healthy{scan="retention"} == 0
+        for: 18h
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker retention scan has remained unhealthy for eighteen hours
+          runbook: ops/runbooks/retention-operations.md
+      - alert: PawketRetentionLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="retention"} > 90000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker retention scan has not succeeded within twenty-five hours
+          runbook: ops/runbooks/retention-operations.md
+      - alert: PawketMigrationFailed
+        expr: increase(pawket_migration_runs_total{outcome="failed"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Pawket migration job failed and workloads must remain gated
+          runbook: ops/runbooks/release-attestation.md
+      - alert: PawketRevisionMismatch
+        expr: pawket_revision_match == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Runtime and embedded source revisions do not match
+          runbook: ops/runbooks/release-attestation.md

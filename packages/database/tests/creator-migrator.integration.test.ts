@@ -61,6 +61,7 @@ async function expectCreatorHead(
   const applicationId = randomUUID();
   const submittedRevisionId = randomUUID();
   const draftRevisionId = randomUUID();
+  const partialMinimizationRevisionId = randomUUID();
   const at = "2026-08-24T03:00:00.000Z";
   await client.unsafe(`
     insert into identity_users
@@ -73,25 +74,86 @@ async function expectCreatorHead(
   await client.unsafe(`
     insert into creator_applications
       (id, user_id, state, version, current_revision_id, created_at, updated_at)
-    values ('${applicationId}', '${userId}', 'submitted', 2, '${submittedRevisionId}', '${at}', '${at}')
+    values ('${applicationId}', '${userId}', 'withdrawn', 2, '${submittedRevisionId}', '${at}', '${at}')
   `);
   await client.unsafe(`
     insert into creator_application_revisions
-      (id, application_id, revision_number, submitted_at, created_at, updated_at)
+      (id, application_id, revision_number, artist_display_name, short_introduction,
+       applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+       practice_description, content_intent, proposed_receiving_account_id,
+       age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
     values
-      ('${submittedRevisionId}', '${applicationId}', 1, '${at}', '${at}', '${at}'),
-      ('${draftRevisionId}', '${applicationId}', 2, null, '${at}', '${at}')
+      ('${submittedRevisionId}', '${applicationId}', 1, 'Migrator Artist', 'Introduction',
+       '${userId}@example.com', '{"version":1}'::jsonb, '["https://example.com/portfolio"]'::jsonb,
+       'illustration', 'Practice', 'general_audience_only', 'receiving-account-1',
+       21, '2026-08-24', '${at}', '${at}', '${at}'),
+      ('${draftRevisionId}', '${applicationId}', 2, null, null, null, null, null, null,
+       null, null, null, null, null, null, '${at}', '${at}')
   `);
+  await expect(
+    client.unsafe(`
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, submitted_at, created_at, updated_at)
+      values ('${randomUUID()}', '${applicationId}', 3, 'Partial submitted', '${at}', '${at}', '${at}')
+    `),
+  ).rejects.toThrow();
+  await expect(
+    client.unsafe(`
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction,
+         applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+         practice_description, content_intent, proposed_receiving_account_id,
+         age_at_submission, age_evaluated_on, created_at, updated_at)
+      values ('${partialMinimizationRevisionId}', '${applicationId}', 4,
+        'Draft Artist', 'Introduction', '${userId}@example.com', '{"version":1}'::jsonb,
+        '["https://example.com/draft"]'::jsonb, 'illustration', 'Practice',
+        'general_audience_only', 'receiving-account-1', 21, '2026-08-24', '${at}', '${at}')
+    `),
+  ).resolves.toBeDefined();
+  await expect(
+    client.unsafe(`
+      update creator_application_revisions
+      set artist_display_name = null, minimized_at = '${at}'
+      where id = '${partialMinimizationRevisionId}'
+    `),
+  ).rejects.toThrow();
   await expect(
     client.unsafe(`delete from creator_application_revisions where id = '${submittedRevisionId}'`),
   ).rejects.toThrow("submitted creator application revisions are immutable");
   await client.unsafe(`delete from creator_application_revisions where id = '${draftRevisionId}'`);
+  await client.unsafe(
+    `delete from creator_application_revisions where id = '${partialMinimizationRevisionId}'`,
+  );
   const [remainingDraft] = await client<{ count: number }[]>`
     select count(*)::int as count
     from creator_application_revisions
     where id = ${draftRevisionId}
   `;
   expect(remainingDraft?.count).toBe(0);
+  await expect(
+    client.unsafe(`
+      update creator_application_revisions
+      set artist_display_name = null, short_introduction = null, applicant_email = null,
+          dob_envelope = null, portfolio_urls = null, primary_art_discipline = null,
+          practice_description = null, content_intent = null,
+          proposed_receiving_account_id = null, minimized_at = '${at}', updated_at = '${at}'
+      where id = '${submittedRevisionId}'
+    `),
+  ).resolves.toBeDefined();
+  const [minimizedRevision] = await client<{
+    artist_display_name: string | null;
+    age_at_submission: number | null;
+    minimized_at: Date | null;
+  }[]>`
+    select artist_display_name, age_at_submission, minimized_at
+    from creator_application_revisions
+    where id = ${submittedRevisionId}
+  `;
+  expect(minimizedRevision).toMatchObject({
+    artist_display_name: null,
+    age_at_submission: 21,
+  });
+  expect(new Date(String(minimizedRevision?.minimized_at)).toISOString()).toBe(at);
 
   const triggers = await client<{ trigger_name: string }[]>`
     select trigger_name
@@ -117,11 +179,13 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(15);
+  expect(journal?.count).toBe(20);
 }
 
-async function createMigrationsThrough0006(): Promise<string> {
-  const temporaryFolder = await mkdtemp(join(tmpdir(), "pawket-migrations-through-0006-"));
+async function createMigrationsThrough(maximumIndex: number): Promise<string> {
+  const temporaryFolder = await mkdtemp(
+    join(tmpdir(), `pawket-migrations-through-${String(maximumIndex).padStart(4, "0")}-`),
+  );
   const metaFolder = join(temporaryFolder, "meta");
   await mkdir(metaFolder);
   const journalPath = join(migrationsFolder, "meta", "_journal.json");
@@ -132,9 +196,9 @@ async function createMigrationsThrough0006(): Promise<string> {
   };
   await writeFile(
     join(metaFolder, "_journal.json"),
-    `${JSON.stringify({ ...journal, entries: journal.entries.filter((entry) => entry.idx <= 6) }, null, 2)}\n`,
+    `${JSON.stringify({ ...journal, entries: journal.entries.filter((entry) => entry.idx <= maximumIndex) }, null, 2)}\n`,
   );
-  for (const entry of journal.entries.filter((candidate) => candidate.idx <= 6)) {
+  for (const entry of journal.entries.filter((candidate) => candidate.idx <= maximumIndex)) {
     const tag = (entry as { tag?: string }).tag;
     if (!tag) throw new Error("Migration journal entry is missing its tag");
     await copyFile(join(migrationsFolder, `${tag}.sql`), join(temporaryFolder, `${tag}.sql`));
@@ -164,7 +228,7 @@ describe("configured Drizzle creator migrator", () => {
   test("uses the configured migrator to upgrade a deployed 0006 database to creator head", async () => {
     // Break caught: creator migrations working only on blank databases or in manual SQL-enumeration tests.
     const { client, schemaName, journalSchema } = await createIsolatedClient("upgrade");
-    const through0006 = await createMigrationsThrough0006();
+    const through0006 = await createMigrationsThrough(6);
     try {
       await migrate(drizzle(client), {
         migrationsFolder: through0006,
@@ -184,6 +248,103 @@ describe("configured Drizzle creator migrator", () => {
     } finally {
       await client.end();
       await rm(through0006, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades complete legacy submitted revisions and rejects newly partial submissions", async () => {
+    // Break caught: the new completeness check either blocking valid deployed rows
+    // during upgrade or allowing partial submitted rows after migration 0018.
+    const { client, journalSchema } = await createIsolatedClient("task9-upgrade");
+    const through0017 = await createMigrationsThrough(17);
+    const userId = `task9-legacy-user-${randomUUID()}`;
+    const applicationId = randomUUID();
+    const revisionId = randomUUID();
+    const at = "2026-08-24T03:00:00.000Z";
+    try {
+      await migrate(drizzle(client), {
+        migrationsFolder: through0017,
+        migrationsSchema: journalSchema,
+      });
+      await client.unsafe(`
+        insert into identity_users
+          (id, name, email, canonical_email, email_verified, email_verified_at,
+           email_verification_provenance, access_status, authorization_version,
+           created_at, updated_at)
+        values ('${userId}', 'Legacy User', '${userId}@example.com', '${userId}@example.com',
+          true, '${at}', 'password_email_challenge', 'active', 1, '${at}', '${at}');
+        insert into creator_applications
+          (id, user_id, state, version, current_revision_id, created_at, updated_at)
+        values ('${applicationId}', '${userId}', 'submitted', 1, '${revisionId}', '${at}', '${at}');
+        insert into creator_application_revisions
+          (id, application_id, revision_number, artist_display_name, short_introduction,
+           applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+           practice_description, content_intent, proposed_receiving_account_id,
+           age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+        values ('${revisionId}', '${applicationId}', 1, 'Legacy Artist', 'Introduction',
+          '${userId}@example.com', '{"version":1}'::jsonb,
+          '["https://example.com/legacy"]'::jsonb, 'illustration', 'Practice',
+          'general_audience_only', 'legacy-account', 21, '2026-08-24',
+          '${at}', '${at}', '${at}')
+      `);
+
+      await expect(
+        migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema }),
+      ).resolves.toBeUndefined();
+      await expect(
+        client<{ id: string }[]>`select id from creator_application_revisions where id = ${revisionId}`,
+      ).resolves.toEqual([{ id: revisionId }]);
+      await expect(
+        client.unsafe(`
+          insert into creator_application_revisions
+            (id, application_id, revision_number, artist_display_name,
+             submitted_at, created_at, updated_at)
+          values ('${randomUUID()}', '${applicationId}', 2, 'Partial', '${at}', '${at}', '${at}')
+        `),
+      ).rejects.toThrow();
+    } finally {
+      await client.end();
+      await rm(through0017, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades compatible 0018 hold rows with stable identities and lifecycle guards", async () => {
+    // Break caught: adding the hold primary key or compatibility constraint in
+    // a way that only works for blank databases.
+    const { client, journalSchema } = await createIsolatedClient("task9-hold-upgrade");
+    const through0018 = await createMigrationsThrough(18);
+    try {
+      await migrate(drizzle(client), {
+        migrationsFolder: through0018,
+        migrationsSchema: journalSchema,
+      });
+      await client.unsafe(`
+        insert into system_retention_holds
+          (dataset, subject_type, subject_id, reason_category, reference_id,
+           starts_at, created_at)
+        values ('sessions', 'user', 'task9-upgrade-held-user', 'incident',
+          'task9-upgrade-hold-reference', '2026-08-24T03:00:00Z',
+          '2026-08-24T03:00:00Z')
+      `);
+
+      await expect(
+        migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema }),
+      ).resolves.toBeUndefined();
+      const [hold] = await client<{ id: string }[]>`
+        select id from system_retention_holds
+        where reference_id = 'task9-upgrade-hold-reference'
+      `;
+      expect(hold?.id).toMatch(/^[0-9a-f-]{36}$/);
+      await expect(client.unsafe(`
+        update system_retention_holds
+        set released_at = '2026-08-25T03:00:00Z'
+        where id = '${hold?.id}'
+      `)).resolves.toBeDefined();
+      await expect(client.unsafe(`
+        delete from system_retention_holds where id = '${hold?.id}'
+      `)).rejects.toThrow("retention hold records are append-only");
+    } finally {
+      await client.end();
+      await rm(through0018, { recursive: true, force: true });
     }
   });
 });

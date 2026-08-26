@@ -1,4 +1,8 @@
-import { describe, expect, test, vi } from "vitest";
+import { EventEmitter } from "node:events";
+
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { metricsRegistry } from "@pawket/observability";
 
 import {
   createSecurityEmailSender,
@@ -16,7 +20,10 @@ type ProcessorFactory = {
     securityEmail?: {
       keyring: never;
       sender: never;
-      deliver: (db: never, input: Record<string, unknown>) => Promise<"delivered" | "already_delivered">;
+      deliver: (db: never, input: Record<string, unknown>) => Promise<
+        "delivered" | "already_delivered" | "attention_required" | "already_attention_required"
+      >;
+      materialize?: (input: Record<string, unknown>) => Promise<"created" | "attention_required" | "already_materialized">;
     };
   }): (job: unknown) => Promise<void>;
 };
@@ -39,14 +46,38 @@ function job(eventType: string, payload: Record<string, unknown>) {
   };
 }
 
+async function scanHealth(scan: string): Promise<number> {
+  const metric = metricsRegistry.getSingleMetric("pawket_worker_scan_healthy");
+  if (!metric) throw new Error("Worker scan-health metric is not registered");
+  const snapshot = await metric.get();
+  return snapshot.values.find((value) => value.labels.scan === scan)?.value ?? -1;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("security email worker contract", () => {
-  test("acknowledges safe Payments liability events without moving funds", async () => {
-    // Break caught: treating a notification event as a transfer command or poisoning the outbox.
-    const acknowledge = vi.fn(async () => true);
+  test("materializes Payments liability email before acknowledging without moving funds", async () => {
+    const calls: string[] = [];
+    const acknowledge = vi.fn(async () => {
+      calls.push("acknowledge");
+      return true;
+    });
+    const materialize = vi.fn(async () => {
+      calls.push("materialize");
+      return "created" as const;
+    });
     const processor = runtime.createWorkerJobProcessor!({
       logger: { info() {}, error() {} },
       database: {} as never,
       acknowledge,
+      securityEmail: {
+        keyring: {} as never,
+        sender: {} as never,
+        deliver: vi.fn(async () => "delivered" as const),
+        materialize,
+      },
     });
     await expect(
       processor(
@@ -56,6 +87,14 @@ describe("security email worker contract", () => {
         }),
       ),
     ).resolves.toBeUndefined();
+    expect(calls).toEqual(["materialize", "acknowledge"]);
+    expect(materialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          eventType: "payments.verification_deposit_refund_due_today.v1",
+        }),
+      }),
+    );
     expect(acknowledge).toHaveBeenCalledOnce();
   });
 
@@ -92,6 +131,52 @@ describe("security email worker contract", () => {
         handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
         workerId: "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
       }),
+    );
+  });
+
+  test("records a fresh bounded terminal outcome once while acknowledging its replay", async () => {
+    // Break caught: exhausting SMTP uncertainty by rethrowing forever instead of surfacing durable attention.
+    metricsRegistry.resetMetrics();
+    const calls: string[] = [];
+    let invocation = 0;
+    const deliver = vi.fn(async () => {
+      calls.push("deliver");
+      invocation += 1;
+      return invocation === 1
+        ? ("attention_required" as const)
+        : ("already_attention_required" as const);
+    });
+    const acknowledge = vi.fn(async () => {
+      calls.push("acknowledge");
+      return true;
+    });
+    const processor = runtime.createWorkerJobProcessor!({
+      logger: { info() {}, error() {} },
+      database: {} as never,
+      acknowledge,
+      securityEmail: { keyring: {} as never, sender: {} as never, deliver },
+    });
+
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(calls).toEqual(["deliver", "acknowledge", "deliver", "acknowledge"]);
+    expect(await metricsRegistry.metrics()).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
     );
   });
 
@@ -186,12 +271,12 @@ describe("production SMTP security email sender", () => {
     expect(delivered).toEqual({
       from: { name: "Pawket Security", address: "security@pawket.example" },
       to: "artist@example.com",
-      subject: "Reset your Pawket password",
+      subject: "Đặt lại mật khẩu Pawket",
       text:
-        "Reset your Pawket password\n\n" +
-        "Open this Pawket link to continue:\n" +
+        "Đặt lại mật khẩu Pawket\n\n" +
+        "Mở liên kết Pawket này để tiếp tục:\n" +
         "https://pawket.example/reset-password?token=one-time-secret\n\n" +
-        "This link expires in 30 minutes. If you did not request this, you can ignore this email.",
+        "Liên kết hết hạn sau 30 phút. Nếu bạn không yêu cầu thao tác này, hãy bỏ qua email.",
     });
   });
 
@@ -219,6 +304,46 @@ describe("production SMTP security email sender", () => {
     });
   });
 
+  test("records a retryable email failure before rethrowing a fixed safe error", async () => {
+    // Catches worker retries without a bounded failure signal or leaked provider text.
+    metricsRegistry.resetMetrics();
+    const logs: string[] = [];
+    const processor = runtime.createWorkerJobProcessor!({
+      logger: {
+        info() {},
+        error(data, message) {
+          logs.push(JSON.stringify({ data, message }));
+        },
+      },
+      database: {} as never,
+      acknowledge: vi.fn(async () => true),
+      securityEmail: {
+        keyring: {} as never,
+        sender: {} as never,
+        deliver: vi.fn(async () => {
+          throw new Error("smtp://artist@example.test:secret@provider.invalid");
+        }),
+      },
+    });
+
+    await expect(
+      processor(
+        job("identity.security_email.requested.v1", {
+          handoffId: "9fed3abd-ec32-462b-ad0b-366babf979c3",
+          purpose: "password_reset",
+        }),
+      ),
+    ).rejects.toThrow("Worker job processing failed");
+
+    const snapshot = await metricsRegistry.metrics();
+    expect(snapshot).toContain(
+      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 1',
+    );
+    expect(snapshot).not.toContain("artist@example.test");
+    expect(logs.join("\n")).not.toContain("artist@example.test");
+    expect(logs.join("\n")).not.toContain("provider.invalid");
+  });
+
   test("routes authenticated email changes to the purpose-specific confirmation page", async () => {
     let delivered: SmtpMail | undefined;
     const sender = createSecurityEmailSender({
@@ -242,6 +367,116 @@ describe("production SMTP security email sender", () => {
       "https://pawket.example/settings/security/confirm-email?token=email-change-secret",
     );
     expect(delivered?.text).not.toContain("https://pawket.example/verify-email?");
+  });
+
+  test.each([
+    ["application_outcome", { state: "approved" }, "Hồ sơ creator của bạn đã được chấp thuận", "/creator/apply"],
+    ["creator_status", { state: "suspended" }, "đã bị tạm ngưng", "/creator"],
+    [
+      "refund_status",
+      { state: "due_today", refundNotBefore: "2026-08-30", refundDue: "2026-09-02" },
+      "Hôm nay là ngày đến hạn",
+      "/creator/apply",
+    ],
+  ] as const)("renders the fixed %s template without sensitive fields", async (purpose, templateData, expectedText, expectedPath) => {
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered = message; } };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose,
+      destination: "artist@example.com",
+      secret: null,
+      templateData,
+    });
+
+    expect(delivered?.text).toContain(expectedText);
+    expect(delivered?.text).toContain(`https://pawket.example${expectedPath}`);
+    expect(delivered?.text).not.toMatch(/account number|challenge|portfolio|date of birth/i);
+  });
+
+  test("renders reopened application copy distinctly from ordinary changes requested", async () => {
+    // Break caught: losing the reopen decision when both outcomes retain the same application database state.
+    const delivered: SmtpMail[] = [];
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered.push(message); } };
+      },
+    });
+
+    for (const state of ["changes_requested", "reopened"] as const) {
+      await sender.send({
+        handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+        purpose: "application_outcome",
+        destination: "artist@example.com",
+        secret: null,
+        templateData: { state },
+      });
+    }
+
+    expect(delivered[0]?.text).toContain("Pawket cần bạn cập nhật một số nội dung trong hồ sơ creator.");
+    expect(delivered[1]?.text).toContain("Pawket đã mở lại hồ sơ creator để bạn tiếp tục cập nhật.");
+    expect(delivered[1]?.text).not.toBe(delivered[0]?.text);
+    expect(delivered.map((message) => message.to)).toEqual(["artist@example.com", "artist@example.com"]);
+    expect(JSON.stringify(delivered)).not.toMatch(/privateNote|applicantExplanation|bank|portfolio|date of birth/i);
+  });
+
+  test.each([
+    ["session_revoked", "Một phiên đăng nhập Pawket đã được thu hồi"],
+    ["sessions_revoked", "Tất cả phiên đăng nhập Pawket đã được thu hồi"],
+    ["owner_mfa_break_glass_completed", "Khôi phục MFA khẩn cấp cho owner đã hoàn tất"],
+  ] as const)("renders the allowlisted %s security notice", async (event, expectedText) => {
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail(message) { delivered = message; } };
+      },
+    });
+
+    await sender.send({
+      handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+      purpose: "security_notice",
+      destination: "owner@example.com",
+      secret: null,
+      templateData: { event },
+    });
+
+    expect(delivered?.subject).toBe("Thông báo bảo mật Pawket");
+    expect(delivered?.text).toContain(expectedText);
+  });
+
+  test("fails closed for a security notice event outside the fixed allowlist", async () => {
+    const sender = createSecurityEmailSender({
+      adapter: "smtp",
+      appBaseUrl: "https://pawket.example",
+      smtp,
+      createTransport() {
+        return { async sendMail() {} };
+      },
+    });
+
+    await expect(
+      sender.send({
+        handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
+        purpose: "security_notice",
+        destination: "owner@example.com",
+        secret: null,
+        templateData: { event: "unbounded-runtime-event" },
+      }),
+    ).rejects.toThrow("Invalid security email message");
   });
 
   test("fails before opening a transport when SMTP configuration is incomplete", () => {
@@ -302,5 +537,371 @@ describe("production SMTP security email sender", () => {
         pass: "smtp-password-that-must-not-leak",
       },
     });
+  });
+});
+
+describe("worker scan health", () => {
+  test.each([
+    ["partial", { claimed: 2, enqueued: 1, failed: 1 }],
+    ["all", { claimed: 2, enqueued: 0, failed: 2 }],
+  ] as const)(
+    "keeps an outbox scan unhealthy when %s dispatch returns enqueue failures",
+    async (_kind, dispatchResult) => {
+      // Catches resolved per-event dispatch failures being reported as a successful poll.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+      metricsRegistry.resetMetrics();
+      const errors: Array<{ data: Record<string, unknown>; message?: string }> = [];
+      const healthState = {
+        initializedAt: null,
+        lastPollSucceededAt: null,
+        lastRefundScanSucceededAt: null,
+        stopping: false,
+      };
+      const resource = {
+        close: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+      const connection = {
+        connect: vi.fn(async () => undefined),
+        quit: vi.fn(async () => undefined),
+        disconnect: vi.fn(),
+      };
+      const handle = await workerRuntime.startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: new EventEmitter(),
+        healthState,
+        logger: {
+          info() {},
+          error(data, message) {
+            errors.push({ data, message });
+          },
+        },
+        dependencies: {
+          createDatabase: () => ({ db: {}, close: resource.close }) as never,
+          createProducerConnection: () => connection as never,
+          createWorkerConnection: () => connection as never,
+          createQueue: () => resource as never,
+          createWorker: () => resource as never,
+          dispatch: vi.fn(async () => dispatchResult) as never,
+          acknowledge: vi.fn() as never,
+          scanRefundWindows: vi.fn(async () => ({
+            dueSoon: 0,
+            dueToday: 0,
+            overdue: 0,
+            attention: 0,
+            outstandingAmountVnd: 0,
+          })) as never,
+          readBacklogMetrics: vi.fn(async () => ({
+            outbox: { pending: 1, oldestAgeSeconds: 1 },
+            email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          })) as never,
+          runRetention: vi.fn() as never,
+          hostname: () => "test-worker",
+          randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(await scanHealth("outbox")).toBe(0);
+      expect(healthState.lastPollSucceededAt).toBeNull();
+      const lastSuccess = metricsRegistry.getSingleMetric(
+        "pawket_worker_last_success_timestamp_seconds",
+      );
+      expect(
+        (await lastSuccess?.get())?.values.some((value) => value.labels.scan === "outbox"),
+      ).toBe(false);
+      expect(errors).toContainEqual({
+        data: {
+          category: "outbox_dispatch_incomplete",
+          workerId: "test-worker:42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+          ...dispatchResult,
+        },
+        message: "Outbox dispatch completed with enqueue failures",
+      });
+      expect(JSON.stringify(errors)).not.toContain("exception");
+      expect(JSON.stringify(errors)).not.toContain("secret");
+
+      await handle.stop();
+    },
+  );
+
+  test.each(["dispatch", "backlog"] as const)(
+    "runs a due retention scan when the outbox %s phase fails",
+    async (failureStage) => {
+      // Break caught: nesting retention scheduling under a successful outbox
+      // dispatch/backlog path and leaving a stale healthy retention gauge.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+      metricsRegistry.resetMetrics();
+      const resource = {
+        close: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+      const connection = {
+        connect: vi.fn(async () => undefined),
+        quit: vi.fn(async () => undefined),
+        disconnect: vi.fn(),
+      };
+      const dispatch =
+        failureStage === "dispatch"
+          ? vi.fn(async () => {
+              throw new Error("outbox-dispatch-secret");
+            })
+          : vi.fn(async () => ({ claimed: 0, enqueued: 0, failed: 0 }));
+      const readBacklogMetrics =
+        failureStage === "backlog"
+          ? vi.fn(async () => {
+              throw new Error("outbox-backlog-secret");
+            })
+          : vi.fn(async () => ({
+              outbox: { pending: 0, oldestAgeSeconds: 0 },
+              email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+            }));
+      const runRetention = vi.fn(async () => []);
+      const handle = await workerRuntime.startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: new EventEmitter(),
+        logger: { info() {}, error() {} },
+        retention: {
+          mode: "report_only",
+          policyVersion: "task-9-test",
+          enforcementPaused: true,
+          batchSize: 10,
+          scanIntervalMs: 1_000,
+        },
+        dependencies: {
+          createDatabase: () => ({ db: {}, close: resource.close }) as never,
+          createProducerConnection: () => connection as never,
+          createWorkerConnection: () => connection as never,
+          createQueue: () => resource as never,
+          createWorker: () => resource as never,
+          dispatch: dispatch as never,
+          acknowledge: vi.fn() as never,
+          scanRefundWindows: vi.fn(async () => ({
+            dueSoon: 0,
+            dueToday: 0,
+            overdue: 0,
+            attention: 0,
+            outstandingAmountVnd: 0,
+          })) as never,
+          readBacklogMetrics: readBacklogMetrics as never,
+          runRetention: runRetention as never,
+          hostname: () => "test-worker",
+          randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(runRetention).toHaveBeenCalledTimes(1);
+      expect(await scanHealth("outbox")).toBe(0);
+      expect(await scanHealth("retention")).toBe(1);
+      const lastSuccess = metricsRegistry.getSingleMetric(
+        "pawket_worker_last_success_timestamp_seconds",
+      );
+      expect(
+        (await lastSuccess?.get())?.values.some((value) => value.labels.scan === "retention"),
+      ).toBe(true);
+
+      await handle.stop();
+    },
+  );
+
+  test("marks a due retention scan unhealthy while its promise is still pending", async () => {
+    // Break caught: a previously successful scan retaining health=1 while the
+    // next due retention execution hangs instead of rejecting.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    metricsRegistry.resetMetrics();
+    let releasePendingScan!: () => void;
+    const pendingScan = new Promise<void>((resolve) => {
+      releasePendingScan = resolve;
+    });
+    const runRetention = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        await pendingScan;
+        return [];
+      });
+    const resource = {
+      close: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const connection = {
+      connect: vi.fn(async () => undefined),
+      quit: vi.fn(async () => undefined),
+      disconnect: vi.fn(),
+    };
+    const handle = await workerRuntime.startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      logger: { info() {}, error() {} },
+      retention: {
+        mode: "report_only",
+        policyVersion: "task-9-test",
+        enforcementPaused: true,
+        batchSize: 10,
+        scanIntervalMs: 1_000,
+      },
+      dependencies: {
+        createDatabase: () => ({ db: {}, close: resource.close }) as never,
+        createProducerConnection: () => connection as never,
+        createWorkerConnection: () => connection as never,
+        createQueue: () => resource as never,
+        createWorker: () => resource as never,
+        dispatch: vi.fn(async () => ({ claimed: 0, enqueued: 0, failed: 0 })) as never,
+        acknowledge: vi.fn() as never,
+        scanRefundWindows: vi.fn(async () => ({
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        })) as never,
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        })) as never,
+        runRetention: runRetention as never,
+        hostname: () => "test-worker",
+        randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await scanHealth("retention")).toBe(1);
+
+    vi.advanceTimersByTime(1_000);
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    expect(runRetention).toHaveBeenCalledTimes(2);
+    expect(await scanHealth("retention")).toBe(0);
+
+    releasePendingScan();
+    await handle.stop();
+  });
+
+  test("starts unhealthy, becomes healthy after success, and returns unhealthy on failure", async () => {
+    // Catches startup being reported as success and scan failures leaving stale healthy state.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    metricsRegistry.resetMetrics();
+    let releaseFirstRefundScan!: () => void;
+    const firstRefundScan = new Promise<void>((resolve) => {
+      releaseFirstRefundScan = resolve;
+    });
+    const scanRefundWindows = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await firstRefundScan;
+        return {
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        };
+      })
+      .mockRejectedValueOnce(new Error("bank-scan-secret"))
+      .mockResolvedValue({
+        dueSoon: 0,
+        dueToday: 0,
+        overdue: 0,
+        attention: 0,
+        outstandingAmountVnd: 0,
+      });
+    const dispatch = vi
+      .fn()
+      .mockResolvedValueOnce({ claimed: 0, enqueued: 0, failed: 0 })
+      .mockRejectedValueOnce(new Error("outbox-scan-secret"))
+      .mockResolvedValue({ claimed: 0, enqueued: 0, failed: 0 });
+    const runRetention = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          dataset: "sessions",
+          candidateCount: 0,
+          protectedCount: 0,
+          processedCount: 0,
+          outcome: "failed",
+        },
+      ]);
+    const resource = {
+      close: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const connection = {
+      connect: vi.fn(async () => undefined),
+      quit: vi.fn(async () => undefined),
+      disconnect: vi.fn(),
+    };
+    const handle = await workerRuntime.startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      logger: { info() {}, error() {} },
+      retention: {
+        mode: "report_only",
+        policyVersion: "task-9-test",
+        enforcementPaused: true,
+        batchSize: 10,
+        scanIntervalMs: 1_000,
+      },
+      dependencies: {
+        createDatabase: () => ({ db: {}, close: resource.close }) as never,
+        createProducerConnection: () => connection as never,
+        createWorkerConnection: () => connection as never,
+        createQueue: () => resource as never,
+        createWorker: () => resource as never,
+        dispatch: dispatch as never,
+        acknowledge: vi.fn() as never,
+        scanRefundWindows: scanRefundWindows as never,
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        })) as never,
+        runRetention: runRetention as never,
+        hostname: () => "test-worker",
+        randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+      },
+    });
+
+    expect(await scanHealth("outbox")).toBe(0);
+    expect(await scanHealth("refund")).toBe(0);
+    expect(await scanHealth("retention")).toBe(0);
+
+    releaseFirstRefundScan();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await scanHealth("outbox")).toBe(1);
+    expect(await scanHealth("refund")).toBe(1);
+    expect(await scanHealth("retention")).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await scanHealth("outbox")).toBe(0);
+
+    vi.setSystemTime(new Date("2026-08-26T00:01:00.000Z"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await scanHealth("refund")).toBe(0);
+    expect(await scanHealth("retention")).toBe(0);
+
+    await handle.stop();
   });
 });

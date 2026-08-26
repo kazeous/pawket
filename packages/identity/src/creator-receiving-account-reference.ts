@@ -1,8 +1,10 @@
+import type { PawketDatabase, PawketTransaction } from "@pawket/database";
+
 export type CreatorReceivingAccountReferencePort = {
   isValidForApplicant(input: {
     applicantUserId: string;
     reference: string;
-  }): Promise<boolean>;
+  }, database?: PawketDatabase | PawketTransaction): Promise<boolean>;
 };
 
 const canonicalUuid =

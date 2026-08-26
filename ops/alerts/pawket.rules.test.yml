@@ -1,0 +1,213 @@
+rule_files:
+  - pawket.rules.yml
+
+evaluation_interval: 1s
+
+tests:
+  - name: outbox scan starts unhealthy and clears only after success
+    interval: 1s
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="outbox"}'
+        values: '0x5 1x2'
+    alert_rule_test:
+      - eval_time: 2s
+        alertname: PawketWorkerPollStale
+        exp_alerts: []
+      - eval_time: 3s
+        alertname: PawketWorkerPollStale
+        exp_alerts:
+          - exp_labels:
+              scan: outbox
+              severity: critical
+            exp_annotations:
+              summary: Worker outbox poll has missed three intervals
+              runbook: ops/runbooks/provider-outage.md
+      - eval_time: 6s
+        alertname: PawketWorkerPollStale
+        exp_alerts: []
+
+  - name: outbox last-success age detects a hung earlier phase
+    interval: 1s
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="outbox"}'
+        values: '1x9'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="outbox"}'
+        values: '0x9'
+    alert_rule_test:
+      - eval_time: 6s
+        alertname: PawketWorkerPollLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 7s
+        alertname: PawketWorkerPollLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: outbox
+              severity: critical
+            exp_annotations:
+              summary: Worker outbox poll has stopped completing
+              runbook: ops/runbooks/provider-outage.md
+
+  - name: refund scan fires on the third interval
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="refund"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PawketRefundScanStale
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: PawketRefundScanStale
+        exp_alerts:
+          - exp_labels:
+              scan: refund
+              severity: critical
+            exp_annotations:
+              summary: Worker refund scan has missed three intervals
+              runbook: ops/runbooks/overdue-refunds.md
+
+  - name: refund last-success age detects a hung later poll
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="refund"}'
+        values: '1x7'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="refund"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketRefundLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketRefundLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: refund
+              severity: critical
+            exp_annotations:
+              summary: Worker refund scan has stopped completing
+              runbook: ops/runbooks/overdue-refunds.md
+
+  - name: retention scan remains unhealthy for eighteen hours
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="retention"}'
+        values: '0x1081'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: PawketRetentionScanStale
+        exp_alerts: []
+      - eval_time: 18h
+        alertname: PawketRetentionScanStale
+        exp_alerts:
+          - exp_labels:
+              scan: retention
+              severity: critical
+            exp_annotations:
+              summary: Worker retention scan has remained unhealthy for eighteen hours
+              runbook: ops/runbooks/retention-operations.md
+
+  - name: retention last-success age detects a hung poll with a stale healthy gauge
+    interval: 5m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="retention"}'
+        values: '1x314'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="retention"}'
+        values: '0x314'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: PawketRetentionLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: PawketRetentionLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: retention
+              severity: critical
+            exp_annotations:
+              summary: Worker retention scan has not succeeded within twenty-five hours
+              runbook: ops/runbooks/retention-operations.md
+
+  - name: refund due-today boundary waits five minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_refund_liabilities_total{window="due_today"}'
+        values: '1x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketRefundDueToday
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketRefundDueToday
+        exp_alerts:
+          - exp_labels:
+              window: due_today
+              severity: warning
+            exp_annotations:
+              summary: Verification-deposit refund is due today
+              runbook: ops/runbooks/daily-deposit-reconciliation-and-refunds.md
+
+  - name: outbox backlog boundaries are strict
+    interval: 1m
+    input_series:
+      - series: pawket_outbox_oldest_age_seconds
+        values: '299 300 301 900 901'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PawketOutboxBacklogWarning
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PawketOutboxBacklogWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Oldest unpublished outbox event exceeds five minutes
+              runbook: ops/runbooks/provider-outage.md
+      - eval_time: 3m
+        alertname: PawketOutboxBacklogCritical
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PawketOutboxBacklogCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Oldest unpublished outbox event exceeds fifteen minutes
+              runbook: ops/runbooks/provider-outage.md
+
+  - name: revision mismatch and immediate refund alerts evaluate
+    interval: 1m
+    input_series:
+      - series: pawket_revision_match
+        values: '0'
+      - series: 'pawket_refund_liabilities_total{window="overdue"}'
+        values: '1'
+      - series: 'pawket_refund_liabilities_total{window="attention_required"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: PawketRevisionMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Runtime and embedded source revisions do not match
+              runbook: ops/runbooks/release-attestation.md
+      - eval_time: 0m
+        alertname: PawketRefundOverdue
+        exp_alerts:
+          - exp_labels:
+              window: overdue
+              severity: critical
+            exp_annotations:
+              summary: Verification-deposit refund is overdue
+              runbook: ops/runbooks/overdue-refunds.md
+      - eval_time: 0m
+        alertname: PawketRefundAttentionRequired
+        exp_alerts:
+          - exp_labels:
+              window: attention_required
+              severity: critical
+            exp_annotations:
+              summary: Verification-deposit refund requires owner attention
+              runbook: ops/runbooks/overdue-refunds.md

@@ -28,4 +28,6 @@ export {
   systemBusinessCalendarHolidays,
   systemBusinessCalendarVersions,
   systemCommandIdempotency,
+  systemRetentionHolds,
+  systemRetentionRuns,
 } from "./shared-controls.js";

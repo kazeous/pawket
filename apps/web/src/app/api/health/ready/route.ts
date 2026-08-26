@@ -1,4 +1,4 @@
-import { loadServerEnv } from "@pawket/config";
+import { loadServerEnv, resolveRevisionAttestation } from "@pawket/config";
 import { checkDatabaseReadiness } from "@pawket/database/readiness";
 
 import {
@@ -16,7 +16,10 @@ export function GET(request: Request): Promise<Response> {
     const probe = createReadinessProbe({
       checkDatabase: (signal) => checkDatabaseReadiness(environment.DATABASE_URL, signal),
       checkValkey: createValkeyReadinessCheck(environment.VALKEY_URL),
-      revision: environment.APP_REVISION,
+      revision: resolveRevisionAttestation(
+        environment.APP_REVISION,
+        environment.APP_BUILD_REVISION,
+      ),
     });
 
     return createReadinessResponse(probe);

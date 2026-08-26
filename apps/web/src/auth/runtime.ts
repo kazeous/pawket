@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
 import { loadServerEnv } from "@pawket/config";
@@ -14,10 +14,11 @@ import {
   getIdentityUserSummary,
   listUserSessions,
   recordSecurityThrottleAttempt,
+  queueUserSecurityNotice,
   resolveSessionCookie,
   resolveAuthoritativeSessionById,
   revokeAllUserSessions,
-  revokeUserSession,
+  revokeUserSessionInTransaction,
 } from "@pawket/identity";
 import {
   createCreatorReceivingAccountReferenceValidator,
@@ -25,6 +26,7 @@ import {
   createReceivingAccountService,
   createVerificationDepositService,
 } from "@pawket/payments";
+import { recordAuthAbuseControl } from "@pawket/observability";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 
 type WebIdentityRuntime = {
@@ -172,6 +174,11 @@ export function getIdentityRuntime(): WebIdentityRuntime {
           }
         : {}),
     },
+    acceleration: {
+      async observe(input) {
+        if (input.outcome === "blocked") recordAuthAbuseControl(input.action);
+      },
+    },
   });
   const service = createIdentityService({
     db: database.db,
@@ -235,9 +242,34 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     authenticate,
     getMe: (userId) => getIdentityUserSummary(database.db, userId),
     listSessions: (userId, now) => listUserSessions(database.db, { userId, now }),
-    revokeSession: (input) => revokeUserSession(database.db, input),
+    revokeSession: (input) =>
+      database.db.transaction(async (tx) => {
+        const revoked = await revokeUserSessionInTransaction(tx, input);
+        if (revoked) {
+          await queueUserSecurityNotice(tx, {
+            id: randomUUID(),
+            userId: input.userId,
+            event: "session_revoked",
+            keyring,
+            now: input.now,
+          });
+        }
+        return revoked;
+      }),
     revokeAllSessions: (input) =>
-      database.db.transaction((tx) => revokeAllUserSessions(tx, input)),
+      database.db.transaction(async (tx) => {
+        const revoked = await revokeAllUserSessions(tx, input);
+        if (revoked > 0) {
+          await queueUserSecurityNotice(tx, {
+            id: randomUUID(),
+            userId: input.userId,
+            event: "sessions_revoked",
+            keyring,
+            now: input.now,
+          });
+        }
+        return revoked;
+      }),
     async throttle({ action, accountSubject, request }) {
       const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
       const networkSubject = (forwarded || "unknown-network").slice(0, 256);

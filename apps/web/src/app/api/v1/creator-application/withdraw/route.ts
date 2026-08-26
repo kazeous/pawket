@@ -1,4 +1,11 @@
 import { getIdentityRuntime } from "../../../../../auth/runtime";
-import { withRouteContext } from "../../../../../http/route-context";
+import { withBusinessOperation, withRouteContext } from "../../../../../http/route-context";
 export const runtime = "nodejs";
-export function POST(request: Request) { return withRouteContext(request, () => getIdentityRuntime().creatorHandlers.withdraw(request)); }
+export function POST(request: Request) {
+  return withRouteContext(request, () =>
+    withBusinessOperation(
+      { domain: "creator", operation: "withdraw" },
+      () => getIdentityRuntime().creatorHandlers.withdraw(request),
+    ),
+  );
+}

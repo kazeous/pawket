@@ -35,6 +35,12 @@ type PawketAuth = {
   handler(request: Request): Promise<Response>;
   api: { getSession(input: { headers: Headers }): Promise<unknown> };
   enabledProviders: readonly ("google" | "discord")[];
+  consumeOperationTelemetry?: (request: Request) =>
+    | {
+        operation: "oauth_callback" | "security_change";
+        outcome: "succeeded" | "rejected" | "retryable_failure";
+      }
+    | null;
 };
 type AuthFactory = {
   createPawketAuth(options: {
@@ -564,15 +570,15 @@ describe("Pawket Better Auth boundary", () => {
       email: "boundary@example.com",
     });
     let callbacks: Response[] = [];
+    const callbackRequests = ["valid-code-a", "valid-code-b"].map(
+      (code) =>
+        new Request(`${baseURL}/api/auth/callback/discord?code=${code}&state=${state}`, {
+          headers: { cookie: `${boundaryCookie}; ${stateCookie}` },
+        }),
+    );
     try {
       callbacks = await Promise.all(
-        ["valid-code-a", "valid-code-b"].map((code) =>
-          socialAuth.handler(
-            new Request(`${baseURL}/api/auth/callback/discord?code=${code}&state=${state}`, {
-              headers: { cookie: `${boundaryCookie}; ${stateCookie}` },
-            }),
-          ),
-        ),
+        callbackRequests.map((request) => socialAuth.handler(request)),
       );
     } finally {
       fetchSpy.mockRestore();
@@ -580,8 +586,15 @@ describe("Pawket Better Auth boundary", () => {
     expect(callbacks.map((response) => response.status).sort()).toEqual([302, 400]);
     const callback = callbacks.find((response) => response.status === 302);
     if (!callback) throw new Error("Expected one claimed social callback");
+    const callbackRequest = callbackRequests[callbacks.indexOf(callback)]!;
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/settings/security");
+    expect(socialAuth.consumeOperationTelemetry).toEqual(expect.any(Function));
+    expect(socialAuth.consumeOperationTelemetry?.(callbackRequest)).toEqual({
+      operation: "security_change",
+      outcome: "succeeded",
+    });
+    expect(socialAuth.consumeOperationTelemetry?.(callbackRequest)).toBeNull();
     const [linkedAccount] = await db
       .select()
       .from(identityAccounts)
@@ -844,17 +857,22 @@ describe("Pawket Better Auth boundary", () => {
       const state = new URL(((await started.json()) as { url: string }).url).searchParams.get("state");
       const fetchSpy = mockDiscordProvider(scenario);
       let callback: Response;
+      const callbackRequest = new Request(
+        `${baseURL}/api/auth/callback/discord?code=fixture&state=${state}`,
+        { headers: { cookie: responseCookieContaining(started, "state=") } },
+      );
       try {
-        callback = await socialAuth.handler(
-          new Request(`${baseURL}/api/auth/callback/discord?code=fixture&state=${state}`, {
-            headers: { cookie: responseCookieContaining(started, "state=") },
-          }),
-        );
+        callback = await socialAuth.handler(callbackRequest);
       } finally {
         fetchSpy.mockRestore();
       }
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain(scenario.error);
+      expect(socialAuth.consumeOperationTelemetry).toEqual(expect.any(Function));
+      expect(socialAuth.consumeOperationTelemetry?.(callbackRequest)).toEqual({
+        operation: "oauth_callback",
+        outcome: "rejected",
+      });
       const [account] = await db
         .select({ id: identityAccounts.id })
         .from(identityAccounts)
@@ -876,17 +894,29 @@ describe("Pawket Better Auth boundary", () => {
       verified: true,
     });
     let callback: Response;
+    const callbackRequest = new Request(
+      `${baseURL}/api/auth/callback/discord?code=fixture&state=${state}`,
+      { headers: { cookie: responseCookieContaining(started, "state=") } },
+    );
     try {
-      callback = await socialAuth.handler(
-        new Request(`${baseURL}/api/auth/callback/discord?code=fixture&state=${state}`, {
-          headers: { cookie: responseCookieContaining(started, "state=") },
-        }),
-      );
+      callback = await socialAuth.handler(callbackRequest);
     } finally {
       fetchSpy.mockRestore();
     }
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/settings/security");
+    expect(socialAuth.consumeOperationTelemetry).toEqual(expect.any(Function));
+    expect(socialAuth.consumeOperationTelemetry?.(callbackRequest)).toEqual({
+      operation: "oauth_callback",
+      outcome: "succeeded",
+    });
+    expect(
+      socialAuth.consumeOperationTelemetry?.(
+        new Request(`${baseURL}/api/auth/callback/discord`, {
+          headers: { "x-pawket-auth-outcome": "succeeded" },
+        }),
+      ),
+    ).toBeNull();
     const [created] = await db
       .select()
       .from(identityUsers)
