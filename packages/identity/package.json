@@ -5,6 +5,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./email-address": "./src/email-address.ts",
     "./security-email": "./src/security-email.ts",
     "./security-email-handoff": "./src/security-email-handoff.ts"
   },

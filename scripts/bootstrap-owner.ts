@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   bootstrapOwner,
   OwnerBootstrapError,
+} from "../packages/admin/src/owner-bootstrap.js";
+import {
   ownerBootstrapUsage,
   parseOwnerBootstrapArguments,
-} from "../packages/admin/src/index.js";
+} from "../packages/admin/src/owner-bootstrap-cli.js";
 import { loadServerEnv } from "../packages/config/src/index.js";
-import { createDatabase } from "../packages/database/src/index.js";
-import { createEncryptionKeyring } from "../packages/security/src/index.js";
+import { createDatabase } from "../packages/database/src/client.js";
+import { createEncryptionKeyring } from "../packages/security/src/encryption-envelope.js";
 
 async function main(): Promise<void> {
   let args;

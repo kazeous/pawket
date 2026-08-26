@@ -9,7 +9,8 @@ import {
   identityUsers,
   type PawketDatabase,
 } from "@pawket/database";
-import { canonicalizeEmailAddress, queueSecurityEmailHandoff } from "@pawket/identity";
+import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
+import { queueSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
 import type { EncryptionKeyring } from "@pawket/security";
 
 const bootstrapIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
