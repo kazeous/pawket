@@ -11,6 +11,13 @@ type SessionContext = {
   primaryAuthenticatedAt: Date;
 };
 
+type SessionSummary = {
+  id: string;
+  deviceLabel: string;
+  createdAt: Date;
+  lastUsedAt: Date;
+};
+
 type IdentityHttpService = {
   registerPassword(input: { name: string; email: string; password: string }): Promise<{ accepted: true }>;
   resendEmailVerification(input: { email: string }): Promise<{ accepted: true }>;
@@ -43,7 +50,7 @@ type IdentityHttpOptions = {
   service: IdentityHttpService;
   authenticate(headers: Headers): Promise<SessionContext | null>;
   getMe(userId: string): Promise<Record<string, unknown> | null>;
-  listSessions(userId: string, now: Date): Promise<unknown[]>;
+  listSessions(userId: string, now: Date): Promise<SessionSummary[]>;
   revokeSession(input: {
     userId: string;
     sessionId: string;
@@ -383,7 +390,12 @@ export function createIdentityHttpHandlers(options: IdentityHttpOptions) {
           return empty(204, true, options.sessionCookie);
         }
         const sessions = await options.listSessions(context.userId, now());
-        return json(200, { sessions });
+        return json(200, {
+          sessions: sessions.map((session) => ({
+            ...session,
+            isCurrent: session.id === context.sessionId,
+          })),
+        });
       } catch {
         return json(503, { code: "IDENTITY_UNAVAILABLE" });
       }

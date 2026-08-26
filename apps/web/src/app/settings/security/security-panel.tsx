@@ -10,7 +10,7 @@ import { StatusBanner, StatusTag } from "../../../ui/status-banner";
 import { groupedTotpSecret, totpSecretFromURI } from "./totp-enrollment";
 
 type Account = { id: string; providerId: string };
-type Session = { id: string; deviceLabel: string; createdAt: string; lastUsedAt: string };
+type Session = { id: string; deviceLabel: string; createdAt: string; lastUsedAt: string; isCurrent: boolean };
 
 async function requestJson(path: string, init?: RequestInit): Promise<Record<string, unknown>> {
   const response = await fetch(path, { credentials: "include", ...init });
@@ -183,7 +183,7 @@ export function SecurityPanel({
   }
 
   function regenerateRecoveryCodes() { return run(async () => { const payload = await requestJson("/api/auth/two-factor/regenerate-recovery-codes", jsonPost({})); setRecoveryCodes(Array.isArray(payload.recoveryCodes) ? (payload.recoveryCodes as string[]) : []); setTone("warning"); setMessage("Bộ mã khôi phục cũ đã mất hiệu lực."); }); }
-  function revokeSession(sessionId: string) { return run(async () => { const response = await fetch(`/api/v1/me/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE", credentials: "include" }); if (!response.ok) throw new Error("SESSION_REVOCATION_FAILED"); await loadSecurityState(); }); }
+  function revokeSession(session: Session) { return run(async () => { const response = await fetch(`/api/v1/me/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE", credentials: "include" }); if (!response.ok) throw new Error("SESSION_REVOCATION_FAILED"); if (session.isCurrent) { router.replace("/sign-in"); router.refresh(); return; } await loadSecurityState(); setTone("success"); setMessage("Đã thu hồi phiên đăng nhập."); }); }
   function revokeAllSessions() { return run(async () => { const response = await fetch("/api/v1/me/sessions", { method: "DELETE", credentials: "include" }); if (!response.ok) throw new Error("SESSION_REVOCATION_FAILED"); router.push("/sign-in"); }); }
 
   function changePassword(event: FormEvent<HTMLFormElement>) {
@@ -219,7 +219,7 @@ export function SecurityPanel({
 
         <section className="work-surface stack" id="sessions">
           <div className="section-heading"><div><p className="eyebrow">04</p><h2>Phiên đăng nhập</h2></div><StatusTag>{sessions.length} phiên</StatusTag></div>
-          {!loading && sessions.length === 0 ? <EmptyState title="Không có phiên đang hoạt động"><p>Đăng nhập lại để tạo phiên mới.</p></EmptyState> : <div className="stack compact">{sessions.map((session) => <div className="item-row" key={session.id}><span><strong>{session.deviceLabel}</strong><small className="muted">Dùng gần nhất {new Date(session.lastUsedAt).toLocaleString("vi-VN")}</small></span><button type="button" className="secondary" disabled={working} onClick={() => revokeSession(session.id)}>Thu hồi</button></div>)}</div>}
+          {!loading && sessions.length === 0 ? <EmptyState title="Không có phiên đang hoạt động"><p>Đăng nhập lại để tạo phiên mới.</p></EmptyState> : <div className="stack compact">{sessions.map((session) => <div className="item-row" key={session.id}><span><strong>{session.deviceLabel}{session.isCurrent ? " · Phiên hiện tại" : ""}</strong><small className="muted">Dùng gần nhất {new Date(session.lastUsedAt).toLocaleString("vi-VN")}</small></span><button type="button" className="secondary" disabled={working} onClick={() => revokeSession(session)}>{session.isCurrent ? "Thu hồi phiên này" : "Thu hồi"}</button></div>)}</div>}
           <div className="action-bar"><p>Đăng xuất khỏi tất cả thiết bị, bao gồm thiết bị này.</p><button type="button" className="danger" disabled={working} onClick={revokeAllSessions}>Thu hồi tất cả</button></div>
         </section>
       </div>
