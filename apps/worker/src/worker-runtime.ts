@@ -417,6 +417,76 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     setWorkerScanHealthMetric({ scan: "retention", healthy: false });
   }
 
+  const scanRetentionIfDue = async (scanAt: number): Promise<void> => {
+    if (
+      !options.retention ||
+      scanAt - lastRetentionScanAt < options.retention.scanIntervalMs
+    ) {
+      return;
+    }
+    lastRetentionScanAt = scanAt;
+    try {
+      const retention = await dependencies.runRetention({
+        db: database.db,
+        now: new Date(scanAt),
+        mode: options.retention.mode,
+        policyVersion: options.retention.policyVersion,
+        enforcementPaused: options.retention.enforcementPaused,
+        batchSize: options.retention.batchSize,
+      });
+      for (const result of retention) {
+        recordRetentionMetrics({
+          dataset: result.dataset,
+          mode: options.retention.mode,
+          disposition: result.outcome === "failed" ? "failed" : "candidate",
+          count: result.outcome === "failed" ? 1 : result.candidateCount,
+        });
+        recordRetentionMetrics({
+          dataset: result.dataset,
+          mode: options.retention.mode,
+          disposition: "protected",
+          count: result.protectedCount,
+        });
+        recordRetentionMetrics({
+          dataset: result.dataset,
+          mode: options.retention.mode,
+          disposition: "processed",
+          count: result.processedCount,
+        });
+      }
+      if (retention.some((result) => result.outcome === "failed")) {
+        setWorkerScanHealthMetric({ scan: "retention", healthy: false });
+        logger.error(
+          { category: "retention_scan_failed", workerId, mode: options.retention.mode },
+          "Retention scan failed",
+        );
+      } else {
+        setWorkerLastSuccessMetric({
+          scan: "retention",
+          timestampSeconds: scanAt / 1_000,
+        });
+        setWorkerScanHealthMetric({ scan: "retention", healthy: true });
+        logger.info(
+          {
+            workerId,
+            mode: options.retention.mode,
+            paused: options.retention.enforcementPaused,
+            candidateCount: retention.reduce((sum, result) => sum + result.candidateCount, 0),
+            protectedCount: retention.reduce((sum, result) => sum + result.protectedCount, 0),
+            processedCount: retention.reduce((sum, result) => sum + result.processedCount, 0),
+          },
+          "Retention scan completed",
+        );
+      }
+    } catch {
+      setWorkerScanHealthMetric({ scan: "retention", healthy: false });
+      logger.error(
+        { category: "retention_scan_failed", workerId, mode: options.retention.mode },
+        "Retention scan failed",
+      );
+    }
+  };
+
   const poll = async (): Promise<void> => {
     if (!running) {
       return;
@@ -483,72 +553,6 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (result.claimed > 0 && result.failed === 0) {
         logger.info({ workerId, ...result }, "Outbox batch dispatched");
       }
-      if (
-        options.retention &&
-        pollSucceededAt - lastRetentionScanAt >= options.retention.scanIntervalMs
-      ) {
-        lastRetentionScanAt = pollSucceededAt;
-        try {
-          const retention = await dependencies.runRetention({
-            db: database.db,
-            now: new Date(pollSucceededAt),
-            mode: options.retention.mode,
-            policyVersion: options.retention.policyVersion,
-            enforcementPaused: options.retention.enforcementPaused,
-            batchSize: options.retention.batchSize,
-          });
-          for (const result of retention) {
-            recordRetentionMetrics({
-              dataset: result.dataset,
-              mode: options.retention.mode,
-              disposition: result.outcome === "failed" ? "failed" : "candidate",
-              count: result.outcome === "failed" ? 1 : result.candidateCount,
-            });
-            recordRetentionMetrics({
-              dataset: result.dataset,
-              mode: options.retention.mode,
-              disposition: "protected",
-              count: result.protectedCount,
-            });
-            recordRetentionMetrics({
-              dataset: result.dataset,
-              mode: options.retention.mode,
-              disposition: "processed",
-              count: result.processedCount,
-            });
-          }
-          if (retention.some((result) => result.outcome === "failed")) {
-            setWorkerScanHealthMetric({ scan: "retention", healthy: false });
-            logger.error(
-              { category: "retention_scan_failed", workerId, mode: options.retention.mode },
-              "Retention scan failed",
-            );
-          } else {
-            setWorkerLastSuccessMetric({
-              scan: "retention",
-              timestampSeconds: pollSucceededAt / 1_000,
-            });
-            setWorkerScanHealthMetric({ scan: "retention", healthy: true });
-            logger.info(
-              {
-                workerId,
-                mode: options.retention.mode,
-                paused: options.retention.enforcementPaused,
-                candidateCount: retention.reduce((sum, result) => sum + result.candidateCount, 0),
-                protectedCount: retention.reduce((sum, result) => sum + result.protectedCount, 0),
-                processedCount: retention.reduce((sum, result) => sum + result.processedCount, 0),
-              },
-              "Retention scan completed",
-            );
-          }
-        } catch {
-          setWorkerScanHealthMetric({ scan: "retention", healthy: false });
-          logger.error(
-            { category: "retention_scan_failed", workerId, mode: options.retention.mode },
-            "Retention scan failed",
-          );
-        }
-      }
     } catch {
       setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
       logger.error(
@@ -556,6 +560,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         "Outbox polling failed",
       );
     } finally {
+      await scanRetentionIfDue(Date.now());
       currentDispatch = undefined;
       if (running) {
         pollTimer = setTimeout(runPoll, POLL_INTERVAL_MS);

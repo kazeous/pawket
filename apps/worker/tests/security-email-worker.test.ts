@@ -631,6 +631,92 @@ describe("worker scan health", () => {
     },
   );
 
+  test.each(["dispatch", "backlog"] as const)(
+    "runs a due retention scan when the outbox %s phase fails",
+    async (failureStage) => {
+      // Break caught: nesting retention scheduling under a successful outbox
+      // dispatch/backlog path and leaving a stale healthy retention gauge.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+      metricsRegistry.resetMetrics();
+      const resource = {
+        close: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+      const connection = {
+        connect: vi.fn(async () => undefined),
+        quit: vi.fn(async () => undefined),
+        disconnect: vi.fn(),
+      };
+      const dispatch =
+        failureStage === "dispatch"
+          ? vi.fn(async () => {
+              throw new Error("outbox-dispatch-secret");
+            })
+          : vi.fn(async () => ({ claimed: 0, enqueued: 0, failed: 0 }));
+      const readBacklogMetrics =
+        failureStage === "backlog"
+          ? vi.fn(async () => {
+              throw new Error("outbox-backlog-secret");
+            })
+          : vi.fn(async () => ({
+              outbox: { pending: 0, oldestAgeSeconds: 0 },
+              email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+            }));
+      const runRetention = vi.fn(async () => []);
+      const handle = await workerRuntime.startWorker({
+        databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+        valkeyUrl: "redis://127.0.0.1:6379/15",
+        concurrency: 1,
+        batchSize: 10,
+        leaseMs: 30_000,
+        signalSource: new EventEmitter(),
+        logger: { info() {}, error() {} },
+        retention: {
+          mode: "report_only",
+          policyVersion: "task-9-test",
+          enforcementPaused: true,
+          batchSize: 10,
+          scanIntervalMs: 1_000,
+        },
+        dependencies: {
+          createDatabase: () => ({ db: {}, close: resource.close }) as never,
+          createProducerConnection: () => connection as never,
+          createWorkerConnection: () => connection as never,
+          createQueue: () => resource as never,
+          createWorker: () => resource as never,
+          dispatch: dispatch as never,
+          acknowledge: vi.fn() as never,
+          scanRefundWindows: vi.fn(async () => ({
+            dueSoon: 0,
+            dueToday: 0,
+            overdue: 0,
+            attention: 0,
+            outstandingAmountVnd: 0,
+          })) as never,
+          readBacklogMetrics: readBacklogMetrics as never,
+          runRetention: runRetention as never,
+          hostname: () => "test-worker",
+          randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(runRetention).toHaveBeenCalledTimes(1);
+      expect(await scanHealth("outbox")).toBe(0);
+      expect(await scanHealth("retention")).toBe(1);
+      const lastSuccess = metricsRegistry.getSingleMetric(
+        "pawket_worker_last_success_timestamp_seconds",
+      );
+      expect(
+        (await lastSuccess?.get())?.values.some((value) => value.labels.scan === "retention"),
+      ).toBe(true);
+
+      await handle.stop();
+    },
+  );
+
   test("starts unhealthy, becomes healthy after success, and returns unhealthy on failure", async () => {
     // Catches startup being reported as success and scan failures leaving stale healthy state.
     vi.useFakeTimers();
