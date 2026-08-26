@@ -26,6 +26,8 @@ export default async function SecuritySettingsPage({
     const error = safeSocialAuthError(params.error);
     redirect(error ? `/sign-in?error=${encodeURIComponent(error)}` : "/sign-in");
   }
+  const totpState = await runtime.getTotpSecurityState(session.userId);
+  if (!totpState) redirect("/sign-in");
   const initialMessage = params.error
     ? socialAuthGuidance(params.error)
     : params["recover-totp"] === "1"
@@ -38,6 +40,7 @@ export default async function SecuritySettingsPage({
       <SecurityPanel
         enabledProviders={runtime.auth.enabledProviders}
         initialMessage={initialMessage}
+        initialTwoFactorEnabled={totpState.enabled}
       />
     </AppShell>
   );

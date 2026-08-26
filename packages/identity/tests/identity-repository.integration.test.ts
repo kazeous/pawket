@@ -10,12 +10,13 @@ import {
   identityEmailHandoffs,
   identityEmailAddresses,
   identitySessions,
+  identityTotpAuthenticators,
   identityUsers,
   identityVerifications,
   systemOutbox,
   type PawketDatabase,
 } from "@pawket/database";
-import { createEncryptionKeyring, type EncryptionKeyring } from "@pawket/security";
+import { createEncryptionKeyring, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import * as schema from "@pawket/database";
 import * as identity from "../src/index.js";
 
@@ -105,6 +106,10 @@ type IdentityRepository = {
     emailVerified: boolean;
     accessStatus: string;
   } | null>;
+  getTotpSecurityState(
+    db: PawketDatabase,
+    userId: string,
+  ): Promise<{ enabled: boolean } | null>;
   queueSecurityEmailHandoff(
     tx: Parameters<Parameters<PawketDatabase["transaction"]>[0]>[0],
     input: {
@@ -293,6 +298,52 @@ describe("identity repository", () => {
       }),
     ).resolves.toBe(true);
     await expect(repository.resolveAuthoritativeSession!(db, { token, now })).resolves.toBeNull();
+  });
+
+  test("reports TOTP as enabled only when the account flag and verified authenticator agree", async () => {
+    expect(typeof repository.getTotpSecurityState).toBe("function");
+    const userId = "totp-status-user";
+    const authenticatorId = "totp-status-authenticator";
+    const keyring = createEncryptionKeyring({
+      activeKeyId: "status-v1",
+      keys: { "status-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 11) },
+    });
+    await db.insert(identityUsers).values({
+      id: userId,
+      name: "TOTP Status Artist",
+      email: "totp-status@example.com",
+      canonicalEmail: "totp-status@example.com",
+      emailVerified: true,
+      emailVerifiedAt: now,
+      emailVerificationProvenance: "password_email_challenge",
+      twoFactorEnabled: true,
+      accessStatus: "active",
+      authorizationVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(identityTotpAuthenticators).values({
+      id: authenticatorId,
+      userId,
+      secret: encryptSensitiveField({
+        plaintext: "totp-status-secret",
+        binding: {
+          recordType: "identity_totp_authenticator",
+          recordId: authenticatorId,
+          fieldName: "secret",
+        },
+        keyring,
+      }),
+      verified: false,
+    });
+
+    await expect(repository.getTotpSecurityState!(db, userId)).resolves.toEqual({ enabled: false });
+    await db
+      .update(identityTotpAuthenticators)
+      .set({ verified: true, updatedAt: now })
+      .where(eq(identityTotpAuthenticators.id, authenticatorId));
+    await expect(repository.getTotpSecurityState!(db, userId)).resolves.toEqual({ enabled: true });
+    await expect(repository.getTotpSecurityState!(db, "missing-user")).resolves.toBeNull();
   });
 
   test("fails closed when current access status or authorization version changes", async () => {
