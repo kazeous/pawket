@@ -18,7 +18,15 @@ test("public identity journeys have no serious axe violations", async ({ page })
   for (const route of publicRoutes) {
     await page.goto(route);
     const results = await new AxeBuilder({ page }).analyze();
-    expect(results.violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical"), route).toEqual([]);
+    const severe = results.violations.filter(
+      (violation) => violation.impact === "serious" || violation.impact === "critical",
+    );
+    if (severe.length > 0) {
+      console.error(
+        `${route}: ${severe.map((violation) => `${violation.id} — ${violation.nodes.map((node) => `${node.target.join(" ")}: ${node.html}`).join(" | ")}`).join(", ")}`,
+      );
+    }
+    expect(severe, route).toEqual([]);
   }
 });
 

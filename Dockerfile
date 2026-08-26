@@ -36,6 +36,7 @@ ENV APP_BUILD_REVISION=$SOURCE_COMMIT
 WORKDIR /app
 
 COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
+COPY --from=build --chown=node:node /app/dist/ops/bootstrap-owner.mjs ./bootstrap-owner.mjs
 
 USER node
 EXPOSE 3000

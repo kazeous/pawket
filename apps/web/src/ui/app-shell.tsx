@@ -1,6 +1,8 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { AccountSessionControl } from "./account-session-control";
+
 type ShellAction = Readonly<{ href: string; label: string }>;
 
 export function AppShell({
@@ -21,7 +23,7 @@ export function AppShell({
           Pawket<span aria-hidden="true">.</span>
         </Link>
         {context ? <p className="site-context">{context}</p> : <span />}
-        {action ? <Link className="header-action" href={action.href}>{action.label}</Link> : <span />}
+        <AccountSessionControl action={action} />
       </header>
       <main className={width === "narrow" ? "page-shell narrow-shell" : "page-shell"}>
         {children}
