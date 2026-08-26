@@ -21,7 +21,7 @@ import {
 } from "@pawket/database";
 import { rejectionCooldownUntil } from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -116,7 +116,7 @@ async function revalidateApproval(tx: PawketTransaction, application: typeof cre
   policy(revision.proposedReceivingAccountId, "missing_receiving_account");
   const attestations = await tx.select({ type: creatorApplicationAttestations.type, policyVersion: creatorApplicationAttestations.policyVersion }).from(creatorApplicationAttestations).where(eq(creatorApplicationAttestations.revisionId, revision.id)).for("update");
   policy(attestations.length === requiredAttestations.size && attestations.every((item) => requiredAttestations.get(item.type) === item.policyVersion), "attestations_invalid");
-  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt))).limit(1).for("update");
+  const [account] = await tx.select().from(paymentsReceivingAccountOnboarding).where(and(eq(paymentsReceivingAccountOnboarding.id, revision.proposedReceivingAccountId), eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId), isNull(paymentsReceivingAccountOnboarding.retiredAt), isNull(paymentsReceivingAccountOnboarding.minimizedAt), isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope), isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope))).limit(1).for("update");
   const proofAge = account?.proofVerifiedAt ? at.getTime() - account.proofVerifiedAt.getTime() : null;
   policy(account && account.proofState === "verified" && proofAge !== null && proofAge >= 0 && proofAge <= 30 * 24 * 60 * 60_000, "proof_expired");
   const [proof] = await tx.select({ id: paymentsVerificationDepositChallenges.id }).from(paymentsVerificationDepositChallenges).where(and(eq(paymentsVerificationDepositChallenges.applicationId, application.id), eq(paymentsVerificationDepositChallenges.revisionId, revision.id), eq(paymentsVerificationDepositChallenges.accountVersionId, account.id), eq(paymentsVerificationDepositChallenges.state, "verified"))).limit(1).for("update");

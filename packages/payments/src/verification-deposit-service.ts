@@ -27,7 +27,7 @@ import {
   type EncryptionEnvelope,
   type EncryptionKeyring,
 } from "@pawket/security";
-import { and, asc, desc, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 
 import { fingerprintReceivingAccount } from "./receiving-account-policy.js";
 
@@ -395,9 +395,13 @@ export function createVerificationDepositService(input: VerificationDepositServi
               eq(paymentsReceivingAccountOnboarding.id, command.accountVersionId),
               eq(paymentsReceivingAccountOnboarding.applicantUserId, application.userId),
               isNull(paymentsReceivingAccountOnboarding.retiredAt),
+              isNull(paymentsReceivingAccountOnboarding.minimizedAt),
+              isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope),
+              isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope),
             ),
           )
-          .limit(1);
+          .limit(1)
+          .for("update");
         if (
           !revision?.submittedAt ||
           revision.proposedReceivingAccountId !== command.accountVersionId ||

@@ -397,8 +397,13 @@ describe("creator application acceptance", () => {
     await expect(
       canonicalApplications.getForApplicant({ userId: rawAccountId }),
     ).resolves.toBeNull();
+    const validationDatabases: unknown[] = [];
     const receivingAccountReferences = {
-      async isValidForApplicant(input: { applicantUserId: string; reference: string }) {
+      async isValidForApplicant(
+        input: { applicantUserId: string; reference: string },
+        database?: unknown,
+      ) {
+        validationDatabases.push(database);
         return input.applicantUserId === ownerId && input.reference === approvedReference;
       },
     };
@@ -438,6 +443,9 @@ describe("creator application acceptance", () => {
       state: "submitted",
       revision: { proposedReceivingAccountId: approvedReference },
     });
+    expect(validationDatabases).toHaveLength(3);
+    expect(validationDatabases.every(Boolean)).toBe(true);
+    expect(validationDatabases.every((database) => database !== db)).toBe(true);
   });
 
   test("submission uses the current verified email and rejects invalid content or a non-opaque account value", async () => {

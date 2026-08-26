@@ -6,13 +6,14 @@ import {
   identityUsers,
   paymentsReceivingAccountOnboarding,
   type PawketDatabase,
+  type PawketTransaction,
 } from "@pawket/database";
 import {
   createLookupHmac,
   encryptSensitiveField,
   type EncryptionKeyring,
 } from "@pawket/security";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 
 import {
   fingerprintReceivingAccount,
@@ -88,6 +89,9 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
               command.applicantUserId,
             ),
             isNull(paymentsReceivingAccountOnboarding.retiredAt),
+            isNull(paymentsReceivingAccountOnboarding.minimizedAt),
+            isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope),
+            isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope),
           ),
         )
         .limit(1);
@@ -167,6 +171,10 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
               and(
                 eq(paymentsReceivingAccountOnboarding.id, referenceId),
                 eq(paymentsReceivingAccountOnboarding.applicantUserId, command.applicantUserId),
+                isNull(paymentsReceivingAccountOnboarding.retiredAt),
+                isNull(paymentsReceivingAccountOnboarding.minimizedAt),
+                isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope),
+                isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope),
               ),
             )
             .limit(1);
@@ -202,7 +210,12 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
           .limit(1)
           .for("update");
 
-        if (current?.accountFingerprint === accountFingerprint) {
+        if (
+          current?.accountFingerprint === accountFingerprint &&
+          current.minimizedAt === null &&
+          current.accountNumberEnvelope !== null &&
+          current.accountHolderLabelEnvelope !== null
+        ) {
           await completeIdempotentCommand(tx, {
             recordId: idempotency.recordId,
             resultReference: replayReference(current.id),
@@ -283,9 +296,9 @@ export function createCreatorReceivingAccountReferenceValidator(input: {
     async isValidForApplicant(candidate: {
       applicantUserId: string;
       reference: string;
-    }): Promise<boolean> {
+    }, database?: PawketDatabase | PawketTransaction): Promise<boolean> {
       if (!referencePattern.test(candidate.reference)) return false;
-      const [account] = await input.db
+      const [account] = await (database ?? input.db)
         .select({ id: paymentsReceivingAccountOnboarding.id })
         .from(paymentsReceivingAccountOnboarding)
         .where(
@@ -293,9 +306,13 @@ export function createCreatorReceivingAccountReferenceValidator(input: {
             eq(paymentsReceivingAccountOnboarding.id, candidate.reference),
             eq(paymentsReceivingAccountOnboarding.applicantUserId, candidate.applicantUserId),
             isNull(paymentsReceivingAccountOnboarding.retiredAt),
+            isNull(paymentsReceivingAccountOnboarding.minimizedAt),
+            isNotNull(paymentsReceivingAccountOnboarding.accountNumberEnvelope),
+            isNotNull(paymentsReceivingAccountOnboarding.accountHolderLabelEnvelope),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
       return Boolean(account);
     },
   };

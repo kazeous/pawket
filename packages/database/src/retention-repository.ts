@@ -134,6 +134,17 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
         with candidates as (
           select p.id,
             exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id) or
+            exists(
+              select 1 from creator_application_revisions r
+              join creator_applications a on a.id = r.application_id
+              where r.proposed_receiving_account_id = p.id::text
+                and a.current_revision_id = r.id
+                and a.state in ('draft','submitted','under_review','changes_requested')
+            ) or
+            exists(
+              select 1 from payments_verification_deposit_challenges c
+              where c.account_version_id = p.id and c.state in ('issued','sent_reported')
+            ) or
             exists(select 1 from payments_verification_deposit_refund_obligations o where o.account_version_id = p.id and o.state in ('pending_window','ready','attention_required')) or
             exists(
               select 1 from payments_unmatched_deposits u
@@ -279,6 +290,15 @@ async function enforceDataset(
                 and a.updated_at < ${cutoffIso}::timestamptz and (a.state <> 'rejected' or a.cooldown_until < ${nowIso}::timestamptz)
             )
             and not exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id)
+            and not exists(
+              select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
+              where r.proposed_receiving_account_id = p.id::text and a.current_revision_id = r.id
+                and a.state in ('draft','submitted','under_review','changes_requested')
+            )
+            and not exists(
+              select 1 from payments_verification_deposit_challenges c
+              where c.account_version_id = p.id and c.state in ('issued','sent_reported')
+            )
             and not exists(select 1 from payments_verification_deposit_refund_obligations o where o.account_version_id = p.id and o.state in ('pending_window','ready','attention_required'))
             and not exists(
               select 1 from payments_unmatched_deposits u join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id

@@ -737,6 +737,239 @@ describe("shared control repositories", () => {
     }
   });
 
+  test("retention protects accounts referenced by a current application or active deposit challenge", async () => {
+    // Break caught: an old final application making an account eligible even
+    // after that same account is reused by a reapplication or live challenge.
+    const now = new Date("2024-02-01T12:00:00.000Z");
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values
+        ('task9-reapplication-owner', 'Reapplication Owner', 'reapplication@example.test',
+         'reapplication@example.test', true, '2022-01-01T00:00:00Z',
+         'password_email_challenge', false, 'active', 1,
+         '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('task9-active-challenge-owner', 'Challenge Account Owner', 'active-challenge@example.test',
+         'active-challenge@example.test', true, '2022-01-01T00:00:00Z',
+         'password_email_challenge', false, 'active', 1,
+         '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('task9-challenge-issuer', 'Challenge Issuer', 'challenge-issuer@example.test',
+         'challenge-issuer@example.test', true, '2022-01-01T00:00:00Z',
+         'password_email_challenge', false, 'active', 1,
+         '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into payments_receiving_account_onboarding
+        (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name,
+         account_number_envelope, account_holder_label_envelope, masked_suffix,
+         account_fingerprint, proof_state, created_at, updated_at)
+      values
+        ('65000000-0000-4000-8000-000000000001', '66000000-0000-4000-8000-000000000001',
+         'task9-reapplication-owner', 1, '970436', 'Test Bank', '{"version":1}'::jsonb,
+         '{"version":1}'::jsonb, '•••• 3001',
+         'hmac-sha256:v1:GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG',
+         'unverified', '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('65000000-0000-4000-8000-000000000002', '66000000-0000-4000-8000-000000000002',
+         'task9-active-challenge-owner', 1, '970436', 'Test Bank', '{"version":1}'::jsonb,
+         '{"version":1}'::jsonb, '•••• 3002',
+         'hmac-sha256:v1:HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH',
+         'challenge_issued', '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z');
+      insert into creator_applications
+        (id, user_id, state, version, current_revision_id, created_at, updated_at)
+      values
+        ('67000000-0000-4000-8000-000000000001', 'task9-reapplication-owner',
+         'withdrawn', 1, null, '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('67000000-0000-4000-8000-000000000002', 'task9-active-challenge-owner',
+         'withdrawn', 1, null, '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('67000000-0000-4000-8000-000000000003', 'task9-reapplication-owner',
+         'draft', 1, null, '2024-01-31T00:00:00Z', '2024-01-31T00:00:00Z');
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction,
+         applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+         practice_description, content_intent, proposed_receiving_account_id,
+         age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values
+        ('68000000-0000-4000-8000-000000000001', '67000000-0000-4000-8000-000000000001',
+         1, 'Reapplication artist', 'Introduction', 'reapplication@example.test',
+         '{"version":1}'::jsonb, '["https://example.test/reapplication"]'::jsonb,
+         'illustration', 'Practice', 'general_audience_only',
+         '65000000-0000-4000-8000-000000000001', 21, '2022-01-01', '2022-01-01T00:00:00Z',
+         '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('68000000-0000-4000-8000-000000000002', '67000000-0000-4000-8000-000000000002',
+         1, 'Challenge artist', 'Introduction', 'active-challenge@example.test',
+         '{"version":1}'::jsonb, '["https://example.test/challenge"]'::jsonb,
+         'illustration', 'Practice', 'general_audience_only',
+         '65000000-0000-4000-8000-000000000002', 21, '2022-01-01', '2022-01-01T00:00:00Z',
+         '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z'),
+        ('68000000-0000-4000-8000-000000000003', '67000000-0000-4000-8000-000000000003',
+         1, null, null, null, null, null, null, null, null,
+         '65000000-0000-4000-8000-000000000001', null, null, null,
+         '2024-01-31T00:00:00Z', '2024-01-31T00:00:00Z');
+      update creator_applications
+      set current_revision_id = '68000000-0000-4000-8000-000000000003'
+      where id = '67000000-0000-4000-8000-000000000003';
+      insert into payments_verification_deposit_challenges
+        (id, application_id, revision_id, account_version_id, amount_vnd,
+         reference_hash, state, issued_by_owner_user_id, step_up_proof_id,
+         issued_at, expires_at, created_at, updated_at)
+      values
+        ('69000000-0000-4000-8000-000000000001', '67000000-0000-4000-8000-000000000002',
+         '68000000-0000-4000-8000-000000000002', '65000000-0000-4000-8000-000000000002',
+         1000, 'sha256:v1:IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII', 'issued',
+         'task9-challenge-issuer', '6a000000-0000-4000-8000-000000000001',
+         '2024-01-31T12:00:00Z', '2024-02-03T12:00:00Z',
+         '2024-01-31T12:00:00Z', '2024-01-31T12:00:00Z');
+    `);
+
+    const report = await runRetentionSweep({
+      db,
+      now,
+      mode: "report_only",
+      policyVersion: "task9-active-reference-v1",
+      enforcementPaused: false,
+      batchSize: 100,
+    });
+    const receivingReport = report.find((item) => item.dataset === "receiving_accounts");
+    expect(receivingReport?.candidateCount).toBeGreaterThanOrEqual(2);
+    expect(receivingReport?.protectedCount).toBeGreaterThanOrEqual(2);
+
+    const enforced = await runRetentionSweep({
+      db,
+      now,
+      mode: "enforce",
+      policyVersion: "task9-active-reference-v1",
+      enforcementPaused: false,
+      batchSize: 100,
+    });
+    expect(enforced.find((item) => item.dataset === "receiving_accounts")?.processedCount).toBe(0);
+    expect(await client`
+      select id from payments_receiving_account_onboarding
+      where id in (
+        '65000000-0000-4000-8000-000000000001',
+        '65000000-0000-4000-8000-000000000002'
+      ) and minimized_at is null
+      order by id
+    `).toHaveLength(2);
+  });
+
+  test("an application transaction holding an account row linearizes before minimization", async () => {
+    // Break caught: retention minimizing an account between reference validation
+    // and committing the new application revision that depends on it.
+    const now = new Date("2020-02-01T12:00:00.000Z");
+    const applicationClient = postgres(databaseUrl, { max: 1 });
+    let transactionOpen = false;
+    await client.unsafe(`
+      insert into identity_users
+        (id, name, email, canonical_email, email_verified, email_verified_at,
+         email_verification_provenance, two_factor_enabled, access_status,
+         authorization_version, created_at, updated_at)
+      values ('task9-account-race-owner', 'Account Race Owner', 'account-race@example.test',
+        'account-race@example.test', true, '2018-01-01T00:00:00Z',
+        'password_email_challenge', false, 'active', 1,
+        '2018-01-01T00:00:00Z', '2018-01-01T00:00:00Z');
+      insert into payments_receiving_account_onboarding
+        (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name,
+         account_number_envelope, account_holder_label_envelope, masked_suffix,
+         account_fingerprint, proof_state, created_at, updated_at)
+      values ('6b000000-0000-4000-8000-000000000001', '6c000000-0000-4000-8000-000000000001',
+        'task9-account-race-owner', 1, '970436', 'Test Bank', '{"version":1}'::jsonb,
+        '{"version":1}'::jsonb, '•••• 4001',
+        'hmac-sha256:v1:JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ',
+        'unverified', '2018-01-01T00:00:00Z', '2018-01-01T00:00:00Z');
+      insert into creator_applications
+        (id, user_id, state, version, created_at, updated_at)
+      values ('6d000000-0000-4000-8000-000000000001', 'task9-account-race-owner',
+        'withdrawn', 1, '2018-01-01T00:00:00Z', '2018-01-01T00:00:00Z');
+      insert into creator_application_revisions
+        (id, application_id, revision_number, artist_display_name, short_introduction,
+         applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+         practice_description, content_intent, proposed_receiving_account_id,
+         age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values ('6e000000-0000-4000-8000-000000000001', '6d000000-0000-4000-8000-000000000001',
+        1, 'Race artist', 'Introduction', 'account-race@example.test',
+        '{"version":1}'::jsonb, '["https://example.test/race"]'::jsonb,
+        'illustration', 'Practice', 'general_audience_only',
+        '6b000000-0000-4000-8000-000000000001', 21, '2018-01-01', '2018-01-01T00:00:00Z',
+        '2018-01-01T00:00:00Z', '2018-01-01T00:00:00Z');
+      insert into system_retention_holds
+        (dataset, subject_type, subject_id, reason_category, reference_id,
+         starts_at, created_at)
+      values ('application_content', 'creator_application',
+        '6d000000-0000-4000-8000-000000000001', 'legal',
+        'task9-ref-account-race-application', '2020-01-01T00:00:00Z',
+        '2020-01-01T00:00:00Z');
+    `);
+
+    try {
+      await applicationClient.unsafe(`set search_path to "${schemaName}", public`);
+      await applicationClient.unsafe("begin");
+      transactionOpen = true;
+      await applicationClient.unsafe(`
+        select id from payments_receiving_account_onboarding
+        where id = '6b000000-0000-4000-8000-000000000001'
+          and retired_at is null and minimized_at is null
+          and account_number_envelope is not null
+          and account_holder_label_envelope is not null
+        for update
+      `);
+      await applicationClient.unsafe(`
+        insert into creator_applications
+          (id, user_id, state, version, created_at, updated_at)
+        values ('6d000000-0000-4000-8000-000000000002', 'task9-account-race-owner',
+          'draft', 1, '2020-01-31T00:00:00Z', '2020-01-31T00:00:00Z');
+        insert into creator_application_revisions
+          (id, application_id, revision_number, proposed_receiving_account_id,
+           created_at, updated_at)
+        values ('6e000000-0000-4000-8000-000000000002', '6d000000-0000-4000-8000-000000000002',
+          1, '6b000000-0000-4000-8000-000000000001',
+          '2020-01-31T00:00:00Z', '2020-01-31T00:00:00Z');
+        update creator_applications
+        set current_revision_id = '6e000000-0000-4000-8000-000000000002'
+        where id = '6d000000-0000-4000-8000-000000000002'
+      `);
+
+      const raced = await runRetentionSweep({
+        db,
+        now,
+        mode: "enforce",
+        policyVersion: "task9-account-race-v1",
+        enforcementPaused: false,
+        batchSize: 100,
+      });
+      expect(raced.find((item) => item.dataset === "receiving_accounts")?.processedCount).toBe(0);
+      expect(await client`
+        select id from payments_receiving_account_onboarding
+        where id = '6b000000-0000-4000-8000-000000000001' and minimized_at is null
+      `).toHaveLength(1);
+
+      await applicationClient.unsafe("commit");
+      transactionOpen = false;
+      const afterCommit = await runRetentionSweep({
+        db,
+        now,
+        mode: "enforce",
+        policyVersion: "task9-account-race-v1",
+        enforcementPaused: false,
+        batchSize: 100,
+      });
+      expect(afterCommit.find((item) => item.dataset === "receiving_accounts")).toEqual(
+        expect.objectContaining({ candidateCount: 1, protectedCount: 1, processedCount: 0 }),
+      );
+      expect(await client`
+        select id from payments_receiving_account_onboarding
+        where id = '6b000000-0000-4000-8000-000000000001' and minimized_at is null
+      `).toHaveLength(1);
+    } finally {
+      if (transactionOpen) await applicationClient.unsafe("rollback");
+      await applicationClient.end();
+      await client`
+        update creator_applications
+        set updated_at = '2024-01-01T00:00:00Z'
+        where id = '6d000000-0000-4000-8000-000000000001'
+      `;
+    }
+  });
+
   test("retention minimizes the current account referenced by an old final application", async () => {
     // Break caught: eligibility and the binding trigger requiring retired_at even
     // though final application timing is the approved retention clock.
