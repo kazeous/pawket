@@ -425,6 +425,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       return;
     }
     lastRetentionScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "retention", healthy: false });
     try {
       const retention = await dependencies.runRetention({
         db: database.db,
@@ -496,6 +497,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       const scanAt = Date.now();
       if (scanAt - lastRefundScanAt >= REFUND_SCAN_INTERVAL_MS) {
         lastRefundScanAt = scanAt;
+        setWorkerScanHealthMetric({ scan: "refund", healthy: false });
         try {
           const liabilities = await dependencies.scanRefundWindows({
             db: database.db,
@@ -527,6 +529,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
           );
         }
       }
+      setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
       const result = await dependencies.dispatch(
         { db: database.db, queue },
         {

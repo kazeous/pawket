@@ -73,6 +73,14 @@ groups:
         annotations:
           summary: Worker outbox poll has missed three intervals
           runbook: ops/runbooks/provider-outage.md
+      - alert: PawketWorkerPollLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="outbox"} > 3
+        for: 3s
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker outbox poll has stopped completing
+          runbook: ops/runbooks/provider-outage.md
       - alert: PawketRefundScanStale
         expr: pawket_worker_scan_healthy{scan="refund"} == 0
         for: 3m
@@ -81,6 +89,14 @@ groups:
         annotations:
           summary: Worker refund scan has missed three intervals
           runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketRefundLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="refund"} > 180
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker refund scan has stopped completing
+          runbook: ops/runbooks/overdue-refunds.md
       - alert: PawketRetentionScanStale
         expr: pawket_worker_scan_healthy{scan="retention"} == 0
         for: 18h
@@ -88,6 +104,14 @@ groups:
           severity: critical
         annotations:
           summary: Worker retention scan has remained unhealthy for eighteen hours
+          runbook: ops/runbooks/retention-operations.md
+      - alert: PawketRetentionLastSuccessOverdue
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="retention"} > 90000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker retention scan has not succeeded within twenty-five hours
           runbook: ops/runbooks/retention-operations.md
       - alert: PawketMigrationFailed
         expr: increase(pawket_migration_runs_total{outcome="failed"}[15m]) > 0

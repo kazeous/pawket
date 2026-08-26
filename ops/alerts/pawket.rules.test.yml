@@ -26,6 +26,27 @@ tests:
         alertname: PawketWorkerPollStale
         exp_alerts: []
 
+  - name: outbox last-success age detects a hung earlier phase
+    interval: 1s
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="outbox"}'
+        values: '1x9'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="outbox"}'
+        values: '0x9'
+    alert_rule_test:
+      - eval_time: 6s
+        alertname: PawketWorkerPollLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 7s
+        alertname: PawketWorkerPollLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: outbox
+              severity: critical
+            exp_annotations:
+              summary: Worker outbox poll has stopped completing
+              runbook: ops/runbooks/provider-outage.md
+
   - name: refund scan fires on the third interval
     interval: 1m
     input_series:
@@ -45,6 +66,27 @@ tests:
               summary: Worker refund scan has missed three intervals
               runbook: ops/runbooks/overdue-refunds.md
 
+  - name: refund last-success age detects a hung later poll
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="refund"}'
+        values: '1x7'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="refund"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketRefundLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketRefundLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: refund
+              severity: critical
+            exp_annotations:
+              summary: Worker refund scan has stopped completing
+              runbook: ops/runbooks/overdue-refunds.md
+
   - name: retention scan remains unhealthy for eighteen hours
     interval: 1m
     input_series:
@@ -62,6 +104,27 @@ tests:
               severity: critical
             exp_annotations:
               summary: Worker retention scan has remained unhealthy for eighteen hours
+              runbook: ops/runbooks/retention-operations.md
+
+  - name: retention last-success age detects a hung poll with a stale healthy gauge
+    interval: 5m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="retention"}'
+        values: '1x314'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="retention"}'
+        values: '0x314'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: PawketRetentionLastSuccessOverdue
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: PawketRetentionLastSuccessOverdue
+        exp_alerts:
+          - exp_labels:
+              scan: retention
+              severity: critical
+            exp_annotations:
+              summary: Worker retention scan has not succeeded within twenty-five hours
               runbook: ops/runbooks/retention-operations.md
 
   - name: refund due-today boundary waits five minutes

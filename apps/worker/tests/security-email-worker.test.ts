@@ -717,6 +717,84 @@ describe("worker scan health", () => {
     },
   );
 
+  test("marks a due retention scan unhealthy while its promise is still pending", async () => {
+    // Break caught: a previously successful scan retaining health=1 while the
+    // next due retention execution hangs instead of rejecting.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    metricsRegistry.resetMetrics();
+    let releasePendingScan!: () => void;
+    const pendingScan = new Promise<void>((resolve) => {
+      releasePendingScan = resolve;
+    });
+    const runRetention = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        await pendingScan;
+        return [];
+      });
+    const resource = {
+      close: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const connection = {
+      connect: vi.fn(async () => undefined),
+      quit: vi.fn(async () => undefined),
+      disconnect: vi.fn(),
+    };
+    const handle = await workerRuntime.startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      logger: { info() {}, error() {} },
+      retention: {
+        mode: "report_only",
+        policyVersion: "task-9-test",
+        enforcementPaused: true,
+        batchSize: 10,
+        scanIntervalMs: 1_000,
+      },
+      dependencies: {
+        createDatabase: () => ({ db: {}, close: resource.close }) as never,
+        createProducerConnection: () => connection as never,
+        createWorkerConnection: () => connection as never,
+        createQueue: () => resource as never,
+        createWorker: () => resource as never,
+        dispatch: vi.fn(async () => ({ claimed: 0, enqueued: 0, failed: 0 })) as never,
+        acknowledge: vi.fn() as never,
+        scanRefundWindows: vi.fn(async () => ({
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        })) as never,
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        })) as never,
+        runRetention: runRetention as never,
+        hostname: () => "test-worker",
+        randomUUID: () => "42b386d6-c7f1-4d11-a3c9-97ac728285c3",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await scanHealth("retention")).toBe(1);
+
+    vi.advanceTimersByTime(1_000);
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    expect(runRetention).toHaveBeenCalledTimes(2);
+    expect(await scanHealth("retention")).toBe(0);
+
+    releasePendingScan();
+    await handle.stop();
+  });
+
   test("starts unhealthy, becomes healthy after success, and returns unhealthy on failure", async () => {
     // Catches startup being reported as success and scan failures leaving stale healthy state.
     vi.useFakeTimers();
