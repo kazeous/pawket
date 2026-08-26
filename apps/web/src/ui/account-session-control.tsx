@@ -138,7 +138,11 @@ export function AccountSessionControl({
       const response = await fetch("/api/auth/sign-out", {
         method: "POST",
         credentials: "include",
-        headers: { accept: "application/json" },
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
       });
       if (!response.ok) throw new Error("SIGN_OUT_FAILED");
       setControlState("success");

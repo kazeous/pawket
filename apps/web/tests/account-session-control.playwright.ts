@@ -105,6 +105,8 @@ test("successful logout returns to sign in and clears the account indicator", as
     );
   });
   await page.route("**/api/auth/sign-out", async (route) => {
+    expect(await route.request().headerValue("content-type")).toContain("application/json");
+    expect(route.request().postData()).toBe("{}");
     signedOut = true;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true }) });
   });
