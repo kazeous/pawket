@@ -12,6 +12,7 @@ import {
   createStepUpProof,
   consumeStepUpProof,
   getIdentityUserSummary,
+  getTotpSecurityState,
   listUserSessions,
   recordSecurityThrottleAttempt,
   queueUserSecurityNotice,
@@ -41,6 +42,7 @@ type WebIdentityRuntime = {
     sessionId: string;
     primaryAuthenticatedAt: Date;
   } | null>;
+  getTotpSecurityState(userId: string): Promise<{ enabled: boolean } | null>;
   authorizeOwner(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
   authorizeCreator(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
 };
@@ -355,6 +357,7 @@ export function getIdentityRuntime(): WebIdentityRuntime {
     creatorReviewHandlers,
     creatorReview,
     authenticate,
+    getTotpSecurityState: (userId) => getTotpSecurityState(database.db, userId),
     async authorizeOwner(headers) {
       const session = await authenticate(headers);
       if (!session) return "unauthenticated";

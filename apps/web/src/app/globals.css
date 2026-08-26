@@ -1,3 +1,4 @@
+/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 · macrostructure: security-settings-stateful-panel · theme: existing Pawket tokens · contrast: pass (40–41) · nav: existing-app-shell · footer: n/a · slop: pass (42–45) · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · responsive: pass (49) · icons: pass (30) · mobile: pass (34, 49, 50–57) */
 @import "../ui/tokens.css";
 
 *,
@@ -736,6 +737,76 @@ textarea:disabled {
   overflow-wrap: anywhere;
 }
 
+.totp-enrollment {
+  border-top: var(--rule-thin) solid var(--color-rule);
+  padding-top: var(--space-lg);
+}
+
+.totp-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr);
+  gap: var(--space-xl);
+  align-items: start;
+}
+
+.totp-qr {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  border: var(--rule-thin) solid var(--color-rule);
+  background: var(--color-surface-strong);
+  padding: var(--space-md);
+}
+
+.totp-qr svg {
+  display: block;
+  width: min(12rem, 100%);
+  height: auto;
+}
+
+.totp-qr figcaption {
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.totp-steps {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.totp-manual {
+  border-block: var(--rule-thin) solid var(--color-rule-2);
+  padding-block: var(--space-md);
+}
+
+.totp-manual p,
+.totp-manual small {
+  margin: 0;
+}
+
+.totp-manual-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-sm);
+  align-items: stretch;
+}
+
+.totp-manual-row code {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  background: var(--color-paper-2);
+  padding: var(--space-sm);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
 .recovery-block ol {
   columns: 2;
   margin: var(--space-md) 0 0;
@@ -969,6 +1040,10 @@ textarea:disabled {
     grid-template-columns: 1fr;
   }
 
+  .totp-setup-grid {
+    grid-template-columns: 1fr;
+  }
+
   .task-rail {
     position: static;
     grid-template-columns: minmax(0, 1fr);
@@ -1011,6 +1086,22 @@ textarea:disabled {
   .action-bar button,
   .action-bar .button-link {
     width: 100%;
+  }
+
+  .totp-manual-row {
+    grid-template-columns: 1fr;
+  }
+
+  .totp-manual-row button {
+    width: 100%;
+  }
+
+  .recovery-block ol {
+    columns: 1;
+  }
+
+  .recovery-block li + li {
+    margin-top: var(--space-xs);
   }
 }
 

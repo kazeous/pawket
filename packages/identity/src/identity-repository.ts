@@ -10,6 +10,7 @@ import {
   identitySecurityThrottles,
   identityEmailAddresses,
   identitySessions,
+  identityTotpAuthenticators,
   identityUsers,
   identityVerifications,
   type PawketDatabase,
@@ -301,6 +302,28 @@ export async function getIdentityUserSummary(
     .where(eq(identityUsers.id, userId))
     .limit(1);
   return user ?? null;
+}
+
+export async function getTotpSecurityState(
+  db: PawketDatabase,
+  userId: string,
+): Promise<{ enabled: boolean } | null> {
+  const [user] = await db
+    .select({ twoFactorEnabled: identityUsers.twoFactorEnabled })
+    .from(identityUsers)
+    .where(eq(identityUsers.id, userId))
+    .limit(1);
+  if (!user) return null;
+
+  const [authenticator] = await db
+    .select({ verified: identityTotpAuthenticators.verified })
+    .from(identityTotpAuthenticators)
+    .where(eq(identityTotpAuthenticators.userId, userId))
+    .limit(1);
+
+  return {
+    enabled: user.twoFactorEnabled && authenticator?.verified === true,
+  };
 }
 
 export async function revokeUserSession(

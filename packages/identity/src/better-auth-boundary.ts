@@ -844,6 +844,21 @@ export function createPawketAuth(options: PawketAuthOptions): PawketAuthBoundary
         ) {
           return fixedJson(401, "RECENT_PRIMARY_AUTHENTICATION_REQUIRED");
         }
+        if (path === "/two-factor/enable") {
+          const [verifiedAuthenticator] = await options.db
+            .select({ id: identityTotpAuthenticators.id })
+            .from(identityTotpAuthenticators)
+            .where(
+              and(
+                eq(identityTotpAuthenticators.userId, resolved.user.id),
+                eq(identityTotpAuthenticators.verified, true),
+              ),
+            )
+            .limit(1);
+          if (verifiedAuthenticator) {
+            return fixedJson(409, "TOTP_ALREADY_ENABLED");
+          }
+        }
         if (externalLinkContext) {
           externalLinkContext.userId = resolved.user.id;
           externalLinkContext.sessionId = resolved.session.id;

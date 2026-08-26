@@ -2,10 +2,12 @@
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { QRCodeSVG } from "qrcode.react";
 
 import { EmptyState, LoadingState } from "../../../ui/async-state";
 import { Field } from "../../../ui/field";
 import { StatusBanner, StatusTag } from "../../../ui/status-banner";
+import { groupedTotpSecret, totpSecretFromURI } from "./totp-enrollment";
 
 type Account = { id: string; providerId: string };
 type Session = { id: string; deviceLabel: string; createdAt: string; lastUsedAt: string };
@@ -25,20 +27,117 @@ function readableMessage(code: string): string {
     SECURITY_ACTION_FAILED: "Chưa thể hoàn tất thao tác bảo mật. Hãy thử lại.",
     RECENT_AUTH_REQUIRED: "Phiên đăng nhập đã cũ. Hãy đăng xuất rồi đăng nhập lại trước khi đổi thông tin nhạy cảm.",
     CURRENT_PASSWORD_INVALID: "Mật khẩu hiện tại chưa đúng.",
+    INVALID_PASSWORD: "Mật khẩu hiện tại chưa đúng.",
     POLICY_REJECTED: "Mật khẩu mới chưa đạt yêu cầu bảo mật.",
     EMAIL_UNAVAILABLE: "Email này không thể sử dụng.",
     SOCIAL_LINK_UNAVAILABLE: "Chưa thể bắt đầu liên kết tài khoản.",
     TOTP_ENROLLMENT_UNAVAILABLE: "Chưa thể bắt đầu thiết lập ứng dụng xác thực.",
+    TOTP_ALREADY_ENABLED: "Xác thực 2 bước đã được bật. Pawket không thay khóa xác thực đang hoạt động.",
+    RECENT_PRIMARY_AUTHENTICATION_REQUIRED: "Phiên xác thực gần đây đã hết hạn. Hãy đăng xuất rồi đăng nhập lại trước khi thay đổi bảo mật.",
+    RECENT_TOTP_REQUIRED: "Hãy đăng xuất rồi đăng nhập lại bằng mã xác thực trước khi tạo bộ mã khôi phục mới.",
     SESSION_REVOCATION_FAILED: "Chưa thể thu hồi phiên này.",
   };
   return messages[code] ?? "Chưa thể hoàn tất thao tác. Hãy thử lại.";
 }
 
-export function SecurityPanel({ enabledProviders, initialMessage = null }: { enabledProviders: readonly ("google" | "discord")[]; initialMessage?: string | null }) {
+export function AuthenticatorSetup({
+  onCancel,
+  onVerify,
+  totpURI,
+  working,
+}: {
+  onCancel(): void;
+  onVerify(event: FormEvent<HTMLFormElement>): void;
+  totpURI: string;
+  working: boolean;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const secret = totpSecretFromURI(totpURI);
+
+  async function copySecret() {
+    if (!secret) return;
+    try {
+      await navigator.clipboard.writeText(secret);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState((current) => current === "copied" ? "idle" : current), 2_500);
+    } catch {
+      setCopyState("error");
+    }
+  }
+
+  if (!secret) {
+    return <StatusBanner tone="error"><p>Mã thiết lập không hợp lệ. Hãy hủy và bắt đầu lại.</p><button type="button" className="secondary" disabled={working} onClick={onCancel}>Hủy thiết lập</button></StatusBanner>;
+  }
+
+  return (
+    <div className="totp-enrollment stack">
+      <div className="totp-setup-grid">
+        <figure className="totp-qr">
+          <QRCodeSVG
+            aria-label="Mã QR để thêm Pawket vào ứng dụng xác thực"
+            bgColor="var(--color-surface-strong)"
+            fgColor="var(--color-ink)"
+            level="M"
+            marginSize={4}
+            role="img"
+            size={192}
+            value={totpURI}
+          />
+          <figcaption>Quét mã bằng ứng dụng xác thực trên điện thoại.</figcaption>
+        </figure>
+        <div className="stack compact">
+          <h3>Hoàn tất trên ứng dụng xác thực</h3>
+          <ol className="totp-steps">
+            <li>Quét mã QR để thêm tài khoản Pawket.</li>
+            <li>Nhập mã 6 chữ số ứng dụng vừa tạo.</li>
+            <li>Lưu mã khôi phục Pawket hiển thị sau khi xác minh.</li>
+          </ol>
+          <div className="totp-manual stack compact">
+            <strong>Không quét được?</strong>
+            <p className="muted">Nhập khóa này thủ công. Không gửi khóa cho người khác.</p>
+            <div className="totp-manual-row">
+              <code aria-label="Khóa thiết lập thủ công">{groupedTotpSecret(secret)}</code>
+              <button type="button" className="secondary" disabled={working} onClick={copySecret}>
+                {copyState === "copied" ? "Đã sao chép" : "Sao chép khóa"}
+              </button>
+            </div>
+            <small className={copyState === "error" ? "field-error" : "muted"} aria-live="polite">
+              {copyState === "copied"
+                ? "Khóa đã được sao chép."
+                : copyState === "error"
+                  ? "Trình duyệt không thể sao chép. Hãy chọn và sao chép khóa thủ công."
+                  : "Khoảng trắng chỉ giúp dễ đọc; ứng dụng xác thực có thể bỏ qua chúng."}
+            </small>
+          </div>
+          <form onSubmit={onVerify} className="stack compact">
+            <Field htmlFor="setup-code" label="Mã xác thực" hint="Nhập mã mới nhất từ ứng dụng xác thực." required>
+              <input id="setup-code" name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={8} required />
+            </Field>
+            <div className="button-row">
+              <button type="submit" disabled={working}>Bật xác thực 2 bước</button>
+              <button type="button" className="secondary" disabled={working} onClick={onCancel}>Hủy thiết lập</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function SecurityPanel({
+  enabledProviders,
+  initialMessage = null,
+  initialTwoFactorEnabled,
+}: {
+  enabledProviders: readonly ("google" | "discord")[];
+  initialMessage?: string | null;
+  initialTwoFactorEnabled: boolean;
+}) {
   const router = useRouter();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [totpURI, setTotpURI] = useState<string | null>(null);
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(initialTwoFactorEnabled);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(initialMessage);
   const [tone, setTone] = useState<"success" | "error" | "warning">("success");
@@ -68,13 +167,19 @@ export function SecurityPanel({ enabledProviders, initialMessage = null }: { ena
   function unlinkAccount(accountId: string) { return run(async () => { await requestJson("/api/auth/unlink-account", jsonPost({ accountId })); await loadSecurityState(); setTone("success"); setMessage("Đã gỡ phương thức đăng nhập."); }); }
 
   function beginTotp(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = new FormData(event.currentTarget);
-    return run(async () => { const password = form.get("password"); const payload = await requestJson("/api/auth/two-factor/enable", jsonPost({ method: "totp", ...(typeof password === "string" && password.length > 0 ? { password } : {}) })); if (typeof payload.totpURI !== "string") throw new Error("TOTP_ENROLLMENT_UNAVAILABLE"); setTotpURI(payload.totpURI); setTone("warning"); setMessage("Thêm mã thiết lập vào ứng dụng xác thực, sau đó nhập một mã để hoàn tất."); });
+    event.preventDefault(); const element = event.currentTarget; const form = new FormData(element);
+    return run(async () => { const password = form.get("password"); const payload = await requestJson("/api/auth/two-factor/enable", jsonPost({ method: "totp", ...(typeof password === "string" && password.length > 0 ? { password } : {}) })); if (typeof payload.totpURI !== "string") throw new Error("TOTP_ENROLLMENT_UNAVAILABLE"); element.reset(); setTotpURI(payload.totpURI); setTone("warning"); setMessage("Quét mã QR và nhập mã xác thực để hoàn tất. 2FA chưa được bật cho đến khi mã được xác minh."); });
   }
 
   function verifyTotp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
-    return run(async () => { const payload = await requestJson("/api/auth/two-factor/verify-totp", jsonPost({ code: form.get("code"), trustDevice: false })); setTotpURI(null); setRecoveryCodes(Array.isArray(payload.recoveryCodes) ? (payload.recoveryCodes as string[]) : []); setTone("success"); setMessage("Đã bật xác thực bằng ứng dụng."); });
+    return run(async () => { const payload = await requestJson("/api/auth/two-factor/verify-totp", jsonPost({ code: form.get("code"), trustDevice: false })); setTotpURI(null); setTwoFactorEnabled(true); setRecoveryCodes(Array.isArray(payload.recoveryCodes) ? (payload.recoveryCodes as string[]) : []); setTone("success"); setMessage("Đã bật xác thực 2 bước. Hãy lưu bộ mã khôi phục trước khi rời trang."); });
+  }
+
+  function cancelTotp() {
+    setTotpURI(null);
+    setTone("warning");
+    setMessage("Đã dừng thiết lập. Xác thực 2 bước vẫn chưa được bật.");
   }
 
   function regenerateRecoveryCodes() { return run(async () => { const payload = await requestJson("/api/auth/two-factor/regenerate-recovery-codes", jsonPost({})); setRecoveryCodes(Array.isArray(payload.recoveryCodes) ? (payload.recoveryCodes as string[]) : []); setTone("warning"); setMessage("Bộ mã khôi phục cũ đã mất hiệu lực."); }); }
@@ -102,10 +207,8 @@ export function SecurityPanel({ enabledProviders, initialMessage = null }: { ena
         </section>
 
         <section className="work-surface stack" id="two-factor">
-          <div><p className="eyebrow">02</p><h2>Ứng dụng xác thực</h2><p className="muted">Tạo mã dùng một lần trên điện thoại để bảo vệ bước đăng nhập thứ hai.</p></div>
-          <form onSubmit={beginTotp} className="stack compact"><Field htmlFor="totp-password" label="Mật khẩu hiện tại" hint="Chỉ cần nhập nếu tài khoản có mật khẩu."><input id="totp-password" name="password" type="password" autoComplete="current-password" /></Field><button type="submit" disabled={working}>Bắt đầu thiết lập</button></form>
-          {totpURI ? <div className="stack compact"><code className="breakable secret-display">{totpURI}</code><form onSubmit={verifyTotp} className="stack compact"><Field htmlFor="setup-code" label="Mã xác thực" required><input id="setup-code" name="code" inputMode="numeric" autoComplete="one-time-code" required /></Field><button type="submit" disabled={working}>Xác minh thiết lập</button></form></div> : null}
-          <button type="button" className="secondary" disabled={working} onClick={regenerateRecoveryCodes}>Thay bộ mã khôi phục</button>
+          <div className="section-heading"><div><p className="eyebrow">02</p><h2>Ứng dụng xác thực</h2><p className="muted">Tạo mã dùng một lần trên điện thoại để bảo vệ bước đăng nhập thứ hai.</p></div><StatusTag tone={twoFactorEnabled ? "success" : "info"}>{twoFactorEnabled ? "Đang bật" : "Chưa bật"}</StatusTag></div>
+          {twoFactorEnabled ? <div className="stack compact"><StatusBanner tone="success" title="Xác thực 2 bước đang bật"><p>Pawket sẽ yêu cầu mã từ ứng dụng xác thực sau bước đăng nhập chính.</p></StatusBanner><div className="stack compact"><button type="button" className="secondary" disabled={working} onClick={regenerateRecoveryCodes}>Tạo bộ mã khôi phục mới</button><small className="muted">Bộ mã hiện tại sẽ mất hiệu lực ngay sau khi bộ mới được tạo.</small></div></div> : totpURI ? <AuthenticatorSetup onCancel={cancelTotp} onVerify={verifyTotp} totpURI={totpURI} working={working} /> : <><StatusBanner title="Xác thực 2 bước chưa bật"><p>Thiết lập một lần bằng mã QR. Pawket sẽ giữ nguyên khóa sau khi bạn xác minh thành công.</p></StatusBanner><form onSubmit={beginTotp} className="stack compact"><Field htmlFor="totp-password" label="Mật khẩu hiện tại" hint="Chỉ cần nhập nếu tài khoản có mật khẩu."><input id="totp-password" name="password" type="password" autoComplete="current-password" /></Field><button type="submit" disabled={working}>Thiết lập ứng dụng xác thực</button></form></>}
           {recoveryCodes.length > 0 ? <div className="recovery-block" role="status"><strong>Lưu các mã này ngay. Pawket sẽ không hiển thị lại.</strong><ol>{recoveryCodes.map((code) => <li key={code}><code>{code}</code></li>)}</ol></div> : null}
         </section>
 

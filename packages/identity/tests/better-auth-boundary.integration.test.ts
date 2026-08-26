@@ -503,6 +503,30 @@ describe("Pawket Better Auth boundary", () => {
     ).toBe(true);
   });
 
+  test("refuses to replace an already-verified TOTP secret", async () => {
+    const [before] = await db
+      .select()
+      .from(identityTotpAuthenticators)
+      .where(eq(identityTotpAuthenticators.userId, "totp-boundary-user"));
+    if (!before) throw new Error("Expected verified TOTP authenticator");
+
+    const repeated = await postWithCookie(
+      "/two-factor/enable",
+      { method: "totp", password: "totp boundary password long enough" },
+      totpEnrollmentCookie,
+    );
+
+    expect(repeated.status).toBe(409);
+    await expect(repeated.json()).resolves.toMatchObject({ code: "TOTP_ALREADY_ENABLED" });
+    const [after] = await db
+      .select()
+      .from(identityTotpAuthenticators)
+      .where(eq(identityTotpAuthenticators.userId, "totp-boundary-user"));
+    expect(after?.id).toBe(before.id);
+    expect(after?.secret).toEqual(before.secret);
+    expect(after?.verified).toBe(true);
+  });
+
   test("configures only complete social providers with exact redirects, minimal scopes, and PKCE state", async () => {
     const socialAuth = createSocialAuth();
     expect(socialAuth.enabledProviders).toEqual(["google", "discord"]);
