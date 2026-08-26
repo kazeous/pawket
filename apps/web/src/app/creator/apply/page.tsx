@@ -35,9 +35,36 @@ type Application = {
   state: string;
   version: number;
   cooldownUntil?: string | null;
+  latestDecision?: {
+    action: string;
+    reasonCode: string;
+    applicantExplanation: string;
+    createdAt: string;
+  } | null;
   revision?: Omit<Partial<FormState>, "portfolioUrls"> & {
     portfolioUrls?: string | string[] | null;
   };
+};
+
+const applicationStateLabel: Record<string, string> = {
+  draft: "Bản nháp",
+  submitted: "Đã gửi",
+  under_review: "Đang xét duyệt",
+  changes_requested: "Cần cập nhật",
+  approved: "Đã phê duyệt",
+  rejected: "Đã từ chối",
+  withdrawn: "Đã rút",
+};
+
+const decisionReasonLabel: Record<string, string> = {
+  portfolio_insufficient: "Portfolio chưa đủ",
+  portfolio_control_unclear: "Quyền kiểm soát portfolio chưa rõ",
+  contact_unverified: "Thông tin liên hệ chưa xác minh",
+  receiving_account_unverified: "Tài khoản nhận tiền chưa xác minh",
+  content_policy_risk: "Cần rà soát chính sách nội dung",
+  information_inconsistent: "Thông tin chưa nhất quán",
+  eligibility_not_met: "Chưa đạt điều kiện",
+  other: "Lý do khác",
 };
 
 type ReceivingAccount = {
@@ -182,8 +209,13 @@ export default function CreatorApplyPage() {
     });
     const value = await response.json().catch(() => null);
     if (!response.ok) throw new Error(value?.code ?? "REQUEST_FAILED");
-    setApplication(value.application);
-    return value.application as Application;
+    const next = value.application as Application;
+    setApplication((current) => ({
+      ...(current ?? next),
+      ...next,
+      latestDecision: next.latestDecision ?? current?.latestDecision ?? null,
+    }));
+    return next;
   };
 
   const currentSnapshot = () => ({
@@ -239,7 +271,15 @@ export default function CreatorApplyPage() {
 
   return (
     <AppShell context="Creator workbench" action={{ href: "/settings/security", label: "Bảo mật" }}>
-      <header className="workspace-header reveal"><div><p className="eyebrow">Creator workbench</p><h1>Hồ sơ nhà sáng tạo</h1><p className="lede">Chuẩn bị danh tính nghề nghiệp và tài khoản nhận VND trong một hồ sơ riêng tư.</p></div><StatusTag tone={application?.state === "submitted" ? "success" : "info"}>{application?.state === "submitted" ? "Đã gửi" : application?.state === "draft" ? "Bản nháp" : application?.state ?? "Chưa tạo"}</StatusTag></header>
+      <header className="workspace-header reveal"><div><p className="eyebrow">Creator workbench</p><h1>Hồ sơ nhà sáng tạo</h1><p className="lede">Chuẩn bị danh tính nghề nghiệp và tài khoản nhận VND trong một hồ sơ riêng tư.</p></div><StatusTag tone={application?.state === "submitted" || application?.state === "approved" ? "success" : "info"}>{application?.state ? applicationStateLabel[application.state] ?? application.state : "Chưa tạo"}</StatusTag></header>
+      {application?.state === "changes_requested" && application.latestDecision ? (
+        <StatusBanner tone="warning" title="Owner yêu cầu cập nhật">
+          <p>{application.latestDecision.applicantExplanation}</p>
+          <p>
+            Lý do: {decisionReasonLabel[application.latestDecision.reasonCode] ?? "Cần rà soát thêm"}.
+          </p>
+        </StatusBanner>
+      ) : null}
       {application?.state === "rejected" && application.cooldownUntil ? (
         <StatusBanner tone="warning"><p>
           Bạn có thể nộp lại từ{" "}
