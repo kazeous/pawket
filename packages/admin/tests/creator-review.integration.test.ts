@@ -193,12 +193,26 @@ afterAll(async () => {
 
 describe("owner creator review", () => {
   test("rejects stale claims and permits a different owner to reclaim only after the 15-minute lease expires", async () => {
-    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number; leaseExpiresAt: Date }> } };
+    type QueueItem = { state: string; version: number; claimedByCurrentOwner: boolean };
+    type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number; leaseExpiresAt: Date }>; listSubmitted(ownerUserId?: string, at?: Date): Promise<QueueItem[]> } };
     const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    await expect(service.listSubmitted("review-owner", now)).resolves.toEqual([
+      expect.objectContaining({ state: "submitted", version: 2, claimedByCurrentOwner: false }),
+    ]);
     await expect(service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 1, requestId: "stale-claim" })).rejects.toMatchObject({ code: "stale_version" });
     const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "first-claim" });
+    await expect(service.listSubmitted("review-owner", now)).resolves.toEqual([
+      expect.objectContaining({ state: "under_review", version: claim.version, claimedByCurrentOwner: true }),
+    ]);
+    await expect(service.listSubmitted("other-owner", now)).resolves.toEqual([]);
     await expect(service.claim({ ownerUserId: "other-owner", ownerSessionId: "other-session", applicationId, expectedVersion: claim.version, requestId: "early-reclaim" })).rejects.toMatchObject({ code: "claim_unavailable" });
     await client`update creator_applications set review_claimed_at = ${(new Date(now.getTime() - 20 * 60_000)).toISOString()}, review_claim_expires_at = ${(new Date(now.getTime() - 5 * 60_000)).toISOString()} where id = ${applicationId}`;
+    await expect(service.listSubmitted("review-owner", now)).resolves.toEqual([
+      expect.objectContaining({ state: "under_review", version: claim.version, claimedByCurrentOwner: false }),
+    ]);
+    await expect(service.listSubmitted("other-owner", now)).resolves.toEqual([
+      expect.objectContaining({ state: "under_review", version: claim.version, claimedByCurrentOwner: false }),
+    ]);
     await expect(service.claim({ ownerUserId: "other-owner", ownerSessionId: "other-session", applicationId, expectedVersion: claim.version, requestId: "expired-reclaim" })).resolves.toMatchObject({ version: claim.version + 1 });
   });
 
