@@ -110,11 +110,35 @@ test("successful logout returns to sign in and clears the account indicator", as
     signedOut = true;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true }) });
   });
+  await page.route("**/api/v1/creator-application**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/receiving-account")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ account: null }) });
+      return;
+    }
+    if (path.endsWith("/deposit")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ deposit: null }) });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        application: {
+          id: "00000000-0000-4000-8000-000000000001",
+          state: "under_review",
+          version: 2,
+          revision: { artistDisplayName: "Synthetic private review" },
+        },
+      }),
+    });
+  });
 
-  await page.goto("/");
+  await page.goto("/creator/apply");
+  await expect(page.getByRole("textbox", { name: "Tên nghệ sĩ" })).toHaveValue("Synthetic private review");
   await page.getByRole("button", { name: "Đăng xuất" }).click();
   await expect(page).toHaveURL(/\/sign-in$/u);
   await expect(page.getByText("hishou@kazeous.com", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Synthetic private review", { exact: true })).toHaveCount(0);
 });
 
 test("an anonymous session shows sign in without claiming an account", async ({ page }) => {

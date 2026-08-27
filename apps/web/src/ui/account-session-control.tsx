@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 type ShellAction = Readonly<{ href: string; label: string }>;
@@ -96,7 +95,6 @@ export function AccountSessionControl({
 }: Readonly<{
   action: ShellAction | null;
 }>) {
-  const router = useRouter();
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [availability, setAvailability] = useState<AccountAvailability>("loading");
   const [controlState, setControlState] = useState<AccountControlState>("idle");
@@ -148,8 +146,7 @@ export function AccountSessionControl({
       setControlState("success");
       setAccount(null);
       setAvailability("anonymous");
-      router.replace("/sign-in");
-      router.refresh();
+      window.location.replace("/sign-in");
     } catch {
       setControlState("error");
     }

@@ -109,6 +109,15 @@ export default function CreatorApplyPage() {
     accountHolderLabel: "",
   });
   const [deposit, setDeposit] = useState<DepositStatus | null>(null);
+  const applicationLocked = Boolean(
+    application && !["draft", "changes_requested"].includes(application.state),
+  );
+  const showDeposit = Boolean(
+    deposit?.challengeId ||
+      deposit?.refundState ||
+      application?.state === "submitted" ||
+      application?.state === "under_review",
+  );
 
   useEffect(() => {
     Promise.all([
@@ -291,7 +300,7 @@ export default function CreatorApplyPage() {
       ) : null}
       {message ? <StatusBanner tone={message.startsWith("Đã") ? "success" : "error"}><p>{message}</p></StatusBanner> : null}
       <div className="creator-workspace">
-      <nav className="task-rail" aria-label="Các bước hồ sơ"><a href="#creator-profile"><span>01</span>Hồ sơ nghề nghiệp</a><a href="#portfolio"><span>02</span>Portfolio</a><a href="#receiving-account"><span>03</span>Tài khoản nhận tiền</a><a href="#attestations"><span>04</span>Xác nhận chính sách</a><a href="#review-submit"><span>05</span>Kiểm tra &amp; gửi</a>{application?.state === "submitted" ? <a href="#deposit"><span>06</span>Xác minh &amp; hoàn trả</a> : null}</nav>
+      <nav className="task-rail" aria-label="Các bước hồ sơ"><a href="#creator-profile"><span>01</span>Hồ sơ nghề nghiệp</a><a href="#portfolio"><span>02</span>Portfolio</a><a href="#receiving-account"><span>03</span>Tài khoản nhận tiền</a><a href="#attestations"><span>04</span>Xác nhận chính sách</a><a href="#review-submit"><span>05</span>Kiểm tra &amp; gửi</a>{showDeposit ? <a href="#deposit"><span>06</span>Xác minh &amp; hoàn trả</a> : null}</nav>
       <div className="stack">
       <section className="work-surface stack" id="receiving-account">
         <p className="eyebrow">03 · Tài khoản nhận tiền đề xuất</p>
@@ -317,7 +326,7 @@ export default function CreatorApplyPage() {
             Ngân hàng hỗ trợ
             <select
               value={accountDraft.bankBin}
-              disabled={application?.state === "submitted"}
+              disabled={applicationLocked}
               onChange={(event) =>
                 setAccountDraft({ ...accountDraft, bankBin: event.target.value })
               }
@@ -333,7 +342,7 @@ export default function CreatorApplyPage() {
               inputMode="numeric"
               autoComplete="off"
               value={accountDraft.accountNumber}
-              disabled={application?.state === "submitted"}
+              disabled={applicationLocked}
               onChange={(event) =>
                 setAccountDraft({ ...accountDraft, accountNumber: event.target.value })
               }
@@ -345,19 +354,19 @@ export default function CreatorApplyPage() {
               required
               autoComplete="off"
               value={accountDraft.accountHolderLabel}
-              disabled={application?.state === "submitted"}
+              disabled={applicationLocked}
               onChange={(event) =>
                 setAccountDraft({ ...accountDraft, accountHolderLabel: event.target.value })
               }
             />
           </label>
-          <button type="submit" disabled={application?.state === "submitted"}>
+          <button type="submit" disabled={applicationLocked}>
             {account ? "Tạo phiên bản tài khoản mới" : "Lưu tài khoản mã hóa"}
           </button>
         </form>
       </section>
 
-      {application?.state === "submitted" ? (
+      {showDeposit ? (
         <section className="work-surface stack" id="deposit">
           <p className="eyebrow">06 · Xác minh chuyển khoản &amp; hoàn trả</p>
           <h2>Trạng thái khoản nộp và hoàn trả</h2>
@@ -406,6 +415,7 @@ export default function CreatorApplyPage() {
           Tên nghệ sĩ
           <input
             required
+            disabled={applicationLocked}
             value={form.artistDisplayName}
             onChange={(event) => setForm({ ...form, artistDisplayName: event.target.value })}
           />
@@ -414,6 +424,7 @@ export default function CreatorApplyPage() {
           Giới thiệu ngắn
           <textarea
             required
+            disabled={applicationLocked}
             value={form.shortIntroduction}
             onChange={(event) => setForm({ ...form, shortIntroduction: event.target.value })}
           />
@@ -422,6 +433,7 @@ export default function CreatorApplyPage() {
           Ngày sinh
           <input
             required
+            disabled={applicationLocked}
             type="date"
             value={form.dateOfBirth}
             onChange={(event) => setForm({ ...form, dateOfBirth: event.target.value })}
@@ -431,6 +443,7 @@ export default function CreatorApplyPage() {
           Liên kết portfolio công khai HTTPS (mỗi dòng một liên kết)
           <textarea
             required
+            disabled={applicationLocked}
             value={form.portfolioUrls}
             onChange={(event) => setForm({ ...form, portfolioUrls: event.target.value })}
           />
@@ -439,6 +452,7 @@ export default function CreatorApplyPage() {
           Chuyên ngành nghệ thuật
           <input
             required
+            disabled={applicationLocked}
             value={form.primaryArtDiscipline}
             onChange={(event) => setForm({ ...form, primaryArtDiscipline: event.target.value })}
           />
@@ -447,6 +461,7 @@ export default function CreatorApplyPage() {
           Mô tả thực hành
           <textarea
             required
+            disabled={applicationLocked}
             value={form.practiceDescription}
             onChange={(event) => setForm({ ...form, practiceDescription: event.target.value })}
           />
@@ -454,6 +469,7 @@ export default function CreatorApplyPage() {
         <label>
           Nội dung
           <select
+            disabled={applicationLocked}
             value={form.contentIntent}
             onChange={(event) => setForm({ ...form, contentIntent: event.target.value })}
           >
@@ -471,6 +487,7 @@ export default function CreatorApplyPage() {
           <label>
             <input
               type="checkbox"
+              disabled={applicationLocked}
               checked={dobAcknowledged}
               onChange={(event) => setDobAcknowledged(event.target.checked)}
             />{" "}
@@ -479,6 +496,7 @@ export default function CreatorApplyPage() {
           <label>
             <input
               type="checkbox"
+              disabled={applicationLocked}
               checked={accepted.truthfulInformationAccepted}
               onChange={(event) =>
                 setAccepted({ ...accepted, truthfulInformationAccepted: event.target.checked })
@@ -489,6 +507,7 @@ export default function CreatorApplyPage() {
           <label>
             <input
               type="checkbox"
+              disabled={applicationLocked}
               checked={accepted.portfolioRightsAccepted}
               onChange={(event) =>
                 setAccepted({ ...accepted, portfolioRightsAccepted: event.target.checked })
@@ -499,6 +518,7 @@ export default function CreatorApplyPage() {
           <label>
             <input
               type="checkbox"
+              disabled={applicationLocked}
               checked={accepted.creatorTermsAccepted}
               onChange={(event) =>
                 setAccepted({ ...accepted, creatorTermsAccepted: event.target.checked })
@@ -509,6 +529,7 @@ export default function CreatorApplyPage() {
           <label>
             <input
               type="checkbox"
+              disabled={applicationLocked}
               checked={accepted.privacyAccepted}
               onChange={(event) =>
                 setAccepted({ ...accepted, privacyAccepted: event.target.checked })
@@ -518,13 +539,13 @@ export default function CreatorApplyPage() {
           </label>
         </section>
         <div className="button-row" id="review-submit">
-          <button type="submit" formNoValidate data-action="save">
+          <button type="submit" formNoValidate data-action="save" disabled={applicationLocked}>
             Lưu bản nháp
           </button>
           <button
             type="submit"
             data-action="submit"
-            disabled={!application || !account || application.state === "submitted"}
+            disabled={!application || !account || applicationLocked}
           >
             Gửi hồ sơ
           </button>
