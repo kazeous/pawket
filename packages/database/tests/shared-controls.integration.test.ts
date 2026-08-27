@@ -13,6 +13,7 @@ import {
   calculateStoredReceiptBusinessDayWindow,
   completeIdempotentCommand,
   importBusinessCalendarVersion,
+  importConfiguredBusinessCalendarVersion,
   insertOutboxEvent,
   runRetentionSweep,
   systemBusinessCalendarHolidays,
@@ -240,6 +241,43 @@ describe("shared control repositories", () => {
         .where(eq(systemBusinessCalendarHolidays.calendarVersion, calendar.version)),
     ).rejects.toMatchObject({ cause: { code: "55000" } });
     await expect(db.select().from(systemBusinessCalendarVersions)).resolves.toHaveLength(1);
+  });
+
+  test("configured calendar bootstrap is repeatable and rejects version drift", async () => {
+    const calendar = {
+      version: "vn-2026-env-v1",
+      holidayDates: ["2026-09-02", "2026-09-03"],
+      importedAt: new Date("2026-08-27T12:00:00.000Z"),
+    } as const;
+    await expect(
+      db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, calendar)),
+    ).resolves.toBe("inserted");
+    await expect(
+      db.transaction((tx) =>
+        importConfiguredBusinessCalendarVersion(tx, {
+          ...calendar,
+          importedAt: new Date("2026-08-28T12:00:00.000Z"),
+        }),
+      ),
+    ).resolves.toBe("already_present");
+
+    const [storedVersion] = await db
+      .select()
+      .from(systemBusinessCalendarVersions)
+      .where(eq(systemBusinessCalendarVersions.version, calendar.version));
+    expect(storedVersion).toMatchObject({
+      sourceLabel: "pawket-env:VN_BUSINESS_HOLIDAYS",
+      publishedAt: calendar.importedAt,
+      importedAt: calendar.importedAt,
+    });
+    await expect(
+      db.transaction((tx) =>
+        importConfiguredBusinessCalendarVersion(tx, {
+          ...calendar,
+          holidayDates: ["2026-09-02"],
+        }),
+      ),
+    ).rejects.toThrow("Business calendar version conflicts");
   });
 
   test("outbox rejects sensitive payloads before a row or job can exist", async () => {
