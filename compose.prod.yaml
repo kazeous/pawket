@@ -38,6 +38,8 @@ services:
     exclude_from_hc: true
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+      VN_BUSINESS_CALENDAR_VERSION: ${VN_BUSINESS_CALENDAR_VERSION:?Set VN_BUSINESS_CALENDAR_VERSION in Coolify}
+      VN_BUSINESS_HOLIDAYS: ${VN_BUSINESS_HOLIDAYS:?Set VN_BUSINESS_HOLIDAYS in Coolify}
     depends_on:
       postgres:
         condition: service_healthy

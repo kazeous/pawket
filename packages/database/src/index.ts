@@ -7,6 +7,7 @@ export {
   calculateBusinessDayWindow,
   calculateStoredReceiptBusinessDayWindow,
   importBusinessCalendarVersion,
+  importConfiguredBusinessCalendarVersion,
   vietnamDateFromInstant,
   BusinessCalendarError,
   type BusinessCalendarHoliday,

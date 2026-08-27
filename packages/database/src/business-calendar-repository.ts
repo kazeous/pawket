@@ -9,6 +9,8 @@ import {
 const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
 const versionPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const sourceLabelPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const configuredCalendarSourceLabel = "pawket-env:VN_BUSINESS_HOLIDAYS";
+const configuredHolidayName = "Configured Vietnam public holiday";
 
 export type BusinessCalendarHoliday = Readonly<{ date: string; name: string }>;
 
@@ -166,6 +168,38 @@ export async function importBusinessCalendarVersion(
     throw new BusinessCalendarError("Business calendar version conflicts");
   }
   return "already_present";
+}
+
+export async function importConfiguredBusinessCalendarVersion(
+  tx: PawketTransaction,
+  input: {
+    version: string;
+    holidayDates: ReadonlyArray<string>;
+    importedAt?: Date;
+  },
+): Promise<"inserted" | "already_present"> {
+  if (input.holidayDates.length > 64) {
+    throw new BusinessCalendarError("Business calendar is invalid");
+  }
+
+  const importedAt = input.importedAt ?? new Date();
+  const [storedVersion] = await tx
+    .select({ publishedAt: systemBusinessCalendarVersions.publishedAt })
+    .from(systemBusinessCalendarVersions)
+    .where(eq(systemBusinessCalendarVersions.version, input.version))
+    .limit(1);
+  const publishedAt = storedVersion?.publishedAt ?? importedAt;
+
+  return importBusinessCalendarVersion(tx, {
+    version: input.version,
+    sourceLabel: configuredCalendarSourceLabel,
+    publishedAt,
+    importedAt: importedAt < publishedAt ? publishedAt : importedAt,
+    holidays: input.holidayDates.map((date) => ({
+      date,
+      name: configuredHolidayName,
+    })),
+  });
 }
 
 export async function calculateStoredReceiptBusinessDayWindow(
