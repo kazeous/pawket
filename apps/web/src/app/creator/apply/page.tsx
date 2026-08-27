@@ -109,6 +109,7 @@ export default function CreatorApplyPage() {
     accountHolderLabel: "",
   });
   const [deposit, setDeposit] = useState<DepositStatus | null>(null);
+  const [depositLoading, setDepositLoading] = useState(true);
   const applicationLocked = Boolean(
     application && !["draft", "changes_requested"].includes(application.state),
   );
@@ -154,7 +155,8 @@ export default function CreatorApplyPage() {
           }
         }
       })
-      .catch(() => setMessage("Không thể tải hồ sơ lúc này."));
+      .catch(() => setMessage("Không thể tải hồ sơ lúc này."))
+      .finally(() => setDepositLoading(false));
   }, []);
 
   const proposeReceivingAccount = async (event: FormEvent<HTMLFormElement>) => {
@@ -370,7 +372,9 @@ export default function CreatorApplyPage() {
         <section className="work-surface stack" id="deposit">
           <p className="eyebrow">06 · Xác minh chuyển khoản &amp; hoàn trả</p>
           <h2>Trạng thái khoản nộp và hoàn trả</h2>
-          {deposit?.challengeId && deposit.operatingAccount ? (
+          {depositLoading ? (
+            <p>Đang tải trạng thái thử thách và hoàn trả…</p>
+          ) : deposit?.challengeId && deposit.operatingAccount ? (
             <>
               <p>
                 Chuyển đúng {deposit.amountVnd?.toLocaleString("vi-VN")} VND đến{" "}
@@ -396,7 +400,7 @@ export default function CreatorApplyPage() {
           ) : (
             <p>Owner chưa phát hành thử thách 72 giờ cho phiên bản hồ sơ này.</p>
           )}
-          {deposit?.refundState ? (
+          {!depositLoading && deposit?.refundState ? (
             <p className="status-message">
               Hoàn trả: {deposit.refundState}
               {deposit.refundNotBefore && deposit.refundDue

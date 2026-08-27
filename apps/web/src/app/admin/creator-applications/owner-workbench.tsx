@@ -6,6 +6,7 @@ import { EmptyState, LoadingState, RetryState } from "../../../ui/async-state";
 import { Field } from "../../../ui/field";
 import { StatusBanner, StatusTag } from "../../../ui/status-banner";
 import { SummaryList } from "../../../ui/summary-list";
+import { ownerActionMessage, reconciliationNotice } from "./owner-feedback";
 
 type QueueItem = { id: string; state: string; version: number; claimExpiresAt: string | null; claimedByCurrentOwner: boolean; submittedAt: string; artistDisplayName: string | null; primaryArtDiscipline: string | null; emailVerified: boolean; ageEligible: boolean; bankName: string | null; maskedSuffix: string | null; proofState: string | null };
 type Detail = { application: { id: string; creatorUserId: string; state: string; version: number; currentRevisionId: string }; revision: { id: string; artistDisplayName: string; shortIntroduction: string; applicantEmail: string; dateOfBirth: string; portfolioUrls: string[]; primaryArtDiscipline: string; practiceDescription: string; contentIntent: string; ageAtSubmission: number; submittedAt: string }; attestations: Array<{ type: string; policyVersion: string }>; priorOutcomes: Array<{ action: string; reasonCode: string; createdAt: string }>; payment: { receivingAccountVersionId: string | null; challengeId: string | null; refundObligationId: string | null; bankName: string | null; maskedSuffix: string | null; proofState: string; refundState: string | null; refundNotBefore: string | null; refundDue: string | null } };
@@ -24,8 +25,6 @@ async function api(path: string, init?: RequestInit) {
 }
 
 function post(body: Record<string, unknown>, extra?: HeadersInit): RequestInit { return { method: "POST", headers: { "content-type": "application/json", ...extra }, body: JSON.stringify(body) }; }
-function actionMessage(code: string): string { const copy: Record<string, string> = { STALE_VERSION: "Dữ liệu đã thay đổi. Queue vừa được tải lại.", CLAIM_UNAVAILABLE: "Hồ sơ đang được owner khác xét duyệt.", CLAIM_EXPIRED: "Claim đã hết hạn. Hãy claim lại hồ sơ.", PAYMENTS_POLICY_REJECTED: "Thao tác thanh toán không khớp chính sách hiện tại.", CREATOR_REVIEW_UNAVAILABLE: "Dịch vụ xét duyệt đang tạm gián đoạn.", PAYMENTS_UNAVAILABLE: "Dịch vụ thanh toán đang tạm gián đoạn." }; return copy[code] ?? "Chưa thể hoàn tất thao tác owner."; }
-
 export function OwnerWorkbench() {
   const [tab, setTab] = useState<Tab>("queue");
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -60,7 +59,7 @@ export function OwnerWorkbench() {
     try { await action(); }
     catch (error) {
       if (error instanceof OwnerApiError && error.code === "OWNER_TOTP_REQUIRED") { pendingAction.current = action; setStepUpOpen(true); return; }
-      setNotice({ tone: "error", text: actionMessage(error instanceof OwnerApiError ? error.code : "OWNER_ACTION_FAILED") });
+      setNotice({ tone: "error", text: ownerActionMessage(error instanceof OwnerApiError ? error.code : "OWNER_ACTION_FAILED") });
       if (error instanceof OwnerApiError && error.code === "STALE_VERSION") void load();
     } finally { setWorking(false); }
   }
@@ -74,7 +73,7 @@ export function OwnerWorkbench() {
         version = ((claimed.claim as { version?: number })?.version ?? version);
       }
     } catch (error) {
-      setNotice({ tone: "error", text: actionMessage(error instanceof OwnerApiError ? error.code : "OWNER_ACTION_FAILED") });
+      setNotice({ tone: "error", text: ownerActionMessage(error instanceof OwnerApiError ? error.code : "OWNER_ACTION_FAILED") });
       await load();
       setWorking(false);
       return;
@@ -136,7 +135,7 @@ export function OwnerWorkbench() {
 
   function reconcile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = new FormData(event.currentTarget); const idempotencyKey = crypto.randomUUID();
-    const action = async () => { await api("/api/v1/admin/verification-deposits/reconcile", post({ bankTransactionReference: values.get("bankTransactionReference"), actualAmountVnd: Number(values.get("actualAmountVnd")), actualTransferReference: values.get("actualTransferReference"), receivedAt: new Date(String(values.get("receivedAt"))).toISOString(), sourceBankBin: values.get("sourceBankBin") || undefined, sourceAccountNumber: values.get("sourceAccountNumber") || undefined, privateNote: values.get("privateNote") }, { "idempotency-key": idempotencyKey })); setNotice({ tone: "success", text: "Đã đối soát giao dịch và ghi audit event." }); };
+    const action = async () => { const payload = await api("/api/v1/admin/verification-deposits/reconcile", post({ bankTransactionReference: values.get("bankTransactionReference"), actualAmountVnd: Number(values.get("actualAmountVnd")), actualTransferReference: values.get("actualTransferReference"), receivedAt: new Date(String(values.get("receivedAt"))).toISOString(), sourceBankBin: values.get("sourceBankBin") || undefined, sourceAccountNumber: values.get("sourceAccountNumber") || undefined, privateNote: values.get("privateNote") }, { "idempotency-key": idempotencyKey })); setNotice(reconciliationNotice(payload)); await load(); };
     return run(action);
   }
 
