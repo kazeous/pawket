@@ -21,7 +21,7 @@ import {
 } from "@pawket/database";
 import { rejectionCooldownUntil } from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
-import { and, asc, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -181,9 +181,21 @@ export function createCreatorReviewService(input: ServiceInput) {
 
     async listSubmitted(ownerUserId?: string, at = now()) {
       const visible = ownerUserId
-        ? or(eq(creatorApplications.state, "submitted"), and(eq(creatorApplications.state, "under_review"), eq(creatorApplications.reviewerUserId, ownerUserId), gt(creatorApplications.reviewClaimExpiresAt, at)))
+        ? or(
+            eq(creatorApplications.state, "submitted"),
+            and(
+              eq(creatorApplications.state, "under_review"),
+              or(
+                lte(creatorApplications.reviewClaimExpiresAt, at),
+                and(
+                  eq(creatorApplications.reviewerUserId, ownerUserId),
+                  gt(creatorApplications.reviewClaimExpiresAt, at),
+                ),
+              ),
+            ),
+          )
         : eq(creatorApplications.state, "submitted");
-      return input.db.select({ id: creatorApplications.id, state: creatorApplications.state, version: creatorApplications.version, claimExpiresAt: creatorApplications.reviewClaimExpiresAt, claimedByCurrentOwner: ownerUserId ? sql<boolean>`${creatorApplications.reviewerUserId} = ${ownerUserId}` : sql<boolean>`false`, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: sql<boolean>`coalesce(${creatorApplicationRevisions.ageAtSubmission} >= 18, false)`, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(visible).orderBy(asc(creatorApplicationRevisions.submittedAt)).limit(100);
+      return input.db.select({ id: creatorApplications.id, state: creatorApplications.state, version: creatorApplications.version, claimExpiresAt: creatorApplications.reviewClaimExpiresAt, claimedByCurrentOwner: ownerUserId ? sql<boolean>`coalesce(${and(eq(creatorApplications.reviewerUserId, ownerUserId), gt(creatorApplications.reviewClaimExpiresAt, at))}, false)` : sql<boolean>`false`, submittedAt: creatorApplicationRevisions.submittedAt, artistDisplayName: creatorApplicationRevisions.artistDisplayName, primaryArtDiscipline: creatorApplicationRevisions.primaryArtDiscipline, emailVerified: identityUsers.emailVerified, ageEligible: sql<boolean>`coalesce(${creatorApplicationRevisions.ageAtSubmission} >= 18, false)`, bankName: paymentsReceivingAccountOnboarding.bankName, maskedSuffix: paymentsReceivingAccountOnboarding.maskedSuffix, proofState: paymentsReceivingAccountOnboarding.proofState }).from(creatorApplications).innerJoin(creatorApplicationRevisions, eq(creatorApplicationRevisions.id, creatorApplications.currentRevisionId)).innerJoin(identityUsers, eq(identityUsers.id, creatorApplications.userId)).leftJoin(paymentsReceivingAccountOnboarding, sql`${paymentsReceivingAccountOnboarding.id}::text = ${creatorApplicationRevisions.proposedReceivingAccountId}`).where(visible).orderBy(asc(creatorApplicationRevisions.submittedAt)).limit(100);
     },
 
     async listCapabilities() {
