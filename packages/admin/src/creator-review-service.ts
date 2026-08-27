@@ -19,15 +19,18 @@ import {
   type PawketDatabase,
   type PawketTransaction,
 } from "@pawket/database";
-import { rejectionCooldownUntil } from "@pawket/identity";
+import {
+  CREATOR_APPLICATION_ATTESTATION_VERSIONS,
+  rejectionCooldownUntil,
+} from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
 import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
-const requiredAttestations = new Map([
-  ["dob_truthfulness", "increment-2-v1"], ["portfolio_rights", "increment-2-v1"], ["truthful_information", "increment-2-v1"], ["creator_terms", "increment-2-v1"], ["privacy", "increment-2-v1"],
-]);
+const requiredAttestations = new Map(
+  Object.entries(CREATOR_APPLICATION_ATTESTATION_VERSIONS),
+);
 const reasonCodes = new Set([
   "portfolio_insufficient",
   "portfolio_control_unclear",

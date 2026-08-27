@@ -29,7 +29,7 @@ import {
 } from "./creator-application-policy.js";
 import type { CreatorReceivingAccountReferencePort } from "./creator-receiving-account-reference.js";
 
-const ATTESTATIONS = {
+export const CREATOR_APPLICATION_ATTESTATION_VERSIONS = {
   dob_truthfulness: "creator-dob-warning-v1",
   portfolio_rights: "creator-portfolio-rights-v1",
   truthful_information: "creator-truthful-information-v1",
@@ -649,7 +649,9 @@ export function createCreatorApplicationService(input: CreatorApplicationService
             });
           }
 
-          for (const [type, policyVersion] of Object.entries(ATTESTATIONS)) {
+          for (const [type, policyVersion] of Object.entries(
+            CREATOR_APPLICATION_ATTESTATION_VERSIONS,
+          )) {
             await tx.insert(creatorApplicationAttestations).values({
               id: id(),
               revisionId,

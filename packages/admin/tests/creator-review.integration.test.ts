@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
+import { CREATOR_APPLICATION_ATTESTATION_VERSIONS } from "@pawket/identity";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 
 import * as admin from "../src/index.js";
@@ -73,16 +74,12 @@ async function seedSubmittedApplication(): Promise<void> {
       'general_audience_only', ${accountVersionId}, 23, '2026-08-25', null, ${at}, ${at}
     )
   `;
-  for (const type of [
-    "dob_truthfulness",
-    "portfolio_rights",
-    "truthful_information",
-    "creator_terms",
-    "privacy",
-  ]) {
+  for (const [type, policyVersion] of Object.entries(
+    CREATOR_APPLICATION_ATTESTATION_VERSIONS,
+  )) {
     await client`
       insert into creator_application_attestations (id, revision_id, type, policy_version, accepted_at, actor_user_id)
-      values (${randomUUID()}, ${revisionId}, ${type}, 'increment-2-v1', ${at}, 'review-artist')
+      values (${randomUUID()}, ${revisionId}, ${type}, ${policyVersion}, ${at}, 'review-artist')
     `;
   }
   await client`update creator_application_revisions set submitted_at = ${at}, updated_at = ${at} where id = ${revisionId}`;
@@ -342,8 +339,8 @@ describe("owner creator review", () => {
     ]);
     expect(detail).toHaveProperty("attestations");
     expect(detail.attestations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "creator_terms", policyVersion: "increment-2-v1" }),
-      expect.objectContaining({ type: "dob_truthfulness", policyVersion: "increment-2-v1" }),
+      expect.objectContaining({ type: "creator_terms", policyVersion: "creator-terms-v1" }),
+      expect.objectContaining({ type: "dob_truthfulness", policyVersion: "creator-dob-warning-v1" }),
     ]));
     expect(JSON.stringify(detail)).not.toContain("001234567890");
     expect(JSON.stringify(detail)).not.toContain("account_number_envelope");
