@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
   creatorApplicationAttestations,
+  creatorApplicationDecisions,
   creatorApplicationRevisions,
   creatorApplications,
   identityUsers,
@@ -313,7 +314,9 @@ describe("creator application acceptance", () => {
   test("changes requested can directly submit a corrected new immutable revision", async () => {
     // Break caught: direct resubmission mutating revision 1 or requiring an intermediate Save Draft command.
     const userId = "direct-resubmission-user";
+    const ownerId = "direct-resubmission-owner";
     await createUser(userId);
+    await createUser(ownerId);
     const applications = createCreatorApplicationService({
       db,
       keyring,
@@ -336,6 +339,32 @@ describe("creator application acceptance", () => {
       .update(creatorApplications)
       .set({ state: "changes_requested", version: first.version + 1 })
       .where(eq(creatorApplications.id, first.id));
+    await db.insert(creatorApplicationDecisions).values({
+      id: randomUUID(),
+      applicationId: first.id,
+      revisionId: first.revision.id,
+      action: "changes_requested",
+      reasonCode: "portfolio_insufficient",
+      applicantExplanation: "Add one more public portfolio link.",
+      privateNote: "Private review detail must not reach the applicant.",
+      actorUserId: ownerId,
+      actorSessionId: "direct-resubmission-owner-session",
+      stepUpProofId: randomUUID(),
+      expectedVersion: first.version,
+      requestId: "direct-resubmission-request-changes",
+      createdAt: new Date("2026-08-24T03:00:00.000Z"),
+    });
+
+    const requestedChanges = await applications.getForApplicant({ userId });
+    expect(requestedChanges).toMatchObject({
+      state: "changes_requested",
+      latestDecision: {
+        action: "changes_requested",
+        reasonCode: "portfolio_insufficient",
+        applicantExplanation: "Add one more public portfolio link.",
+      },
+    });
+    expect(JSON.stringify(requestedChanges)).not.toContain("Private review detail");
 
     const correctedForm = {
       ...completeDraft,

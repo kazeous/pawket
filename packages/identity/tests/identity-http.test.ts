@@ -98,6 +98,12 @@ function createHarness(emailDeliveryAvailable = true, throttleAllowed = true) {
       createdAt: new Date("2026-08-24T02:00:00.000Z"),
       lastUsedAt: new Date("2026-08-24T03:00:00.000Z"),
     },
+    {
+      id: "session-other",
+      deviceLabel: "Firefox",
+      createdAt: new Date("2026-08-24T01:00:00.000Z"),
+      lastUsedAt: new Date("2026-08-24T02:30:00.000Z"),
+    },
   ]);
   const revokeSession = vi.fn(async () => true);
   const revokeAllSessions = vi.fn(async () => 2);
@@ -217,6 +223,14 @@ describe("identity HTTP v1 handlers", () => {
           deviceLabel: "Chrome",
           createdAt: "2026-08-24T02:00:00.000Z",
           lastUsedAt: "2026-08-24T03:00:00.000Z",
+          isCurrent: true,
+        },
+        {
+          id: "session-other",
+          deviceLabel: "Firefox",
+          createdAt: "2026-08-24T01:00:00.000Z",
+          lastUsedAt: "2026-08-24T02:30:00.000Z",
+          isCurrent: false,
         },
       ],
     });

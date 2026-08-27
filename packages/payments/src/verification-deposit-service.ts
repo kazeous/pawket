@@ -361,17 +361,26 @@ export function createVerificationDepositService(input: VerificationDepositServi
             userId: creatorApplications.userId,
             state: creatorApplications.state,
             currentRevisionId: creatorApplications.currentRevisionId,
+            reviewerUserId: creatorApplications.reviewerUserId,
+            reviewClaimExpiresAt: creatorApplications.reviewClaimExpiresAt,
           })
           .from(creatorApplications)
           .where(eq(creatorApplications.id, command.applicationId))
           .limit(1)
           .for("update");
+        const ownerHasActiveClaim =
+          application?.state === "under_review" &&
+          application.reviewerUserId === command.ownerUserId &&
+          application.reviewClaimExpiresAt !== null &&
+          application.reviewClaimExpiresAt > at;
         if (
           !application ||
-          application.state !== "submitted" ||
+          (application.state !== "submitted" && !ownerHasActiveClaim) ||
           application.currentRevisionId !== command.revisionId
         ) {
-          throw new VerificationDepositServiceError("Submitted application required");
+          throw new VerificationDepositServiceError(
+            "Submitted or actively claimed application required",
+          );
         }
         const [revision] = await tx
           .select({

@@ -256,8 +256,9 @@ function service(): VerificationDepositService {
 }
 
 describe("verification-deposit service", () => {
-  test("issues a single-display 72-hour challenge only for a submitted revision", async () => {
-    // Break caught: challenge creation before submission, without step-up, or reversible reference storage.
+  test("issues a single-display 72-hour challenge for a submitted or actively claimed revision", async () => {
+    // Break caught: challenge creation before submission, through another owner's claim,
+    // without step-up, or with reversible reference storage.
     const deposits = service();
     const issue = {
       ownerUserId: "deposit-owner",
@@ -269,7 +270,9 @@ describe("verification-deposit service", () => {
       idempotencyKey: "challenge-issue-one",
       requestId: "request.challenge.issue.one",
     };
-    await expect(deposits.issueChallenge(issue)).rejects.toThrow("Submitted application required");
+    await expect(deposits.issueChallenge(issue)).rejects.toThrow(
+      "Submitted or actively claimed application required",
+    );
     consumedProofs.delete(proofId(1));
 
     await client`
@@ -291,6 +294,23 @@ describe("verification-deposit service", () => {
           updated_at = ${clock.toISOString()}
       where id = ${revisionId}
     `;
+    await client`
+      update creator_applications
+      set state = 'under_review',
+          reviewer_user_id = 'deposit-applicant',
+          review_claimed_at = ${clock.toISOString()},
+          review_claim_expires_at = ${new Date(clock.getTime() + 30 * 60_000).toISOString()},
+          updated_at = ${clock.toISOString()}
+      where id = ${applicationId}
+    `;
+    await expect(deposits.issueChallenge(issue)).rejects.toThrow(
+      "Submitted or actively claimed application required",
+    );
+    await client`
+      update creator_applications
+      set reviewer_user_id = 'deposit-owner', updated_at = ${clock.toISOString()}
+      where id = ${applicationId}
+    `;
     await expect(
       deposits.issueChallenge({ ...issue, stepUpProofId: proofId(999) }),
     ).rejects.toThrow("Owner TOTP step-up required");
@@ -311,6 +331,15 @@ describe("verification-deposit service", () => {
 
     const replayed = await deposits.issueChallenge(issue);
     expect(replayed).toMatchObject({ id: issued.id, reference: null, replayed: true });
+    await client`
+      update creator_applications
+      set state = 'submitted',
+          reviewer_user_id = null,
+          review_claimed_at = null,
+          review_claim_expires_at = null,
+          updated_at = ${clock.toISOString()}
+      where id = ${applicationId}
+    `;
   });
 
   test("rejects a minimized receiving account before issuing a challenge", async () => {

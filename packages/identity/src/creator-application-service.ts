@@ -2,6 +2,7 @@ import {
   beginIdempotentCommand,
   completeIdempotentCommand,
   creatorApplicationAttestations,
+  creatorApplicationDecisions,
   creatorApplicationRevisions,
   creatorApplications,
   identityUsers,
@@ -205,6 +206,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
     applicationId: string,
     userId: string,
     snapshot?: ReplaySnapshot,
+    includeLatestDecision = false,
   ) {
     const [application] = await database
       .select()
@@ -249,11 +251,28 @@ export function createCreatorApplicationService(input: CreatorApplicationService
       : application.state === "rejected" && application.rejectedAt
         ? rejectionCooldownUntil(application.rejectedAt)
         : application.cooldownUntil;
+    const [latestDecision] = includeLatestDecision
+      ? await database
+          .select({
+            action: creatorApplicationDecisions.action,
+            reasonCode: creatorApplicationDecisions.reasonCode,
+            applicantExplanation: creatorApplicationDecisions.applicantExplanation,
+            createdAt: creatorApplicationDecisions.createdAt,
+          })
+          .from(creatorApplicationDecisions)
+          .where(eq(creatorApplicationDecisions.applicationId, application.id))
+          .orderBy(
+            desc(creatorApplicationDecisions.expectedVersion),
+            desc(creatorApplicationDecisions.createdAt),
+          )
+          .limit(1)
+      : [];
     return {
       id: application.id,
       state: snapshot?.state ?? application.state,
       version: snapshot?.version ?? application.version,
       cooldownUntil,
+      ...(includeLatestDecision ? { latestDecision: latestDecision ?? null } : {}),
       revision: {
         id: revision.id,
         revisionNumber: revision.revisionNumber,
@@ -349,7 +368,7 @@ export function createCreatorApplicationService(input: CreatorApplicationService
         .where(eq(creatorApplications.userId, userId))
         .orderBy(desc(creatorApplications.updatedAt))
         .limit(1);
-      return application ? response(input.db, application.id, userId) : null;
+      return application ? response(input.db, application.id, userId, undefined, true) : null;
     },
 
     async saveDraft(commandInput: Command & Draft) {

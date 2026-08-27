@@ -57,3 +57,38 @@ test("reapplication cooldown is displayed in the Ho Chi Minh calendar date", asy
     "15/3/2026",
   );
 });
+
+test("changes requested shows the owner explanation without private review data", async ({ page }) => {
+  // Break caught: rendering only an internal state token and leaving the applicant
+  // unable to know what must change before resubmission.
+  await page.route("**/api/v1/creator-application**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/receiving-account")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ account: null }) });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        application: {
+          id: "changes-requested-1",
+          state: "changes_requested",
+          version: 3,
+          latestDecision: {
+            action: "changes_requested",
+            reasonCode: "portfolio_insufficient",
+            applicantExplanation: "Please add one more public portfolio link.",
+            createdAt: "2026-08-27T00:00:00.000Z",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/creator/apply");
+  await expect(page.getByText("Cần cập nhật", { exact: true })).toBeVisible();
+  await expect(page.getByText("Owner yêu cầu cập nhật")).toBeVisible();
+  await expect(page.getByText("Please add one more public portfolio link.")).toBeVisible();
+  await expect(page.getByText("Lý do: Portfolio chưa đủ.")).toBeVisible();
+  await expect(page.getByText("Private review detail")).toHaveCount(0);
+});
