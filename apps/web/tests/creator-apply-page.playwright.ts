@@ -92,3 +92,79 @@ test("changes requested shows the owner explanation without private review data"
   await expect(page.getByText("Lý do: Portfolio chưa đủ.")).toBeVisible();
   await expect(page.getByText("Private review detail")).toHaveCount(0);
 });
+
+test("an under-review application keeps deposit instructions visible and locks revision fields", async ({ page }) => {
+  // Break caught: owner claim changes submitted to under_review, which previously
+  // hid the challenge workflow and made the immutable review snapshot look editable.
+  await page.route("**/api/v1/creator-application**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/receiving-account")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          account: {
+            referenceId: "00000000-0000-4000-8000-000000000001",
+            bankBin: "970415",
+            bankName: "VietinBank",
+            maskedSuffix: "•••• 0000",
+            proofState: "challenge_issued",
+          },
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/deposit")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          deposit: {
+            proofState: "issued",
+            refundState: null,
+            refundNotBefore: null,
+            refundDue: null,
+            challengeId: "00000000-0000-4000-8000-000000000002",
+            amountVnd: 1000,
+            expiresAt: "2026-08-30T12:00:00.000Z",
+            operatingAccount: {
+              bankBin: "000000",
+              bankName: "Pawket Test Bank",
+              accountNumber: "000000",
+              accountHolderLabel: "PAWKET PLAYWRIGHT",
+            },
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        application: {
+          id: "00000000-0000-4000-8000-000000000003",
+          state: "under_review",
+          version: 4,
+          revision: {
+            artistDisplayName: "Synthetic Artist",
+            shortIntroduction: "Synthetic review record",
+            dateOfBirth: "2004-01-21",
+            portfolioUrls: ["https://example.com/synthetic"],
+            primaryArtDiscipline: "Illustration",
+            practiceDescription: "Synthetic QA only",
+            contentIntent: "general_audience_only",
+            proposedReceivingAccountId: "00000000-0000-4000-8000-000000000001",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/creator/apply");
+  await expect(page.getByRole("heading", { name: "Trạng thái khoản nộp và hoàn trả" })).toBeVisible();
+  await expect(page.getByText(/Chuyển đúng 1\.000 VND/u)).toContainText("Pawket Test Bank");
+  await expect(page.getByRole("button", { name: "Tôi đã chuyển từ tài khoản đã khai" })).toBeVisible();
+  await expect(page.getByLabel("Tên nghệ sĩ")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Tạo phiên bản tài khoản mới" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Lưu bản nháp" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Gửi hồ sơ" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Rút hồ sơ" })).toBeEnabled();
+});
