@@ -37,6 +37,8 @@ async function expectCreatorHead(
 ): Promise<void> {
   const [tables] = await client<{
     applications: string | null;
+    catalogPages: string | null;
+    catalogRevisions: string | null;
     revisions: string | null;
     attestations: string | null;
     decisions: string | null;
@@ -44,6 +46,8 @@ async function expectCreatorHead(
   }[]>`
     select
       to_regclass('creator_applications')::text as applications,
+      to_regclass('creator_pages')::text as "catalogPages",
+      to_regclass('creator_publication_revisions')::text as "catalogRevisions",
       to_regclass('creator_application_revisions')::text as revisions,
       to_regclass('creator_application_attestations')::text as attestations,
       to_regclass('creator_application_decisions')::text as decisions,
@@ -51,6 +55,8 @@ async function expectCreatorHead(
   `;
   expect(tables).toEqual({
     applications: "creator_applications",
+    catalogPages: "creator_pages",
+    catalogRevisions: "creator_publication_revisions",
     revisions: "creator_application_revisions",
     attestations: "creator_application_attestations",
     decisions: "creator_application_decisions",
@@ -179,7 +185,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(20);
+  expect(journal?.count).toBe(21);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -248,6 +254,38 @@ describe("configured Drizzle creator migrator", () => {
     } finally {
       await client.end();
       await rm(through0006, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 19 to creator catalog index 20", async () => {
+    // Break caught: a catalog migration that runs in ad-hoc SQL tests but is skipped
+    // by the configured migrator after an already-deployed 0019 database.
+    const { client, schemaName, journalSchema } = await createIsolatedClient("catalog-upgrade");
+    const through0019 = await createMigrationsThrough(19);
+    try {
+      await migrate(drizzle(client), {
+        migrationsFolder: through0019,
+        migrationsSchema: journalSchema,
+      });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(20);
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass(${`${schemaName}.creator_pages`})::text as name`,
+      ).resolves.toEqual([{ name: null }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass('creator_pages')::text as name`,
+      ).resolves.toEqual([{ name: "creator_pages" }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(21);
+    } finally {
+      await client.end();
+      await rm(through0019, { recursive: true, force: true });
     }
   });
 

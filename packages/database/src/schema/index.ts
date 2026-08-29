@@ -15,6 +15,18 @@ export {
 } from "./identity-core.js";
 export { creatorApplications, creatorApplicationRevisions, creatorApplicationAttestations, creatorApplicationDecisions, identityCreatorCapabilities, identityCreatorCapabilityEvents } from "./creator-applications.js";
 export {
+  creatorDiscoveryProjections,
+  creatorHandleClaims,
+  creatorPageDrafts,
+  creatorPages,
+  creatorPublicationEvents,
+  creatorPublicationMedia,
+  creatorPublicationRevisions,
+  creatorPublicationShowcases,
+  creatorShowcaseDraftMedia,
+  creatorShowcaseDrafts,
+} from "./creator-catalog.js";
+export {
   paymentsReceivingAccountOnboarding,
   paymentsUnmatchedDeposits,
   paymentsVerificationDepositChallenges,

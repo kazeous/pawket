@@ -8,6 +8,7 @@ export default defineConfig({
     "./src/schema/shared-controls.ts",
     "./src/schema/identity-core.ts",
     "./src/schema/creator-applications.ts",
+    "./src/schema/creator-catalog.ts",
     "./src/schema/payments.ts",
   ],
 });
