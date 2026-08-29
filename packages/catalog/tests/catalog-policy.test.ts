@@ -35,6 +35,14 @@ test.each(["safe\u0000text", "safe\u202Etext", "<strong>text</strong>", "", "abc
   },
 );
 
+test("counts astral public text by Unicode code point, not UTF-16 unit", () => {
+  // Break caught: accepting one astral character for a two-code-point minimum because it has two UTF-16 units.
+  expect(normalizeProfileText("🦊", { minCodePoints: 1, maxCodePoints: 1 })).toBe("🦊");
+  expect(() => normalizeProfileText("🦊", { minCodePoints: 2, maxCodePoints: 2 })).toThrow(
+    CatalogPolicyError,
+  );
+});
+
 test("normalizes a credential-free HTTPS external destination", () => {
   // Break caught: persisting a non-canonical external URL.
   expect(normalizeExternalDestination("HTTPS://EXAMPLE.COM:443/portfolio?tag=art")).toBe(
@@ -46,6 +54,8 @@ test.each([
   "http://example.com/portfolio",
   "https://artist:secret@example.com/portfolio",
   "#portfolio",
+  "https:///portfolio",
+  "https:/example.com",
 ])("rejects non-external destination %s", (value) => {
   // Break caught: accepting insecure, credential-bearing, or fragment-only destinations.
   expect(() => normalizeExternalDestination(value)).toThrow(CatalogPolicyError);

@@ -30,6 +30,7 @@ const HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const CONTROL_CHARACTER = /\p{Cc}/u;
 const BIDI_CONTROL_CHARACTER = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
 const HTML_ANGLE_BRACKET = /[<>]/u;
+const EXPLICIT_HTTPS_AUTHORITY = /^https:\/\/[^/?#]+/iu;
 
 function reject(reason: string): never {
   throw new CatalogPolicyError(reason);
@@ -73,7 +74,7 @@ export function normalizeProfileText(value: unknown, bounds: ProfileTextBounds):
 }
 
 export function normalizeExternalDestination(value: unknown): string {
-  if (typeof value !== "string" || !/^https:\/\//iu.test(value)) {
+  if (typeof value !== "string" || !EXPLICIT_HTTPS_AUTHORITY.test(value)) {
     return reject("invalid_external_destination");
   }
   let destination: URL;

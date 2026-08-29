@@ -122,4 +122,72 @@ describe("Identity creator catalog seed port", () => {
     // Break caught: initializing a catalog page from an application or user record without a capability grant.
     await expect(createIdentityCreatorSeedPort().getCreatorSeed(db, "not-a-creator")).resolves.toBeNull();
   });
+
+  test("returns null when the approved revision belongs to a different application", async () => {
+    // Break caught: projecting a stale or mismatched revision that does not belong to the capability's approved application.
+    const userId = `mismatched-application-user-${randomUUID()}`;
+    const approvedApplicationId = randomUUID();
+    const approvedRevisionId = randomUUID();
+    const staleApplicationId = randomUUID();
+    const staleRevisionId = randomUUID();
+    const at = new Date("2026-08-29T03:00:00.000Z");
+    await db.insert(identityUsers).values({
+      id: userId,
+      name: "Mismatched Application Artist",
+      email: "mismatched-application@example.test",
+      canonicalEmail: "mismatched-application@example.test",
+      emailVerified: true,
+      emailVerifiedAt: at,
+      emailVerificationProvenance: "password_email_challenge",
+      createdAt: at,
+      updatedAt: at,
+    });
+    await db.insert(creatorApplications).values([
+      { id: approvedApplicationId, userId, state: "approved", version: 1, currentRevisionId: approvedRevisionId, createdAt: at, updatedAt: at },
+      { id: staleApplicationId, userId, state: "approved", version: 1, currentRevisionId: staleRevisionId, createdAt: at, updatedAt: at },
+    ]);
+    await db.insert(creatorApplicationRevisions).values([
+      { id: approvedRevisionId, applicationId: approvedApplicationId, revisionNumber: 1, artistDisplayName: "Approved Artist", shortIntroduction: "The approved profile.", createdAt: at, updatedAt: at },
+      { id: staleRevisionId, applicationId: staleApplicationId, revisionNumber: 1, artistDisplayName: "Stale Artist", shortIntroduction: "A profile from another application.", createdAt: at, updatedAt: at },
+    ]);
+    await db.insert(identityCreatorCapabilities).values({
+      id: randomUUID(), userId, state: "active", version: 1,
+      approvedApplicationId, approvedRevisionId: staleRevisionId, suspendedAt: null, createdAt: at, updatedAt: at,
+    });
+
+    await expect(createIdentityCreatorSeedPort().getCreatorSeed(db, userId)).resolves.toBeNull();
+  });
+
+  test("returns a suspended capability's exact six-field seed", async () => {
+    // Break caught: hiding suspended capability state instead of letting the later private remediation flow decide it.
+    const userId = `suspended-catalog-seed-user-${randomUUID()}`;
+    const applicationId = randomUUID();
+    const revisionId = randomUUID();
+    const at = new Date("2026-08-29T03:00:00.000Z");
+    await db.insert(identityUsers).values({
+      id: userId, name: "Suspended Catalog Artist", email: "suspended-catalog@example.test",
+      canonicalEmail: "suspended-catalog@example.test", emailVerified: true, emailVerifiedAt: at,
+      emailVerificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at,
+    });
+    await db.insert(creatorApplications).values({
+      id: applicationId, userId, state: "approved", version: 2, currentRevisionId: revisionId, createdAt: at, updatedAt: at,
+    });
+    await db.insert(creatorApplicationRevisions).values({
+      id: revisionId, applicationId, revisionNumber: 1, artistDisplayName: "Suspended Artist",
+      shortIntroduction: "A public seed awaiting private remediation.", createdAt: at, updatedAt: at,
+    });
+    await db.insert(identityCreatorCapabilities).values({
+      id: randomUUID(), userId, state: "suspended", version: 4, approvedApplicationId: applicationId,
+      approvedRevisionId: revisionId, suspendedAt: at, createdAt: at, updatedAt: at,
+    });
+
+    await expect(createIdentityCreatorSeedPort().getCreatorSeed(db, userId)).resolves.toEqual({
+      userId,
+      capabilityState: "suspended",
+      capabilityVersion: 4,
+      approvedRevisionId: revisionId,
+      displayName: "Suspended Artist",
+      introduction: "A public seed awaiting private remediation.",
+    });
+  });
 });

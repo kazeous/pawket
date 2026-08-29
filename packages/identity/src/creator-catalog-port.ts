@@ -36,7 +36,10 @@ export function createIdentityCreatorSeedPort(): {
         .from(identityCreatorCapabilities)
         .innerJoin(
           creatorApplicationRevisions,
-          eq(creatorApplicationRevisions.id, identityCreatorCapabilities.approvedRevisionId),
+          and(
+            eq(creatorApplicationRevisions.id, identityCreatorCapabilities.approvedRevisionId),
+            eq(creatorApplicationRevisions.applicationId, identityCreatorCapabilities.approvedApplicationId),
+          ),
         )
         .where(
           and(
