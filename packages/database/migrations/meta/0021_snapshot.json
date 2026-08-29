@@ -1,5 +1,5 @@
 {
-  "id": "3fdf1dd2-d482-45cc-8817-bcc58be33f51",
+  "id": "3965f311-5d52-47ac-8151-71864f4f7db8",
   "prevId": "156a5d84-61c8-4976-b870-70d3a3dcaa8c",
   "version": "7",
   "dialect": "postgresql",
@@ -5831,6 +5831,10 @@
         "public_media_upload_intents_completion_check": {
           "name": "public_media_upload_intents_completion_check",
           "value": "(\"public_media_upload_intents\".\"state\" = 'completed' and \"public_media_upload_intents\".\"completed_at\" is not null)\n        or (\"public_media_upload_intents\".\"state\" <> 'completed' and \"public_media_upload_intents\".\"completed_at\" is null)"
+        },
+        "public_media_upload_intents_completion_window_check": {
+          "name": "public_media_upload_intents_completion_window_check",
+          "value": "\"public_media_upload_intents\".\"completed_at\" is null or (\"public_media_upload_intents\".\"completed_at\" >= \"public_media_upload_intents\".\"created_at\" and \"public_media_upload_intents\".\"completed_at\" <= \"public_media_upload_intents\".\"expires_at\")"
         },
         "public_media_upload_intents_timestamps_check": {
           "name": "public_media_upload_intents_timestamps_check",

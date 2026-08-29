@@ -247,6 +247,25 @@ describe("public media persistence", () => {
     await expect(client.unsafe(`delete from public_media_upload_intents where id = '${completed.intentId}'`)).rejects.toThrow();
   });
 
+  test("bounds upload completion to the inclusive creation-to-expiry window", async () => {
+    const beforeCreation = await fixture();
+    await expectSqlState(
+      client.unsafe(`update public_media_upload_intents set state = 'completed', completed_at = '2026-08-29T11:59:59.000Z' where id = '${beforeCreation.intentId}'`),
+      "23514",
+      /completion|window|created/i,
+    );
+
+    const afterExpiry = await fixture();
+    await expectSqlState(
+      client.unsafe(`update public_media_upload_intents set state = 'completed', completed_at = '2026-08-29T12:15:00.001Z' where id = '${afterExpiry.intentId}'`),
+      "23514",
+      /completion|window|expir/i,
+    );
+
+    const atExpiry = await fixture();
+    await client.unsafe(`update public_media_upload_intents set state = 'completed', completed_at = '${later}' where id = '${atExpiry.intentId}'`);
+  });
+
   test("requires a completed matching intent before consuming source bytes", async () => {
     const issued = await fixture();
     await expectSqlState(

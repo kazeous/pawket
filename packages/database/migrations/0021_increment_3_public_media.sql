@@ -70,6 +70,7 @@ CREATE TABLE "public_media_upload_intents" (
 	CONSTRAINT "public_media_upload_intents_state_check" CHECK ("state" in ('issued','completed','expired')),
 	CONSTRAINT "public_media_upload_intents_expiry_check" CHECK ("expires_at" = "created_at" + interval '15 minutes'),
 	CONSTRAINT "public_media_upload_intents_completion_check" CHECK (("state" = 'completed' and "completed_at" is not null) or ("state" <> 'completed' and "completed_at" is null)),
+	CONSTRAINT "public_media_upload_intents_completion_window_check" CHECK ("completed_at" is null or ("completed_at" >= "created_at" and "completed_at" <= "expires_at")),
 	CONSTRAINT "public_media_upload_intents_object_key_check" CHECK ("object_key" ~ '^quarantine/[0-9a-f-]{36}/[0-9a-f-]{36}$'),
 	CONSTRAINT "public_media_upload_intents_timestamps_check" CHECK ("updated_at" >= "created_at")
 );

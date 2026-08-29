@@ -179,6 +179,10 @@ export const publicMediaUploadIntents = pgTable(
       sql`(${table.state} = 'completed' and ${table.completedAt} is not null)
         or (${table.state} <> 'completed' and ${table.completedAt} is null)`,
     ),
+    check(
+      "public_media_upload_intents_completion_window_check",
+      sql`${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and ${table.completedAt} <= ${table.expiresAt})`,
+    ),
     check("public_media_upload_intents_timestamps_check", sql`${table.updatedAt} >= ${table.createdAt}`),
   ],
 );
