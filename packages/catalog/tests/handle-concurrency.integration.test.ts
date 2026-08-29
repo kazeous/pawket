@@ -4,7 +4,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { createDatabase, creatorPageDrafts, creatorShowcaseDrafts, identityUsers, systemOutbox, type PawketDatabase } from "@pawket/database";
+import { createDatabase, creatorPageDrafts, creatorPages, creatorShowcaseDrafts, identityUsers, systemOutbox, type PawketDatabase } from "@pawket/database";
 import { createCatalogService, HANDLE_RENAME_COOLDOWN_MS } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -88,8 +88,12 @@ describe("catalog handle lifecycle", () => {
     const initialized = await Promise.all([catalog.initialize({ userId, requestId: "request-init-race-one" }), service().initialize({ userId, requestId: "request-init-race-two" })]);
     expect(new Set(initialized.map((item) => item.pageId)).size).toBe(1);
     const pageId = initialized[0]!.pageId;
+    expect(await db.select().from(creatorPages).where(eq(creatorPages.userId, userId))).toHaveLength(1);
     expect(await db.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, pageId))).toHaveLength(1);
-    expect(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, pageId))).toHaveLength(1);
+    const initializationEvents = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, pageId));
+    expect(initializationEvents).toHaveLength(1);
+    expect(initializationEvents[0]).toMatchObject({ eventType: "creator.page_initialized.v1", eventVersion: 1, payload: { pageId, version: 1, actorUserId: userId } });
+    expect(["request-init-race-one", "request-init-race-two"]).toContain((initializationEvents[0]?.payload as { correlationId: string }).correlationId);
     let version = 1; const ids: string[] = [];
     for (let position = 0; position < 12; position += 1) {
       const result = await catalog.upsertShowcase({ actor: actor(userId), pageId, expectedVersion: version, idempotencyKey: `reverse-key-${position.toString().padStart(4, "0")}`, requestId: `request-reverse-${position}`, showcase: { position, title: `Showcase ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } });

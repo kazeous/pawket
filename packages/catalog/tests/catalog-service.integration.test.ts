@@ -184,4 +184,50 @@ describe("catalog authoring service", () => {
     const [stored] = await db.select({ draftVersion: creatorPages.draftVersion }).from(creatorPages).where(eq(creatorPages.id, page.pageId));
     expect(stored?.draftVersion).toBe(1);
   });
+
+  test("records one replay-safe, bounded outbox event for every authoring mutation family", async () => {
+    // Break caught: a command mutates twice on replay, misses its durable event, or writes profile/session data into an event.
+    const userId = await approvedCreator("event-matrix"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "matrix-init" });
+    async function assertCommand(name: string, eventType: string, version: number, invoke: () => Promise<{ pageId: string; draftVersion: number }>) {
+      const before = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+      const first = await invoke();
+      expect(first, `${name} first result`).toEqual({ pageId: page.pageId, draftVersion: version });
+      expect((await db.select({ version: creatorPages.draftVersion }).from(creatorPages).where(eq(creatorPages.id, page.pageId)))[0]?.version, `${name} page version`).toBe(version);
+      const after = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+      expect(after).toHaveLength(before.length + 1);
+      expect(after.at(-1)).toMatchObject({ eventType, eventVersion: 1, payload: { pageId: page.pageId, version, correlationId: expect.any(String), actorUserId: userId } });
+      await expect(invoke(), `${name} replay`).resolves.toEqual(first);
+      expect(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId))).toHaveLength(after.length);
+    }
+    const claim = { actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "matrix-claim-0001", requestId: "matrix-claim", handle: "matrix-one" } as const;
+    await assertCommand("claim", "creator.handle_claimed.v1", 2, () => catalog.claimHandle(claim));
+    const rename = { actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "matrix-rename-0001", requestId: "matrix-rename", handle: "matrix-two" } as const;
+    await assertCommand("rename", "creator.handle_renamed.v1", 3, () => catalog.renameHandle(rename));
+    const draft = { actor: actor(userId), pageId: page.pageId, expectedVersion: 3, idempotencyKey: "matrix-draft-0001", requestId: "matrix-draft", draft: { displayName: "Matrix Artist", introduction: "Matrix intro", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } } as const;
+    await assertCommand("save draft", "creator.page_draft_saved.v1", 4, () => catalog.saveDraft(draft));
+    const create = { actor: actor(userId), pageId: page.pageId, expectedVersion: 4, idempotencyKey: "matrix-create-0001", requestId: "matrix-create", showcase: { position: 0, title: "Before", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [{ assetId: randomUUID(), alternativeText: "Before image" }] } } as const;
+    await assertCommand("showcase create", "creator.showcase_upserted.v1", 5, () => catalog.upsertShowcase(create));
+    const showcaseId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]!.id;
+    const update = { actor: actor(userId), pageId: page.pageId, expectedVersion: 5, idempotencyKey: "matrix-update-0001", requestId: "matrix-update", showcase: { ...create.showcase, id: showcaseId, title: "After", media: [{ assetId: randomUUID(), alternativeText: "After image" }] } } as const;
+    await assertCommand("showcase update", "creator.showcase_upserted.v1", 6, () => catalog.upsertShowcase(update));
+    expect((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]).toMatchObject({ id: showcaseId, title: "After", media: [{ alternativeText: "After image" }] });
+    const second = { actor: actor(userId), pageId: page.pageId, expectedVersion: 6, idempotencyKey: "matrix-second-0001", requestId: "matrix-second", showcase: { ...create.showcase, position: 1, title: "Second", media: [] } } as const;
+    await assertCommand("second create", "creator.showcase_upserted.v1", 7, () => catalog.upsertShowcase(second));
+    const remove = { actor: actor(userId), pageId: page.pageId, expectedVersion: 7, idempotencyKey: "matrix-remove-0001", requestId: "matrix-remove", showcaseId } as const;
+    await assertCommand("showcase remove", "creator.showcase_removed.v1", 8, () => catalog.removeShowcase(remove));
+    const remainingId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]!.id;
+    const reorder = { actor: actor(userId), pageId: page.pageId, expectedVersion: 8, idempotencyKey: "matrix-reorder-0001", requestId: "matrix-reorder", showcaseIds: [remainingId] } as const;
+    await assertCommand("showcase reorder", "creator.showcase_reordered.v1", 9, () => catalog.reorderShowcases(reorder));
+    const serialized = JSON.stringify(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId)));
+    for (const forbidden of ["session", "Matrix Artist", "Matrix intro", "assetId", "alternativeText", "portfolio", "application"]) expect(serialized).not.toContain(forbidden);
+  });
+
+  test("maps active-showcase overflow to a stable policy error without partial state", async () => {
+    // Break caught: the database trigger leaks its raw error when a thirteenth active showcase is attempted.
+    const userId = await approvedCreator("overflow"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "overflow-init" });
+    let version = 1;
+    for (let position = 0; position < 12; position += 1) version = (await catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: `overflow-key-${position}`, requestId: `overflow-${position}`, showcase: { position, title: `Item ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } })).draftVersion;
+    await expect(catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: "overflow-key-last", requestId: "overflow-last", showcase: { position: 11, title: "Thirteenth", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } })).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases).toHaveLength(12);
+  });
 });
