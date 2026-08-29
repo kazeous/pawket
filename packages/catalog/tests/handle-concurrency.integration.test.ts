@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 
-import { sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { createDatabase, identityUsers, type PawketDatabase } from "@pawket/database";
+import { createDatabase, creatorPageDrafts, creatorShowcaseDrafts, identityUsers, systemOutbox, type PawketDatabase } from "@pawket/database";
 import { createCatalogService, HANDLE_RENAME_COOLDOWN_MS } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -28,12 +28,12 @@ async function approvedCreator(label: string): Promise<string> {
 }
 
 function actor(userId: string, primaryAuthenticatedAt = at) { return { userId, sessionId: "handle-session", primaryAuthenticatedAt }; }
-function service(database = db) {
+function service(database = db, clock = at) {
   return createCatalogService({
     db: database,
     creatorSeeds: { async getCreatorSeed(_database, userId) { return { userId, capabilityState: "active" as const, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Artist", introduction: "Approved intro" }; } },
     commandFingerprintKey: commandKey,
-    now: () => at,
+    now: () => clock,
   });
 }
 
@@ -88,6 +88,8 @@ describe("catalog handle lifecycle", () => {
     const initialized = await Promise.all([catalog.initialize({ userId, requestId: "request-init-race-one" }), service().initialize({ userId, requestId: "request-init-race-two" })]);
     expect(new Set(initialized.map((item) => item.pageId)).size).toBe(1);
     const pageId = initialized[0]!.pageId;
+    expect(await db.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, pageId))).toHaveLength(1);
+    expect(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, pageId))).toHaveLength(1);
     let version = 1; const ids: string[] = [];
     for (let position = 0; position < 12; position += 1) {
       const result = await catalog.upsertShowcase({ actor: actor(userId), pageId, expectedVersion: version, idempotencyKey: `reverse-key-${position.toString().padStart(4, "0")}`, requestId: `request-reverse-${position}`, showcase: { position, title: `Showcase ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } });
@@ -96,5 +98,35 @@ describe("catalog handle lifecycle", () => {
     const reversed = [...ids].reverse();
     await expect(catalog.reorderShowcases({ actor: actor(userId), pageId, expectedVersion: version, idempotencyKey: "reverse-key-final", requestId: "request-reverse-final", showcaseIds: reversed })).resolves.toEqual({ pageId, draftVersion: version + 1 });
     expect((await catalog.getWorkspace({ actorUserId: userId, pageId })).showcases.map((showcase) => showcase.id)).toEqual(reversed);
+  });
+
+  test("replays committed handle claims and renames after authentication freshness expires", async () => {
+    // Break caught: a previously completed idempotent handle command is rejected before replay detection solely because time elapsed.
+    const userId = await approvedCreator("expired-replay"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "request-expired-replay-init" });
+    const claim = { actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "expired-replay-claim", requestId: "request-expired-replay-claim", handle: "replay-claim" } as const;
+    const claimResult = await catalog.claimHandle(claim);
+    await expect(service(db, new Date(at.getTime() + 900_001)).claimHandle({ ...claim, actor: actor(userId, new Date(at.getTime() - 900_001)) })).resolves.toEqual(claimResult);
+    await expect(catalog.claimHandle({ ...claim, handle: "other-handle" })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const rename = { actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "expired-replay-rename", requestId: "request-expired-replay-rename", handle: "replay-renamed" } as const;
+    const renameResult = await catalog.renameHandle(rename);
+    await expect(service(db, new Date(at.getTime() + 900_001)).renameHandle({ ...rename, actor: actor(userId, new Date(at.getTime() - 900_001)) })).resolves.toEqual(renameResult);
+    await expect(catalog.renameHandle({ ...rename, handle: "other-renamed" })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  test("reorder keeps a same-time historical removal removed", async () => {
+    // Break caught: reactivation selects every row sharing the injected timestamp, including an already removed showcase.
+    const userId = await approvedCreator("marker"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "request-marker-init" });
+    let version = 1; const ids: string[] = [];
+    for (let position = 0; position < 3; position += 1) {
+      const created = await catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: `marker-create-${position}`, requestId: `request-marker-create-${position}`, showcase: { position, title: `Marker ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } });
+      version = created.draftVersion; ids.push((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases.at(-1)!.id);
+    }
+    const removed = ids[0]!;
+    version = (await catalog.removeShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: "marker-remove", requestId: "request-marker-remove", showcaseId: removed })).draftVersion;
+    await catalog.reorderShowcases({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: "marker-reorder", requestId: "request-marker-reorder", showcaseIds: [ids[2]!, ids[1]!] });
+    const active = await db.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.pageId), isNull(creatorShowcaseDrafts.removedAt)));
+    const [historical] = await db.select().from(creatorShowcaseDrafts).where(eq(creatorShowcaseDrafts.id, removed));
+    expect(active.map((row) => row.id).sort()).toEqual([ids[1]!, ids[2]!].sort());
+    expect(historical?.removedAt).toEqual(at);
   });
 });

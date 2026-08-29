@@ -13,7 +13,7 @@ import {
   type PawketTransaction,
 } from "@pawket/database";
 import { createLookupHmac } from "@pawket/security";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import {
   CatalogPolicyError,
@@ -192,6 +192,7 @@ export function createCatalogService(input: CatalogServiceInput) {
     activeOnly: boolean,
     eventType: string,
     change: (tx: PawketTransaction, page: typeof creatorPages.$inferSelect, at: Date) => Promise<void>,
+    beforeChange?: (at: Date) => void,
   ) {
     policy(validUuid(command.pageId) && validIdempotencyKey(command.idempotencyKey) && validRequestId(command.requestId) && Number.isInteger(command.expectedVersion));
     const at = now();
@@ -209,6 +210,7 @@ export function createCatalogService(input: CatalogServiceInput) {
         return { pageId: replay.pageId, draftVersion: replay.version };
       }
       if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+      beforeChange?.(at);
       if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
       await change(tx, page, at);
       const nextVersion = page.draftVersion + 1;
@@ -244,18 +246,16 @@ export function createCatalogService(input: CatalogServiceInput) {
     },
     async getWorkspace(command: { actorUserId: string; pageId: string }) { return workspace(input.db, command.actorUserId, command.pageId); },
     async claimHandle(command: VersionedCatalogCommand & { handle: unknown }) {
-      const at = now(); assertRecentAuthentication(command.actor, at);
       let handle: string; try { handle = normalizeHandle(command.handle); } catch { fail("POLICY_VIOLATION"); }
       try {
         return await mutate("catalog.handle.claim", command, { pageId: command.pageId, handle }, true, "creator.handle_claimed.v1", async (tx, page, occurredAt) => {
           const current = await tx.select({ id: creatorHandleClaims.id }).from(creatorHandleClaims).where(and(eq(creatorHandleClaims.pageId, page.id), eq(creatorHandleClaims.kind, "canonical"))).limit(1).for("update");
           if (current[0]) fail("HANDLE_UNAVAILABLE");
           await tx.insert(creatorHandleClaims).values({ id: id(), pageId: page.id, normalizedHandle: handle, kind: "canonical", claimedAt: occurredAt, replacedAt: null });
-        });
+        }, (occurredAt) => assertRecentAuthentication(command.actor, occurredAt));
       } catch (error) { if (databaseConstraint(error, "creator_handle_claims_normalized_handle_uidx")) fail("HANDLE_UNAVAILABLE"); throw error; }
     },
     async renameHandle(command: VersionedCatalogCommand & { handle: unknown }) {
-      const at = now(); assertRecentAuthentication(command.actor, at);
       let handle: string; try { handle = normalizeHandle(command.handle); } catch { fail("POLICY_VIOLATION"); }
       try {
         return await mutate("catalog.handle.rename", command, { pageId: command.pageId, handle }, true, "creator.handle_renamed.v1", async (tx, page, occurredAt) => {
@@ -265,7 +265,7 @@ export function createCatalogService(input: CatalogServiceInput) {
           await tx.update(creatorHandleClaims).set({ kind: "alias", replacedAt: occurredAt }).where(eq(creatorHandleClaims.id, current.id));
           await tx.insert(creatorHandleClaims).values({ id: id(), pageId: page.id, normalizedHandle: handle, kind: "canonical", claimedAt: occurredAt, replacedAt: null });
           await tx.update(creatorPages).set({ renameAvailableAt: new Date(occurredAt.getTime() + HANDLE_RENAME_COOLDOWN_MS) }).where(eq(creatorPages.id, page.id));
-        });
+        }, (occurredAt) => assertRecentAuthentication(command.actor, occurredAt));
       } catch (error) { if (databaseConstraint(error, "creator_handle_claims_normalized_handle_uidx")) fail("HANDLE_UNAVAILABLE"); throw error; }
     },
     async saveDraft(command: VersionedCatalogCommand & { draft: DraftInput }) {
@@ -306,13 +306,14 @@ export function createCatalogService(input: CatalogServiceInput) {
         const active = await tx.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position)).for("update");
         if (active.length !== command.showcaseIds.length || !active.every((row) => command.showcaseIds.includes(row.id))) fail("POLICY_VIOLATION");
         if (active.length === 0) return;
-        const deactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: at, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).returning({ id: creatorShowcaseDrafts.id });
+        const activeIds = active.map((row) => row.id);
+        const deactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: at, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), inArray(creatorShowcaseDrafts.id, activeIds), isNull(creatorShowcaseDrafts.removedAt))).returning({ id: creatorShowcaseDrafts.id });
         if (deactivated.length !== active.length) fail("VERSION_CONFLICT");
         for (const [position, showcaseId] of command.showcaseIds.entries()) {
           const updated = await tx.update(creatorShowcaseDrafts).set({ position, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.id, showcaseId), eq(creatorShowcaseDrafts.pageId, page.id), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
           if (updated.length !== 1) fail("VERSION_CONFLICT");
         }
-        const reactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: null, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
+        const reactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: null, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), inArray(creatorShowcaseDrafts.id, activeIds), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
         if (reactivated.length !== active.length) fail("VERSION_CONFLICT");
       });
     },
