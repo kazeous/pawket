@@ -73,6 +73,9 @@ export class CatalogServiceError extends Error {
 function fail(code: CatalogServiceError["code"]): never { throw new CatalogServiceError(code); }
 function policy(condition: unknown): asserts condition { if (!condition) fail("POLICY_VIOLATION"); }
 function validIdempotencyKey(value: string): boolean { return /^[A-Za-z0-9._-]{8,200}$/u.test(value); }
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+function validUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
+function validRequestId(value: string): boolean { return /^[A-Za-z0-9._:-]{1,200}$/u.test(value); }
 function isDiscipline(value: unknown): value is Discipline { return typeof value === "string" && (DISCIPLINES as readonly string[]).includes(value); }
 function databaseConstraint(error: unknown, constraint: string): boolean {
   let current = error;
@@ -96,6 +99,8 @@ function normalizeDraft(input: DraftInput) {
   policy(secondary.every(isDiscipline) && !secondary.includes(input.primaryDiscipline) && new Set(secondary).size === secondary.length);
   policy(input.avatarAssetId === null || typeof input.avatarAssetId === "string");
   policy(input.coverAssetId === null || typeof input.coverAssetId === "string");
+  policy(input.avatarAssetId === null || validUuid(input.avatarAssetId));
+  policy(input.coverAssetId === null || validUuid(input.coverAssetId));
   try {
     return {
       displayName: normalizeProfileText(input.displayName, { minCodePoints: 1, maxCodePoints: 80 }),
@@ -117,7 +122,7 @@ function normalizeShowcase(input: ShowcaseInput) {
   policy(Array.isArray(input.media) && input.media.length <= 4);
   try {
     const media = input.media.map((item) => {
-      policy(typeof item.assetId === "string" && item.assetId.length > 0);
+      policy(validUuid(item.assetId));
       return { assetId: item.assetId, alternativeText: normalizeProfileText(item.alternativeText, { minCodePoints: 1, maxCodePoints: 300 }) };
     });
     return {
@@ -153,6 +158,8 @@ export function createCatalogService(input: CatalogServiceInput) {
   }
 
   async function workspace(database: PawketDatabase | PawketTransaction, userId: string, pageId: string, version?: number) {
+    policy(validUuid(pageId));
+    await requireCreator(database, userId, false);
     const [page] = await database.select().from(creatorPages).where(and(eq(creatorPages.id, pageId), eq(creatorPages.userId, userId))).limit(1);
     if (!page) fail("NOT_FOUND");
     const [draft] = await database.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, page.id)).limit(1);
@@ -172,10 +179,10 @@ export function createCatalogService(input: CatalogServiceInput) {
     };
   }
 
-  async function completeMutation(tx: PawketTransaction, started: { recordId: string }, pageId: string, nextVersion: number, at: Date, eventType: string) {
+  async function completeMutation(tx: PawketTransaction, started: { recordId: string }, pageId: string, nextVersion: number, at: Date, eventType: string, correlationId: string, actorUserId: string) {
     const completed = await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: replayReference(pageId, nextVersion), completedAt: at });
     if (!completed) fail("IDEMPOTENCY_CONFLICT");
-    await insertOutboxEvent(tx, { eventType, eventVersion: 1, aggregateType: "creator_page", aggregateId: pageId, payload: { pageId, version: nextVersion }, occurredAt: at });
+    await insertOutboxEvent(tx, { eventType, eventVersion: 1, aggregateType: "creator_page", aggregateId: pageId, payload: { pageId, version: nextVersion, correlationId, actorUserId }, occurredAt: at });
   }
 
   async function mutate(
@@ -186,7 +193,7 @@ export function createCatalogService(input: CatalogServiceInput) {
     eventType: string,
     change: (tx: PawketTransaction, page: typeof creatorPages.$inferSelect, at: Date) => Promise<void>,
   ) {
-    policy(validIdempotencyKey(command.idempotencyKey) && command.requestId.length > 0 && Number.isInteger(command.expectedVersion));
+    policy(validUuid(command.pageId) && validIdempotencyKey(command.idempotencyKey) && validRequestId(command.requestId) && Number.isInteger(command.expectedVersion));
     const at = now();
     return input.db.transaction(async (tx) => {
       await requireCreator(tx, command.actor.userId, activeOnly);
@@ -199,7 +206,7 @@ export function createCatalogService(input: CatalogServiceInput) {
       });
       if (started.kind === "replay") {
         const replay = parseReplayReference(started.resultReference); if (!replay || replay.pageId !== page.id) fail("IDEMPOTENCY_CONFLICT");
-        return workspace(tx, command.actor.userId, page.id, replay.version);
+        return { pageId: replay.pageId, draftVersion: replay.version };
       }
       if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
       if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
@@ -207,8 +214,8 @@ export function createCatalogService(input: CatalogServiceInput) {
       const nextVersion = page.draftVersion + 1;
       const [updated] = await tx.update(creatorPages).set({ draftVersion: nextVersion, updatedAt: at }).where(and(eq(creatorPages.id, page.id), eq(creatorPages.draftVersion, page.draftVersion))).returning({ id: creatorPages.id });
       if (!updated) fail("VERSION_CONFLICT");
-      await completeMutation(tx, started, page.id, nextVersion, at, eventType);
-      return workspace(tx, command.actor.userId, page.id);
+      await completeMutation(tx, started, page.id, nextVersion, at, eventType, command.requestId, command.actor.userId);
+      return { pageId: page.id, draftVersion: nextVersion };
     });
   }
 
@@ -219,9 +226,10 @@ export function createCatalogService(input: CatalogServiceInput) {
 
   return {
     async initialize(command: { userId: string; requestId: string }) {
-      policy(command.requestId.length > 0);
+      policy(validRequestId(command.requestId));
       const at = now();
       return input.db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`catalog-page:${command.userId}`}, 0))`);
         const existing = await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
         if (existing[0]) return workspace(tx, command.userId, existing[0].id);
         const seed = await requireCreator(tx, command.userId, true);
@@ -230,7 +238,7 @@ export function createCatalogService(input: CatalogServiceInput) {
         const introduction = normalizeProfileText(seed.introduction, { minCodePoints: 1, maxCodePoints: 500 });
         await tx.insert(creatorPages).values({ id: pageId, userId: command.userId, draftVersion: 1, publishedRevisionId: null, renameAvailableAt: null, initializedFromRevisionId: seed.approvedRevisionId, createdAt: at, updatedAt: at });
         await tx.insert(creatorPageDrafts).values({ pageId, displayName, shortIntroduction: introduction, primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null, createdAt: at, updatedAt: at });
-        await insertOutboxEvent(tx, { eventType: "catalog.page.initialized", eventVersion: 1, aggregateType: "creator_page", aggregateId: pageId, payload: { pageId, version: 1 }, occurredAt: at });
+        await insertOutboxEvent(tx, { eventType: "creator.page_initialized.v1", eventVersion: 1, aggregateType: "creator_page", aggregateId: pageId, payload: { pageId, version: 1, correlationId: command.requestId, actorUserId: command.userId }, occurredAt: at });
         return workspace(tx, command.userId, pageId);
       });
     },
@@ -239,7 +247,7 @@ export function createCatalogService(input: CatalogServiceInput) {
       const at = now(); assertRecentAuthentication(command.actor, at);
       let handle: string; try { handle = normalizeHandle(command.handle); } catch { fail("POLICY_VIOLATION"); }
       try {
-        return await mutate("catalog.handle.claim", command, { pageId: command.pageId, handle }, true, "catalog.handle.claimed", async (tx, page, occurredAt) => {
+        return await mutate("catalog.handle.claim", command, { pageId: command.pageId, handle }, true, "creator.handle_claimed.v1", async (tx, page, occurredAt) => {
           const current = await tx.select({ id: creatorHandleClaims.id }).from(creatorHandleClaims).where(and(eq(creatorHandleClaims.pageId, page.id), eq(creatorHandleClaims.kind, "canonical"))).limit(1).for("update");
           if (current[0]) fail("HANDLE_UNAVAILABLE");
           await tx.insert(creatorHandleClaims).values({ id: id(), pageId: page.id, normalizedHandle: handle, kind: "canonical", claimedAt: occurredAt, replacedAt: null });
@@ -250,7 +258,7 @@ export function createCatalogService(input: CatalogServiceInput) {
       const at = now(); assertRecentAuthentication(command.actor, at);
       let handle: string; try { handle = normalizeHandle(command.handle); } catch { fail("POLICY_VIOLATION"); }
       try {
-        return await mutate("catalog.handle.rename", command, { pageId: command.pageId, handle }, true, "catalog.handle.renamed", async (tx, page, occurredAt) => {
+        return await mutate("catalog.handle.rename", command, { pageId: command.pageId, handle }, true, "creator.handle_renamed.v1", async (tx, page, occurredAt) => {
           if (page.renameAvailableAt && page.renameAvailableAt > occurredAt) fail("RENAME_COOLDOWN");
           const [current] = await tx.select().from(creatorHandleClaims).where(and(eq(creatorHandleClaims.pageId, page.id), eq(creatorHandleClaims.kind, "canonical"))).limit(1).for("update");
           if (!current || current.normalizedHandle === handle) fail("HANDLE_UNAVAILABLE");
@@ -262,13 +270,15 @@ export function createCatalogService(input: CatalogServiceInput) {
     },
     async saveDraft(command: VersionedCatalogCommand & { draft: DraftInput }) {
       const draft = normalizeDraft(command.draft);
-      return mutate("catalog.page.save", command, { pageId: command.pageId, draft }, false, "catalog.page.draft_saved", async (tx, page, at) => {
-        await tx.update(creatorPageDrafts).set({ displayName: draft.displayName, shortIntroduction: draft.introduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId, updatedAt: at }).where(eq(creatorPageDrafts.pageId, page.id));
+      return mutate("catalog.page.save", command, { pageId: command.pageId, draft }, false, "creator.page_draft_saved.v1", async (tx, page, at) => {
+        const updated = await tx.update(creatorPageDrafts).set({ displayName: draft.displayName, shortIntroduction: draft.introduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId, updatedAt: at }).where(eq(creatorPageDrafts.pageId, page.id)).returning({ pageId: creatorPageDrafts.pageId });
+        if (updated.length !== 1) fail("NOT_FOUND");
       });
     },
     async upsertShowcase(command: VersionedCatalogCommand & { showcase: ShowcaseInput }) {
       const showcase = normalizeShowcase(command.showcase);
-      return mutate("catalog.showcase.upsert", command, { pageId: command.pageId, showcase }, false, "catalog.showcase.upserted", async (tx, page, at) => {
+      if (showcase.id !== undefined) policy(validUuid(showcase.id));
+      return mutate("catalog.showcase.upsert", command, { pageId: command.pageId, showcase }, false, "creator.showcase_upserted.v1", async (tx, page, at) => {
         const [occupied] = await tx.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), eq(creatorShowcaseDrafts.position, showcase.position), isNull(creatorShowcaseDrafts.removedAt))).limit(1).for("update");
         if (occupied && occupied.id !== showcase.id) fail("POLICY_VIOLATION");
         const showcaseId = showcase.id ?? id();
@@ -284,18 +294,26 @@ export function createCatalogService(input: CatalogServiceInput) {
       });
     },
     async removeShowcase(command: VersionedCatalogCommand & { showcaseId: string }) {
-      return mutate("catalog.showcase.remove", command, { pageId: command.pageId, showcaseId: command.showcaseId }, false, "catalog.showcase.removed", async (tx, page, at) => {
+      policy(validUuid(command.showcaseId));
+      return mutate("catalog.showcase.remove", command, { pageId: command.pageId, showcaseId: command.showcaseId }, false, "creator.showcase_removed.v1", async (tx, page, at) => {
         const [removed] = await tx.update(creatorShowcaseDrafts).set({ removedAt: at, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.id, command.showcaseId), eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).returning({ id: creatorShowcaseDrafts.id });
         if (!removed) fail("NOT_FOUND");
       });
     },
     async reorderShowcases(command: VersionedCatalogCommand & { showcaseIds: readonly string[] }) {
-      policy(command.showcaseIds.length <= 12 && new Set(command.showcaseIds).size === command.showcaseIds.length);
-      return mutate("catalog.showcase.reorder", command, { pageId: command.pageId, showcaseIds: command.showcaseIds }, false, "catalog.showcase.reordered", async (tx, page, at) => {
+      policy(command.showcaseIds.length <= 12 && new Set(command.showcaseIds).size === command.showcaseIds.length && command.showcaseIds.every(validUuid));
+      return mutate("catalog.showcase.reorder", command, { pageId: command.pageId, showcaseIds: command.showcaseIds }, false, "creator.showcase_reordered.v1", async (tx, page, at) => {
         const active = await tx.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position)).for("update");
         if (active.length !== command.showcaseIds.length || !active.every((row) => command.showcaseIds.includes(row.id))) fail("POLICY_VIOLATION");
-        const cases = command.showcaseIds.map((showcaseId, position) => sql`when ${creatorShowcaseDrafts.id} = ${showcaseId} then ${position}`);
-        await tx.update(creatorShowcaseDrafts).set({ position: sql`case ${sql.join(cases, sql` `)} end`, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt)));
+        if (active.length === 0) return;
+        const deactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: at, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).returning({ id: creatorShowcaseDrafts.id });
+        if (deactivated.length !== active.length) fail("VERSION_CONFLICT");
+        for (const [position, showcaseId] of command.showcaseIds.entries()) {
+          const updated = await tx.update(creatorShowcaseDrafts).set({ position, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.id, showcaseId), eq(creatorShowcaseDrafts.pageId, page.id), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
+          if (updated.length !== 1) fail("VERSION_CONFLICT");
+        }
+        const reactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: null, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
+        if (reactivated.length !== active.length) fail("VERSION_CONFLICT");
       });
     },
   };

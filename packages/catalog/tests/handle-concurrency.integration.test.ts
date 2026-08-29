@@ -59,9 +59,10 @@ describe("catalog handle lifecycle", () => {
     const userId = await approvedCreator("rename"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "request-handle-initialize" });
     await catalog.claimHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "claim-key-0001", requestId: "request-claim-one", handle: "artist-one" });
     const renamed = await catalog.renameHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "rename-key-0001", requestId: "request-rename-one", handle: "artist-two" });
-    expect(renamed.canonicalHandle).toBe("artist-two"); expect(renamed.aliases).toContain("artist-one");
-    if (!renamed.renameAvailableAt) throw new Error("Expected rename cooldown");
-    expect(renamed.renameAvailableAt.toISOString()).toBe("2026-09-28T03:00:00.000Z");
+    const renamedWorkspace = await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId });
+    expect(renamedWorkspace.canonicalHandle).toBe("artist-two"); expect(renamedWorkspace.aliases).toContain("artist-one");
+    if (!renamedWorkspace.renameAvailableAt) throw new Error("Expected rename cooldown");
+    expect(renamedWorkspace.renameAvailableAt.toISOString()).toBe("2026-09-28T03:00:00.000Z");
     await expect(catalog.renameHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: renamed.draftVersion, idempotencyKey: "rename-key-0002", requestId: "request-rename-two", handle: "artist-three" })).rejects.toMatchObject({ code: "RENAME_COOLDOWN" });
     expect(HANDLE_RENAME_COOLDOWN_MS).toBe(2_592_000_000);
   });
@@ -79,5 +80,21 @@ describe("catalog handle lifecycle", () => {
     const rejected = outcomes.find((outcome) => outcome.status === "rejected");
     expect(rejected).toMatchObject({ reason: { code: "HANDLE_UNAVAILABLE" } });
     expect(JSON.stringify(rejected)).not.toContain(firstUserId); expect(JSON.stringify(rejected)).not.toContain(secondUserId);
+  });
+
+  test("serializes concurrent first initialization and reorders a complete reverse safely", async () => {
+    // Break caught: concurrent initialization leaks a unique violation or an ordinary position swap trips the partial unique index.
+    const userId = await approvedCreator("init-race"); const catalog = service();
+    const initialized = await Promise.all([catalog.initialize({ userId, requestId: "request-init-race-one" }), service().initialize({ userId, requestId: "request-init-race-two" })]);
+    expect(new Set(initialized.map((item) => item.pageId)).size).toBe(1);
+    const pageId = initialized[0]!.pageId;
+    let version = 1; const ids: string[] = [];
+    for (let position = 0; position < 12; position += 1) {
+      const result = await catalog.upsertShowcase({ actor: actor(userId), pageId, expectedVersion: version, idempotencyKey: `reverse-key-${position.toString().padStart(4, "0")}`, requestId: `request-reverse-${position}`, showcase: { position, title: `Showcase ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } });
+      version = result.draftVersion; ids.push((await catalog.getWorkspace({ actorUserId: userId, pageId })).showcases.at(-1)!.id);
+    }
+    const reversed = [...ids].reverse();
+    await expect(catalog.reorderShowcases({ actor: actor(userId), pageId, expectedVersion: version, idempotencyKey: "reverse-key-final", requestId: "request-reverse-final", showcaseIds: reversed })).resolves.toEqual({ pageId, draftVersion: version + 1 });
+    expect((await catalog.getWorkspace({ actorUserId: userId, pageId })).showcases.map((showcase) => showcase.id)).toEqual(reversed);
   });
 });
