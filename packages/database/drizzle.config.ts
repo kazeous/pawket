@@ -9,6 +9,7 @@ export default defineConfig({
     "./src/schema/identity-core.ts",
     "./src/schema/creator-applications.ts",
     "./src/schema/creator-catalog.ts",
+    "./src/schema/public-media.ts",
     "./src/schema/payments.ts",
   ],
 });

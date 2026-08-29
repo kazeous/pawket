@@ -27,6 +27,12 @@ export {
   creatorShowcaseDrafts,
 } from "./creator-catalog.js";
 export {
+  publicMediaAssets,
+  publicMediaDerivatives,
+  publicMediaProcessingAttempts,
+  publicMediaUploadIntents,
+} from "./public-media.js";
+export {
   paymentsReceivingAccountOnboarding,
   paymentsUnmatchedDeposits,
   paymentsVerificationDepositChallenges,

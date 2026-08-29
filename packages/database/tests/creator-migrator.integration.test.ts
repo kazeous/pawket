@@ -39,6 +39,10 @@ async function expectCreatorHead(
     applications: string | null;
     catalogPages: string | null;
     catalogRevisions: string | null;
+    mediaAssets: string | null;
+    mediaIntents: string | null;
+    mediaDerivatives: string | null;
+    mediaAttempts: string | null;
     revisions: string | null;
     attestations: string | null;
     decisions: string | null;
@@ -48,6 +52,10 @@ async function expectCreatorHead(
       to_regclass('creator_applications')::text as applications,
       to_regclass('creator_pages')::text as "catalogPages",
       to_regclass('creator_publication_revisions')::text as "catalogRevisions",
+      to_regclass('public_media_assets')::text as "mediaAssets",
+      to_regclass('public_media_upload_intents')::text as "mediaIntents",
+      to_regclass('public_media_derivatives')::text as "mediaDerivatives",
+      to_regclass('public_media_processing_attempts')::text as "mediaAttempts",
       to_regclass('creator_application_revisions')::text as revisions,
       to_regclass('creator_application_attestations')::text as attestations,
       to_regclass('creator_application_decisions')::text as decisions,
@@ -57,6 +65,10 @@ async function expectCreatorHead(
     applications: "creator_applications",
     catalogPages: "creator_pages",
     catalogRevisions: "creator_publication_revisions",
+    mediaAssets: "public_media_assets",
+    mediaIntents: "public_media_upload_intents",
+    mediaDerivatives: "public_media_derivatives",
+    mediaAttempts: "public_media_processing_attempts",
     revisions: "creator_application_revisions",
     attestations: "creator_application_attestations",
     decisions: "creator_application_decisions",
@@ -185,7 +197,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(21);
+  expect(journal?.count).toBe(22);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -278,10 +290,38 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(21);
+      expect(after?.count).toBe(22);
     } finally {
       await client.end();
       await rm(through0019, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 20 to public media index 21", async () => {
+    // Break caught: the media migration exists on disk but is skipped after a deployed catalog head.
+    const { client, journalSchema } = await createIsolatedClient("media-upgrade");
+    const through0020 = await createMigrationsThrough(20);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0020, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(21);
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass('public_media_assets')::text as name`,
+      ).resolves.toEqual([{ name: null }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass('public_media_assets')::text as name`,
+      ).resolves.toEqual([{ name: "public_media_assets" }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(22);
+    } finally {
+      await client.end();
+      await rm(through0020, { recursive: true, force: true });
     }
   });
 
