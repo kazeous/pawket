@@ -19,6 +19,7 @@ import {
 } from "@pawket/database";
 import {
   CONTENT_POLICY_VERSION,
+  CatalogServiceError,
   TAXONOMY_VERSION,
   createCatalogService,
   createPublicCatalogQuery,
@@ -52,16 +53,20 @@ function harness(input: {
   pageHeld?: boolean;
   heldShowcaseIds?: ReadonlySet<string>;
   mutateMedia?: (media: ReadyMedia, reference: MediaReference) => ReadyMedia | null;
+  malformedMediaResult?: boolean;
 } = {}) {
   let capabilityState = input.capabilityState === undefined ? "active" : input.capabilityState;
+  let seedInterceptor: (() => Promise<void>) | null = null;
   let failVisibility = false;
   const media = new Map<string, ReadyMedia>();
   const creatorSeeds = {
     async getCreatorSeed(_database: unknown, userId: string): Promise<CreatorSeed | null> {
-      if (capabilityState === null) return null;
+      const stateAtRead = capabilityState;
+      if (stateAtRead === null) return null;
+      await seedInterceptor?.();
       return {
         userId,
-        capabilityState,
+        capabilityState: stateAtRead,
         capabilityVersion: 7,
         approvedRevisionId: randomUUID(),
         displayName: "Approved Artist",
@@ -70,14 +75,14 @@ function harness(input: {
     },
   };
   const mediaCatalog = {
-    async resolveReadyAssets(_database: unknown, ownerUserId: string, references: readonly MediaReference[]) {
+    async resolveReadyAssets(_database: unknown, _ownerUserId: string, references: readonly MediaReference[]) {
       const resolved = new Map<string, ReadyMedia>();
       for (const reference of references) {
         const found = media.get(reference.assetId);
         const value = found ? (input.mutateMedia?.(found, reference) ?? found) : null;
-        if (value && value.ownerUserId === ownerUserId) resolved.set(reference.assetId, value);
+        if (value) resolved.set(reference.assetId, value);
       }
-      return resolved;
+      return input.malformedMediaResult ? ({} as ReadonlyMap<string, ReadyMedia>) : resolved;
     },
   };
   const visibility = {
@@ -115,6 +120,7 @@ function harness(input: {
     query,
     media,
     setCapability(value: CreatorSeed["capabilityState"] | null) { capabilityState = value; },
+    setSeedInterceptor(value: (() => Promise<void>) | null) { seedInterceptor = value; },
     failVisibility() { failVisibility = true; },
   };
 }
@@ -224,6 +230,21 @@ async function authoritativePublication(pageId: string, userId: string) {
   return { pages, projections, revisions, showcases, media, events, outbox, idempotency };
 }
 
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try { await promise; } catch (error) { return error; }
+  throw new Error("Expected rejection");
+}
+
+function postgresErrorCode(error: unknown): string | null {
+  let current = error;
+  while (current && typeof current === "object") {
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string") return candidate.code;
+    current = candidate.cause;
+  }
+  return null;
+}
+
 beforeAll(async () => {
   const root = createDatabase(databaseUrl);
   await root.db.execute(sql.raw(`create schema "${schemaName}"`));
@@ -298,6 +319,17 @@ describe("creator publication", () => {
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
   });
 
+  test("publish fails closed for a held showcase without authoritative side effects", async () => {
+    const heldShowcaseIds = new Set<string>();
+    const testHarness = harness({ heldShowcaseIds });
+    const page = await preparedPage(testHarness, `held-child-${randomUUID().slice(0, 6)}`);
+    const workspace = await testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId });
+    heldShowcaseIds.add(workspace.showcases[0]!.id);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    await expect(testHarness.service.publish(publishCommand(page, "held-showcase"))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
   test("publish and unpublish replay exact immutable outcomes and preserve revision history", async () => {
     // Break caught: replay creates another revision/event or unpublish deletes immutable children/media.
     const testHarness = harness();
@@ -334,6 +366,29 @@ describe("creator publication", () => {
     expect(JSON.stringify(publicationEvents)).not.toMatch(/session|displayName|introduction|asset|storage|application/i);
   });
 
+  test("replays original publish and unpublish outcomes after intervening draft and publication writes", async () => {
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `late-replay-${randomUUID().slice(0, 6)}`);
+    const publishOne = publishCommand(page, "late-replay-one");
+    const first = await testHarness.service.publish(publishOne);
+    const changed = await testHarness.service.saveDraft({
+      actor: actor(page.userId), pageId: page.pageId, expectedVersion: page.version,
+      idempotencyKey: `late-replay-draft-${page.pageId}`, requestId: "request-late-replay-draft",
+      draft: { displayName: "Later private draft", introduction: "Later", primaryDiscipline: "drawing", secondaryDisciplines: [], avatarAssetId: page.avatar.assetId, coverAssetId: page.cover.assetId },
+    });
+    const beforePublishReplay = await authoritativePublication(page.pageId, page.userId);
+    expect(await testHarness.service.publish(publishOne)).toEqual(first);
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(beforePublishReplay);
+    const unpublishOne = { actor: actor(page.userId), pageId: page.pageId, expectedVersion: changed.draftVersion, idempotencyKey: `late-unpublish-${page.pageId}`, requestId: "request-late-unpublish" };
+    const unpublished = await testHarness.service.unpublish(unpublishOne);
+    const second = await testHarness.service.publish({ ...publishCommand(page, "late-replay-two"), expectedVersion: changed.draftVersion });
+    const beforeUnpublishReplay = await authoritativePublication(page.pageId, page.userId);
+    expect(await testHarness.service.unpublish(unpublishOne)).toEqual(unpublished);
+    const after = await authoritativePublication(page.pageId, page.userId);
+    expect(after).toEqual(beforeUnpublishReplay);
+    expect(after.pages[0]?.publishedRevisionId).toBe(second.revisionId);
+  });
+
   test("rolls back head, projection, event, outbox, and idempotency when outbox insertion fails", async () => {
     // Break caught: a post-head outbox failure leaves a partially published aggregate.
     const testHarness = harness();
@@ -345,6 +400,24 @@ describe("creator publication", () => {
     try {
       await db.execute(sql.raw(`create trigger "${triggerName}" before insert on "system_outbox" for each row execute function "${functionName}"()`));
       await expect(testHarness.service.publish(publishCommand(page, "rollback"))).rejects.toThrow();
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists "${triggerName}" on "system_outbox"`));
+      await db.execute(sql.raw(`drop function if exists "${functionName}"()`));
+    }
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test("rolls back unpublish head, projection, event, outbox, and idempotency on a late outbox failure", async () => {
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `unpubrb-${randomUUID().slice(0, 5)}`);
+    await testHarness.service.publish(publishCommand(page, "unpublish-rollback"));
+    const before = await authoritativePublication(page.pageId, page.userId);
+    const functionName = `fail_catalog_unpublish_${randomUUID().replaceAll("-", "")}`;
+    const triggerName = `${functionName}_trigger`;
+    await db.execute(sql.raw(`create function "${functionName}"() returns trigger language plpgsql as $$ begin if new.event_type = 'creator.page_unpublished.v1' then raise exception 'injected late unpublish failure' using errcode = '55000'; end if; return new; end; $$`));
+    try {
+      await db.execute(sql.raw(`create trigger "${triggerName}" before insert on "system_outbox" for each row execute function "${functionName}"()`));
+      await expect(testHarness.service.unpublish({ actor: actor(page.userId), pageId: page.pageId, expectedVersion: page.version, idempotencyKey: `unpublish-rollback-${page.pageId}`, requestId: "request-unpublish-rollback" })).rejects.toThrow();
     } finally {
       await db.execute(sql.raw(`drop trigger if exists "${triggerName}" on "system_outbox"`));
       await db.execute(sql.raw(`drop function if exists "${functionName}"()`));
@@ -420,6 +493,71 @@ describe("creator publication", () => {
       await db.execute(sql.raw(`drop trigger if exists "${triggerName}" on "system_outbox"`));
       await db.execute(sql.raw(`drop function if exists "${functionName}"()`));
     }
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test("serializes publish before capability read against suspension clearing", async () => {
+    // Break caught: publish snapshots active capability before taking the page lock, then republishes after suspension clears.
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `race-${randomUUID().slice(0, 8)}`);
+    let releaseSeed!: () => void;
+    let signalSeedRead!: () => void;
+    const seedRead = new Promise<void>((resolve) => { signalSeedRead = resolve; });
+    const seedRelease = new Promise<void>((resolve) => { releaseSeed = resolve; });
+    testHarness.setSeedInterceptor(async () => { signalSeedRead(); await seedRelease; });
+    const publishPromise = testHarness.service.publish(publishCommand(page, "suspension-race"));
+    await seedRead;
+
+    let pageWasLockedBeforeCapabilityRead = false;
+    try {
+      await db.transaction((tx) => tx.execute(sql`select id from creator_pages where id = ${page.pageId} for update nowait`));
+    } catch (error) {
+      pageWasLockedBeforeCapabilityRead = postgresErrorCode(error) === "55P03";
+    }
+
+    let signalSuspensionStarted!: () => void;
+    const suspensionStarted = new Promise<void>((resolve) => { signalSuspensionStarted = resolve; });
+    testHarness.setCapability("suspended");
+    const suspensionPromise = db.transaction(async (tx) => {
+      signalSuspensionStarted();
+      return testHarness.service.clearPublishedHeadForSuspension(tx, {
+        creatorUserId: page.userId, actorUserId: page.userId, actorSessionId: "owner-session",
+        reasonCode: "creator_capability_suspended", requestId: "request-race-suspension", occurredAt: at,
+      });
+    });
+    await suspensionStarted;
+    if (!pageWasLockedBeforeCapabilityRead) await suspensionPromise;
+    releaseSeed();
+    await publishPromise;
+    if (pageWasLockedBeforeCapabilityRead) await suspensionPromise;
+    testHarness.setSeedInterceptor(null);
+    testHarness.setCapability("active");
+
+    expect(pageWasLockedBeforeCapabilityRead).toBe(true);
+    expect((await authoritativePublication(page.pageId, page.userId)).pages[0]?.publishedRevisionId).toBeNull();
+    expect(await testHarness.query.resolvePublicCreator(page.handle!)).toEqual({ kind: "not_found" });
+  });
+
+  test.each(["missing_derivatives", "extra_variant", "malformed_derivative"] as const)("rejects malformed MediaCatalogPort result %s without TypeError or state drift", async (scenario) => {
+    // Break caught: malformed provider output is dereferenced before the consumer validates its exact structural boundary.
+    const testHarness = harness({ mutateMedia(item) {
+      if (scenario === "missing_derivatives") return { ...item, derivatives: undefined } as unknown as ReadyMedia;
+      if (scenario === "extra_variant") return { ...item, derivatives: { ...item.derivatives, master: item.derivatives.large } } as unknown as ReadyMedia;
+      return { ...item, derivatives: { ...item.derivatives, thumb: { ...item.derivatives.thumb, width: 1.5 } } } as ReadyMedia;
+    } });
+    const page = await preparedPage(testHarness, `badmedia-${randomUUID().slice(0, 6)}`);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    const error = await rejectionOf(testHarness.service.publish(publishCommand(page, scenario)));
+    expect(error).toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(error).toBeInstanceOf(CatalogServiceError);
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test("rejects a non-map MediaCatalogPort result without TypeError or state drift", async () => {
+    const testHarness = harness({ malformedMediaResult: true });
+    const page = await preparedPage(testHarness, `badmap-${randomUUID().slice(0, 6)}`);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    await expect(testHarness.service.publish(publishCommand(page, "bad-map"))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
   });
 

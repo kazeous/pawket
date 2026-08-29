@@ -152,11 +152,25 @@ function parseUnpublicationReplayReference(value: string): UnpublishResult | nul
 }
 
 function assertReadyReference(reference: MediaReference, resolved: ReadyMedia | undefined, ownerUserId: string): ReadyMedia {
-  if (!resolved || resolved.assetId !== reference.assetId || resolved.ownerUserId !== ownerUserId || resolved.purpose !== reference.purpose) fail("POLICY_VIOLATION");
-  for (const derivative of Object.values(resolved.derivatives)) {
-    if (!validUuid(derivative.derivativeId) || !Number.isInteger(derivative.width) || derivative.width <= 0 || !Number.isInteger(derivative.height) || derivative.height <= 0) fail("POLICY_VIOLATION");
+  if (!resolved || typeof resolved !== "object" || resolved.assetId !== reference.assetId || resolved.ownerUserId !== ownerUserId || resolved.purpose !== reference.purpose) fail("POLICY_VIOLATION");
+  const derivatives: unknown = resolved.derivatives;
+  if (!derivatives || typeof derivatives !== "object" || Array.isArray(derivatives) || Object.keys(derivatives).sort().join(",") !== "display,large,thumb") fail("POLICY_VIOLATION");
+  for (const derivative of Object.values(derivatives)) {
+    if (!derivative || typeof derivative !== "object") fail("POLICY_VIOLATION");
+    const candidate = derivative as { derivativeId?: unknown; width?: unknown; height?: unknown };
+    if (!validUuid(candidate.derivativeId) || !Number.isInteger(candidate.width) || (candidate.width as number) <= 0 || !Number.isInteger(candidate.height) || (candidate.height as number) <= 0) fail("POLICY_VIOLATION");
   }
   return resolved;
+}
+
+function readyReferenceFromResult(reference: MediaReference, resolved: unknown, ownerUserId: string): ReadyMedia {
+  if (!resolved || typeof resolved !== "object" || typeof (resolved as { get?: unknown }).get !== "function") fail("POLICY_VIOLATION");
+  try {
+    return assertReadyReference(reference, (resolved as ReadonlyMap<string, ReadyMedia>).get(reference.assetId), ownerUserId);
+  } catch (error) {
+    if (error instanceof CatalogServiceError) throw error;
+    fail("POLICY_VIOLATION");
+  }
 }
 
 function normalizeDraft(input: DraftInput) {
@@ -404,8 +418,8 @@ export function createCatalogService(input: CatalogServiceInput) {
       assertPublicationCommand(command);
       const occurredAt = now();
       return input.db.transaction(async (tx) => {
-        await requireCreator(tx, command.actor.userId, true);
         const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
+        await requireCreator(tx, command.actor.userId, true);
         const started = await beginIdempotentCommand(tx, {
           actorUserId: command.actor.userId,
           commandScope: "catalog.page.publish",
@@ -460,7 +474,7 @@ export function createCatalogService(input: CatalogServiceInput) {
         if (normalizedDraft.coverAssetId) references.push({ assetId: normalizedDraft.coverAssetId, purpose: "cover", altText: null });
         for (const showcase of normalizedShowcases) for (const item of showcase.media) references.push({ assetId: item.assetId, purpose: "showcase", altText: item.alternativeText });
         const resolved = await input.mediaCatalog.resolveReadyAssets(tx, command.actor.userId, references);
-        const resolvedByReference = new Map(references.map((reference) => [reference.assetId, assertReadyReference(reference, resolved.get(reference.assetId), command.actor.userId)]));
+        const resolvedByReference = new Map(references.map((reference) => [reference.assetId, readyReferenceFromResult(reference, resolved, command.actor.userId)]));
         const avatar = normalizedDraft.avatarAssetId ? resolvedByReference.get(normalizedDraft.avatarAssetId) : undefined;
         const cover = normalizedDraft.coverAssetId ? resolvedByReference.get(normalizedDraft.coverAssetId) : undefined;
         const maximumRevision = (await tx.select({ maximumRevision: max(creatorPublicationRevisions.revisionNumber) }).from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.pageId, page.id)))[0]?.maximumRevision;

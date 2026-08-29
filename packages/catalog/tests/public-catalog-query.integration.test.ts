@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
   createDatabase,
+  creatorDiscoveryProjections,
   creatorHandleClaims,
   creatorPages,
   identityUsers,
@@ -39,6 +40,7 @@ const media = new Map<string, ReadyMedia>();
 let pageHoldIds = new Set<string>();
 let showcaseHoldIds = new Set<string>();
 let publishingMode: "disabled" | "general_audience" = "general_audience";
+let mediaResolveCalls = 0;
 
 const creatorSeeds = {
   async getCreatorSeed(_database: unknown, userId: string): Promise<CreatorSeed | null> {
@@ -49,6 +51,7 @@ const creatorSeeds = {
 };
 const mediaCatalog = {
   async resolveReadyAssets(_database: unknown, ownerUserId: string, references: readonly MediaReference[]) {
+    mediaResolveCalls += 1;
     return new Map(references.flatMap((reference) => {
       const asset = media.get(reference.assetId);
       return asset?.ownerUserId === ownerUserId && asset.purpose === reference.purpose ? [[asset.assetId, asset] as const] : [];
@@ -93,13 +96,16 @@ async function publishCreator(handle: string, options: { discipline?: "illustrat
   const initialized = await service.initialize({ userId, requestId: `initialize-${handle}` });
   let version = (await service.claimHandle({ actor: actor(userId), pageId: initialized.pageId, expectedVersion: 1, idempotencyKey: `claim-${handle}`, requestId: `claim-${handle}`, handle })).draftVersion;
   const avatar = readyMedia(userId, "avatar"); media.set(avatar.assetId, avatar);
+  const cover = readyMedia(userId, "cover"); media.set(cover.assetId, cover);
   version = (await service.saveDraft({
     actor: actor(userId), pageId: initialized.pageId, expectedVersion: version, idempotencyKey: `draft-${handle}`, requestId: `draft-${handle}`,
-    draft: { displayName: `Creator ${handle}`, introduction: `Introduction for ${handle}`, primaryDiscipline: options.discipline ?? "illustration", secondaryDisciplines: [], avatarAssetId: avatar.assetId, coverAssetId: null },
+    draft: { displayName: `Creator ${handle}`, introduction: `Introduction for ${handle}`, primaryDiscipline: options.discipline ?? "illustration", secondaryDisciplines: [], avatarAssetId: avatar.assetId, coverAssetId: cover.assetId },
   })).draftVersion;
   const showcaseIds: string[] = [];
+  const showcaseAssets: ReadyMedia[] = [];
   for (let position = 0; position < (options.showcases ?? 1); position += 1) {
     const asset = readyMedia(userId, "showcase"); media.set(asset.assetId, asset);
+    showcaseAssets.push(asset);
     version = (await service.upsertShowcase({
       actor: actor(userId), pageId: initialized.pageId, expectedVersion: version, idempotencyKey: `showcase-${handle}-${position}`, requestId: `showcase-${handle}-${position}`,
       showcase: { position, title: `${handle} work ${position}`, description: "Public work", discipline: options.discipline ?? "illustration", contentLabel: "general_audience", externalUrl: null, media: [{ assetId: asset.assetId, alternativeText: `${handle} image ${position}` }] },
@@ -108,7 +114,7 @@ async function publishCreator(handle: string, options: { discipline?: "illustrat
     showcaseIds.push(workspace.showcases[position]!.id);
   }
   const published = await service.publish({ actor: actor(userId), pageId: initialized.pageId, expectedVersion: version, idempotencyKey: `publish-${handle}`, requestId: `publish-${handle}` });
-  return { userId, pageId: initialized.pageId, revisionId: published.revisionId, showcaseIds, avatar, version };
+  return { userId, pageId: initialized.pageId, revisionId: published.revisionId, showcaseIds, showcaseAssets, avatar, cover, version };
 }
 
 beforeAll(async () => {
@@ -200,6 +206,22 @@ describe("effective public catalog query", () => {
     await expect(query.listPublicCreators({ discipline: "illustration", handlePrefix: prefix, cursor: "not-a-cursor", limit: 24 })).rejects.toMatchObject({ code: "INVALID_CURSOR" });
   });
 
+  test("directory keyset batches past more than one full hidden candidate batch without duplicates", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const prefix = `batch${randomUUID().slice(0, 4)}`;
+    for (let index = 0; index < 51; index += 1) {
+      const hidden = await publishCreator(`${prefix}-${index.toString().padStart(3, "0")}`, { showcases: 0 });
+      pageHoldIds.add(hidden.pageId);
+    }
+    for (let index = 51; index < 77; index += 1) await publishCreator(`${prefix}-${index.toString().padStart(3, "0")}`, { showcases: 0 });
+    const { query } = composition();
+    const first = await query.listPublicCreators({ discipline: null, handlePrefix: prefix, cursor: null, limit: 24 });
+    const second = await query.listPublicCreators({ discipline: null, handlePrefix: prefix, cursor: first.nextCursor, limit: 24 });
+    expect(first.items).toHaveLength(24);
+    expect(second.items).toHaveLength(2);
+    expect(new Set([...first.items, ...second.items].map((item) => item.pageId)).size).toBe(26);
+  }, 20_000);
+
   test("sitemap and structural authorization adapters share effective visibility", async () => {
     // Break caught: sitemap/media/report adapters bypass the same visibility policy or disclose a stale revision target.
     pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
@@ -209,15 +231,96 @@ describe("effective public catalog query", () => {
     const sitemap = await query.listSitemapCreators();
     expect(sitemap).toContain(handle);
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(true);
-    expect(await query.isDerivativePreviewable(db, creator.userId, creator.avatar.assetId, "thumb")).toBe(true);
-    expect(await query.isDerivativePreviewable(db, creator.userId, creator.avatar.assetId, "large")).toBe(false);
+    for (const asset of [creator.avatar, creator.cover, creator.showcaseAssets[0]!]) {
+      for (const variant of ["thumb", "display", "large"] as const) expect(await query.isDerivativePreviewable(db, creator.userId, asset.assetId, variant)).toBe(true);
+    }
+    expect(await query.isDerivativePublic(db, creator.avatar.assetId, "display")).toBe(true);
+    expect(await query.isDerivativePublic(db, creator.avatar.assetId, "large")).toBe(false);
+    expect(await query.isDerivativePublic(db, creator.cover.assetId, "thumb")).toBe(false);
+    expect(await query.isDerivativePublic(db, creator.cover.assetId, "display")).toBe(true);
+    expect(await query.isDerivativePublic(db, creator.cover.assetId, "large")).toBe(false);
+    for (const variant of ["thumb", "display", "large"] as const) expect(await query.isDerivativePublic(db, creator.showcaseAssets[0]!.assetId, variant)).toBe(true);
     expect(await query.isDerivativePreviewable(db, `foreign-${randomUUID()}`, creator.avatar.assetId, "thumb")).toBe(false);
+    expect(await query.isDerivativePreviewable(db, creator.userId, randomUUID(), "thumb")).toBe(false);
+    expect(await query.isDerivativePreviewable(db, creator.userId, "malformed", "thumb")).toBe(false);
     const pageTarget = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
-    expect(await query.resolveVisibleReportTarget(db, pageTarget)).toMatchObject({ target: pageTarget, pageId: creator.pageId, mediaAssetIds: expect.arrayContaining([creator.avatar.assetId]) });
-    expect(await query.readRevisionTarget(db, pageTarget)).toMatchObject({ target: pageTarget, pageId: creator.pageId, mediaAssetIds: expect.arrayContaining([creator.avatar.assetId]) });
+    const exactPageTarget = { target: pageTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: null, mediaAssetIds: [creator.avatar.assetId, creator.cover.assetId, creator.showcaseAssets[0]!.assetId] };
+    expect(await query.resolveVisibleReportTarget(db, pageTarget)).toEqual(exactPageTarget);
+    expect(await query.readRevisionTarget(db, pageTarget)).toEqual(exactPageTarget);
+    const showcaseTarget = { targetType: "showcase", targetId: creator.showcaseIds[0]!, publicationRevisionId: creator.revisionId } as const;
+    expect(await query.resolveVisibleReportTarget(db, showcaseTarget)).toEqual({ target: showcaseTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: `${handle} work 0`, mediaAssetIds: [creator.showcaseAssets[0]!.assetId] });
+    expect(await query.resolveVisibleReportTarget(db, { ...showcaseTarget, targetId: randomUUID() })).toBeNull();
+    expect(await query.readRevisionTarget(db, { ...showcaseTarget, publicationRevisionId: randomUUID() })).toBeNull();
     pageHoldIds.add(creator.pageId);
     expect(await query.listSitemapCreators()).not.toContain(handle);
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(false);
     expect(await query.resolveVisibleReportTarget(db, pageTarget)).toBeNull();
+  });
+
+  test("an unknown derivative is rejected by targeted joins without resolving or scanning catalog media", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    await publishCreator(`targeted-${randomUUID().slice(0, 5)}`);
+    mediaResolveCalls = 0;
+    expect(await composition().query.isDerivativePublic(db, randomUUID(), "display")).toBe(false);
+    expect(mediaResolveCalls).toBe(0);
+  });
+
+  test("visible moderation targets exclude held showcases while historical targets remain exact and target-scoped", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`target-${randomUUID().slice(0, 6)}`, { showcases: 2 });
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    showcaseHoldIds.add(creator.showcaseIds[0]!);
+    const { query } = composition();
+    const pageTarget = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    expect(await query.resolveVisibleReportTarget(db, pageTarget)).toEqual({ target: pageTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: null, mediaAssetIds: [creator.avatar.assetId, creator.cover.assetId, creator.showcaseAssets[1]!.assetId] });
+    const heldTarget = { targetType: "showcase", targetId: creator.showcaseIds[0]!, publicationRevisionId: creator.revisionId } as const;
+    expect(await query.resolveVisibleReportTarget(db, heldTarget)).toBeNull();
+    expect(await query.readRevisionTarget(db, heldTarget)).toEqual({ target: heldTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: `${handle} work 0`, mediaAssetIds: [creator.showcaseAssets[0]!.assetId] });
+  });
+
+  test.each([
+    ["canonicalHandle", { canonicalHandle: `mismatch-${randomUUID().slice(0, 6)}` }],
+    ["displayName", { displayName: "Tampered" }],
+    ["introduction", { shortIntroduction: "Tampered" }],
+    ["disciplines", { disciplines: ["drawing"] as string[] }],
+    ["avatar", { avatarThumbDerivativeId: null }],
+    ["timestamp", { revisionAt: new Date(at.getTime() + 1_000) }],
+  ] as const)("fails closed across all consumers for a mismatched projection %s", async (_field, mutation) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`projection-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    await db.update(creatorDiscoveryProjections).set(mutation).where(eq(creatorDiscoveryProjections.pageId, creator.pageId));
+    const { query } = composition();
+    const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    expect(await query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
+    expect((await query.listPublicCreators({ discipline: null, handlePrefix: handle, cursor: null, limit: 24 })).items).toEqual([]);
+    expect(await query.listSitemapCreators()).not.toContain(handle);
+    expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(false);
+    expect(await query.resolveVisibleReportTarget(db, target)).toBeNull();
+  });
+
+  test.each(["missing", "extra", "bad_dimensions"] as const)("treats malformed MediaCatalogPort %s output as neutral denial", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`malformed-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    const original = creator.avatar;
+    media.set(original.assetId, scenario === "missing"
+      ? ({ ...original, derivatives: undefined } as unknown as ReadyMedia)
+      : scenario === "extra"
+        ? ({ ...original, derivatives: { ...original.derivatives, master: original.derivatives.large } } as unknown as ReadyMedia)
+        : ({ ...original, derivatives: { ...original.derivatives, thumb: { ...original.derivatives.thumb, width: 0 } } } as ReadyMedia));
+    const { query } = composition();
+    const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    expect(await query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
+    expect(await query.isDerivativePublic(db, original.assetId, "thumb")).toBe(false);
+    expect(await query.isDerivativePreviewable(db, creator.userId, original.assetId, "thumb")).toBe(false);
+    expect(await query.resolveVisibleReportTarget(db, target)).toBeNull();
+  });
+
+  test("private preview fails neutrally for a referenced asset that is no longer ready", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`notready-${randomUUID().slice(0, 6)}`);
+    media.delete(creator.cover.assetId);
+    expect(await composition().query.isDerivativePreviewable(db, creator.userId, creator.cover.assetId, "large")).toBe(false);
   });
 });
