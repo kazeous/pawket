@@ -25,15 +25,16 @@ describe("public media service", () => {
       db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never,
       storage: {} as never,
       creator: { getActiveCreator: async () => ({ userId: "creator-1", state: "active" }) },
+      catalog: { ownsAsset: async () => true },
       publishingMode: "disabled",
     });
-    await expect(service.createUploadIntent({ actor: { userId: "creator-1" }, purpose: "showcase", contentType: "image/png", declaredBytes: 12 })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
+    await expect(service.createUploadIntent({ actor: { userId: "creator-1" }, purpose: "showcase", declaredSourceFormat: "png", contentType: "image/png", declaredBytes: 12, idempotencyKey: "disabled-key-1", requestId: "disabled-request-1" })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
   });
 
   test("does not call storage for a disabled mutation", async () => {
     const presign = vi.fn();
-    const service = createPublicMediaService({ db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never, storage: { presignPut: presign } as never, creator: { getActiveCreator: async () => ({ userId: "creator-1", state: "active" }) }, publishingMode: "disabled" });
-    await expect(service.createUploadIntent({ actor: { userId: "creator-1" }, purpose: "avatar", contentType: "image/jpeg", declaredBytes: 12 })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
+    const service = createPublicMediaService({ db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never, storage: { presignPut: presign } as never, creator: { getActiveCreator: async () => ({ userId: "creator-1", state: "active" }) }, catalog: { ownsAsset: async () => true }, publishingMode: "disabled" });
+    await expect(service.createUploadIntent({ actor: { userId: "creator-1" }, purpose: "avatar", declaredSourceFormat: "jpeg", contentType: "image/jpeg", declaredBytes: 12, idempotencyKey: "disabled-key-2", requestId: "disabled-request-2" })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
     expect(presign).not.toHaveBeenCalled();
   });
 
@@ -52,13 +53,29 @@ describe("public media service", () => {
       async presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: 900 }) { return { url: "https://upload.invalid/signed", requiredHeaders: { "content-type": input.contentType, "content-length": String(input.contentLength) }, expiresAt: new Date(at.getTime() + input.expiresInSeconds * 1000) }; },
       async headObject() { return { contentLength: 3, contentType: "image/png", etag: "\"etag-v1\"", versionId: "version-v1", sha256: null }; },
     };
-    const service = createPublicMediaService({ db, storage: storage as never, publishingMode: "general_audience", creator: { getActiveCreator: async () => ({ userId, state: "active" }) }, commandFingerprintKey: new Uint8Array(32).fill(7), now: () => at, idFactory: () => ids.shift()! });
-    const intent = await service.createUploadIntent({ actor: { userId }, purpose: "showcase", contentType: "image/png", declaredBytes: 3, idempotencyKey: "media-intent-1" });
-    const completed = await service.completeUpload({ actor: { userId }, assetId: intent.assetId, intentId: intent.intentId, idempotencyKey: "media-complete-1" });
+    const service = createPublicMediaService({ db, storage: storage as never, publishingMode: "general_audience", creator: { getActiveCreator: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, commandFingerprintKey: new Uint8Array(32).fill(7), now: () => at, idFactory: () => ids.shift()! });
+    const intent = await service.createUploadIntent({ actor: { userId }, purpose: "showcase", declaredSourceFormat: "png", contentType: "image/png", declaredBytes: 3, idempotencyKey: "media-intent-1", requestId: "media-request-1" });
+    const completed = await service.completeUpload({ actor: { userId }, assetId: intent.assetId, intentId: intent.intentId, idempotencyKey: "media-complete-1", requestId: "media-complete-request-1" });
     expect(completed).toMatchObject({ assetId: intent.assetId, intentId: intent.intentId, state: "pending", sourceObjectVersionId: "version-v1", actualSourceBytes: 3 });
     expect((await db.select().from(publicMediaAssets).where(eq(publicMediaAssets.id, intent.assetId)))[0]).toMatchObject({ state: "pending", sourceObjectVersionId: "version-v1", actualSourceBytes: 3 });
     expect((await db.select().from(publicMediaUploadIntents).where(eq(publicMediaUploadIntents.id, intent.intentId)))[0]).toMatchObject({ state: "completed" });
     expect((await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, intent.assetId))).map((event) => event.eventType)).toContain("media.public_upload_completed.v1");
+    await close(); close = undefined;
+    const cleanup = createDatabase(databaseUrl!); await cleanup.db.execute(sql.raw(`drop schema if exists "${schemaName}" cascade`)); await cleanup.close();
+  });
+
+  test.skipIf(!databaseUrl)("serializes the 500 MiB allocation with exactly 50 ten-MiB winners", async () => {
+    schemaName = `public_media_quota_${process.pid}_${Date.now()}`;
+    const root = createDatabase(databaseUrl!);
+    await root.db.execute(sql.raw(`create schema "${schemaName}"`)); await root.close();
+    const connection = createDatabase(`${databaseUrl!}?options=-csearch_path%3D${schemaName},public`); db = connection.db; close = connection.close;
+    for (const file of (await readdir(migrationsDirectory)).filter((name) => name.endsWith(".sql")).sort()) await migrate(file);
+    const userId = `quota-${randomUUID()}`;
+    await db.insert(identityUsers).values({ id: userId, name: "Quota creator", email: `${userId}@example.test`, canonicalEmail: `${userId}@example.test`, emailVerified: false, createdAt: at, updatedAt: at });
+    const storage = { async presignPut(input: { expiresInSeconds: number; contentType: string; contentLength: number; key: string }) { return { url: "https://upload.invalid/signed", requiredHeaders: { "content-type": input.contentType, "content-length": String(input.contentLength) }, expiresAt: new Date(at.getTime() + input.expiresInSeconds * 1000) }; } };
+    const service = createPublicMediaService({ db, storage: storage as never, publishingMode: "general_audience", creator: { getActiveCreator: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, now: () => at });
+    const results = await Promise.allSettled(Array.from({ length: 51 }, (_, index) => service.createUploadIntent({ actor: { userId }, purpose: "showcase", declaredSourceFormat: "png", contentType: "image/png", declaredBytes: 10 * 1024 * 1024, idempotencyKey: `quota-key-${index.toString().padStart(2, "0")}`, requestId: `quota-request-${index.toString().padStart(2, "0")}` })));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(50);
     await close(); close = undefined;
     const cleanup = createDatabase(databaseUrl!); await cleanup.db.execute(sql.raw(`drop schema if exists "${schemaName}" cascade`)); await cleanup.close();
   });

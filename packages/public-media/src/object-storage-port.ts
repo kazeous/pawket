@@ -13,7 +13,7 @@ export type HeadObjectResult = Readonly<{
 }>;
 
 export type ObjectStoragePort = Readonly<{
-  presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: 900 }): Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
+  presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
   headObject(location: ObjectLocation): Promise<HeadObjectResult | null>;
   listObjectVersions(location: Omit<ObjectLocation, "versionId">): Promise<readonly { versionId: string; isDeleteMarker: boolean }[]>;
   getObject(location: ObjectLocation): Promise<NodeJS.ReadableStream>;

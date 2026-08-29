@@ -26,7 +26,7 @@ import {
   type MediaPurpose,
   type SourceFormat,
 } from "./media-policy.js";
-import type { CatalogMediaVisibilityPort, PublicMediaRetentionHoldPort } from "./media-ports.js";
+import type { CatalogMediaOwnershipPort, CreatorCapabilityPort } from "./media-ports.js";
 import type { ObjectStoragePort } from "./object-storage-port.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -36,11 +36,7 @@ const MIME_BY_FORMAT: Readonly<Record<SourceFormat, string>> = { jpeg: "image/jp
 const FORMAT_BY_MIME: Readonly<Record<string, SourceFormat>> = { "image/jpeg": "jpeg", "image/png": "png", "image/webp": "webp" };
 
 export type MediaActor = Readonly<{ userId: string }>;
-export type ActiveCreator = Readonly<{ userId: string; state?: "active" | "suspended" }>;
-export type ActiveCreatorPort = Readonly<{
-  getActiveCreator?(db: PawketDatabase | PawketTransaction, userId: string): Promise<ActiveCreator | null>;
-  getCreatorSeed?(db: PawketDatabase | PawketTransaction, userId: string): Promise<{ userId: string; capabilityState: "active" | "suspended" } | null>;
-}>;
+export type { CreatorCapability, CreatorCapabilityPort } from "./media-ports.js";
 
 export type UploadIntentResult = Readonly<{ assetId: string; intentId: string; expiresAt: Date; url: string; requiredHeaders: Record<string, string> }>;
 export type CompletedUploadResult = Readonly<{ assetId: string; intentId: string; state: "pending"; sourceObjectVersionId: string; actualSourceBytes: number }>;
@@ -51,12 +47,9 @@ type ReadyMediaRecord = { assetId: string; ownerUserId: string; purpose: MediaPu
 type ServiceInput = Readonly<{
   db: PawketDatabase;
   storage: ObjectStoragePort;
-  creator?: ActiveCreatorPort;
-  creatorCapabilities?: ActiveCreatorPort;
-  creatorSeeds?: ActiveCreatorPort;
-  identityCreator?: ActiveCreatorPort;
-  identity?: ActiveCreatorPort;
-  publishingMode?: "disabled" | "general_audience";
+  creator: CreatorCapabilityPort;
+  catalog: CatalogMediaOwnershipPort;
+  publishingMode: "disabled" | "general_audience";
   commandFingerprintKey?: Uint8Array;
   now?: () => Date;
   idFactory?: () => string;
@@ -65,20 +58,19 @@ type ServiceInput = Readonly<{
 export type CreateUploadIntentInput = Readonly<{
   actor: MediaActor;
   purpose: MediaPurpose;
-  declaredSourceFormat?: SourceFormat;
-  contentType?: string;
-  declaredBytes?: number;
-  contentLength?: number;
-  idempotencyKey?: string;
-  requestId?: string;
+  declaredSourceFormat: SourceFormat;
+  contentType: string;
+  declaredBytes: number;
+  idempotencyKey: string;
+  requestId: string;
 }>;
 
 export type CompleteUploadInput = Readonly<{
   actor: MediaActor;
   assetId: string;
-  intentId?: string;
-  idempotencyKey?: string;
-  requestId?: string;
+  intentId: string;
+  idempotencyKey: string;
+  requestId: string;
 }>;
 
 export type ResolveReference = Readonly<{ assetId: string; purpose: MediaPurpose; altText?: string | null }>;
@@ -93,7 +85,15 @@ export class PublicMediaServiceError extends Error {
 function fail(code: MediaPolicyError["code"]): never { throw new PublicMediaServiceError(code); }
 function validUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
 function validActor(actor: MediaActor): boolean { return Boolean(actor && typeof actor.userId === "string" && ID_KEY.test(actor.userId)); }
-function validRequest(value: string | undefined): boolean { return value === undefined || REQUEST_ID.test(value); }
+function validRequest(value: string | undefined): boolean { return typeof value === "string" && REQUEST_ID.test(value); }
+function exactActiveCreator(value: unknown, userId: string): boolean {
+  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("userId") || !keys.includes("state")) return false;
+  const user = Object.getOwnPropertyDescriptor(value, "userId");
+  const state = Object.getOwnPropertyDescriptor(value, "state");
+  return Boolean(user && state && "value" in user && "value" in state && user.value === userId && state.value === "active");
+}
 function mapStorageError(error: unknown): never {
   if (error instanceof PublicMediaServiceError) throw error;
   if (error instanceof MediaPolicyError) fail(error.code);
@@ -113,15 +113,17 @@ export function createPublicMediaService(input: ServiceInput) {
   const now = input.now ?? (() => new Date());
   const id = input.idFactory ?? randomUUID;
   const fingerprintKey = input.commandFingerprintKey ?? new Uint8Array(32).fill(71);
-  const activePort = input.creator ?? input.creatorCapabilities ?? input.creatorSeeds ?? input.identityCreator ?? input.identity;
+  const activePort = input.creator;
 
   async function requireActiveCreator(db: PawketDatabase | PawketTransaction, userId: string): Promise<void> {
     if (!activePort) fail("MEDIA_NOT_OWNER");
-    let result: ActiveCreator | { userId: string; capabilityState: "active" | "suspended" } | null;
-    if (activePort.getActiveCreator) result = await activePort.getActiveCreator(db, userId);
-    else if (activePort.getCreatorSeed) result = await activePort.getCreatorSeed(db, userId);
-    else fail("MEDIA_NOT_OWNER");
-    if (!result || result.userId !== userId || ("capabilityState" in result ? result.capabilityState !== "active" : result.state !== "active")) fail("MEDIA_NOT_OWNER");
+    const result = await activePort.getActiveCreator(db, userId);
+    if (!exactActiveCreator(result, userId)) fail("MEDIA_NOT_OWNER");
+  }
+
+  async function requireOwnedCatalogAsset(db: PawketDatabase | PawketTransaction, userId: string, assetId: string, purpose: MediaPurpose): Promise<void> {
+    if (!input.catalog || typeof input.catalog.ownsAsset !== "function") fail("MEDIA_NOT_OWNER");
+    if (await input.catalog.ownsAsset(db, userId, assetId, purpose) !== true) fail("MEDIA_NOT_OWNER");
   }
 
   function fingerprint(value: unknown): string {
@@ -129,10 +131,11 @@ export function createPublicMediaService(input: ServiceInput) {
   }
 
   async function createUploadIntent(command: CreateUploadIntentInput): Promise<UploadIntentResult> {
-    if (!validActor(command.actor) || !isMediaPurpose(command.purpose) || !validRequest(command.requestId)) fail("INVALID_INPUT");
+    if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
+    if (!command || typeof command !== "object" || !validActor(command.actor) || !isMediaPurpose(command.purpose) || !validRequest(command.requestId) || !ID_KEY.test(command.idempotencyKey)) fail("INVALID_INPUT");
     const format = command.declaredSourceFormat ?? (command.contentType ? sourceFormatForContentType(command.contentType) : null);
     const contentType = command.contentType?.trim().toLowerCase();
-    const declaredBytes = command.declaredBytes ?? command.contentLength;
+    const declaredBytes = command.declaredBytes;
     if (!format || !isSourceFormat(format) || !contentType || FORMAT_BY_MIME[contentType] !== format || !Number.isSafeInteger(declaredBytes) || (declaredBytes as number) < 1 || (declaredBytes as number) > MAX_SOURCE_BYTES) fail("INVALID_INPUT");
     const safeDeclaredBytes = declaredBytes as number;
     const at = now();
@@ -152,20 +155,23 @@ export function createPublicMediaService(input: ServiceInput) {
             if (!replay) fail("IDEMPOTENCY_CONFLICT");
             const [existing] = await tx.select().from(publicMediaUploadIntents).where(and(eq(publicMediaUploadIntents.id, replay.intentId), eq(publicMediaUploadIntents.assetId, replay.assetId), eq(publicMediaUploadIntents.ownerUserId, command.actor.userId))).limit(1);
             if (!existing || existing.state !== "issued") fail("IDEMPOTENCY_CONFLICT");
-            const replayGrant = await input.storage.presignPut({ key: existing.objectKey, contentType, contentLength: existing.maxSourceBytes > safeDeclaredBytes ? safeDeclaredBytes : existing.maxSourceBytes, expiresInSeconds: 900 });
+            const remainingSeconds = Math.min(900, Math.floor((existing.expiresAt.getTime() - at.getTime()) / 1000));
+            if (!Number.isInteger(remainingSeconds) || remainingSeconds < 1) fail("UPLOAD_EXPIRED");
+            const replayGrant = await input.storage.presignPut({ key: existing.objectKey, contentType, contentLength: existing.maxSourceBytes, expiresInSeconds: remainingSeconds });
+            if (!(replayGrant.expiresAt instanceof Date) || !Number.isFinite(replayGrant.expiresAt.getTime()) || replayGrant.expiresAt.getTime() <= at.getTime() || replayGrant.expiresAt.getTime() > existing.expiresAt.getTime()) fail("STORAGE_ERROR");
             return { assetId: replay.assetId, intentId: replay.intentId, expiresAt: existing.expiresAt, url: replayGrant.url, requiredHeaders: { ...replayGrant.requiredHeaders } };
           }
+          if (started.kind === "expired") fail("UPLOAD_EXPIRED");
           if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
           idempotencyRecordId = started.recordId;
         }
-        if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`public-media-quota:${command.actor.userId}`}, 0))`);
         const [allocated] = await tx.select({ total: sql<number>`coalesce(sum(${publicMediaAssets.sourceAllocationBytes}), 0)` }).from(publicMediaAssets).where(and(eq(publicMediaAssets.ownerUserId, command.actor.userId), isNull(publicMediaAssets.sourceDeletedAt), inArray(publicMediaAssets.state, ["awaiting_upload", "pending", "processing", "ready", "failed"])));
         if (Number(allocated?.total ?? 0) + safeDeclaredBytes > CREATOR_SOURCE_ALLOCATION_BYTES) fail("MEDIA_QUOTA_EXCEEDED");
         await tx.insert(publicMediaAssets).values({ id: assetId, ownerUserId: command.actor.userId, purpose: command.purpose, declaredSourceFormat: format, state: "awaiting_upload", sourceAllocationBytes: safeDeclaredBytes, sourceObjectKey: objectKey, sourceObjectVersionId: null, sourceObjectEtag: null, normalizedMasterObjectKey: null, normalizedMasterObjectVersionId: null, actualSourceBytes: null, sourceDeletedAt: null, width: null, height: null, failureCode: null, readyAt: null, deletionReviewedAt: null, createdAt: at, updatedAt: at });
-        await tx.insert(publicMediaUploadIntents).values({ id: intentId, assetId, ownerUserId: command.actor.userId, purpose: command.purpose, declaredSourceFormat: format, maxSourceBytes: MAX_SOURCE_BYTES, maxSourcePixels: MAX_SOURCE_PIXELS, objectKey, state: "issued", expiresAt, completedAt: null, createdAt: at, updatedAt: at });
+        await tx.insert(publicMediaUploadIntents).values({ id: intentId, assetId, ownerUserId: command.actor.userId, purpose: command.purpose, declaredSourceFormat: format, maxSourceBytes: safeDeclaredBytes, maxSourcePixels: MAX_SOURCE_PIXELS, objectKey, state: "issued", expiresAt, completedAt: null, createdAt: at, updatedAt: at });
         const storageGrant = await input.storage.presignPut({ key: objectKey, contentType, contentLength: safeDeclaredBytes, expiresInSeconds: 900 });
-        if (!storageGrant.expiresAt || storageGrant.expiresAt.getTime() < at.getTime()) fail("STORAGE_ERROR");
+        if (!storageGrant.expiresAt || storageGrant.expiresAt.getTime() !== expiresAt.getTime()) fail("STORAGE_ERROR");
         if (idempotencyRecordId) {
           if (!await completeIdempotentCommand(tx, { recordId: idempotencyRecordId, resultReference: `media-upload-v1:${assetId}:${intentId}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
         }
@@ -175,37 +181,41 @@ export function createPublicMediaService(input: ServiceInput) {
   }
 
   async function completeUpload(command: CompleteUploadInput): Promise<CompletedUploadResult> {
-    if (!validActor(command.actor) || !validUuid(command.assetId) || (command.intentId !== undefined && !validUuid(command.intentId)) || !validRequest(command.requestId)) fail("INVALID_INPUT");
+    if (!command || typeof command !== "object" || !validActor(command.actor) || !validUuid(command.assetId) || !validUuid(command.intentId) || !validRequest(command.requestId) || !ID_KEY.test(command.idempotencyKey)) fail("INVALID_INPUT");
     const at = now();
     try {
       return await input.db.transaction(async (tx) => {
         const [asset] = await tx.select().from(publicMediaAssets).where(and(eq(publicMediaAssets.id, command.assetId), eq(publicMediaAssets.ownerUserId, command.actor.userId))).limit(1).for("update");
         if (!asset) fail("MEDIA_NOT_FOUND");
         const [intent] = await tx.select().from(publicMediaUploadIntents).where(and(eq(publicMediaUploadIntents.assetId, asset.id), eq(publicMediaUploadIntents.ownerUserId, command.actor.userId))).limit(1).for("update");
-        if (!intent || (command.intentId && intent.id !== command.intentId)) fail("MEDIA_NOT_FOUND");
+        if (!intent || intent.id !== command.intentId) fail("MEDIA_NOT_FOUND");
+        // Capability and consumer-owned Catalog authorization are required before
+        // consulting idempotency, including completed replays while publishing is
+        // disabled.  This keeps replay from becoming an authorization bypass.
+        await requireActiveCreator(tx, command.actor.userId);
+        await requireOwnedCatalogAsset(tx, command.actor.userId, asset.id, asset.purpose as MediaPurpose);
         let idempotencyRecordId: string | undefined;
         if (command.idempotencyKey) {
           const started = await beginIdempotentCommand(tx, { actorUserId: command.actor.userId, commandScope: "public-media.upload-complete", keyHash: createLookupHmac({ value: command.idempotencyKey, context: "public-media-command-key", key: fingerprintKey }), requestFingerprint: fingerprint({ assetId: asset.id, intentId: intent.id, requestId: command.requestId ?? null }), expiresAt: new Date(at.getTime() + 24 * 60 * 60_000), now: at });
           if (started.kind === "replay") {
             const replay = parseCompletionReference(started.resultReference);
-            if (!replay || replay.assetId !== asset.id || replay.intentId !== intent.id) fail("IDEMPOTENCY_CONFLICT");
+            if (!replay || replay.assetId !== asset.id || replay.intentId !== intent.id || intent.state !== "completed" || replay.sourceObjectVersionId !== asset.sourceObjectVersionId || replay.actualSourceBytes !== asset.actualSourceBytes) fail("IDEMPOTENCY_CONFLICT");
             return replay;
           }
           if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
           idempotencyRecordId = started.recordId;
         }
-        // A completed intent is immutable and replayable even after its 15-minute window.
-        if (intent.state === "completed" && asset.sourceObjectVersionId && asset.actualSourceBytes) {
-          const replay: CompletedUploadResult = { assetId: asset.id, intentId: intent.id, state: "pending", sourceObjectVersionId: asset.sourceObjectVersionId, actualSourceBytes: asset.actualSourceBytes };
-          if (idempotencyRecordId && !await completeIdempotentCommand(tx, { recordId: idempotencyRecordId, resultReference: `media-complete-v1:${replay.assetId}:${replay.intentId}:${replay.sourceObjectVersionId}:${replay.actualSourceBytes}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
-          return replay;
-        }
         if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
+        // A completed intent is immutable, but only its recorded idempotency
+        // command can replay it. A fresh key must not mint another state row.
+        if (intent.state === "completed" && asset.sourceObjectVersionId && asset.actualSourceBytes) {
+          fail("UPLOAD_NOT_READY");
+        }
         if (asset.state !== "awaiting_upload" || intent.state !== "issued") fail("UPLOAD_NOT_READY");
-        if (at.getTime() > intent.expiresAt.getTime()) fail("UPLOAD_EXPIRED");
-        await requireActiveCreator(tx, command.actor.userId);
+        if (at.getTime() >= intent.expiresAt.getTime()) fail("UPLOAD_EXPIRED");
+        if (intent.objectKey !== asset.sourceObjectKey) fail("UPLOAD_CONTENT_INVALID");
         const head = await input.storage.headObject({ area: "quarantine", key: intent.objectKey });
-        if (!head || !head.versionId || !head.etag || head.contentLength <= 0 || head.contentLength > MAX_SOURCE_BYTES || head.contentLength > asset.sourceAllocationBytes || head.contentType !== MIME_BY_FORMAT[asset.declaredSourceFormat as SourceFormat]) fail("UPLOAD_CONTENT_INVALID");
+        if (!head || typeof head.versionId !== "string" || !head.versionId || head.versionId === "null" || head.versionId.length > 512 || head.versionId !== head.versionId.trim() || /[\u0000-\u001f\u007f]/u.test(head.versionId) || typeof head.etag !== "string" || !head.etag || head.etag.length > 512 || head.etag !== head.etag.trim() || /[\u0000-\u001f\u007f]/u.test(head.etag) || !Number.isSafeInteger(head.contentLength) || head.contentLength <= 0 || head.contentLength !== asset.sourceAllocationBytes || head.contentLength !== intent.maxSourceBytes || head.contentLength > MAX_SOURCE_BYTES || head.contentType !== MIME_BY_FORMAT[asset.declaredSourceFormat as SourceFormat]) fail("UPLOAD_CONTENT_INVALID");
         await tx.update(publicMediaUploadIntents).set({ state: "completed", completedAt: at, updatedAt: at }).where(eq(publicMediaUploadIntents.id, intent.id));
         await tx.update(publicMediaAssets).set({ state: "pending", sourceObjectVersionId: head.versionId, sourceObjectEtag: head.etag, actualSourceBytes: head.contentLength, updatedAt: at }).where(and(eq(publicMediaAssets.id, asset.id), eq(publicMediaAssets.state, "awaiting_upload")));
         const result: CompletedUploadResult = { assetId: asset.id, intentId: intent.id, state: "pending", sourceObjectVersionId: head.versionId, actualSourceBytes: head.contentLength };
@@ -264,28 +274,11 @@ export function createPublicMediaService(input: ServiceInput) {
   }
 
   async function getDeliveryGrant(command: Readonly<{ assetId: string; variant: "thumb" | "display" | "large" }>): Promise<DeliveryGrant> {
-    if (!validUuid(command.assetId) || !isMediaVariant(command.variant)) fail("INVALID_INPUT");
+    if (!command || !validUuid(command.assetId) || !["thumb", "display", "large"].includes(command.variant) || !isMediaVariant(command.variant) || (command.variant as string) === "master") fail("INVALID_INPUT");
     const [row] = await input.db.select({ objectKey: publicMediaDerivatives.objectKey, objectVersionId: publicMediaDerivatives.objectVersionId, byteSize: publicMediaDerivatives.byteSize }).from(publicMediaDerivatives).innerJoin(publicMediaAssets, eq(publicMediaAssets.id, publicMediaDerivatives.assetId)).where(and(eq(publicMediaDerivatives.assetId, command.assetId), eq(publicMediaDerivatives.variant, command.variant), eq(publicMediaAssets.state, "ready"))).limit(1);
-    if (!row || !row.objectKey || !row.objectVersionId || row.byteSize < 1) fail("MEDIA_NOT_READY");
+    if (!row || !row.objectKey || !row.objectVersionId || row.objectVersionId === "null" || !Number.isSafeInteger(row.byteSize) || row.byteSize < 1) fail("MEDIA_NOT_READY");
     return { location: { area: "derivative", key: row.objectKey, versionId: row.objectVersionId }, contentLength: row.byteSize, contentType: "image/webp" };
   }
 
   return { createUploadIntent, completeUpload, resolveReadyAssets, resolveReadyAssetsBatch, getDeliveryGrant };
 }
-
-export const publicMediaRetentionHoldPort: PublicMediaRetentionHoldPort = {
-  async protectedAssetIds(_db, assetIds) { return new Set(assetIds); },
-};
-
-export const catalogMediaVisibilityPort: CatalogMediaVisibilityPort = {
-  async isDerivativePublic(db, assetId, variant) {
-    if (!validUuid(assetId) || !isMediaVariant(variant)) return false;
-    const [row] = await db.select({ id: publicMediaDerivatives.id }).from(publicMediaDerivatives).innerJoin(publicMediaAssets, eq(publicMediaAssets.id, publicMediaDerivatives.assetId)).where(and(eq(publicMediaDerivatives.assetId, assetId), eq(publicMediaDerivatives.variant, variant), eq(publicMediaAssets.state, "ready"))).limit(1);
-    return Boolean(row);
-  },
-  async isDerivativePreviewable(db, actorUserId, assetId, variant) {
-    if (!ID_KEY.test(actorUserId)) return false;
-    const [row] = await db.select({ id: publicMediaDerivatives.id }).from(publicMediaDerivatives).innerJoin(publicMediaAssets, eq(publicMediaAssets.id, publicMediaDerivatives.assetId)).where(and(eq(publicMediaDerivatives.assetId, assetId), eq(publicMediaDerivatives.variant, variant), eq(publicMediaAssets.ownerUserId, actorUserId), eq(publicMediaAssets.state, "ready"))).limit(1);
-    return Boolean(row);
-  },
-};
