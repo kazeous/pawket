@@ -258,15 +258,11 @@ describe("configured Drizzle creator migrator", () => {
   });
 
   test("upgrades the configured journal from index 19 to creator catalog index 20", async () => {
-    // Break caught: a catalog migration that runs in ad-hoc SQL tests but is skipped
-    // by the configured migrator after an already-deployed 0019 database.
+    // Break caught: a catalog migration runs in a blank database but is skipped after a deployed 0019 database.
     const { client, schemaName, journalSchema } = await createIsolatedClient("catalog-upgrade");
     const through0019 = await createMigrationsThrough(19);
     try {
-      await migrate(drizzle(client), {
-        migrationsFolder: through0019,
-        migrationsSchema: journalSchema,
-      });
+      await migrate(drizzle(client), { migrationsFolder: through0019, migrationsSchema: journalSchema });
       const [before] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );

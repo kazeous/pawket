@@ -5,7 +5,8 @@ import { boolean, check, index, integer, pgTable, text, timestamp, uniqueIndex, 
 // @ts-ignore Drizzle Kit 0.31 resolves this TypeScript schema only without the emitted .js suffix.
 import { identityUsers } from "./identity-core";
 
-const disciplineValues = "'illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other'";
+const disciplines = "'illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other'";
+const handleCheck = (value: { readonly name: string }) => sql`char_length(${value}) between 3 and 30 and ${value} ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'`;
 
 export const creatorPages = pgTable("creator_pages", {
   id: uuid("id").primaryKey(),
@@ -34,7 +35,7 @@ export const creatorHandleClaims = pgTable("creator_handle_claims", {
   uniqueIndex("creator_handle_claims_one_canonical_page_uidx").on(table.pageId).where(sql`${table.kind} = 'canonical'`),
   uniqueIndex("creator_handle_claims_normalized_handle_uidx").on(sql`lower(${table.normalizedHandle})`),
   check("creator_handle_claims_kind_check", sql`${table.kind} in ('canonical','alias')`),
-  check("creator_handle_claims_normalized_handle_check", sql`${table.normalizedHandle} ~ '^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$' and ${table.normalizedHandle} = lower(${table.normalizedHandle})`),
+  check("creator_handle_claims_normalized_handle_check", handleCheck(table.normalizedHandle)),
   check("creator_handle_claims_replaced_check", sql`(${table.kind} = 'canonical' and ${table.replacedAt} is null) or (${table.kind} = 'alias' and ${table.replacedAt} is not null)`),
 ]);
 
@@ -51,8 +52,8 @@ export const creatorPageDrafts = pgTable("creator_page_drafts", {
 }, (table) => [
   check("creator_page_drafts_display_name_check", sql`char_length(${table.displayName}) between 1 and 80`),
   check("creator_page_drafts_short_introduction_check", sql`char_length(${table.shortIntroduction}) between 1 and 500`),
-  check("creator_page_drafts_primary_discipline_check", sql`${table.primaryDiscipline} in (${sql.raw(disciplineValues)})`),
-  check("creator_page_drafts_secondary_disciplines_check", sql`cardinality(${table.secondaryDisciplines}) between 0 and 2 and ${table.secondaryDisciplines} <@ ARRAY[${sql.raw(disciplineValues)}]::text[] and array_position(${table.secondaryDisciplines}, ${table.primaryDiscipline}) is null`),
+  check("creator_page_drafts_primary_discipline_check", sql`${table.primaryDiscipline} in (${sql.raw(disciplines)})`),
+  check("creator_page_drafts_secondary_disciplines_check", sql`cardinality(${table.secondaryDisciplines}) between 0 and 2 and ${table.secondaryDisciplines} <@ ARRAY[${sql.raw(disciplines)}]::text[] and array_position(${table.secondaryDisciplines}, ${table.primaryDiscipline}) is null`),
 ]);
 
 export const creatorShowcaseDrafts = pgTable("creator_showcase_drafts", {
@@ -73,7 +74,7 @@ export const creatorShowcaseDrafts = pgTable("creator_showcase_drafts", {
   check("creator_showcase_drafts_position_check", sql`${table.position} between 0 and 11`),
   check("creator_showcase_drafts_title_check", sql`char_length(${table.title}) between 1 and 100`),
   check("creator_showcase_drafts_description_check", sql`char_length(${table.description}) between 0 and 1000`),
-  check("creator_showcase_drafts_discipline_check", sql`${table.discipline} in (${sql.raw(disciplineValues)})`),
+  check("creator_showcase_drafts_discipline_check", sql`${table.discipline} in (${sql.raw(disciplines)})`),
   check("creator_showcase_drafts_content_label_check", sql`${table.contentLabel} = 'general_audience'`),
 ]);
 
@@ -117,10 +118,11 @@ export const creatorPublicationRevisions = pgTable("creator_publication_revision
   uniqueIndex("creator_publication_revisions_id_page_uidx").on(table.id, table.pageId),
   index("creator_publication_revisions_page_idx").on(table.pageId, table.publishedAt),
   check("creator_publication_revisions_number_check", sql`${table.revisionNumber} > 0`),
+  check("creator_publication_revisions_canonical_handle_check", handleCheck(table.canonicalHandle)),
   check("creator_publication_revisions_display_name_check", sql`char_length(${table.displayName}) between 1 and 80`),
   check("creator_publication_revisions_short_introduction_check", sql`char_length(${table.shortIntroduction}) between 1 and 500`),
-  check("creator_publication_revisions_primary_discipline_check", sql`${table.primaryDiscipline} in (${sql.raw(disciplineValues)})`),
-  check("creator_publication_revisions_secondary_disciplines_check", sql`cardinality(${table.secondaryDisciplines}) between 0 and 2 and ${table.secondaryDisciplines} <@ ARRAY[${sql.raw(disciplineValues)}]::text[] and array_position(${table.secondaryDisciplines}, ${table.primaryDiscipline}) is null`),
+  check("creator_publication_revisions_primary_discipline_check", sql`${table.primaryDiscipline} in (${sql.raw(disciplines)})`),
+  check("creator_publication_revisions_secondary_disciplines_check", sql`cardinality(${table.secondaryDisciplines}) between 0 and 2 and ${table.secondaryDisciplines} <@ ARRAY[${sql.raw(disciplines)}]::text[] and array_position(${table.secondaryDisciplines}, ${table.primaryDiscipline}) is null`),
   check("creator_publication_revisions_policy_check", sql`${table.taxonomyVersion} = 'v1' and ${table.policyVersion} = 'general_audience.v1'`),
   check("creator_publication_revisions_expected_draft_version_check", sql`${table.expectedDraftVersion} > 0`),
 ]);
@@ -140,7 +142,7 @@ export const creatorPublicationShowcases = pgTable("creator_publication_showcase
   check("creator_publication_showcases_position_check", sql`${table.position} between 0 and 11`),
   check("creator_publication_showcases_title_check", sql`char_length(${table.title}) between 1 and 100`),
   check("creator_publication_showcases_description_check", sql`char_length(${table.description}) between 0 and 1000`),
-  check("creator_publication_showcases_discipline_check", sql`${table.discipline} in (${sql.raw(disciplineValues)})`),
+  check("creator_publication_showcases_discipline_check", sql`${table.discipline} in (${sql.raw(disciplines)})`),
   check("creator_publication_showcases_content_label_check", sql`${table.contentLabel} = 'general_audience'`),
 ]);
 
@@ -162,7 +164,7 @@ export const creatorPublicationMedia = pgTable("creator_publication_media", {
 export const creatorPublicationEvents = pgTable("creator_publication_events", {
   id: uuid("id").primaryKey(),
   pageId: uuid("page_id").notNull().references(() => creatorPages.id, { onDelete: "restrict", onUpdate: "restrict" }),
-  revisionId: uuid("revision_id").references(() => creatorPublicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  revisionId: uuid("revision_id"),
   type: text("type").notNull(),
   actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   actorSessionId: text("actor_session_id").notNull(),
@@ -177,7 +179,7 @@ export const creatorPublicationEvents = pgTable("creator_publication_events", {
 
 export const creatorDiscoveryProjections = pgTable("creator_discovery_projections", {
   pageId: uuid("page_id").primaryKey().references(() => creatorPages.id, { onDelete: "restrict", onUpdate: "restrict" }),
-  revisionId: uuid("revision_id").notNull().references(() => creatorPublicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  revisionId: uuid("revision_id").notNull(),
   canonicalHandle: text("canonical_handle").notNull(),
   displayName: text("display_name").notNull(),
   shortIntroduction: text("short_introduction").notNull(),
@@ -186,7 +188,8 @@ export const creatorDiscoveryProjections = pgTable("creator_discovery_projection
   revisionAt: timestamp("revision_at", { withTimezone: true, mode: "date" }).notNull(),
   enabled: boolean("enabled").notNull().default(false),
 }, (table) => [
-  uniqueIndex("creator_discovery_projections_canonical_handle_uidx").on(table.canonicalHandle),
+  uniqueIndex("creator_discovery_projections_canonical_handle_uidx").on(sql`lower(${table.canonicalHandle})`),
   index("creator_discovery_projections_enabled_handle_idx").on(table.canonicalHandle, table.pageId).where(sql`${table.enabled}`),
-  check("creator_discovery_projections_disciplines_check", sql`cardinality(${table.disciplines}) between 1 and 3 and ${table.disciplines} <@ ARRAY[${sql.raw(disciplineValues)}]::text[]`),
+  check("creator_discovery_projections_canonical_handle_check", handleCheck(table.canonicalHandle)),
+  check("creator_discovery_projections_disciplines_check", sql`cardinality(${table.disciplines}) between 1 and 3 and ${table.disciplines} <@ ARRAY[${sql.raw(disciplines)}]::text[]`),
 ]);

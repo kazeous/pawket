@@ -1,5 +1,5 @@
 {
-  "id": "5b247baf-259b-49cd-8e9a-3203d3ff6b00",
+  "id": "156a5d84-61c8-4976-b870-70d3a3dcaa8c",
   "prevId": "ec612265-27e4-4818-bd21-20e4c5541ec9",
   "version": "7",
   "dialect": "postgresql",
@@ -3600,9 +3600,9 @@
           "name": "creator_discovery_projections_canonical_handle_uidx",
           "columns": [
             {
-              "expression": "canonical_handle",
-              "isExpression": false,
+              "expression": "lower(\"canonical_handle\")",
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
@@ -3647,25 +3647,16 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "restrict"
-        },
-        "creator_discovery_projections_revision_id_creator_publication_revisions_id_fk": {
-          "name": "creator_discovery_projections_revision_id_creator_publication_revisions_id_fk",
-          "tableFrom": "creator_discovery_projections",
-          "tableTo": "creator_publication_revisions",
-          "columnsFrom": [
-            "revision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "restrict"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "creator_discovery_projections_canonical_handle_check": {
+          "name": "creator_discovery_projections_canonical_handle_check",
+          "value": "char_length(\"creator_discovery_projections\".\"canonical_handle\") between 3 and 30 and \"creator_discovery_projections\".\"canonical_handle\" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'"
+        },
         "creator_discovery_projections_disciplines_check": {
           "name": "creator_discovery_projections_disciplines_check",
           "value": "cardinality(\"creator_discovery_projections\".\"disciplines\") between 1 and 3 and \"creator_discovery_projections\".\"disciplines\" <@ ARRAY['illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other']::text[]"
@@ -3787,7 +3778,7 @@
         },
         "creator_handle_claims_normalized_handle_check": {
           "name": "creator_handle_claims_normalized_handle_check",
-          "value": "\"creator_handle_claims\".\"normalized_handle\" ~ '^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$' and \"creator_handle_claims\".\"normalized_handle\" = lower(\"creator_handle_claims\".\"normalized_handle\")"
+          "value": "char_length(\"creator_handle_claims\".\"normalized_handle\") between 3 and 30 and \"creator_handle_claims\".\"normalized_handle\" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'"
         },
         "creator_handle_claims_replaced_check": {
           "name": "creator_handle_claims_replaced_check",
@@ -4097,19 +4088,6 @@
           "tableTo": "creator_pages",
           "columnsFrom": [
             "page_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "restrict"
-        },
-        "creator_publication_events_revision_id_creator_publication_revisions_id_fk": {
-          "name": "creator_publication_events_revision_id_creator_publication_revisions_id_fk",
-          "tableFrom": "creator_publication_events",
-          "tableTo": "creator_publication_revisions",
-          "columnsFrom": [
-            "revision_id"
           ],
           "columnsTo": [
             "id"
@@ -4479,6 +4457,10 @@
         "creator_publication_revisions_number_check": {
           "name": "creator_publication_revisions_number_check",
           "value": "\"creator_publication_revisions\".\"revision_number\" > 0"
+        },
+        "creator_publication_revisions_canonical_handle_check": {
+          "name": "creator_publication_revisions_canonical_handle_check",
+          "value": "char_length(\"creator_publication_revisions\".\"canonical_handle\") between 3 and 30 and \"creator_publication_revisions\".\"canonical_handle\" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'"
         },
         "creator_publication_revisions_display_name_check": {
           "name": "creator_publication_revisions_display_name_check",

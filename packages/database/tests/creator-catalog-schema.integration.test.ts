@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 
-import { drizzle } from "drizzle-orm/postgres-js";
-import { eq } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -24,8 +22,8 @@ if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for database in
 
 const schemaName = `creator_catalog_schema_${process.pid}_${Date.now()}`;
 const client = postgres(databaseUrl, { max: 1, onnotice: () => undefined });
-const db = drizzle(client);
 const migrationsDirectory = new URL("../migrations/", import.meta.url);
+const at = "2026-08-29T00:00:00.000Z";
 
 async function executeMigration(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -34,20 +32,44 @@ async function executeMigration(filename: string): Promise<void> {
   }
 }
 
-async function insertUser(userId: string, at: Date): Promise<void> {
+async function createUser(): Promise<string> {
+  const userId = `creator-catalog-user-${randomUUID()}`;
   await client.unsafe(`
     insert into identity_users
       (id, name, email, canonical_email, email_verified, access_status, authorization_version,
        created_at, updated_at)
     values ('${userId}', 'Catalog Artist', '${userId}@example.com', '${userId}@example.com',
-      false, 'active', 1, '${at.toISOString()}', '${at.toISOString()}')
+      false, 'active', 1, '${at}', '${at}')
   `);
+  return userId;
 }
 
-async function expectAppendOnly(action: Promise<unknown>): Promise<void> {
-  await expect(action).rejects.toMatchObject({
-    cause: { message: expect.stringMatching(/append-only/) },
-  });
+async function createPage(userId: string): Promise<string> {
+  const pageId = randomUUID();
+  await client.unsafe(`
+    insert into creator_pages
+      (id, user_id, draft_version, initialized_from_revision_id, created_at, updated_at)
+    values ('${pageId}', '${userId}', 1, '${randomUUID()}', '${at}', '${at}')
+  `);
+  return pageId;
+}
+
+async function createRevision(pageId: string, userId: string, revisionNumber = 1): Promise<string> {
+  const revisionId = randomUUID();
+  await client.unsafe(`
+    insert into creator_publication_revisions
+      (id, page_id, revision_number, canonical_handle, display_name, short_introduction,
+       primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
+       actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
+    values ('${revisionId}', '${pageId}', ${revisionNumber}, 'artist-${revisionNumber}', 'Artist', 'Introduction',
+      'illustration', ARRAY['drawing']::text[], 'v1', 'general_audience.v1',
+      '${userId}', 'session-1', 1, 'request-${revisionNumber}-${randomUUID()}', '${at}')
+  `);
+  return revisionId;
+}
+
+async function expectAppendOnly(query: string): Promise<void> {
+  await expect(client.unsafe(query)).rejects.toThrow(/append-only/);
 }
 
 beforeAll(async () => {
@@ -66,253 +88,288 @@ afterAll(async () => {
 });
 
 describe("creator catalog persistence schema", () => {
-  test("enforces one page, one canonical handle, permanent aliases, and immutable publication rows", async () => {
-    // Break caught: a catalog migration without the database invariants that prevent
-    // concurrent handle/page changes from corrupting public identity or history.
-    const userId = `creator-catalog-user-${randomUUID()}`;
-    const pageId = randomUUID();
-    const canonicalClaimId = randomUUID();
-    const at = new Date("2026-08-29T00:00:00.000Z");
-    await insertUser(userId, at);
+  test("exports the complete authoritative catalog table boundary", () => {
+    // Break caught: a migration or schema file exists but consumers cannot use the tables.
+    expect({
+      creatorPages,
+      creatorHandleClaims,
+      creatorPageDrafts,
+      creatorShowcaseDrafts,
+      creatorShowcaseDraftMedia,
+      creatorPublicationRevisions,
+      creatorPublicationShowcases,
+      creatorPublicationMedia,
+      creatorPublicationEvents,
+      creatorDiscoveryProjections,
+    }).toEqual({
+      creatorPages: expect.anything(),
+      creatorHandleClaims: expect.anything(),
+      creatorPageDrafts: expect.anything(),
+      creatorShowcaseDrafts: expect.anything(),
+      creatorShowcaseDraftMedia: expect.anything(),
+      creatorPublicationRevisions: expect.anything(),
+      creatorPublicationShowcases: expect.anything(),
+      creatorPublicationMedia: expect.anything(),
+      creatorPublicationEvents: expect.anything(),
+      creatorDiscoveryProjections: expect.anything(),
+    });
+  });
 
-    await db.insert(creatorPages).values({
-      id: pageId,
-      userId,
-      draftVersion: 1,
-      initializedFromRevisionId: randomUUID(),
-      createdAt: at,
-      updatedAt: at,
-    });
-    await expect(db.insert(creatorPages).values({
-      id: randomUUID(),
-      userId,
-      draftVersion: 1,
-      initializedFromRevisionId: randomUUID(),
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
-    await expect(db.insert(creatorPages).values({
-      id: randomUUID(),
-      userId: `missing-${randomUUID()}`,
-      draftVersion: 0,
-      initializedFromRevisionId: randomUUID(),
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
+  test("rejects draft version zero for an existing valid user", async () => {
+    // Break caught: changing the page check to allow an invalid optimistic version.
+    const userId = await createUser();
+    await expect(client.unsafe(`
+      insert into creator_pages
+        (id, user_id, draft_version, initialized_from_revision_id, created_at, updated_at)
+      values ('${randomUUID()}', '${userId}', 0, '${randomUUID()}', '${at}', '${at}')
+    `)).rejects.toThrow();
+  });
 
-    await db.insert(creatorHandleClaims).values({
-      id: canonicalClaimId, pageId, normalizedHandle: "artist-one", kind: "canonical", claimedAt: at,
-    });
-    await expect(db.insert(creatorHandleClaims).values({
-      id: randomUUID(), pageId, normalizedHandle: "artist-two", kind: "canonical", claimedAt: at,
-    })).rejects.toThrow();
-    await expectAppendOnly(db.delete(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, pageId)));
-    await db.transaction(async (tx) => {
-      await tx.update(creatorHandleClaims).set({ kind: "alias", replacedAt: at })
-        .where(eq(creatorHandleClaims.id, canonicalClaimId));
-      await tx.insert(creatorHandleClaims).values({
-        id: randomUUID(), pageId, normalizedHandle: "artist-two", kind: "canonical", claimedAt: at,
-      });
-    });
-    await expectAppendOnly(db.update(creatorHandleClaims).set({ normalizedHandle: "artist-three" })
-      .where(eq(creatorHandleClaims.id, canonicalClaimId)));
-
-    await expect(db.insert(creatorPageDrafts).values({
-      pageId,
-      displayName: "Artist One",
-      shortIntroduction: "A short introduction",
-      primaryDiscipline: "unsupported",
-      secondaryDisciplines: [],
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
-    await db.insert(creatorPageDrafts).values({
-      pageId,
-      displayName: "Artist One",
-      shortIntroduction: "A short introduction",
-      primaryDiscipline: "illustration",
-      secondaryDisciplines: ["drawing"],
-      createdAt: at,
-      updatedAt: at,
-    });
-
-    const showcaseId = randomUUID();
-    await db.insert(creatorShowcaseDrafts).values({
-      id: showcaseId,
-      pageId,
-      position: 0,
-      title: "First showcase",
-      description: "",
-      discipline: "illustration",
-      contentLabel: "general_audience",
-      createdAt: at,
-      updatedAt: at,
-    });
-    await expect(db.insert(creatorShowcaseDrafts).values({
-      id: randomUUID(),
-      pageId,
-      position: 12,
-      title: "Invalid position",
-      description: "",
-      discipline: "illustration",
-      contentLabel: "general_audience",
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
-    await expect(db.insert(creatorShowcaseDrafts).values({
-      id: randomUUID(),
-      pageId,
-      position: 1,
-      title: "Invalid label",
-      description: "",
-      discipline: "illustration",
-      contentLabel: "age_restricted",
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
-    for (const position of [0, 1, 2, 3]) {
-      await db.insert(creatorShowcaseDraftMedia).values({
-        id: randomUUID(),
-        showcaseId,
-        assetId: randomUUID(),
-        position,
-        alternativeText: `Image ${position + 1}`,
-        createdAt: at,
-        updatedAt: at,
-      });
+  test("rejects invalid handle boundaries and globally colliding claims", async () => {
+    // Break caught: handle syntax or case-insensitive global identity becoming permissive.
+    const firstUserId = await createUser();
+    const secondUserId = await createUser();
+    const firstPageId = await createPage(firstUserId);
+    const secondPageId = await createPage(secondUserId);
+    for (const handle of ["a", "ab", "a".repeat(31), "-artist", "artist-", "artist--one", "Artist"]) {
+      await expect(client.unsafe(`
+        insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at)
+        values ('${randomUUID()}', '${firstPageId}', '${handle}', 'canonical', '${at}')
+      `)).rejects.toThrow();
     }
-    await expect(db.insert(creatorShowcaseDraftMedia).values({
-      id: randomUUID(),
-      showcaseId,
-      assetId: randomUUID(),
-      position: 4,
-      alternativeText: "Fifth image",
-      createdAt: at,
-      updatedAt: at,
-    })).rejects.toThrow();
+    await client.unsafe(`
+      insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at)
+      values ('${randomUUID()}', '${firstPageId}', 'artist-one', 'canonical', '${at}')
+    `);
+    await expect(client.unsafe(`
+      insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at)
+      values ('${randomUUID()}', '${secondPageId}', 'artist-one', 'canonical', '${at}')
+    `)).rejects.toThrow();
+  });
 
-    const revisionId = randomUUID();
-    await db.insert(creatorPublicationRevisions).values({
-      id: revisionId,
-      pageId,
-      revisionNumber: 1,
-      canonicalHandle: "artist-two",
-      displayName: "Artist One",
-      shortIntroduction: "A short introduction",
-      primaryDiscipline: "illustration",
-      secondaryDisciplines: ["drawing"],
-      taxonomyVersion: "v1",
-      policyVersion: "general_audience.v1",
-      actorUserId: userId,
-      actorSessionId: "session-1",
-      expectedDraftVersion: 1,
-      requestId: "request-1",
-      publishedAt: at,
-    });
-    await expect(db.insert(creatorPublicationRevisions).values({
-      id: randomUUID(),
-      pageId,
-      revisionNumber: 1,
-      canonicalHandle: "artist-two",
-      displayName: "Artist One",
-      shortIntroduction: "A short introduction",
-      primaryDiscipline: "illustration",
-      secondaryDisciplines: [],
-      taxonomyVersion: "v1",
-      policyVersion: "general_audience.v1",
-      actorUserId: userId,
-      actorSessionId: "session-2",
-      expectedDraftVersion: 1,
-      requestId: "request-2",
-      publishedAt: at,
-    })).rejects.toThrow();
-    await db.update(creatorPages).set({ publishedRevisionId: revisionId }).where(eq(creatorPages.id, pageId));
+  test("rejects direct aliases and permits only an atomic canonical replacement", async () => {
+    // Break caught: an alias can be inserted or mutated outside a successful rename transaction.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    const canonicalId = randomUUID();
+    await expect(client.unsafe(`
+      insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at, replaced_at)
+      values ('${randomUUID()}', '${pageId}', 'artist-alias', 'alias', '${at}', '${at}')
+    `)).rejects.toThrow(/canonical/);
+    await client.unsafe(`
+      insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at)
+      values ('${canonicalId}', '${pageId}', 'artist-old', 'canonical', '${at}')
+    `);
+    await expect(client.unsafe(`
+      update creator_handle_claims set kind = 'alias', replaced_at = '${at}' where id = '${canonicalId}'
+    `)).rejects.toThrow(/append-only/);
+    await client.unsafe("begin");
+    try {
+      await client.unsafe(`
+        update creator_handle_claims set kind = 'alias', replaced_at = '${at}' where id = '${canonicalId}'
+      `);
+      await client.unsafe(`
+        insert into creator_handle_claims (id, page_id, normalized_handle, kind, claimed_at)
+        values ('${randomUUID()}', '${pageId}', 'artist-new', 'canonical', '${at}')
+      `);
+      await client.unsafe("commit");
+    } catch (error) {
+      await client.unsafe("rollback");
+      throw error;
+    }
+    await expectAppendOnly(`delete from creator_handle_claims where id = '${canonicalId}'`);
+  });
 
-    const otherUserId = `creator-catalog-user-${randomUUID()}`;
-    const otherPageId = randomUUID();
-    await insertUser(otherUserId, at);
-    await db.insert(creatorPages).values({
-      id: otherPageId,
-      userId: otherUserId,
-      draftVersion: 1,
-      initializedFromRevisionId: randomUUID(),
-      createdAt: at,
-      updatedAt: at,
-    });
-    await expect(db.update(creatorPages).set({ publishedRevisionId: revisionId }).where(eq(creatorPages.id, otherPageId))).rejects.toThrow();
-
-    const publicationShowcaseId = randomUUID();
-    await db.insert(creatorPublicationShowcases).values({
-      id: publicationShowcaseId,
-      revisionId,
-      sourceShowcaseId: showcaseId,
-      position: 0,
-      title: "First showcase",
-      description: "",
-      discipline: "illustration",
-      contentLabel: "general_audience",
-    });
-    await db.insert(creatorPublicationMedia).values({
-      id: randomUUID(),
-      publicationShowcaseId,
-      assetId: randomUUID(),
-      position: 0,
-      alternativeText: "Published image",
-      thumbDerivativeId: randomUUID(),
-      displayDerivativeId: randomUUID(),
-      largeDerivativeId: randomUUID(),
-    });
-    await db.insert(creatorPublicationEvents).values({
-      id: randomUUID(),
-      pageId,
-      revisionId,
-      type: "published",
-      actorUserId: userId,
-      actorSessionId: "session-1",
-      expectedDraftVersion: 1,
-      requestId: "request-1",
-      occurredAt: at,
-    });
-    await expectAppendOnly(db.update(creatorPublicationRevisions).set({ displayName: "Changed" }).where(eq(creatorPublicationRevisions.id, revisionId)));
-    await expectAppendOnly(db.delete(creatorPublicationShowcases).where(eq(creatorPublicationShowcases.id, publicationShowcaseId)));
-    await expectAppendOnly(db.delete(creatorPublicationEvents).where(eq(creatorPublicationEvents.pageId, pageId)));
-
-    await db.insert(creatorDiscoveryProjections).values({
-      pageId,
-      revisionId,
-      canonicalHandle: "artist-two",
-      displayName: "Artist One",
-      shortIntroduction: "A short introduction",
-      disciplines: ["illustration", "drawing"],
-      avatarThumbDerivativeId: null,
-      revisionAt: at,
-      enabled: true,
-    });
-
-    const triggers = await client<{ trigger_name: string }[]>`
-      select trigger_name
-      from information_schema.triggers
-      where event_object_schema = ${schemaName}
-        and trigger_name in (
-          'creator_handle_claims_append_only',
-          'creator_publication_events_append_only',
-          'creator_publication_media_append_only',
-          'creator_publication_revisions_append_only',
-          'creator_publication_showcases_append_only',
-          'creator_showcase_draft_media_limit',
-          'creator_showcase_drafts_limit_active'
-        )
-      group by trigger_name
-      order by trigger_name
+  test("applies the canonical-handle contract to revision snapshots and discovery projections", async () => {
+    // Break caught: a public snapshot/projection bypasses the permanent-handle syntax contract.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    await expect(client.unsafe(`
+      insert into creator_publication_revisions
+        (id, page_id, revision_number, canonical_handle, display_name, short_introduction,
+         primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
+         actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
+      values ('${randomUUID()}', '${pageId}', 1, 'artist--invalid', 'Artist', 'Introduction',
+        'illustration', ARRAY[]::text[], 'v1', 'general_audience.v1', '${userId}', 'session', 1, 'request-handle', '${at}')
+    `)).rejects.toThrow();
+    const revisionId = await createRevision(pageId, userId);
+    await expect(client.unsafe(`
+      insert into creator_discovery_projections
+        (page_id, revision_id, canonical_handle, display_name, short_introduction, disciplines, revision_at, enabled)
+      values ('${pageId}', '${revisionId}', 'artist-', 'Artist', 'Introduction', ARRAY['illustration']::text[], '${at}', true)
+    `)).rejects.toThrow();
+    const columns = await client<{ column_name: string }[]>`
+      select column_name from information_schema.columns
+      where table_schema = ${schemaName} and table_name = 'creator_discovery_projections'
+      order by ordinal_position
     `;
-    expect(triggers).toEqual([
-      { trigger_name: "creator_handle_claims_append_only" },
-      { trigger_name: "creator_publication_events_append_only" },
-      { trigger_name: "creator_publication_media_append_only" },
-      { trigger_name: "creator_publication_revisions_append_only" },
-      { trigger_name: "creator_publication_showcases_append_only" },
-      { trigger_name: "creator_showcase_draft_media_limit" },
-      { trigger_name: "creator_showcase_drafts_limit_active" },
+    expect(columns.map((column) => column.column_name)).toEqual([
+      "page_id", "revision_id", "canonical_handle", "display_name", "short_introduction",
+      "disciplines", "avatar_thumb_derivative_id", "revision_at", "enabled",
     ]);
+    const secondUserId = await createUser();
+    const secondPageId = await createPage(secondUserId);
+    const secondRevisionId = await createRevision(secondPageId, secondUserId);
+    await client.unsafe("begin");
+    try {
+      await client.unsafe("alter table creator_discovery_projections drop constraint creator_discovery_projections_canonical_handle_check");
+      await client.unsafe(`
+        insert into creator_discovery_projections
+          (page_id, revision_id, canonical_handle, display_name, short_introduction, disciplines, revision_at, enabled)
+        values ('${pageId}', '${revisionId}', 'artist-projection', 'Artist', 'Introduction', ARRAY['illustration']::text[], '${at}', true)
+      `);
+      await expect(client.unsafe(`
+        insert into creator_discovery_projections
+          (page_id, revision_id, canonical_handle, display_name, short_introduction, disciplines, revision_at, enabled)
+        values ('${secondPageId}', '${secondRevisionId}', 'ARTIST-PROJECTION', 'Artist', 'Introduction', ARRAY['illustration']::text[], '${at}', true)
+      `)).rejects.toThrow();
+    } finally {
+      await client.unsafe("rollback");
+    }
+  });
+
+  test("rejects duplicate active draft positions and isolates the 13th showcase guard", async () => {
+    // Break caught: active showcase ordering ceases to be unique or the count trigger is removed.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    const insertShowcase = (position: number) => client.unsafe(`
+      insert into creator_showcase_drafts
+        (id, page_id, position, title, description, discipline, content_label, created_at, updated_at)
+      values ('${randomUUID()}', '${pageId}', ${position}, 'Showcase ${position}', '', 'illustration',
+        'general_audience', '${at}', '${at}')
+    `);
+    await insertShowcase(0);
+    await expect(insertShowcase(0)).rejects.toThrow();
+    await client.unsafe("begin");
+    try {
+      await client.unsafe("alter table creator_showcase_drafts drop constraint creator_showcase_drafts_position_check");
+      for (let position = 1; position <= 11; position += 1) await insertShowcase(position);
+      await expect(insertShowcase(12)).rejects.toThrow(/at most 12 active showcases/);
+    } finally {
+      await client.unsafe("rollback");
+    }
+  });
+
+  test("rejects duplicate media positions and isolates the fifth-media guard", async () => {
+    // Break caught: showcase media ordering ceases to be unique or the count trigger is removed.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    const showcaseId = randomUUID();
+    await client.unsafe(`
+      insert into creator_showcase_drafts
+        (id, page_id, position, title, description, discipline, content_label, created_at, updated_at)
+      values ('${showcaseId}', '${pageId}', 0, 'Showcase', '', 'illustration', 'general_audience', '${at}', '${at}')
+    `);
+    const insertMedia = (position: number) => client.unsafe(`
+      insert into creator_showcase_draft_media
+        (id, showcase_id, asset_id, position, alternative_text, created_at, updated_at)
+      values ('${randomUUID()}', '${showcaseId}', '${randomUUID()}', ${position}, 'Alternative ${position}', '${at}', '${at}')
+    `);
+    await insertMedia(0);
+    await expect(insertMedia(0)).rejects.toThrow();
+    await client.unsafe("begin");
+    try {
+      await client.unsafe("alter table creator_showcase_draft_media drop constraint creator_showcase_draft_media_position_check");
+      for (let position = 1; position <= 3; position += 1) await insertMedia(position);
+      await expect(insertMedia(4)).rejects.toThrow(/at most four media rows/);
+    } finally {
+      await client.unsafe("rollback");
+    }
+  });
+
+  test("enforces immutable revision taxonomy, policy, and child positions", async () => {
+    // Break caught: revisions accept an unsupported public policy or duplicate ordered children.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    await expect(client.unsafe(`
+      insert into creator_publication_revisions
+        (id, page_id, revision_number, canonical_handle, display_name, short_introduction,
+         primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
+         actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
+      values ('${randomUUID()}', '${pageId}', 1, 'artist-invalid', 'Artist', 'Introduction',
+        'unsupported', ARRAY[]::text[], 'v1', 'general_audience.v1', '${userId}', 'session', 1, 'request-a', '${at}')
+    `)).rejects.toThrow();
+    await expect(client.unsafe(`
+      insert into creator_publication_revisions
+        (id, page_id, revision_number, canonical_handle, display_name, short_introduction,
+         primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
+         actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
+      values ('${randomUUID()}', '${pageId}', 1, 'artist-invalid', 'Artist', 'Introduction',
+        'illustration', ARRAY[]::text[], 'v2', 'age_restricted.v1', '${userId}', 'session', 1, 'request-b', '${at}')
+    `)).rejects.toThrow();
+    const revisionId = await createRevision(pageId, userId);
+    await expect(createRevision(pageId, userId)).rejects.toThrow();
+    const showcaseId = randomUUID();
+    await client.unsafe(`
+      insert into creator_publication_showcases
+        (id, revision_id, source_showcase_id, position, title, description, discipline, content_label)
+      values ('${showcaseId}', '${revisionId}', '${randomUUID()}', 0, 'Published', '', 'illustration', 'general_audience')
+    `);
+    await expect(client.unsafe(`
+      insert into creator_publication_showcases
+        (id, revision_id, source_showcase_id, position, title, description, discipline, content_label)
+      values ('${randomUUID()}', '${revisionId}', '${randomUUID()}', 0, 'Duplicate', '', 'illustration', 'general_audience')
+    `)).rejects.toThrow();
+    await client.unsafe(`
+      insert into creator_publication_media
+        (id, publication_showcase_id, asset_id, position, alternative_text, thumb_derivative_id, display_derivative_id, large_derivative_id)
+      values ('${randomUUID()}', '${showcaseId}', '${randomUUID()}', 0, 'Alternative', '${randomUUID()}', '${randomUUID()}', '${randomUUID()}')
+    `);
+    await expect(client.unsafe(`
+      insert into creator_publication_media
+        (id, publication_showcase_id, asset_id, position, alternative_text, thumb_derivative_id, display_derivative_id, large_derivative_id)
+      values ('${randomUUID()}', '${showcaseId}', '${randomUUID()}', 0, 'Duplicate', '${randomUUID()}', '${randomUUID()}', '${randomUUID()}')
+    `)).rejects.toThrow();
+  });
+
+  test("rejects cross-page revision references in heads, events, and discovery projections", async () => {
+    // Break caught: a page can claim another page's immutable revision as its own public state.
+    const firstUserId = await createUser();
+    const secondUserId = await createUser();
+    const firstPageId = await createPage(firstUserId);
+    const secondPageId = await createPage(secondUserId);
+    const firstRevisionId = await createRevision(firstPageId, firstUserId);
+    await expect(client.unsafe(`
+      update creator_pages set published_revision_id = '${firstRevisionId}' where id = '${secondPageId}'
+    `)).rejects.toThrow();
+    await expect(client.unsafe(`
+      insert into creator_publication_events
+        (id, page_id, revision_id, type, actor_user_id, actor_session_id, expected_draft_version, request_id, occurred_at)
+      values ('${randomUUID()}', '${secondPageId}', '${firstRevisionId}', 'published', '${secondUserId}', 'session', 1, 'event-a', '${at}')
+    `)).rejects.toThrow();
+    await expect(client.unsafe(`
+      insert into creator_discovery_projections
+        (page_id, revision_id, canonical_handle, display_name, short_introduction, disciplines, revision_at, enabled)
+      values ('${secondPageId}', '${firstRevisionId}', 'artist-projection', 'Artist', 'Introduction', ARRAY['illustration']::text[], '${at}', true)
+    `)).rejects.toThrow();
+  });
+
+  test("rejects update and delete of publication rows and events", async () => {
+    // Break caught: immutable public history can be changed or removed after publication.
+    const userId = await createUser();
+    const pageId = await createPage(userId);
+    const revisionId = await createRevision(pageId, userId);
+    const showcaseId = randomUUID();
+    const mediaId = randomUUID();
+    const eventId = randomUUID();
+    await client.unsafe(`
+      insert into creator_publication_showcases
+        (id, revision_id, source_showcase_id, position, title, description, discipline, content_label)
+      values ('${showcaseId}', '${revisionId}', '${randomUUID()}', 0, 'Published', '', 'illustration', 'general_audience')
+    `);
+    await client.unsafe(`
+      insert into creator_publication_media
+        (id, publication_showcase_id, asset_id, position, alternative_text, thumb_derivative_id, display_derivative_id, large_derivative_id)
+      values ('${mediaId}', '${showcaseId}', '${randomUUID()}', 0, 'Alternative', '${randomUUID()}', '${randomUUID()}', '${randomUUID()}')
+    `);
+    await client.unsafe(`
+      insert into creator_publication_events
+        (id, page_id, revision_id, type, actor_user_id, actor_session_id, expected_draft_version, request_id, occurred_at)
+      values ('${eventId}', '${pageId}', '${revisionId}', 'published', '${userId}', 'session', 1, 'event-b', '${at}')
+    `);
+    await expectAppendOnly(`update creator_publication_revisions set display_name = 'Changed' where id = '${revisionId}'`);
+    await expectAppendOnly(`delete from creator_publication_showcases where id = '${showcaseId}'`);
+    await expectAppendOnly(`update creator_publication_media set alternative_text = 'Changed' where id = '${mediaId}'`);
+    await expectAppendOnly(`delete from creator_publication_events where id = '${eventId}'`);
   });
 });

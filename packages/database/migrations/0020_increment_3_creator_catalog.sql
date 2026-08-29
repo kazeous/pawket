@@ -8,6 +8,7 @@ CREATE TABLE "creator_discovery_projections" (
 	"avatar_thumb_derivative_id" uuid,
 	"revision_at" timestamp with time zone NOT NULL,
 	"enabled" boolean DEFAULT false NOT NULL,
+	CONSTRAINT "creator_discovery_projections_canonical_handle_check" CHECK (char_length("creator_discovery_projections"."canonical_handle") between 3 and 30 and "creator_discovery_projections"."canonical_handle" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
 	CONSTRAINT "creator_discovery_projections_disciplines_check" CHECK (cardinality("creator_discovery_projections"."disciplines") between 1 and 3 and "creator_discovery_projections"."disciplines" <@ ARRAY['illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other']::text[])
 );
 --> statement-breakpoint
@@ -19,7 +20,7 @@ CREATE TABLE "creator_handle_claims" (
 	"claimed_at" timestamp with time zone NOT NULL,
 	"replaced_at" timestamp with time zone,
 	CONSTRAINT "creator_handle_claims_kind_check" CHECK ("creator_handle_claims"."kind" in ('canonical','alias')),
-	CONSTRAINT "creator_handle_claims_normalized_handle_check" CHECK ("creator_handle_claims"."normalized_handle" ~ '^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$' and "creator_handle_claims"."normalized_handle" = lower("creator_handle_claims"."normalized_handle")),
+	CONSTRAINT "creator_handle_claims_normalized_handle_check" CHECK (char_length("creator_handle_claims"."normalized_handle") between 3 and 30 and "creator_handle_claims"."normalized_handle" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
 	CONSTRAINT "creator_handle_claims_replaced_check" CHECK (("creator_handle_claims"."kind" = 'canonical' and "creator_handle_claims"."replaced_at" is null) or ("creator_handle_claims"."kind" = 'alias' and "creator_handle_claims"."replaced_at" is not null))
 );
 --> statement-breakpoint
@@ -100,6 +101,7 @@ CREATE TABLE "creator_publication_revisions" (
 	"request_id" text NOT NULL,
 	"published_at" timestamp with time zone NOT NULL,
 	CONSTRAINT "creator_publication_revisions_number_check" CHECK ("creator_publication_revisions"."revision_number" > 0),
+	CONSTRAINT "creator_publication_revisions_canonical_handle_check" CHECK (char_length("creator_publication_revisions"."canonical_handle") between 3 and 30 and "creator_publication_revisions"."canonical_handle" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
 	CONSTRAINT "creator_publication_revisions_display_name_check" CHECK (char_length("creator_publication_revisions"."display_name") between 1 and 80),
 	CONSTRAINT "creator_publication_revisions_short_introduction_check" CHECK (char_length("creator_publication_revisions"."short_introduction") between 1 and 500),
 	CONSTRAINT "creator_publication_revisions_primary_discipline_check" CHECK ("creator_publication_revisions"."primary_discipline" in ('illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other')),
@@ -157,12 +159,10 @@ CREATE TABLE "creator_showcase_drafts" (
 );
 --> statement-breakpoint
 ALTER TABLE "creator_discovery_projections" ADD CONSTRAINT "creator_discovery_projections_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
-ALTER TABLE "creator_discovery_projections" ADD CONSTRAINT "creator_discovery_projections_revision_id_creator_publication_revisions_id_fk" FOREIGN KEY ("revision_id") REFERENCES "creator_publication_revisions"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_handle_claims" ADD CONSTRAINT "creator_handle_claims_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_page_drafts" ADD CONSTRAINT "creator_page_drafts_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_pages" ADD CONSTRAINT "creator_pages_user_id_identity_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "identity_users"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_publication_events" ADD CONSTRAINT "creator_publication_events_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
-ALTER TABLE "creator_publication_events" ADD CONSTRAINT "creator_publication_events_revision_id_creator_publication_revisions_id_fk" FOREIGN KEY ("revision_id") REFERENCES "creator_publication_revisions"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_publication_events" ADD CONSTRAINT "creator_publication_events_actor_user_id_identity_users_id_fk" FOREIGN KEY ("actor_user_id") REFERENCES "identity_users"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_publication_media" ADD CONSTRAINT "creator_publication_media_publication_showcase_id_creator_publication_showcases_id_fk" FOREIGN KEY ("publication_showcase_id") REFERENCES "creator_publication_showcases"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_publication_revisions" ADD CONSTRAINT "creator_publication_revisions_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
@@ -170,7 +170,7 @@ ALTER TABLE "creator_publication_revisions" ADD CONSTRAINT "creator_publication_
 ALTER TABLE "creator_publication_showcases" ADD CONSTRAINT "creator_publication_showcases_revision_id_creator_publication_revisions_id_fk" FOREIGN KEY ("revision_id") REFERENCES "creator_publication_revisions"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_showcase_draft_media" ADD CONSTRAINT "creator_showcase_draft_media_showcase_id_creator_showcase_drafts_id_fk" FOREIGN KEY ("showcase_id") REFERENCES "creator_showcase_drafts"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "creator_showcase_drafts" ADD CONSTRAINT "creator_showcase_drafts_page_id_creator_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "creator_pages"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
-CREATE UNIQUE INDEX "creator_discovery_projections_canonical_handle_uidx" ON "creator_discovery_projections" USING btree ("canonical_handle");--> statement-breakpoint
+CREATE UNIQUE INDEX "creator_discovery_projections_canonical_handle_uidx" ON "creator_discovery_projections" USING btree (lower("canonical_handle"));--> statement-breakpoint
 CREATE INDEX "creator_discovery_projections_enabled_handle_idx" ON "creator_discovery_projections" USING btree ("canonical_handle","page_id") WHERE "creator_discovery_projections"."enabled";--> statement-breakpoint
 CREATE INDEX "creator_handle_claims_page_idx" ON "creator_handle_claims" USING btree ("page_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_handle_claims_one_canonical_page_uidx" ON "creator_handle_claims" USING btree ("page_id") WHERE "creator_handle_claims"."kind" = 'canonical';--> statement-breakpoint
@@ -188,9 +188,60 @@ CREATE INDEX "creator_showcase_drafts_page_idx" ON "creator_showcase_drafts" USI
 CREATE UNIQUE INDEX "creator_showcase_drafts_active_position_uidx" ON "creator_showcase_drafts" USING btree ("page_id","position") WHERE "creator_showcase_drafts"."removed_at" is null;
 --> statement-breakpoint
 ALTER TABLE "creator_pages" ADD CONSTRAINT "creator_pages_published_head_fk"
-FOREIGN KEY ("published_revision_id", "id")
-REFERENCES "creator_publication_revisions"("id", "page_id")
+FOREIGN KEY ("published_revision_id", "id") REFERENCES "creator_publication_revisions"("id", "page_id")
 DEFERRABLE INITIALLY DEFERRED;
+--> statement-breakpoint
+ALTER TABLE "creator_publication_events" ADD CONSTRAINT "creator_publication_events_revision_page_fk"
+FOREIGN KEY ("revision_id", "page_id") REFERENCES "creator_publication_revisions"("id", "page_id")
+DEFERRABLE INITIALLY DEFERRED;
+--> statement-breakpoint
+ALTER TABLE "creator_discovery_projections" ADD CONSTRAINT "creator_discovery_projections_revision_page_fk"
+FOREIGN KEY ("revision_id", "page_id") REFERENCES "creator_publication_revisions"("id", "page_id")
+DEFERRABLE INITIALLY DEFERRED;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION creator_catalog_reject_direct_alias_insert() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.kind = 'alias' THEN
+    RAISE EXCEPTION 'creator handle aliases must arise from a canonical replacement' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER creator_handle_claims_reject_direct_alias
+BEFORE INSERT ON "creator_handle_claims"
+FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_direct_alias_insert();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION creator_catalog_reject_handle_claim_mutation() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'creator handle claims are append-only' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.kind = 'canonical'
+    AND NEW.kind = 'alias'
+    AND OLD.replaced_at IS NULL
+    AND NEW.replaced_at IS NOT NULL
+    AND ROW(OLD.id, OLD.page_id, OLD.normalized_handle, OLD.claimed_at)
+      IS NOT DISTINCT FROM ROW(NEW.id, NEW.page_id, NEW.normalized_handle, NEW.claimed_at)
+    AND EXISTS (
+      SELECT 1 FROM creator_handle_claims
+      WHERE page_id = NEW.page_id AND kind = 'canonical' AND id <> NEW.id
+    )
+  THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'creator handle claims are append-only' USING ERRCODE = '55000';
+END;
+$$;
+--> statement-breakpoint
+CREATE CONSTRAINT TRIGGER creator_handle_claims_append_only
+AFTER UPDATE OR DELETE ON "creator_handle_claims"
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_handle_claim_mutation();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION creator_catalog_limit_active_showcases() RETURNS trigger
 LANGUAGE plpgsql
@@ -198,13 +249,7 @@ AS $$
 BEGIN
   IF NEW.removed_at IS NULL
     AND (TG_OP = 'INSERT' OR OLD.removed_at IS NOT NULL OR OLD.page_id IS DISTINCT FROM NEW.page_id)
-    AND (
-      SELECT count(*)
-      FROM creator_showcase_drafts
-      WHERE page_id = NEW.page_id
-        AND removed_at IS NULL
-        AND id <> NEW.id
-    ) >= 12
+    AND (SELECT count(*) FROM creator_showcase_drafts WHERE page_id = NEW.page_id AND removed_at IS NULL AND id <> NEW.id) >= 12
   THEN
     RAISE EXCEPTION 'creator pages may have at most 12 active showcases' USING ERRCODE = '23514';
   END IF;
@@ -221,13 +266,7 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   IF TG_OP = 'INSERT' OR OLD.showcase_id IS DISTINCT FROM NEW.showcase_id THEN
-    IF (
-      SELECT count(*)
-      FROM creator_showcase_draft_media
-      WHERE showcase_id = NEW.showcase_id
-        AND id <> NEW.id
-    ) >= 4
-    THEN
+    IF (SELECT count(*) FROM creator_showcase_draft_media WHERE showcase_id = NEW.showcase_id AND id <> NEW.id) >= 4 THEN
       RAISE EXCEPTION 'creator showcases may have at most four media rows' USING ERRCODE = '23514';
     END IF;
   END IF;
@@ -239,34 +278,6 @@ CREATE TRIGGER creator_showcase_draft_media_limit
 BEFORE INSERT OR UPDATE ON "creator_showcase_draft_media"
 FOR EACH ROW EXECUTE FUNCTION creator_catalog_limit_showcase_media();
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION creator_catalog_reject_handle_claim_mutation() RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  IF TG_OP = 'UPDATE'
-    AND OLD.kind = 'canonical'
-    AND NEW.kind = 'alias'
-    AND OLD.replaced_at IS NULL
-    AND NEW.replaced_at IS NOT NULL
-    AND ROW(OLD.id, OLD.page_id, OLD.normalized_handle, OLD.claimed_at)
-      IS NOT DISTINCT FROM ROW(NEW.id, NEW.page_id, NEW.normalized_handle, NEW.claimed_at)
-    AND EXISTS (
-      SELECT 1 FROM creator_handle_claims
-      WHERE page_id = NEW.page_id AND kind = 'canonical' AND id <> NEW.id
-    )
-  THEN
-    RETURN NEW;
-  END IF;
-
-  RAISE EXCEPTION 'creator handle claims are append-only' USING ERRCODE = '55000';
-END;
-$$;
---> statement-breakpoint
-CREATE CONSTRAINT TRIGGER creator_handle_claims_append_only
-AFTER UPDATE OR DELETE ON "creator_handle_claims"
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_handle_claim_mutation();
---> statement-breakpoint
 CREATE OR REPLACE FUNCTION creator_catalog_reject_publication_mutation() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -275,18 +286,10 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
-CREATE TRIGGER creator_publication_revisions_append_only
-BEFORE UPDATE OR DELETE ON "creator_publication_revisions"
-FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
+CREATE TRIGGER creator_publication_revisions_append_only BEFORE UPDATE OR DELETE ON "creator_publication_revisions" FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
 --> statement-breakpoint
-CREATE TRIGGER creator_publication_showcases_append_only
-BEFORE UPDATE OR DELETE ON "creator_publication_showcases"
-FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
+CREATE TRIGGER creator_publication_showcases_append_only BEFORE UPDATE OR DELETE ON "creator_publication_showcases" FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
 --> statement-breakpoint
-CREATE TRIGGER creator_publication_media_append_only
-BEFORE UPDATE OR DELETE ON "creator_publication_media"
-FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
+CREATE TRIGGER creator_publication_media_append_only BEFORE UPDATE OR DELETE ON "creator_publication_media" FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
 --> statement-breakpoint
-CREATE TRIGGER creator_publication_events_append_only
-BEFORE UPDATE OR DELETE ON "creator_publication_events"
-FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
+CREATE TRIGGER creator_publication_events_append_only BEFORE UPDATE OR DELETE ON "creator_publication_events" FOR EACH ROW EXECUTE FUNCTION creator_catalog_reject_publication_mutation();
