@@ -4317,14 +4317,14 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'v1'"
+          "default": "'creator-discipline-v1'"
         },
         "policy_version": {
           "name": "policy_version",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'general_audience.v1'"
+          "default": "'general-audience-v1'"
         },
         "actor_user_id": {
           "name": "actor_user_id",
@@ -4480,7 +4480,7 @@
         },
         "creator_publication_revisions_policy_check": {
           "name": "creator_publication_revisions_policy_check",
-          "value": "\"creator_publication_revisions\".\"taxonomy_version\" = 'v1' and \"creator_publication_revisions\".\"policy_version\" = 'general_audience.v1'"
+          "value": "\"creator_publication_revisions\".\"taxonomy_version\" = 'creator-discipline-v1' and \"creator_publication_revisions\".\"policy_version\" = 'general-audience-v1'"
         },
         "creator_publication_revisions_expected_draft_version_check": {
           "name": "creator_publication_revisions_expected_draft_version_check",

@@ -3,9 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   beginIdempotentCommand,
   completeIdempotentCommand,
+  creatorDiscoveryProjections,
   creatorHandleClaims,
   creatorPageDrafts,
   creatorPages,
+  creatorPublicationEvents,
+  creatorPublicationMedia,
+  creatorPublicationRevisions,
+  creatorPublicationShowcases,
   creatorShowcaseDraftMedia,
   creatorShowcaseDrafts,
   insertOutboxEvent,
@@ -13,17 +18,19 @@ import {
   type PawketTransaction,
 } from "@pawket/database";
 import { createLookupHmac } from "@pawket/security";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, max, sql } from "drizzle-orm";
 
 import {
   CatalogPolicyError,
+  CONTENT_POLICY_VERSION,
   DISCIPLINES,
   normalizeExternalDestination,
   normalizeHandle,
   normalizeProfileText,
+  TAXONOMY_VERSION,
   type Discipline,
 } from "./catalog-policy.js";
-import type { IdentityCreatorSeedPort } from "./catalog-ports.js";
+import type { IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
 
 export const HANDLE_RECENT_AUTH_MS = 15 * 60_000;
 export const HANDLE_RENAME_COOLDOWN_MS = 30 * 24 * 60 * 60_000;
@@ -59,9 +66,37 @@ type ShowcaseInput = Readonly<{
 type CatalogServiceInput = Readonly<{
   db: PawketDatabase;
   creatorSeeds: IdentityCreatorSeedPort;
+  mediaCatalog?: MediaCatalogPort;
+  visibility?: VisibilityReadPort;
+  publishingMode?: "disabled" | "general_audience";
   commandFingerprintKey: Uint8Array;
   now?: () => Date;
   idFactory?: () => string;
+}>;
+
+export type PublishResult = Readonly<{
+  pageId: string;
+  revisionId: string;
+  revisionNumber: number;
+  canonicalHandle: string;
+  draftVersion: number;
+  publishedAt: Date;
+}>;
+
+export type UnpublishResult = Readonly<{
+  pageId: string;
+  previousPublishedRevisionId: string;
+  draftVersion: number;
+  unpublishedAt: Date;
+}>;
+
+export type SuspensionPublicationClear = Readonly<{
+  creatorUserId: string;
+  actorUserId: string;
+  actorSessionId: string;
+  reasonCode: string;
+  requestId: string;
+  occurredAt: Date;
 }>;
 
 export class CatalogServiceError extends Error {
@@ -90,6 +125,38 @@ function replayReference(pageId: string, version: number): string { return `cata
 function parseReplayReference(value: string): { pageId: string; version: number } | null {
   const match = /^catalog-v1:([0-9a-f-]{36}):([1-9]\d*)$/u.exec(value);
   return match ? { pageId: match[1]!, version: Number(match[2]) } : null;
+}
+
+function publicationReplayReference(result: PublishResult): string {
+  return ["catalog-publish-v1", result.pageId, result.revisionId, result.revisionNumber, result.canonicalHandle, result.draftVersion, result.publishedAt.getTime()].join(":");
+}
+
+function parsePublicationReplayReference(value: string): PublishResult | null {
+  const match = /^catalog-publish-v1:([0-9a-f-]{36}):([0-9a-f-]{36}):([1-9]\d*):([a-z0-9-]{3,30}):([1-9]\d*):(\d+)$/u.exec(value);
+  if (!match) return null;
+  const publishedAt = new Date(Number(match[6]));
+  if (Number.isNaN(publishedAt.getTime())) return null;
+  return { pageId: match[1]!, revisionId: match[2]!, revisionNumber: Number(match[3]), canonicalHandle: match[4]!, draftVersion: Number(match[5]), publishedAt };
+}
+
+function unpublicationReplayReference(result: UnpublishResult): string {
+  return ["catalog-unpublish-v1", result.pageId, result.previousPublishedRevisionId, result.draftVersion, result.unpublishedAt.getTime()].join(":");
+}
+
+function parseUnpublicationReplayReference(value: string): UnpublishResult | null {
+  const match = /^catalog-unpublish-v1:([0-9a-f-]{36}):([0-9a-f-]{36}):([1-9]\d*):(\d+)$/u.exec(value);
+  if (!match) return null;
+  const unpublishedAt = new Date(Number(match[4]));
+  if (Number.isNaN(unpublishedAt.getTime())) return null;
+  return { pageId: match[1]!, previousPublishedRevisionId: match[2]!, draftVersion: Number(match[3]), unpublishedAt };
+}
+
+function assertReadyReference(reference: MediaReference, resolved: ReadyMedia | undefined, ownerUserId: string): ReadyMedia {
+  if (!resolved || resolved.assetId !== reference.assetId || resolved.ownerUserId !== ownerUserId || resolved.purpose !== reference.purpose) fail("POLICY_VIOLATION");
+  for (const derivative of Object.values(resolved.derivatives)) {
+    if (!validUuid(derivative.derivativeId) || !Number.isInteger(derivative.width) || derivative.width <= 0 || !Number.isInteger(derivative.height) || derivative.height <= 0) fail("POLICY_VIOLATION");
+  }
+  return resolved;
 }
 
 function normalizeDraft(input: DraftInput) {
@@ -226,6 +293,21 @@ export function createCatalogService(input: CatalogServiceInput) {
     if (!actor.sessionId || Number.isNaN(age) || age < 0 || age > HANDLE_RECENT_AUTH_MS) fail("RECENT_AUTH_REQUIRED");
   }
 
+  function assertPublicationCommand(command: VersionedCatalogCommand) {
+    policy(
+      validUuid(command.pageId) &&
+      validIdempotencyKey(command.idempotencyKey) &&
+      validRequestId(command.requestId) &&
+      Number.isInteger(command.expectedVersion) &&
+      command.expectedVersion > 0 &&
+      Boolean(command.actor.sessionId),
+    );
+  }
+
+  async function completePublicationCommand(tx: PawketTransaction, recordId: string, resultReference: string, completedAt: Date) {
+    if (!await completeIdempotentCommand(tx, { recordId, resultReference, completedAt })) fail("IDEMPOTENCY_CONFLICT");
+  }
+
   return {
     async initialize(command: { userId: string; requestId: string }) {
       policy(validRequestId(command.requestId));
@@ -265,6 +347,7 @@ export function createCatalogService(input: CatalogServiceInput) {
           await tx.update(creatorHandleClaims).set({ kind: "alias", replacedAt: occurredAt }).where(eq(creatorHandleClaims.id, current.id));
           await tx.insert(creatorHandleClaims).values({ id: id(), pageId: page.id, normalizedHandle: handle, kind: "canonical", claimedAt: occurredAt, replacedAt: null });
           await tx.update(creatorPages).set({ renameAvailableAt: new Date(occurredAt.getTime() + HANDLE_RENAME_COOLDOWN_MS) }).where(eq(creatorPages.id, page.id));
+          await tx.update(creatorDiscoveryProjections).set({ canonicalHandle: handle }).where(eq(creatorDiscoveryProjections.pageId, page.id));
         }, (occurredAt) => assertRecentAuthentication(command.actor, occurredAt));
       } catch (error) { if (databaseConstraint(error, "creator_handle_claims_normalized_handle_uidx")) fail("HANDLE_UNAVAILABLE"); throw error; }
     },
@@ -316,6 +399,198 @@ export function createCatalogService(input: CatalogServiceInput) {
         const reactivated = await tx.update(creatorShowcaseDrafts).set({ removedAt: null, updatedAt: at }).where(and(eq(creatorShowcaseDrafts.pageId, page.id), inArray(creatorShowcaseDrafts.id, activeIds), eq(creatorShowcaseDrafts.removedAt, at))).returning({ id: creatorShowcaseDrafts.id });
         if (reactivated.length !== active.length) fail("VERSION_CONFLICT");
       });
+    },
+    async publish(command: VersionedCatalogCommand): Promise<PublishResult> {
+      assertPublicationCommand(command);
+      const occurredAt = now();
+      return input.db.transaction(async (tx) => {
+        await requireCreator(tx, command.actor.userId, true);
+        const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
+        const started = await beginIdempotentCommand(tx, {
+          actorUserId: command.actor.userId,
+          commandScope: "catalog.page.publish",
+          keyHash: createLookupHmac({ value: command.idempotencyKey, context: "catalog-command-key", key: input.commandFingerprintKey }),
+          requestFingerprint: createLookupHmac({ value: JSON.stringify({ pageId: command.pageId, expectedVersion: command.expectedVersion }), context: "catalog-command", key: input.commandFingerprintKey }),
+          expiresAt: new Date(occurredAt.getTime() + IDEMPOTENCY_LIFETIME_MS),
+          now: occurredAt,
+        });
+        if (started.kind === "replay") {
+          const replay = parsePublicationReplayReference(started.resultReference);
+          if (!replay || replay.pageId !== page.id) fail("IDEMPOTENCY_CONFLICT");
+          return replay;
+        }
+        if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        if (input.publishingMode !== "general_audience" || !input.mediaCatalog || !input.visibility) fail("POLICY_VIOLATION");
+        if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
+
+        const [draft] = await tx.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, page.id)).limit(1).for("update");
+        const [canonical] = await tx.select().from(creatorHandleClaims).where(and(eq(creatorHandleClaims.pageId, page.id), eq(creatorHandleClaims.kind, "canonical"))).limit(1).for("update");
+        if (!draft || !canonical) fail("POLICY_VIOLATION");
+        let canonicalHandle: string;
+        try { canonicalHandle = normalizeHandle(canonical.normalizedHandle); } catch { fail("POLICY_VIOLATION"); }
+        const normalizedDraft = normalizeDraft({
+          displayName: draft.displayName,
+          introduction: draft.shortIntroduction,
+          primaryDiscipline: draft.primaryDiscipline,
+          secondaryDisciplines: draft.secondaryDisciplines,
+          avatarAssetId: draft.avatarAssetId,
+          coverAssetId: draft.coverAssetId,
+        });
+        const showcases = await tx.select().from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position)).for("update");
+        const showcaseIds = showcases.map((showcase) => showcase.id);
+        const mediaRows = showcaseIds.length === 0
+          ? []
+          : await tx.select().from(creatorShowcaseDraftMedia).where(inArray(creatorShowcaseDraftMedia.showcaseId, showcaseIds)).orderBy(asc(creatorShowcaseDraftMedia.position)).for("update");
+        const normalizedShowcases = showcases.map((showcase) => normalizeShowcase({
+          id: showcase.id,
+          position: showcase.position,
+          title: showcase.title,
+          description: showcase.description,
+          discipline: showcase.discipline,
+          contentLabel: showcase.contentLabel,
+          externalUrl: showcase.externalUrl,
+          media: mediaRows.filter((item) => item.showcaseId === showcase.id).map((item) => ({ assetId: item.assetId, alternativeText: item.alternativeText })),
+        }));
+        const revisionId = id();
+        const holds = await input.visibility.readHolds(tx, page.id, revisionId, showcaseIds);
+        if (holds.pageHeld || showcases.some((showcase) => holds.heldShowcaseIds.has(showcase.id))) fail("POLICY_VIOLATION");
+
+        const references: MediaReference[] = [];
+        if (normalizedDraft.avatarAssetId) references.push({ assetId: normalizedDraft.avatarAssetId, purpose: "avatar", altText: null });
+        if (normalizedDraft.coverAssetId) references.push({ assetId: normalizedDraft.coverAssetId, purpose: "cover", altText: null });
+        for (const showcase of normalizedShowcases) for (const item of showcase.media) references.push({ assetId: item.assetId, purpose: "showcase", altText: item.alternativeText });
+        const resolved = await input.mediaCatalog.resolveReadyAssets(tx, command.actor.userId, references);
+        const resolvedByReference = new Map(references.map((reference) => [reference.assetId, assertReadyReference(reference, resolved.get(reference.assetId), command.actor.userId)]));
+        const avatar = normalizedDraft.avatarAssetId ? resolvedByReference.get(normalizedDraft.avatarAssetId) : undefined;
+        const cover = normalizedDraft.coverAssetId ? resolvedByReference.get(normalizedDraft.coverAssetId) : undefined;
+        const maximumRevision = (await tx.select({ maximumRevision: max(creatorPublicationRevisions.revisionNumber) }).from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.pageId, page.id)))[0]?.maximumRevision;
+        const revisionNumber = (maximumRevision ?? 0) + 1;
+        await tx.insert(creatorPublicationRevisions).values({
+          id: revisionId,
+          pageId: page.id,
+          revisionNumber,
+          canonicalHandle,
+          displayName: normalizedDraft.displayName,
+          shortIntroduction: normalizedDraft.introduction,
+          primaryDiscipline: normalizedDraft.primaryDiscipline,
+          secondaryDisciplines: normalizedDraft.secondaryDisciplines,
+          avatarAssetId: avatar?.assetId ?? null,
+          avatarThumbDerivativeId: avatar?.derivatives.thumb.derivativeId ?? null,
+          avatarDisplayDerivativeId: avatar?.derivatives.display.derivativeId ?? null,
+          coverAssetId: cover?.assetId ?? null,
+          coverDisplayDerivativeId: cover?.derivatives.display.derivativeId ?? null,
+          taxonomyVersion: TAXONOMY_VERSION,
+          policyVersion: CONTENT_POLICY_VERSION,
+          actorUserId: command.actor.userId,
+          actorSessionId: command.actor.sessionId,
+          expectedDraftVersion: command.expectedVersion,
+          requestId: command.requestId,
+          publishedAt: occurredAt,
+        });
+        for (const showcase of normalizedShowcases) {
+          const publicationShowcaseId = id();
+          await tx.insert(creatorPublicationShowcases).values({
+            id: publicationShowcaseId,
+            revisionId,
+            sourceShowcaseId: showcase.id!,
+            position: showcase.position,
+            title: showcase.title,
+            description: showcase.description,
+            discipline: showcase.discipline,
+            contentLabel: showcase.contentLabel,
+            externalUrl: showcase.externalUrl,
+          });
+          if (showcase.media.length > 0) {
+            await tx.insert(creatorPublicationMedia).values(showcase.media.map((item, position) => {
+              const itemMedia = resolvedByReference.get(item.assetId);
+              if (!itemMedia) fail("POLICY_VIOLATION");
+              return {
+                id: id(), publicationShowcaseId, assetId: item.assetId, position,
+                alternativeText: item.alternativeText,
+                thumbDerivativeId: itemMedia.derivatives.thumb.derivativeId,
+                displayDerivativeId: itemMedia.derivatives.display.derivativeId,
+                largeDerivativeId: itemMedia.derivatives.large.derivativeId,
+              };
+            }));
+          }
+        }
+        const [head] = await tx.update(creatorPages).set({ publishedRevisionId: revisionId, updatedAt: occurredAt }).where(and(eq(creatorPages.id, page.id), eq(creatorPages.draftVersion, command.expectedVersion))).returning({ id: creatorPages.id });
+        if (!head) fail("VERSION_CONFLICT");
+        await tx.insert(creatorDiscoveryProjections).values({
+          pageId: page.id,
+          revisionId,
+          canonicalHandle,
+          displayName: normalizedDraft.displayName,
+          shortIntroduction: normalizedDraft.introduction,
+          disciplines: [normalizedDraft.primaryDiscipline, ...normalizedDraft.secondaryDisciplines],
+          avatarThumbDerivativeId: avatar?.derivatives.thumb.derivativeId ?? null,
+          revisionAt: occurredAt,
+          enabled: true,
+        }).onConflictDoUpdate({ target: creatorDiscoveryProjections.pageId, set: {
+          revisionId,
+          canonicalHandle,
+          displayName: normalizedDraft.displayName,
+          shortIntroduction: normalizedDraft.introduction,
+          disciplines: [normalizedDraft.primaryDiscipline, ...normalizedDraft.secondaryDisciplines],
+          avatarThumbDerivativeId: avatar?.derivatives.thumb.derivativeId ?? null,
+          revisionAt: occurredAt,
+          enabled: true,
+        } });
+        await tx.insert(creatorPublicationEvents).values({ id: id(), pageId: page.id, revisionId, type: "published", actorUserId: command.actor.userId, actorSessionId: command.actor.sessionId, expectedDraftVersion: command.expectedVersion, requestId: command.requestId, occurredAt });
+        const result: PublishResult = { pageId: page.id, revisionId, revisionNumber, canonicalHandle, draftVersion: command.expectedVersion, publishedAt: occurredAt };
+        await completePublicationCommand(tx, started.recordId, publicationReplayReference(result), occurredAt);
+        await insertOutboxEvent(tx, { eventType: "creator.page_published.v1", eventVersion: 1, aggregateType: "creator_page", aggregateId: page.id, payload: { pageId: page.id, revisionId, revisionNumber, draftVersion: command.expectedVersion, correlationId: command.requestId, actorUserId: command.actor.userId }, occurredAt });
+        return result;
+      });
+    },
+    async unpublish(command: VersionedCatalogCommand): Promise<UnpublishResult> {
+      assertPublicationCommand(command);
+      const occurredAt = now();
+      return input.db.transaction(async (tx) => {
+        await requireCreator(tx, command.actor.userId, true);
+        const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
+        const started = await beginIdempotentCommand(tx, {
+          actorUserId: command.actor.userId,
+          commandScope: "catalog.page.unpublish",
+          keyHash: createLookupHmac({ value: command.idempotencyKey, context: "catalog-command-key", key: input.commandFingerprintKey }),
+          requestFingerprint: createLookupHmac({ value: JSON.stringify({ pageId: command.pageId, expectedVersion: command.expectedVersion }), context: "catalog-command", key: input.commandFingerprintKey }),
+          expiresAt: new Date(occurredAt.getTime() + IDEMPOTENCY_LIFETIME_MS),
+          now: occurredAt,
+        });
+        if (started.kind === "replay") {
+          const replay = parseUnpublicationReplayReference(started.resultReference);
+          if (!replay || replay.pageId !== page.id) fail("IDEMPOTENCY_CONFLICT");
+          return replay;
+        }
+        if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
+        if (!page.publishedRevisionId) fail("POLICY_VIOLATION");
+        const previousPublishedRevisionId = page.publishedRevisionId;
+        await tx.update(creatorPages).set({ publishedRevisionId: null, updatedAt: occurredAt }).where(eq(creatorPages.id, page.id));
+        const projection = await tx.update(creatorDiscoveryProjections).set({ enabled: false }).where(and(eq(creatorDiscoveryProjections.pageId, page.id), eq(creatorDiscoveryProjections.revisionId, previousPublishedRevisionId))).returning({ pageId: creatorDiscoveryProjections.pageId });
+        if (projection.length !== 1) fail("POLICY_VIOLATION");
+        await tx.insert(creatorPublicationEvents).values({ id: id(), pageId: page.id, revisionId: previousPublishedRevisionId, type: "unpublished", actorUserId: command.actor.userId, actorSessionId: command.actor.sessionId, expectedDraftVersion: command.expectedVersion, requestId: command.requestId, occurredAt });
+        const result: UnpublishResult = { pageId: page.id, previousPublishedRevisionId, draftVersion: command.expectedVersion, unpublishedAt: occurredAt };
+        await completePublicationCommand(tx, started.recordId, unpublicationReplayReference(result), occurredAt);
+        await insertOutboxEvent(tx, { eventType: "creator.page_unpublished.v1", eventVersion: 1, aggregateType: "creator_page", aggregateId: page.id, payload: { pageId: page.id, revisionId: previousPublishedRevisionId, draftVersion: command.expectedVersion, correlationId: command.requestId, actorUserId: command.actor.userId }, occurredAt });
+        return result;
+      });
+    },
+    async clearPublishedHeadForSuspension(tx: PawketTransaction, transition: SuspensionPublicationClear) {
+      policy(validRequestId(transition.requestId) && validRequestId(transition.reasonCode) && Boolean(transition.actorSessionId));
+      const [page] = await tx.select().from(creatorPages).where(eq(creatorPages.userId, transition.creatorUserId)).limit(1).for("update");
+      if (!page) return { pageId: null, previousPublishedRevisionId: null };
+      if (!page.publishedRevisionId) {
+        await tx.update(creatorDiscoveryProjections).set({ enabled: false }).where(eq(creatorDiscoveryProjections.pageId, page.id));
+        return { pageId: page.id, previousPublishedRevisionId: null };
+      }
+      const previousPublishedRevisionId = page.publishedRevisionId;
+      await tx.update(creatorPages).set({ publishedRevisionId: null, updatedAt: transition.occurredAt }).where(eq(creatorPages.id, page.id));
+      const projection = await tx.update(creatorDiscoveryProjections).set({ enabled: false }).where(and(eq(creatorDiscoveryProjections.pageId, page.id), eq(creatorDiscoveryProjections.revisionId, previousPublishedRevisionId))).returning({ pageId: creatorDiscoveryProjections.pageId });
+      if (projection.length !== 1) fail("POLICY_VIOLATION");
+      await tx.insert(creatorPublicationEvents).values({ id: id(), pageId: page.id, revisionId: previousPublishedRevisionId, type: "unpublished", actorUserId: transition.actorUserId, actorSessionId: transition.actorSessionId, expectedDraftVersion: page.draftVersion, requestId: transition.requestId, occurredAt: transition.occurredAt });
+      await insertOutboxEvent(tx, { eventType: "creator.page_unpublished.v1", eventVersion: 1, aggregateType: "creator_page", aggregateId: page.id, payload: { pageId: page.id, revisionId: previousPublishedRevisionId, draftVersion: page.draftVersion, correlationId: transition.requestId, actorUserId: transition.actorUserId, reasonCode: transition.reasonCode }, occurredAt: transition.occurredAt });
+      return { pageId: page.id, previousPublishedRevisionId };
     },
   };
 }

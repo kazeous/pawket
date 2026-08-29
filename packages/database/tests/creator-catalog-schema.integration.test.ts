@@ -62,7 +62,7 @@ async function createRevision(pageId: string, userId: string, revisionNumber = 1
        primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
        actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
     values ('${revisionId}', '${pageId}', ${revisionNumber}, 'artist-${revisionNumber}', 'Artist', 'Introduction',
-      'illustration', ARRAY['drawing']::text[], 'v1', 'general_audience.v1',
+      'illustration', ARRAY['drawing']::text[], 'creator-discipline-v1', 'general-audience-v1',
       '${userId}', 'session-1', 1, 'request-${revisionNumber}-${randomUUID()}', '${at}')
   `);
   return revisionId;
@@ -190,7 +190,7 @@ describe("creator catalog persistence schema", () => {
          primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
          actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
       values ('${randomUUID()}', '${pageId}', 1, 'artist--invalid', 'Artist', 'Introduction',
-        'illustration', ARRAY[]::text[], 'v1', 'general_audience.v1', '${userId}', 'session', 1, 'request-handle', '${at}')
+        'illustration', ARRAY[]::text[], 'creator-discipline-v1', 'general-audience-v1', '${userId}', 'session', 1, 'request-handle', '${at}')
     `)).rejects.toThrow();
     const revisionId = await createRevision(pageId, userId);
     await expect(client.unsafe(`
@@ -287,7 +287,7 @@ describe("creator catalog persistence schema", () => {
          primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
          actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
       values ('${randomUUID()}', '${pageId}', 1, 'artist-invalid', 'Artist', 'Introduction',
-        'unsupported', ARRAY[]::text[], 'v1', 'general_audience.v1', '${userId}', 'session', 1, 'request-a', '${at}')
+        'unsupported', ARRAY[]::text[], 'creator-discipline-v1', 'general-audience-v1', '${userId}', 'session', 1, 'request-a', '${at}')
     `)).rejects.toThrow();
     await expect(client.unsafe(`
       insert into creator_publication_revisions

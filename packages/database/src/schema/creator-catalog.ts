@@ -106,8 +106,8 @@ export const creatorPublicationRevisions = pgTable("creator_publication_revision
   avatarDisplayDerivativeId: uuid("avatar_display_derivative_id"),
   coverAssetId: uuid("cover_asset_id"),
   coverDisplayDerivativeId: uuid("cover_display_derivative_id"),
-  taxonomyVersion: text("taxonomy_version").notNull().default("v1"),
-  policyVersion: text("policy_version").notNull().default("general_audience.v1"),
+  taxonomyVersion: text("taxonomy_version").notNull().default("creator-discipline-v1"),
+  policyVersion: text("policy_version").notNull().default("general-audience-v1"),
   actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   actorSessionId: text("actor_session_id").notNull(),
   expectedDraftVersion: integer("expected_draft_version").notNull(),
@@ -123,7 +123,7 @@ export const creatorPublicationRevisions = pgTable("creator_publication_revision
   check("creator_publication_revisions_short_introduction_check", sql`char_length(${table.shortIntroduction}) between 1 and 500`),
   check("creator_publication_revisions_primary_discipline_check", sql`${table.primaryDiscipline} in (${sql.raw(disciplines)})`),
   check("creator_publication_revisions_secondary_disciplines_check", sql`cardinality(${table.secondaryDisciplines}) between 0 and 2 and ${table.secondaryDisciplines} <@ ARRAY[${sql.raw(disciplines)}]::text[] and array_position(${table.secondaryDisciplines}, ${table.primaryDiscipline}) is null`),
-  check("creator_publication_revisions_policy_check", sql`${table.taxonomyVersion} = 'v1' and ${table.policyVersion} = 'general_audience.v1'`),
+  check("creator_publication_revisions_policy_check", sql`${table.taxonomyVersion} = 'creator-discipline-v1' and ${table.policyVersion} = 'general-audience-v1'`),
   check("creator_publication_revisions_expected_draft_version_check", sql`${table.expectedDraftVersion} > 0`),
 ]);
 

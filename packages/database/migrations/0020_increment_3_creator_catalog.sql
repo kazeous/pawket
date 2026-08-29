@@ -93,8 +93,8 @@ CREATE TABLE "creator_publication_revisions" (
 	"avatar_display_derivative_id" uuid,
 	"cover_asset_id" uuid,
 	"cover_display_derivative_id" uuid,
-	"taxonomy_version" text DEFAULT 'v1' NOT NULL,
-	"policy_version" text DEFAULT 'general_audience.v1' NOT NULL,
+	"taxonomy_version" text DEFAULT 'creator-discipline-v1' NOT NULL,
+	"policy_version" text DEFAULT 'general-audience-v1' NOT NULL,
 	"actor_user_id" text NOT NULL,
 	"actor_session_id" text NOT NULL,
 	"expected_draft_version" integer NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE "creator_publication_revisions" (
 	CONSTRAINT "creator_publication_revisions_short_introduction_check" CHECK (char_length("creator_publication_revisions"."short_introduction") between 1 and 500),
 	CONSTRAINT "creator_publication_revisions_primary_discipline_check" CHECK ("creator_publication_revisions"."primary_discipline" in ('illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other')),
 	CONSTRAINT "creator_publication_revisions_secondary_disciplines_check" CHECK (cardinality("creator_publication_revisions"."secondary_disciplines") between 0 and 2 and "creator_publication_revisions"."secondary_disciplines" <@ ARRAY['illustration','drawing','painting','comics','animation','three_d','graphic_design','photography','crafts','other']::text[] and array_position("creator_publication_revisions"."secondary_disciplines", "creator_publication_revisions"."primary_discipline") is null),
-	CONSTRAINT "creator_publication_revisions_policy_check" CHECK ("creator_publication_revisions"."taxonomy_version" = 'v1' and "creator_publication_revisions"."policy_version" = 'general_audience.v1'),
+	CONSTRAINT "creator_publication_revisions_policy_check" CHECK ("creator_publication_revisions"."taxonomy_version" = 'creator-discipline-v1' and "creator_publication_revisions"."policy_version" = 'general-audience-v1'),
 	CONSTRAINT "creator_publication_revisions_expected_draft_version_check" CHECK ("creator_publication_revisions"."expected_draft_version" > 0)
 );
 --> statement-breakpoint
