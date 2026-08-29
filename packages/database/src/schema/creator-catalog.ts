@@ -117,6 +117,8 @@ export const creatorPublicationRevisions = pgTable("creator_publication_revision
   uniqueIndex("creator_publication_revisions_number_uidx").on(table.pageId, table.revisionNumber),
   uniqueIndex("creator_publication_revisions_id_page_uidx").on(table.id, table.pageId),
   index("creator_publication_revisions_page_idx").on(table.pageId, table.publishedAt),
+  index("creator_publication_revisions_avatar_asset_idx").on(table.avatarAssetId, table.pageId).where(sql`${table.avatarAssetId} is not null`),
+  index("creator_publication_revisions_cover_asset_idx").on(table.coverAssetId, table.pageId).where(sql`${table.coverAssetId} is not null`),
   check("creator_publication_revisions_number_check", sql`${table.revisionNumber} > 0`),
   check("creator_publication_revisions_canonical_handle_check", handleCheck(table.canonicalHandle)),
   check("creator_publication_revisions_display_name_check", sql`char_length(${table.displayName}) between 1 and 80`),
@@ -157,6 +159,7 @@ export const creatorPublicationMedia = pgTable("creator_publication_media", {
   largeDerivativeId: uuid("large_derivative_id").notNull(),
 }, (table) => [
   uniqueIndex("creator_publication_media_position_uidx").on(table.publicationShowcaseId, table.position),
+  index("creator_publication_media_asset_showcase_idx").on(table.assetId, table.publicationShowcaseId),
   check("creator_publication_media_position_check", sql`${table.position} between 0 and 3`),
   check("creator_publication_media_alternative_text_check", sql`char_length(${table.alternativeText}) between 1 and 300`),
 ]);

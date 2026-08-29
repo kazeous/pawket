@@ -14,6 +14,10 @@ export type IdentityCreatorSeedPort = {
     db: PawketDatabase | PawketTransaction,
     userId: string,
   ): Promise<CreatorSeed | null>;
+  getCreatorSeeds(
+    db: PawketDatabase | PawketTransaction,
+    userIds: readonly string[],
+  ): Promise<ReadonlyMap<string, CreatorSeed | null>>;
 };
 
 export type MediaReference = Readonly<{
@@ -41,7 +45,22 @@ export type MediaCatalogPort = {
     ownerUserId: string,
     references: readonly MediaReference[],
   ): Promise<ReadonlyMap<string, ReadyMedia>>;
+  resolveReadyAssetsBatch(
+    db: PawketDatabase | PawketTransaction,
+    requests: readonly Readonly<{ ownerUserId: string; references: readonly MediaReference[] }>[],
+  ): Promise<ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>>;
 };
+
+export type VisibilityHoldRequest = Readonly<{
+  pageId: string;
+  revisionId: string;
+  showcaseIds: readonly string[];
+}>;
+
+export type VisibilityHoldSnapshot = Readonly<{
+  pageHeld: boolean;
+  heldShowcaseIds: ReadonlySet<string>;
+}>;
 
 export type VisibilityReadPort = {
   readHolds(
@@ -50,4 +69,8 @@ export type VisibilityReadPort = {
     revisionId: string,
     showcaseIds: readonly string[],
   ): Promise<{ pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }>;
+  readHoldsBatch(
+    db: PawketDatabase | PawketTransaction,
+    requests: readonly VisibilityHoldRequest[],
+  ): Promise<ReadonlyMap<string, VisibilityHoldSnapshot>>;
 };

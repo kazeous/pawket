@@ -88,6 +88,46 @@ afterAll(async () => {
 });
 
 describe("creator catalog persistence schema", () => {
+  test("uses targeted asset indexes for profile and showcase publication lookups", async () => {
+    // Break caught: public derivative authorization regresses to scanning every publication row for random assets.
+    const indexes = await client<{ indexname: string }[]>`
+      select indexname from pg_indexes
+      where schemaname = ${schemaName} and indexname in (
+        'creator_publication_media_asset_showcase_idx',
+        'creator_publication_revisions_avatar_asset_idx',
+        'creator_publication_revisions_cover_asset_idx'
+      ) order by indexname
+    `;
+    expect(indexes.map((row) => row.indexname)).toEqual([
+      "creator_publication_media_asset_showcase_idx",
+      "creator_publication_revisions_avatar_asset_idx",
+      "creator_publication_revisions_cover_asset_idx",
+    ]);
+    await client.unsafe("set enable_seqscan = off");
+    try {
+      const assetId = randomUUID();
+      const userId = await createUser();
+      const pageId = await createPage(userId);
+      const revisionId = randomUUID();
+      const showcaseId = randomUUID();
+      await client.unsafe(`insert into creator_publication_revisions
+        (id,page_id,revision_number,canonical_handle,display_name,short_introduction,primary_discipline,secondary_disciplines,avatar_asset_id,avatar_thumb_derivative_id,avatar_display_derivative_id,cover_asset_id,cover_display_derivative_id,taxonomy_version,policy_version,actor_user_id,actor_session_id,expected_draft_version,request_id,published_at)
+        values ('${revisionId}','${pageId}',1,'indexed-artist','Indexed','Indexed introduction','illustration',ARRAY[]::text[],'${assetId}','${randomUUID()}','${randomUUID()}','${assetId}','${randomUUID()}','creator-discipline-v1','general-audience-v1','${userId}','session-index',1,'request-index','${at}')`);
+      await client.unsafe(`insert into creator_publication_showcases (id,revision_id,source_showcase_id,position,title,description,discipline,content_label) values ('${showcaseId}','${revisionId}','${randomUUID()}',0,'Indexed showcase','','illustration','general_audience')`);
+      await client.unsafe(`insert into creator_publication_media (id,publication_showcase_id,asset_id,position,alternative_text,thumb_derivative_id,display_derivative_id,large_derivative_id) values ('${randomUUID()}','${showcaseId}','${assetId}',0,'Indexed asset','${randomUUID()}','${randomUUID()}','${randomUUID()}')`);
+      const mediaPlan = await client.unsafe(`explain (costs off) select publication_showcase_id from creator_publication_media where asset_id = '${assetId}'`);
+      const avatarPlan = await client.unsafe(`explain (costs off) select page_id from creator_publication_revisions where avatar_asset_id = '${assetId}'`);
+      const coverPlan = await client.unsafe(`explain (costs off) select page_id from creator_publication_revisions where cover_asset_id = '${assetId}'`);
+      expect(JSON.stringify(mediaPlan)).toContain("creator_publication_media_asset_showcase_idx");
+      expect(JSON.stringify(avatarPlan)).toContain("creator_publication_revisions_avatar_asset_idx");
+      expect(JSON.stringify(coverPlan)).toContain("creator_publication_revisions_cover_asset_idx");
+      const unknownPlan = await client.unsafe(`explain (costs off) select publication_showcase_id from creator_publication_media where asset_id = '${randomUUID()}'`);
+      expect(JSON.stringify(unknownPlan)).toContain("creator_publication_media_asset_showcase_idx");
+    } finally {
+      await client.unsafe("reset enable_seqscan");
+    }
+  });
+
   test("exports the complete authoritative catalog table boundary", () => {
     // Break caught: a migration or schema file exists but consumers cannot use the tables.
     expect({

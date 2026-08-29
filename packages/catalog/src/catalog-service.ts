@@ -163,10 +163,13 @@ function assertReadyReference(reference: MediaReference, resolved: ReadyMedia | 
   return resolved;
 }
 
-function readyReferenceFromResult(reference: MediaReference, resolved: unknown, ownerUserId: string): ReadyMedia {
-  if (!resolved || typeof resolved !== "object" || typeof (resolved as { get?: unknown }).get !== "function") fail("POLICY_VIOLATION");
+function exactReadyMap(references: readonly MediaReference[], resolved: unknown, ownerUserId: string): ReadonlyMap<string, ReadyMedia> {
+  if (!(resolved instanceof Map)) fail("POLICY_VIOLATION");
+  const expectedIds = [...new Set(references.map((reference) => reference.assetId))];
   try {
-    return assertReadyReference(reference, (resolved as ReadonlyMap<string, ReadyMedia>).get(reference.assetId), ownerUserId);
+    if (resolved.size !== expectedIds.length || [...resolved.keys()].some((key) => typeof key !== "string" || !expectedIds.includes(key))) fail("POLICY_VIOLATION");
+    for (const reference of references) assertReadyReference(reference, resolved.get(reference.assetId) as ReadyMedia | undefined, ownerUserId);
+    return resolved as ReadonlyMap<string, ReadyMedia>;
   } catch (error) {
     if (error instanceof CatalogServiceError) throw error;
     fail("POLICY_VIOLATION");
@@ -419,7 +422,6 @@ export function createCatalogService(input: CatalogServiceInput) {
       const occurredAt = now();
       return input.db.transaction(async (tx) => {
         const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
-        await requireCreator(tx, command.actor.userId, true);
         const started = await beginIdempotentCommand(tx, {
           actorUserId: command.actor.userId,
           commandScope: "catalog.page.publish",
@@ -434,6 +436,7 @@ export function createCatalogService(input: CatalogServiceInput) {
           return replay;
         }
         if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        await requireCreator(tx, command.actor.userId, true);
         if (input.publishingMode !== "general_audience" || !input.mediaCatalog || !input.visibility) fail("POLICY_VIOLATION");
         if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
 
@@ -474,7 +477,7 @@ export function createCatalogService(input: CatalogServiceInput) {
         if (normalizedDraft.coverAssetId) references.push({ assetId: normalizedDraft.coverAssetId, purpose: "cover", altText: null });
         for (const showcase of normalizedShowcases) for (const item of showcase.media) references.push({ assetId: item.assetId, purpose: "showcase", altText: item.alternativeText });
         const resolved = await input.mediaCatalog.resolveReadyAssets(tx, command.actor.userId, references);
-        const resolvedByReference = new Map(references.map((reference) => [reference.assetId, readyReferenceFromResult(reference, resolved, command.actor.userId)]));
+        const resolvedByReference = exactReadyMap(references, resolved, command.actor.userId);
         const avatar = normalizedDraft.avatarAssetId ? resolvedByReference.get(normalizedDraft.avatarAssetId) : undefined;
         const cover = normalizedDraft.coverAssetId ? resolvedByReference.get(normalizedDraft.coverAssetId) : undefined;
         const maximumRevision = (await tx.select({ maximumRevision: max(creatorPublicationRevisions.revisionNumber) }).from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.pageId, page.id)))[0]?.maximumRevision;
@@ -561,7 +564,6 @@ export function createCatalogService(input: CatalogServiceInput) {
       assertPublicationCommand(command);
       const occurredAt = now();
       return input.db.transaction(async (tx) => {
-        await requireCreator(tx, command.actor.userId, true);
         const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
         const started = await beginIdempotentCommand(tx, {
           actorUserId: command.actor.userId,
@@ -577,6 +579,7 @@ export function createCatalogService(input: CatalogServiceInput) {
           return replay;
         }
         if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        await requireCreator(tx, command.actor.userId, true);
         if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
         if (!page.publishedRevisionId) fail("POLICY_VIOLATION");
         const previousPublishedRevisionId = page.publishedRevisionId;

@@ -179,9 +179,12 @@ CREATE UNIQUE INDEX "creator_pages_user_uidx" ON "creator_pages" USING btree ("u
 CREATE UNIQUE INDEX "creator_pages_published_revision_uidx" ON "creator_pages" USING btree ("published_revision_id") WHERE "creator_pages"."published_revision_id" is not null;--> statement-breakpoint
 CREATE INDEX "creator_publication_events_page_idx" ON "creator_publication_events" USING btree ("page_id","occurred_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_publication_media_position_uidx" ON "creator_publication_media" USING btree ("publication_showcase_id","position");--> statement-breakpoint
+CREATE INDEX "creator_publication_media_asset_showcase_idx" ON "creator_publication_media" USING btree ("asset_id","publication_showcase_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_publication_revisions_number_uidx" ON "creator_publication_revisions" USING btree ("page_id","revision_number");--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_publication_revisions_id_page_uidx" ON "creator_publication_revisions" USING btree ("id","page_id");--> statement-breakpoint
 CREATE INDEX "creator_publication_revisions_page_idx" ON "creator_publication_revisions" USING btree ("page_id","published_at");--> statement-breakpoint
+CREATE INDEX "creator_publication_revisions_avatar_asset_idx" ON "creator_publication_revisions" USING btree ("avatar_asset_id","page_id") WHERE "creator_publication_revisions"."avatar_asset_id" is not null;--> statement-breakpoint
+CREATE INDEX "creator_publication_revisions_cover_asset_idx" ON "creator_publication_revisions" USING btree ("cover_asset_id","page_id") WHERE "creator_publication_revisions"."cover_asset_id" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_publication_showcases_position_uidx" ON "creator_publication_showcases" USING btree ("revision_id","position");--> statement-breakpoint
 CREATE UNIQUE INDEX "creator_showcase_draft_media_position_uidx" ON "creator_showcase_draft_media" USING btree ("showcase_id","position");--> statement-breakpoint
 CREATE INDEX "creator_showcase_drafts_page_idx" ON "creator_showcase_drafts" USING btree ("page_id","position");--> statement-breakpoint

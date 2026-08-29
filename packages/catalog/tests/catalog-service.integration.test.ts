@@ -52,6 +52,9 @@ function service(capabilityState: "active" | "suspended" | null = "active") {
         if (capabilityState === null) return null;
         return { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Approved Artist", introduction: "Approved intro" };
       },
+      async getCreatorSeeds(_database, userIds) {
+        return new Map(userIds.map((userId) => [userId, capabilityState === null ? null : { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Approved Artist", introduction: "Approved intro" }] as const));
+      },
     },
     commandFingerprintKey: commandKey,
     now: () => at,

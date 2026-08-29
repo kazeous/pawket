@@ -41,26 +41,73 @@ let pageHoldIds = new Set<string>();
 let showcaseHoldIds = new Set<string>();
 let publishingMode: "disabled" | "general_audience" = "general_audience";
 let mediaResolveCalls = 0;
+let mediaMapMode: "exact" | "get_only" | "missing" | "extra" | "wrong_key" | "wrong_asset" | "wrong_owner" | "wrong_purpose" | "outer_get_only" | "outer_missing" | "outer_extra" = "exact";
+let identityBatchMode: "exact" | "missing" | "extra" = "exact";
+let visibilityBatchMode: "exact" | "missing" | "extra" = "exact";
+const providerCalls = { identitySingle: 0, identityBatch: 0, visibilitySingle: 0, visibilityBatch: 0, mediaSingle: 0, mediaBatch: 0 };
+function resetProviderCalls() { for (const key of Object.keys(providerCalls) as (keyof typeof providerCalls)[]) providerCalls[key] = 0; }
+function mutateAssetMap(result: Map<string, ReadyMedia>): unknown {
+  const [firstKey, firstValue] = result.entries().next().value ?? [];
+  if (mediaMapMode === "get_only") return { get: result.get.bind(result) };
+  if (mediaMapMode === "missing" && firstKey) result.delete(firstKey);
+  if (mediaMapMode === "extra" && firstValue) result.set(randomUUID(), firstValue);
+  if (mediaMapMode === "wrong_key" && firstKey && firstValue) { result.delete(firstKey); result.set(randomUUID(), firstValue); }
+  if (mediaMapMode === "wrong_asset" && firstKey && firstValue) result.set(firstKey, { ...firstValue, assetId: randomUUID() });
+  if (mediaMapMode === "wrong_owner" && firstKey && firstValue) result.set(firstKey, { ...firstValue, ownerUserId: `foreign-${randomUUID()}` });
+  if (mediaMapMode === "wrong_purpose" && firstKey && firstValue) result.set(firstKey, { ...firstValue, purpose: firstValue.purpose === "avatar" ? "cover" : "avatar" });
+  return result;
+}
 
 const creatorSeeds = {
   async getCreatorSeed(_database: unknown, userId: string): Promise<CreatorSeed | null> {
+    providerCalls.identitySingle += 1;
     const capabilityState = capabilities.get(userId);
     if (!capabilityState) return null;
     return { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" };
+  },
+  async getCreatorSeeds(_database: unknown, userIds: readonly string[]) {
+    providerCalls.identityBatch += 1;
+    const result = new Map(userIds.map((userId) => {
+      const capabilityState = capabilities.get(userId);
+      return [userId, capabilityState ? { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" } : null] as const;
+    }));
+    if (identityBatchMode === "missing") result.delete(userIds[0] ?? "");
+    if (identityBatchMode === "extra") result.set(`foreign-${randomUUID()}`, null);
+    return result;
   },
 };
 const mediaCatalog = {
   async resolveReadyAssets(_database: unknown, ownerUserId: string, references: readonly MediaReference[]) {
     mediaResolveCalls += 1;
-    return new Map(references.flatMap((reference) => {
+    providerCalls.mediaSingle += 1;
+    return mutateAssetMap(new Map(references.flatMap((reference) => {
       const asset = media.get(reference.assetId);
       return asset?.ownerUserId === ownerUserId && asset.purpose === reference.purpose ? [[asset.assetId, asset] as const] : [];
-    }));
+    })) as Map<string, ReadyMedia>) as ReadonlyMap<string, ReadyMedia>;
+  },
+  async resolveReadyAssetsBatch(_database: unknown, requests: readonly { ownerUserId: string; references: readonly MediaReference[] }[]) {
+    providerCalls.mediaBatch += 1;
+    const result = new Map(requests.map((request) => [request.ownerUserId, mutateAssetMap(new Map(request.references.flatMap((reference) => {
+      const asset = media.get(reference.assetId);
+      return asset?.ownerUserId === request.ownerUserId && asset.purpose === reference.purpose ? [[asset.assetId, asset] as const] : [];
+    })) as Map<string, ReadyMedia>)] as const));
+    if (mediaMapMode === "outer_get_only") return { get: result.get.bind(result) } as unknown as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
+    if (mediaMapMode === "outer_missing") result.delete(requests[0]?.ownerUserId ?? "");
+    if (mediaMapMode === "outer_extra") result.set(`foreign-${randomUUID()}`, new Map());
+    return result as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
   },
 };
 const visibility = {
   async readHolds(_database: unknown, pageId: string, _revisionId: string, showcaseIds: readonly string[]) {
+    providerCalls.visibilitySingle += 1;
     return { pageHeld: pageHoldIds.has(pageId), heldShowcaseIds: new Set(showcaseIds.filter((id) => showcaseHoldIds.has(id))) };
+  },
+  async readHoldsBatch(_database: unknown, requests: readonly { pageId: string; revisionId: string; showcaseIds: readonly string[] }[]) {
+    providerCalls.visibilityBatch += 1;
+    const result = new Map(requests.map((request) => [request.pageId, { pageHeld: pageHoldIds.has(request.pageId), heldShowcaseIds: new Set(request.showcaseIds.filter((id) => showcaseHoldIds.has(id))) }] as const));
+    if (visibilityBatchMode === "missing") result.delete(requests[0]?.pageId ?? "");
+    if (visibilityBatchMode === "extra") result.set(randomUUID(), { pageHeld: false, heldShowcaseIds: new Set() });
+    return result;
   },
 };
 
@@ -206,21 +253,39 @@ describe("effective public catalog query", () => {
     await expect(query.listPublicCreators({ discipline: "illustration", handlePrefix: prefix, cursor: "not-a-cursor", limit: 24 })).rejects.toMatchObject({ code: "INVALID_CURSOR" });
   });
 
-  test("directory keyset batches past more than one full hidden candidate batch without duplicates", async () => {
+  test("directory caps each request at 96 candidates and advances across an all-held population", async () => {
     pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
     const prefix = `batch${randomUUID().slice(0, 4)}`;
-    for (let index = 0; index < 51; index += 1) {
+    for (let index = 0; index < 100; index += 1) {
       const hidden = await publishCreator(`${prefix}-${index.toString().padStart(3, "0")}`, { showcases: 0 });
       pageHoldIds.add(hidden.pageId);
     }
-    for (let index = 51; index < 77; index += 1) await publishCreator(`${prefix}-${index.toString().padStart(3, "0")}`, { showcases: 0 });
+    for (let index = 100; index < 126; index += 1) await publishCreator(`${prefix}-${index.toString().padStart(3, "0")}`, { showcases: 0 });
     const { query } = composition();
+    resetProviderCalls();
     const first = await query.listPublicCreators({ discipline: null, handlePrefix: prefix, cursor: null, limit: 24 });
+    expect(first.items).toEqual([]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(providerCalls).toMatchObject({ identitySingle: 0, visibilitySingle: 0, mediaSingle: 0, identityBatch: 2, visibilityBatch: 2, mediaBatch: 2 });
+    resetProviderCalls();
     const second = await query.listPublicCreators({ discipline: null, handlePrefix: prefix, cursor: first.nextCursor, limit: 24 });
-    expect(first.items).toHaveLength(24);
-    expect(second.items).toHaveLength(2);
-    expect(new Set([...first.items, ...second.items].map((item) => item.pageId)).size).toBe(26);
-  }, 20_000);
+    expect(providerCalls).toMatchObject({ identitySingle: 0, visibilitySingle: 0, mediaSingle: 0, identityBatch: 1, visibilityBatch: 1, mediaBatch: 1 });
+    resetProviderCalls();
+    const third = await query.listPublicCreators({ discipline: null, handlePrefix: prefix, cursor: second.nextCursor, limit: 24 });
+    expect(providerCalls).toMatchObject({ identitySingle: 0, visibilitySingle: 0, mediaSingle: 0, identityBatch: 1, visibilityBatch: 1, mediaBatch: 1 });
+    expect(second.items).toHaveLength(24);
+    expect(third.items).toHaveLength(2);
+    expect(new Set([...second.items, ...third.items].map((item) => item.pageId)).size).toBe(26);
+  }, 30_000);
+
+  test("sitemap evaluates complete catalog in fixed provider batches without per-page calls", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const enabled = await db.select({ pageId: creatorDiscoveryProjections.pageId }).from(creatorDiscoveryProjections).where(eq(creatorDiscoveryProjections.enabled, true));
+    resetProviderCalls();
+    await composition().query.listSitemapCreators();
+    const expectedBatches = Math.ceil(enabled.length / 48);
+    expect(providerCalls).toEqual({ identitySingle: 0, identityBatch: expectedBatches, visibilitySingle: 0, visibilityBatch: expectedBatches, mediaSingle: 0, mediaBatch: expectedBatches });
+  });
 
   test("sitemap and structural authorization adapters share effective visibility", async () => {
     // Break caught: sitemap/media/report adapters bypass the same visibility policy or disclose a stale revision target.
@@ -251,6 +316,11 @@ describe("effective public catalog query", () => {
     expect(await query.resolveVisibleReportTarget(db, showcaseTarget)).toEqual({ target: showcaseTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: `${handle} work 0`, mediaAssetIds: [creator.showcaseAssets[0]!.assetId] });
     expect(await query.resolveVisibleReportTarget(db, { ...showcaseTarget, targetId: randomUUID() })).toBeNull();
     expect(await query.readRevisionTarget(db, { ...showcaseTarget, publicationRevisionId: randomUUID() })).toBeNull();
+    expect(await query.resolveVisibleReportTarget(db, { ...pageTarget, targetId: randomUUID() })).toBeNull();
+    expect(await query.readRevisionTarget(db, { ...showcaseTarget, targetId: randomUUID() })).toBeNull();
+    expect(await query.readRevisionTarget(db, { targetType: "page", targetId: "malformed", publicationRevisionId: creator.revisionId })).toBeNull();
+    expect(await query.readRevisionTarget(db, { targetType: "page", targetId: creator.pageId, publicationRevisionId: "malformed" })).toBeNull();
+    expect(await query.readRevisionTarget(db, { targetType: "invalid", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as never)).toBeNull();
     pageHoldIds.add(creator.pageId);
     expect(await query.listSitemapCreators()).not.toContain(handle);
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(false);
@@ -315,6 +385,36 @@ describe("effective public catalog query", () => {
     expect(await query.isDerivativePublic(db, original.assetId, "thumb")).toBe(false);
     expect(await query.isDerivativePreviewable(db, creator.userId, original.assetId, "thumb")).toBe(false);
     expect(await query.resolveVisibleReportTarget(db, target)).toBeNull();
+  });
+
+  test.each(["get_only", "missing", "extra", "wrong_key", "wrong_asset", "wrong_owner", "wrong_purpose"] as const)("denies public and preview reads for an inexact media map/value (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; mediaMapMode = "exact";
+    const creator = await publishCreator(`map-${randomUUID().slice(0, 6)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    mediaMapMode = scenario;
+    try {
+      expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
+      expect(await composition().query.isDerivativePreviewable(db, creator.userId, creator.avatar.assetId, "thumb")).toBe(false);
+    } finally { mediaMapMode = "exact"; }
+  });
+
+  test.each(["outer_get_only", "outer_missing", "outer_extra"] as const)("denies public reads for an inexact batch media map (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; mediaMapMode = "exact";
+    const creator = await publishCreator(`outer-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    mediaMapMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); }
+    finally { mediaMapMode = "exact"; }
+  });
+
+  test.each(["identity_missing", "identity_extra", "visibility_missing", "visibility_extra"] as const)("fails closed for an inexact provider batch result (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`provider-${randomUUID().slice(0, 4)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    identityBatchMode = scenario.startsWith("identity") ? (scenario.endsWith("missing") ? "missing" : "extra") : "exact";
+    visibilityBatchMode = scenario.startsWith("visibility") ? (scenario.endsWith("missing") ? "missing" : "extra") : "exact";
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); }
+    finally { identityBatchMode = "exact"; visibilityBatchMode = "exact"; }
   });
 
   test("private preview fails neutrally for a referenced asset that is no longer ready", async () => {

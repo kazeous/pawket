@@ -49,7 +49,10 @@ function service(database = db, clock = at, options: ServiceOptions = {}) {
       introduction: options.introduction ?? "Approved intro",
       portfolioUrls: options.privateSentinel ? [options.privateSentinel] : undefined,
       applicantEmail: options.privateSentinel,
-    }; } },
+    }; }, async getCreatorSeeds(_database, userIds) { return new Map(userIds.map((userId) => [userId, {
+      userId, capabilityState: "active" as const, capabilityVersion: 1, approvedRevisionId,
+      displayName: options.displayName ?? "Artist", introduction: options.introduction ?? "Approved intro",
+    }] as const)); } },
     commandFingerprintKey: commandKey,
     now: () => clock,
     ...(options.idFactory ? { idFactory: options.idFactory } : {}),

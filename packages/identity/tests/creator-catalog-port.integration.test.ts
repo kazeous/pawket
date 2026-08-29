@@ -116,6 +116,13 @@ describe("Identity creator catalog seed port", () => {
     expect(JSON.stringify(seed)).not.toContain("applicantEmail");
     expect(JSON.stringify(seed)).not.toContain("portfolio");
     expect(JSON.stringify(seed)).not.toContain("receiving");
+    const batchPort = port as typeof port & { getCreatorSeeds?: (database: PawketDatabase, userIds: readonly string[]) => Promise<ReadonlyMap<string, typeof seed>> };
+    expect(typeof batchPort.getCreatorSeeds).toBe("function");
+    const seeds = await batchPort.getCreatorSeeds!(db, [userId, "not-a-creator"]);
+    expect([...seeds.entries()]).toEqual([
+      [userId, { userId, capabilityState: "active", capabilityVersion: 7, approvedRevisionId: revisionId, displayName: "Seed Artist", introduction: "A safe public introduction." }],
+      ["not-a-creator", null],
+    ]);
   });
 
   test("returns null when the user has no authoritative creator capability", async () => {

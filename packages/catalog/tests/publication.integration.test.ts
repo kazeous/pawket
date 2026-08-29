@@ -12,6 +12,7 @@ import {
   creatorPublicationMedia,
   creatorPublicationRevisions,
   creatorPublicationShowcases,
+  creatorShowcaseDraftMedia,
   identityUsers,
   systemCommandIdempotency,
   systemOutbox,
@@ -53,7 +54,7 @@ function harness(input: {
   pageHeld?: boolean;
   heldShowcaseIds?: ReadonlySet<string>;
   mutateMedia?: (media: ReadyMedia, reference: MediaReference) => ReadyMedia | null;
-  malformedMediaResult?: boolean;
+  mutateResolvedMap?: (result: Map<string, ReadyMedia>, references: readonly MediaReference[]) => unknown;
 } = {}) {
   let capabilityState = input.capabilityState === undefined ? "active" : input.capabilityState;
   let seedInterceptor: (() => Promise<void>) | null = null;
@@ -73,6 +74,11 @@ function harness(input: {
         introduction: "Approved introduction",
       };
     },
+    async getCreatorSeeds(_database: unknown, userIds: readonly string[]) {
+      return new Map(userIds.map((userId) => [userId, capabilityState === null ? null : {
+        userId, capabilityState, capabilityVersion: 7, approvedRevisionId: randomUUID(), displayName: "Approved Artist", introduction: "Approved introduction",
+      }] as const));
+    },
   };
   const mediaCatalog = {
     async resolveReadyAssets(_database: unknown, _ownerUserId: string, references: readonly MediaReference[]) {
@@ -82,7 +88,13 @@ function harness(input: {
         const value = found ? (input.mutateMedia?.(found, reference) ?? found) : null;
         if (value) resolved.set(reference.assetId, value);
       }
-      return input.malformedMediaResult ? ({} as ReadonlyMap<string, ReadyMedia>) : resolved;
+      return (input.mutateResolvedMap?.(resolved, references) ?? resolved) as ReadonlyMap<string, ReadyMedia>;
+    },
+    async resolveReadyAssetsBatch(_database: unknown, requests: readonly { ownerUserId: string; references: readonly MediaReference[] }[]) {
+      return new Map(requests.map((request) => [request.ownerUserId, new Map(request.references.flatMap((reference) => {
+        const found = media.get(reference.assetId);
+        return found ? [[reference.assetId, found] as const] : [];
+      }))] as const));
     },
   };
   const visibility = {
@@ -92,6 +104,9 @@ function harness(input: {
         pageHeld: input.pageHeld ?? false,
         heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>(),
       };
+    },
+    async readHoldsBatch(_database: unknown, requests: readonly { pageId: string; revisionId: string; showcaseIds: readonly string[] }[]) {
+      return new Map(requests.map((request) => [request.pageId, { pageHeld: input.pageHeld ?? false, heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>() }] as const));
     },
   };
   const service = createCatalogService({
@@ -389,6 +404,24 @@ describe("creator publication", () => {
     expect(after.pages[0]?.publishedRevisionId).toBe(second.revisionId);
   });
 
+  test("replays completed publish and unpublish while suspended before fresh policy checks", async () => {
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `suspend-replay-${randomUUID().slice(0, 4)}`);
+    const publish = publishCommand(page, "suspended-replay");
+    const published = await testHarness.service.publish(publish);
+    const unpublish = { actor: actor(page.userId), pageId: page.pageId, expectedVersion: page.version, idempotencyKey: `suspended-unpublish-${page.pageId}`, requestId: "request-suspended-unpublish" };
+    const unpublished = await testHarness.service.unpublish(unpublish);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    testHarness.setCapability("suspended");
+    expect(await testHarness.service.publish(publish)).toEqual(published);
+    expect(await testHarness.service.unpublish(unpublish)).toEqual(unpublished);
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+    await expect(testHarness.service.publish({ ...publish, expectedVersion: page.version + 1 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(testHarness.service.unpublish({ ...unpublish, expectedVersion: page.version + 1 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(testHarness.service.publish({ ...publishCommand(page, "fresh-suspended"), idempotencyKey: `fresh-suspended-${page.pageId}` })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
   test("rolls back head, projection, event, outbox, and idempotency when outbox insertion fails", async () => {
     // Break caught: a post-head outbox failure leaves a partially published aggregate.
     const testHarness = harness();
@@ -553,12 +586,28 @@ describe("creator publication", () => {
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
   });
 
-  test("rejects a non-map MediaCatalogPort result without TypeError or state drift", async () => {
-    const testHarness = harness({ malformedMediaResult: true });
+  test.each(["get_only", "missing", "extra", "wrong_key"] as const)("rejects an inexact MediaCatalogPort map (%s) without state drift", async (scenario) => {
+    const testHarness = harness({ mutateResolvedMap(result, references) {
+      const first = references[0]!;
+      if (scenario === "get_only") return { get: result.get.bind(result) };
+      if (scenario === "missing") { result.delete(first.assetId); return result; }
+      const value = result.get(first.assetId)!;
+      if (scenario === "extra") { result.set(randomUUID(), value); return result; }
+      result.delete(first.assetId); result.set(randomUUID(), value); return result;
+    } });
     const page = await preparedPage(testHarness, `badmap-${randomUUID().slice(0, 6)}`);
     const before = await authoritativePublication(page.pageId, page.userId);
     await expect(testHarness.service.publish(publishCommand(page, "bad-map"))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test("accepts one exact map key for duplicate legitimate references to the same ready asset", async () => {
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `duplicate-${randomUUID().slice(0, 5)}`);
+    const workspace = await testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId });
+    await db.insert(creatorShowcaseDraftMedia).values({ id: randomUUID(), showcaseId: workspace.showcases[0]!.id, assetId: page.showcaseMedia.assetId, position: 1, alternativeText: "Second view of the same asset", createdAt: at, updatedAt: at });
+    await expect(testHarness.service.publish(publishCommand(page, "duplicate-reference"))).resolves.toMatchObject({ revisionNumber: 1 });
+    expect((await authoritativePublication(page.pageId, page.userId)).media).toHaveLength(2);
   });
 
   test("persists the exact current taxonomy and content-policy versions", async () => {

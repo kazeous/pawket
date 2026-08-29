@@ -4198,6 +4198,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "creator_publication_media_asset_showcase_idx": {
+          "name": "creator_publication_media_asset_showcase_idx",
+          "columns": [
+            {
+              "expression": "asset_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "publication_showcase_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -4417,6 +4438,50 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "creator_publication_revisions_avatar_asset_idx": {
+          "name": "creator_publication_revisions_avatar_asset_idx",
+          "columns": [
+            {
+              "expression": "avatar_asset_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"creator_publication_revisions\".\"avatar_asset_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "creator_publication_revisions_cover_asset_idx": {
+          "name": "creator_publication_revisions_cover_asset_idx",
+          "columns": [
+            {
+              "expression": "cover_asset_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"creator_publication_revisions\".\"cover_asset_id\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -25,6 +25,7 @@ type Variant = "thumb" | "display" | "large";
 type Candidate = { pageId: string; canonicalHandle: string };
 type Effective = { page: PublicCreatorPage; creatorUserId: string };
 export const PUBLIC_CATALOG_QUERY_BATCH_SIZE = 48;
+export const PUBLIC_DIRECTORY_CANDIDATE_SCAN_BUDGET = 96;
 export class PublicCatalogQueryError extends Error { constructor(readonly code: "INVALID_QUERY" | "INVALID_CURSOR") { super(code); } }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -58,6 +59,20 @@ function exactMedia(reference: MediaReference, value: unknown, ownerUserId: stri
   }
   return item as ReadyMedia;
 }
+function exactMap(value: unknown, expectedKeys: readonly string[]): Map<unknown, unknown> | null {
+  if (!(value instanceof Map)) return null;
+  const expected = new Set(expectedKeys);
+  if (value.size !== expected.size || [...value.keys()].some((key) => typeof key !== "string" || !expected.has(key))) return null;
+  return value;
+}
+function exactSeed(value: unknown, userId: string): value is NonNullable<Awaited<ReturnType<IdentityCreatorSeedPort["getCreatorSeed"]>>> {
+  if (!value || typeof value !== "object") return false;
+  const seed = value as Record<string, unknown>;
+  return Object.keys(seed).sort().join(",") === "approvedRevisionId,capabilityState,capabilityVersion,displayName,introduction,userId"
+    && seed.userId === userId && (seed.capabilityState === "active" || seed.capabilityState === "suspended")
+    && Number.isInteger(seed.capabilityVersion) && (seed.capabilityVersion as number) > 0 && isUuid(seed.approvedRevisionId)
+    && typeof seed.displayName === "string" && typeof seed.introduction === "string";
+}
 function derivative(item: ReadyMedia, variant: Variant): PublicDerivative { const value = item.derivatives[variant]; return { derivativeId: value.derivativeId, width: value.width, height: value.height }; }
 
 export function createPublicCatalogQuery(input: Input) {
@@ -73,50 +88,75 @@ export function createPublicCatalogQuery(input: Input) {
     const claims = await database.select().from(creatorHandleClaims).where(inArray(creatorHandleClaims.pageId, pages.map((page) => page.id)));
     const showcases = await database.select().from(creatorPublicationShowcases).where(inArray(creatorPublicationShowcases.revisionId, revisionIds)).orderBy(asc(creatorPublicationShowcases.revisionId), asc(creatorPublicationShowcases.position));
     const mediaRows = showcases.length === 0 ? [] : await database.select().from(creatorPublicationMedia).where(inArray(creatorPublicationMedia.publicationShowcaseId, showcases.map((showcase) => showcase.id))).orderBy(asc(creatorPublicationMedia.publicationShowcaseId), asc(creatorPublicationMedia.position));
-    await Promise.all(pages.map(async (page) => {
-      try {
+    try {
+      const contexts = pages.flatMap((page) => {
         const revision = revisions.find((item) => item.id === page.publishedRevisionId && item.pageId === page.id);
         const projection = projections.find((item) => item.pageId === page.id);
         const canonical = claims.find((item) => item.pageId === page.id && item.kind === "canonical");
-        if (!revision || !projection || !canonical || !publicHandle(canonical.normalizedHandle)) return;
-        if (!claims.some((item) => item.pageId === page.id && item.normalizedHandle === revision.canonicalHandle)) return;
-        if (revision.taxonomyVersion !== TAXONOMY_VERSION || revision.policyVersion !== CONTENT_POLICY_VERSION || !isDiscipline(revision.primaryDiscipline) || !revision.secondaryDisciplines.every(isDiscipline)) return;
+        if (!revision || !projection || !canonical || !publicHandle(canonical.normalizedHandle)) return [];
+        if (!claims.some((item) => item.pageId === page.id && item.normalizedHandle === revision.canonicalHandle)) return [];
+        if (revision.taxonomyVersion !== TAXONOMY_VERSION || revision.policyVersion !== CONTENT_POLICY_VERSION || !isDiscipline(revision.primaryDiscipline) || !revision.secondaryDisciplines.every(isDiscipline)) return [];
         const expectedDisciplines = [revision.primaryDiscipline, ...revision.secondaryDisciplines];
-        if (projection.enabled !== true || projection.revisionId !== revision.id || projection.canonicalHandle !== canonical.normalizedHandle || projection.displayName !== revision.displayName || projection.shortIntroduction !== revision.shortIntroduction || !sameStrings(projection.disciplines, expectedDisciplines) || projection.avatarThumbDerivativeId !== revision.avatarThumbDerivativeId || projection.revisionAt.getTime() !== revision.publishedAt.getTime()) return;
-        const seed = await input.creatorSeeds.getCreatorSeed(database, page.userId);
-        if (!seed || seed.userId !== page.userId || seed.capabilityState !== "active") return;
+        if (projection.enabled !== true || projection.revisionId !== revision.id || projection.canonicalHandle !== canonical.normalizedHandle || projection.displayName !== revision.displayName || projection.shortIntroduction !== revision.shortIntroduction || !sameStrings(projection.disciplines, expectedDisciplines) || projection.avatarThumbDerivativeId !== revision.avatarThumbDerivativeId || projection.revisionAt.getTime() !== revision.publishedAt.getTime()) return [];
         const revisionShowcases = showcases.filter((item) => item.revisionId === revision.id);
-        const holds = await input.visibility.readHolds(database, page.id, revision.id, revisionShowcases.map((showcase) => showcase.sourceShowcaseId));
-        if (!holds || holds.pageHeld !== false || !holds.heldShowcaseIds || typeof (holds.heldShowcaseIds as { has?: unknown }).has !== "function") return;
-        const visibleShowcases = revisionShowcases.filter((showcase) => !holds.heldShowcaseIds.has(showcase.sourceShowcaseId));
-        if (visibleShowcases.some((showcase) => !isDiscipline(showcase.discipline) || showcase.contentLabel !== "general_audience")) return;
+        return [{ page, revision, canonical, revisionShowcases }];
+      });
+      const userIds = unique(contexts.map((context) => context.page.userId));
+      const seedMap = exactMap(await input.creatorSeeds.getCreatorSeeds(database, userIds), userIds);
+      if (!seedMap) return result;
+      const active = contexts.filter((context) => {
+        const seed = seedMap.get(context.page.userId);
+        return exactSeed(seed, context.page.userId) && seed.capabilityState === "active";
+      });
+      const holdRequests = active.map((context) => ({ pageId: context.page.id, revisionId: context.revision.id, showcaseIds: context.revisionShowcases.map((showcase) => showcase.sourceShowcaseId) }));
+      const holdMap = exactMap(await input.visibility.readHoldsBatch(database, holdRequests), holdRequests.map((request) => request.pageId));
+      if (!holdMap) return result;
+      const heldChecked = active.flatMap((context) => {
+        const holds = holdMap.get(context.page.id);
+        const request = holdRequests.find((item) => item.pageId === context.page.id)!;
+        if (!holds || typeof holds !== "object") return [];
+        const snapshot = holds as { pageHeld?: unknown; heldShowcaseIds?: unknown };
+        if (typeof snapshot.pageHeld !== "boolean" || !(snapshot.heldShowcaseIds instanceof Set) || [...snapshot.heldShowcaseIds].some((id) => typeof id !== "string" || !request.showcaseIds.includes(id))) return [];
+        if (snapshot.pageHeld) return [];
+        return [{ ...context, heldShowcaseIds: snapshot.heldShowcaseIds as Set<string> }];
+      });
+      const mediaContexts = heldChecked.flatMap((context) => {
+        const visibleShowcases = context.revisionShowcases.filter((showcase) => !context.heldShowcaseIds.has(showcase.sourceShowcaseId));
+        if (visibleShowcases.some((showcase) => !isDiscipline(showcase.discipline) || showcase.contentLabel !== "general_audience")) return [];
         const visibleIds = new Set(visibleShowcases.map((showcase) => showcase.id));
         const visibleMedia = mediaRows.filter((item) => visibleIds.has(item.publicationShowcaseId));
         const references: MediaReference[] = [];
-        if (revision.avatarAssetId) references.push({ assetId: revision.avatarAssetId, purpose: "avatar", altText: null });
-        if (revision.coverAssetId) references.push({ assetId: revision.coverAssetId, purpose: "cover", altText: null });
+        if (context.revision.avatarAssetId) references.push({ assetId: context.revision.avatarAssetId, purpose: "avatar", altText: null });
+        if (context.revision.coverAssetId) references.push({ assetId: context.revision.coverAssetId, purpose: "cover", altText: null });
         for (const row of visibleMedia) references.push({ assetId: row.assetId, purpose: "showcase", altText: row.alternativeText });
-        const resolved = await input.mediaCatalog.resolveReadyAssets(database, page.userId, references);
-        if (!resolved || typeof (resolved as { get?: unknown }).get !== "function") return;
+        return [{ ...context, visibleShowcases, visibleMedia, references }];
+      });
+      const mediaRequests = mediaContexts.map((context) => ({ ownerUserId: context.page.userId, references: context.references }));
+      const mediaBatch = exactMap(await input.mediaCatalog.resolveReadyAssetsBatch(database, mediaRequests), mediaRequests.map((request) => request.ownerUserId));
+      if (!mediaBatch) return result;
+      for (const context of mediaContexts) {
+        const { page, revision, canonical, visibleShowcases, visibleMedia, references } = context;
+        const resolved = exactMap(mediaBatch.get(page.userId), unique(references.map((reference) => reference.assetId)));
+        if (!resolved) return new Map();
         const ready = new Map<string, ReadyMedia>();
-        for (const reference of references) { const item = exactMedia(reference, resolved.get(reference.assetId), page.userId); if (!item) return; ready.set(reference.assetId, item); }
+        for (const reference of references) { const item = exactMedia(reference, resolved.get(reference.assetId), page.userId); if (!item) return new Map(); ready.set(reference.assetId, item); }
         const avatar = revision.avatarAssetId ? ready.get(revision.avatarAssetId) : undefined;
         const cover = revision.coverAssetId ? ready.get(revision.coverAssetId) : undefined;
-        if (avatar && (avatar.derivatives.thumb.derivativeId !== revision.avatarThumbDerivativeId || avatar.derivatives.display.derivativeId !== revision.avatarDisplayDerivativeId)) return;
-        if (cover && cover.derivatives.display.derivativeId !== revision.coverDisplayDerivativeId) return;
+        if (avatar && (avatar.derivatives.thumb.derivativeId !== revision.avatarThumbDerivativeId || avatar.derivatives.display.derivativeId !== revision.avatarDisplayDerivativeId)) return new Map();
+        if (cover && cover.derivatives.display.derivativeId !== revision.coverDisplayDerivativeId) return new Map();
         const projected: PublicCreatorShowcase[] = [];
         for (const showcase of visibleShowcases) {
           const projectedMedia: PublicCreatorMedia[] = [];
           for (const row of visibleMedia.filter((item) => item.publicationShowcaseId === showcase.id)) {
             const item = ready.get(row.assetId);
-            if (!item || item.derivatives.thumb.derivativeId !== row.thumbDerivativeId || item.derivatives.display.derivativeId !== row.displayDerivativeId || item.derivatives.large.derivativeId !== row.largeDerivativeId) return;
+            if (!item || item.derivatives.thumb.derivativeId !== row.thumbDerivativeId || item.derivatives.display.derivativeId !== row.displayDerivativeId || item.derivatives.large.derivativeId !== row.largeDerivativeId) return new Map();
             projectedMedia.push({ assetId: row.assetId, thumbDerivativeId: row.thumbDerivativeId, displayDerivativeId: row.displayDerivativeId, largeDerivativeId: row.largeDerivativeId, alternativeText: row.alternativeText, dimensions: { thumb: { width: item.derivatives.thumb.width, height: item.derivatives.thumb.height }, display: { width: item.derivatives.display.width, height: item.derivatives.display.height }, large: { width: item.derivatives.large.width, height: item.derivatives.large.height } } });
           }
           projected.push({ sourceShowcaseId: showcase.sourceShowcaseId, position: showcase.position, title: showcase.title, description: showcase.description, discipline: showcase.discipline as Discipline, contentLabel: "general_audience", externalUrl: showcase.externalUrl, media: projectedMedia });
         }
         result.set(page.id, { creatorUserId: page.userId, page: { pageId: page.id, revisionId: revision.id, revisionNumber: revision.revisionNumber, canonicalHandle: canonical.normalizedHandle, displayName: revision.displayName, introduction: revision.shortIntroduction, primaryDiscipline: revision.primaryDiscipline as Discipline, secondaryDisciplines: revision.secondaryDisciplines as Discipline[], avatar: avatar ? { assetId: avatar.assetId, thumb: derivative(avatar, "thumb"), display: derivative(avatar, "display") } : null, cover: cover ? { assetId: cover.assetId, display: derivative(cover, "display") } : null, showcases: projected, publishedAt: revision.publishedAt } });
-      } catch { /* External consumer boundary failures are indistinguishable from not-found. */ }
-    }));
+      }
+    } catch { return new Map(); }
     return result;
   }
   async function loadEffective(database: Database, pageId: string): Promise<Effective | null> { return (await loadEffectiveBatch(database, [pageId])).get(pageId) ?? null; }
@@ -166,16 +206,22 @@ export function createPublicCatalogQuery(input: Input) {
       if (input.publishingMode !== "general_audience") return { items: [], nextCursor: null };
       let scan = query.cursor === null ? null : decodeCursor(query.cursor);
       const visible: PublicCreatorDirectoryItem[] = [];
-      while (visible.length < 25) {
+      let scanned = 0;
+      let exhausted = false;
+      while (visible.length < 25 && scanned < PUBLIC_DIRECTORY_CANDIDATE_SCAN_BUDGET) {
         const batch = await candidates(input.db, { discipline: query.discipline, prefix: query.handlePrefix, after: scan });
-        if (batch.length === 0) break;
+        if (batch.length === 0) { exhausted = true; break; }
+        scanned += batch.length;
         const evaluated = await loadEffectiveBatch(input.db, batch.map((item) => item.pageId));
         for (const candidate of batch) { const page = evaluated.get(candidate.pageId)?.page; if (!page || (query.discipline && page.primaryDiscipline !== query.discipline && !page.secondaryDisciplines.includes(query.discipline))) continue; visible.push({ pageId: page.pageId, canonicalHandle: page.canonicalHandle, displayName: page.displayName, introduction: page.introduction, disciplines: [page.primaryDiscipline, ...page.secondaryDisciplines], avatarThumbDerivativeId: page.avatar?.thumb.derivativeId ?? null }); if (visible.length === 25) break; }
         const last = batch.at(-1)!; scan = { handle: last.canonicalHandle, pageId: last.pageId };
-        if (batch.length < PUBLIC_CATALOG_QUERY_BATCH_SIZE) break;
+        if (batch.length < PUBLIC_CATALOG_QUERY_BATCH_SIZE) { exhausted = true; break; }
       }
       const items = visible.slice(0, 24); const last = items.at(-1);
-      return { items, nextCursor: visible.length > 24 && last ? encodeCursor(last.canonicalHandle, last.pageId) : null };
+      const continuation = visible.length > 24 && last
+        ? { handle: last.canonicalHandle, pageId: last.pageId }
+        : !exhausted && scanned >= PUBLIC_DIRECTORY_CANDIDATE_SCAN_BUDGET ? scan : null;
+      return { items, nextCursor: continuation ? encodeCursor(continuation.handle, continuation.pageId) : null };
     },
     async listSitemapCreators(): Promise<readonly string[]> {
       if (input.publishingMode !== "general_audience") return [];
@@ -210,8 +256,8 @@ export function createPublicCatalogQuery(input: Input) {
         const showcases = await database.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt)));
         if (showcases.length > 0) { const [row] = await database.select().from(creatorShowcaseDraftMedia).where(and(inArray(creatorShowcaseDraftMedia.showcaseId, showcases.map((item) => item.id)), eq(creatorShowcaseDraftMedia.assetId, assetId))).limit(1); if (row) references.push({ assetId, purpose: "showcase", altText: row.alternativeText }); }
         if (references.length !== 1) return false;
-        const resolved = await input.mediaCatalog.resolveReadyAssets(database, actorUserId, references); const reference = references[0]!;
-        return Boolean(resolved && typeof (resolved as { get?: unknown }).get === "function" && exactMedia(reference, resolved.get(assetId), actorUserId));
+        const resolved = exactMap(await input.mediaCatalog.resolveReadyAssets(database, actorUserId, references), [assetId]); const reference = references[0]!;
+        return Boolean(resolved && exactMedia(reference, resolved.get(assetId), actorUserId));
       } catch { return false; }
     },
     resolveVisibleReportTarget(database: Database, target: ReportTarget) { return snapshot(database, target, true); },
