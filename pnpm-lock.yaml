@@ -158,6 +158,9 @@ importers:
       '@pawket/security':
         specifier: workspace:*
         version: link:../security
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
       zod:
         specifier: 4.4.3
         version: 4.4.3
