@@ -7,6 +7,7 @@ import {
 } from "@pawket/database";
 import { CONTENT_POLICY_VERSION, DISCIPLINES, TAXONOMY_VERSION, type Discipline } from "./catalog-policy.js";
 import type { IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
+import { readExactNativeMap, readExactNativeStringSet, readExactOwnRecord } from "./runtime-boundary.js";
 
 export type PublicDerivative = Readonly<{ derivativeId: string; width: number; height: number }>;
 export type PublicCreatorMedia = Readonly<{ assetId: string; thumbDerivativeId: string; displayDerivativeId: string; largeDerivativeId: string; alternativeText: string; dimensions: Readonly<Record<"thumb" | "display" | "large", Readonly<{ width: number; height: number }>>> }>;
@@ -47,31 +48,31 @@ function decodeCursor(value: string): { handle: string; pageId: string } {
   } catch { throw new PublicCatalogQueryError("INVALID_CURSOR"); }
 }
 function exactMedia(reference: MediaReference, value: unknown, ownerUserId: string): ReadyMedia | null {
-  if (!value || typeof value !== "object") return null;
-  const item = value as Partial<ReadyMedia> & { derivatives?: unknown };
-  if (item.assetId !== reference.assetId || item.ownerUserId !== ownerUserId || item.purpose !== reference.purpose) return null;
-  if (!item.derivatives || typeof item.derivatives !== "object" || Array.isArray(item.derivatives) || Object.keys(item.derivatives).sort().join(",") !== VARIANTS.join(",")) return null;
+  const item = readExactOwnRecord(value, ["assetId", "ownerUserId", "purpose", "derivatives"]);
+  if (!item || item.assetId !== reference.assetId || item.ownerUserId !== ownerUserId || item.purpose !== reference.purpose) return null;
+  const derivatives = readExactOwnRecord(item.derivatives, ["thumb", "display", "large"]);
+  if (!derivatives) return null;
+  const normalized = {} as Record<Variant, ReadyMedia["derivatives"]["thumb"]>;
   for (const variant of VARIANTS) {
-    const value = (item.derivatives as Record<string, unknown>)[variant];
-    if (!value || typeof value !== "object") return null;
-    const derivative = value as { derivativeId?: unknown; width?: unknown; height?: unknown };
+    const derivative = readExactOwnRecord(derivatives[variant], ["derivativeId", "width", "height"]);
+    if (!derivative) return null;
     if (!isUuid(derivative.derivativeId) || !Number.isInteger(derivative.width) || (derivative.width as number) <= 0 || !Number.isInteger(derivative.height) || (derivative.height as number) <= 0) return null;
+    normalized[variant] = { derivativeId: derivative.derivativeId, width: derivative.width as number, height: derivative.height as number };
   }
-  return item as ReadyMedia;
+  return { assetId: reference.assetId, ownerUserId, purpose: reference.purpose, derivatives: normalized };
 }
-function exactMap(value: unknown, expectedKeys: readonly string[]): Map<unknown, unknown> | null {
-  if (!(value instanceof Map)) return null;
-  const expected = new Set(expectedKeys);
-  if (value.size !== expected.size || [...value.keys()].some((key) => typeof key !== "string" || !expected.has(key))) return null;
-  return value;
+function exactMap(value: unknown, expectedKeys: readonly string[]): Map<string, unknown> | null { return readExactNativeMap(value, expectedKeys); }
+function exactSeed(value: unknown, userId: string): NonNullable<Awaited<ReturnType<IdentityCreatorSeedPort["getCreatorSeed"]>>> | null {
+  const seed = readExactOwnRecord(value, ["userId", "capabilityState", "capabilityVersion", "approvedRevisionId", "displayName", "introduction"]);
+  if (!seed || seed.userId !== userId || (seed.capabilityState !== "active" && seed.capabilityState !== "suspended")
+    || !Number.isInteger(seed.capabilityVersion) || (seed.capabilityVersion as number) <= 0 || !isUuid(seed.approvedRevisionId)
+    || typeof seed.displayName !== "string" || typeof seed.introduction !== "string") return null;
+  return { userId, capabilityState: seed.capabilityState, capabilityVersion: seed.capabilityVersion as number, approvedRevisionId: seed.approvedRevisionId, displayName: seed.displayName, introduction: seed.introduction };
 }
-function exactSeed(value: unknown, userId: string): value is NonNullable<Awaited<ReturnType<IdentityCreatorSeedPort["getCreatorSeed"]>>> {
-  if (!value || typeof value !== "object") return false;
-  const seed = value as Record<string, unknown>;
-  return Object.keys(seed).sort().join(",") === "approvedRevisionId,capabilityState,capabilityVersion,displayName,introduction,userId"
-    && seed.userId === userId && (seed.capabilityState === "active" || seed.capabilityState === "suspended")
-    && Number.isInteger(seed.capabilityVersion) && (seed.capabilityVersion as number) > 0 && isUuid(seed.approvedRevisionId)
-    && typeof seed.displayName === "string" && typeof seed.introduction === "string";
+function normalizeReportTarget(value: unknown): ReportTarget | null {
+  const target = readExactOwnRecord(value, ["targetType", "targetId", "publicationRevisionId"]);
+  if (!target || (target.targetType !== "page" && target.targetType !== "showcase") || !isUuid(target.targetId) || !isUuid(target.publicationRevisionId)) return null;
+  return { targetType: target.targetType, targetId: target.targetId, publicationRevisionId: target.publicationRevisionId };
 }
 function derivative(item: ReadyMedia, variant: Variant): PublicDerivative { const value = item.derivatives[variant]; return { derivativeId: value.derivativeId, width: value.width, height: value.height }; }
 
@@ -105,20 +106,20 @@ export function createPublicCatalogQuery(input: Input) {
       const seedMap = exactMap(await input.creatorSeeds.getCreatorSeeds(database, userIds), userIds);
       if (!seedMap) return result;
       const active = contexts.filter((context) => {
-        const seed = seedMap.get(context.page.userId);
-        return exactSeed(seed, context.page.userId) && seed.capabilityState === "active";
+        const seed = exactSeed(seedMap.get(context.page.userId), context.page.userId);
+        return seed?.capabilityState === "active";
       });
       const holdRequests = active.map((context) => ({ pageId: context.page.id, revisionId: context.revision.id, showcaseIds: context.revisionShowcases.map((showcase) => showcase.sourceShowcaseId) }));
       const holdMap = exactMap(await input.visibility.readHoldsBatch(database, holdRequests), holdRequests.map((request) => request.pageId));
       if (!holdMap) return result;
       const heldChecked = active.flatMap((context) => {
-        const holds = holdMap.get(context.page.id);
+        const holds = readExactOwnRecord(holdMap.get(context.page.id), ["pageHeld", "heldShowcaseIds"]);
         const request = holdRequests.find((item) => item.pageId === context.page.id)!;
-        if (!holds || typeof holds !== "object") return [];
-        const snapshot = holds as { pageHeld?: unknown; heldShowcaseIds?: unknown };
-        if (typeof snapshot.pageHeld !== "boolean" || !(snapshot.heldShowcaseIds instanceof Set) || [...snapshot.heldShowcaseIds].some((id) => typeof id !== "string" || !request.showcaseIds.includes(id))) return [];
-        if (snapshot.pageHeld) return [];
-        return [{ ...context, heldShowcaseIds: snapshot.heldShowcaseIds as Set<string> }];
+        if (!holds || typeof holds.pageHeld !== "boolean") return [];
+        const heldShowcaseIds = readExactNativeStringSet(holds.heldShowcaseIds);
+        if (!heldShowcaseIds || [...heldShowcaseIds].some((id) => !request.showcaseIds.includes(id))) return [];
+        if (holds.pageHeld) return [];
+        return [{ ...context, heldShowcaseIds }];
       });
       const mediaContexts = heldChecked.flatMap((context) => {
         const visibleShowcases = context.revisionShowcases.filter((showcase) => !context.heldShowcaseIds.has(showcase.sourceShowcaseId));
@@ -168,28 +169,29 @@ export function createPublicCatalogQuery(input: Input) {
     return database.select({ pageId: creatorDiscoveryProjections.pageId, canonicalHandle: creatorDiscoveryProjections.canonicalHandle }).from(creatorDiscoveryProjections).where(and(...predicates)).orderBy(asc(creatorDiscoveryProjections.canonicalHandle), asc(creatorDiscoveryProjections.pageId)).limit(PUBLIC_CATALOG_QUERY_BATCH_SIZE);
   }
   async function snapshot(database: Database, target: ReportTarget, visibleOnly: boolean): Promise<ModerationTargetSnapshot | null> {
-    if (!target || !isUuid(target.targetId) || !isUuid(target.publicationRevisionId) || (target.targetType !== "page" && target.targetType !== "showcase")) return null;
+    const normalizedTarget = normalizeReportTarget(target);
+    if (!normalizedTarget) return null;
     try {
-      const [revision] = await database.select().from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.id, target.publicationRevisionId)).limit(1);
+      const [revision] = await database.select().from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.id, normalizedTarget.publicationRevisionId)).limit(1);
       if (!revision || !publicHandle(revision.canonicalHandle)) return null;
       const [page] = await database.select().from(creatorPages).where(eq(creatorPages.id, revision.pageId)).limit(1);
       if (!page) return null;
       if (visibleOnly) {
         const current = await loadEffective(database, page.id);
         if (!current || current.page.revisionId !== revision.id) return null;
-        if (target.targetType === "page") {
-          if (target.targetId !== page.id) return null;
-          return { target, pageId: page.id, creatorUserId: page.userId, canonicalHandle: current.page.canonicalHandle, displayName: current.page.displayName, showcaseTitle: null, mediaAssetIds: unique([current.page.avatar?.assetId ?? null, current.page.cover?.assetId ?? null, ...current.page.showcases.flatMap((item) => item.media.map((media) => media.assetId))]) };
+        if (normalizedTarget.targetType === "page") {
+          if (normalizedTarget.targetId !== page.id) return null;
+          return { target: normalizedTarget, pageId: page.id, creatorUserId: page.userId, canonicalHandle: current.page.canonicalHandle, displayName: current.page.displayName, showcaseTitle: null, mediaAssetIds: unique([current.page.avatar?.assetId ?? null, current.page.cover?.assetId ?? null, ...current.page.showcases.flatMap((item) => item.media.map((media) => media.assetId))]) };
         }
-        const selected = current.page.showcases.find((item) => item.sourceShowcaseId === target.targetId);
-        return selected ? { target, pageId: page.id, creatorUserId: page.userId, canonicalHandle: current.page.canonicalHandle, displayName: current.page.displayName, showcaseTitle: selected.title, mediaAssetIds: unique(selected.media.map((item) => item.assetId)) } : null;
+        const selected = current.page.showcases.find((item) => item.sourceShowcaseId === normalizedTarget.targetId);
+        return selected ? { target: normalizedTarget, pageId: page.id, creatorUserId: page.userId, canonicalHandle: current.page.canonicalHandle, displayName: current.page.displayName, showcaseTitle: selected.title, mediaAssetIds: unique(selected.media.map((item) => item.assetId)) } : null;
       }
       const allShowcases = await database.select().from(creatorPublicationShowcases).where(eq(creatorPublicationShowcases.revisionId, revision.id)).orderBy(asc(creatorPublicationShowcases.position));
-      if (target.targetType === "page" && target.targetId !== page.id) return null;
-      const selected = target.targetType === "page" ? allShowcases : allShowcases.filter((item) => item.sourceShowcaseId === target.targetId);
-      if (target.targetType === "showcase" && selected.length !== 1) return null;
+      if (normalizedTarget.targetType === "page" && normalizedTarget.targetId !== page.id) return null;
+      const selected = normalizedTarget.targetType === "page" ? allShowcases : allShowcases.filter((item) => item.sourceShowcaseId === normalizedTarget.targetId);
+      if (normalizedTarget.targetType === "showcase" && selected.length !== 1) return null;
       const mediaRows = selected.length === 0 ? [] : await database.select().from(creatorPublicationMedia).where(inArray(creatorPublicationMedia.publicationShowcaseId, selected.map((item) => item.id))).orderBy(asc(creatorPublicationMedia.publicationShowcaseId), asc(creatorPublicationMedia.position));
-      return { target, pageId: page.id, creatorUserId: page.userId, canonicalHandle: revision.canonicalHandle, displayName: revision.displayName, showcaseTitle: target.targetType === "showcase" ? selected[0]!.title : null, mediaAssetIds: unique([...(target.targetType === "page" ? [revision.avatarAssetId, revision.coverAssetId] : []), ...mediaRows.map((item) => item.assetId)]) };
+      return { target: normalizedTarget, pageId: page.id, creatorUserId: page.userId, canonicalHandle: revision.canonicalHandle, displayName: revision.displayName, showcaseTitle: normalizedTarget.targetType === "showcase" ? selected[0]!.title : null, mediaAssetIds: unique([...(normalizedTarget.targetType === "page" ? [revision.avatarAssetId, revision.coverAssetId] : []), ...mediaRows.map((item) => item.assetId)]) };
     } catch { return null; }
   }
   return {
@@ -247,7 +249,7 @@ export function createPublicCatalogQuery(input: Input) {
     async isDerivativePreviewable(database: Database, actorUserId: string, assetId: string, variant: Variant): Promise<boolean> {
       if (!isUuid(assetId) || !isVariant(variant)) return false;
       try {
-        const seed = await input.creatorSeeds.getCreatorSeed(database, actorUserId); if (!seed || seed.userId !== actorUserId) return false;
+        const seed = exactSeed(await input.creatorSeeds.getCreatorSeed(database, actorUserId), actorUserId); if (!seed) return false;
         const [page] = await database.select().from(creatorPages).where(eq(creatorPages.userId, actorUserId)).limit(1); if (!page) return false;
         const [draft] = await database.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, page.id)).limit(1); if (!draft) return false;
         const references: MediaReference[] = [];

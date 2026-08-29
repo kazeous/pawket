@@ -30,7 +30,8 @@ import {
   TAXONOMY_VERSION,
   type Discipline,
 } from "./catalog-policy.js";
-import type { IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
+import type { CreatorSeed, IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
+import { readExactNativeMap, readExactNativeStringSet, readExactOwnRecord } from "./runtime-boundary.js";
 
 export const HANDLE_RECENT_AUTH_MS = 15 * 60_000;
 export const HANDLE_RENAME_COOLDOWN_MS = 30 * 24 * 60 * 60_000;
@@ -152,28 +153,42 @@ function parseUnpublicationReplayReference(value: string): UnpublishResult | nul
 }
 
 function assertReadyReference(reference: MediaReference, resolved: ReadyMedia | undefined, ownerUserId: string): ReadyMedia {
-  if (!resolved || typeof resolved !== "object" || resolved.assetId !== reference.assetId || resolved.ownerUserId !== ownerUserId || resolved.purpose !== reference.purpose) fail("POLICY_VIOLATION");
-  const derivatives: unknown = resolved.derivatives;
-  if (!derivatives || typeof derivatives !== "object" || Array.isArray(derivatives) || Object.keys(derivatives).sort().join(",") !== "display,large,thumb") fail("POLICY_VIOLATION");
-  for (const derivative of Object.values(derivatives)) {
-    if (!derivative || typeof derivative !== "object") fail("POLICY_VIOLATION");
-    const candidate = derivative as { derivativeId?: unknown; width?: unknown; height?: unknown };
-    if (!validUuid(candidate.derivativeId) || !Number.isInteger(candidate.width) || (candidate.width as number) <= 0 || !Number.isInteger(candidate.height) || (candidate.height as number) <= 0) fail("POLICY_VIOLATION");
+  const media = readExactOwnRecord(resolved, ["assetId", "ownerUserId", "purpose", "derivatives"]);
+  if (!media || media.assetId !== reference.assetId || media.ownerUserId !== ownerUserId || media.purpose !== reference.purpose) fail("POLICY_VIOLATION");
+  const derivatives = readExactOwnRecord(media.derivatives, ["thumb", "display", "large"]);
+  if (!derivatives) fail("POLICY_VIOLATION");
+  const normalized = {} as Record<"thumb" | "display" | "large", ReadyMedia["derivatives"]["thumb"]>;
+  for (const variant of ["thumb", "display", "large"] as const) {
+    const candidate = readExactOwnRecord(derivatives[variant], ["derivativeId", "width", "height"]);
+    if (!candidate || !validUuid(candidate.derivativeId) || !Number.isInteger(candidate.width) || (candidate.width as number) <= 0 || !Number.isInteger(candidate.height) || (candidate.height as number) <= 0) fail("POLICY_VIOLATION");
+    normalized[variant] = { derivativeId: candidate.derivativeId, width: candidate.width as number, height: candidate.height as number };
   }
-  return resolved;
+  return { assetId: reference.assetId, ownerUserId, purpose: reference.purpose, derivatives: normalized };
 }
 
 function exactReadyMap(references: readonly MediaReference[], resolved: unknown, ownerUserId: string): ReadonlyMap<string, ReadyMedia> {
-  if (!(resolved instanceof Map)) fail("POLICY_VIOLATION");
   const expectedIds = [...new Set(references.map((reference) => reference.assetId))];
-  try {
-    if (resolved.size !== expectedIds.length || [...resolved.keys()].some((key) => typeof key !== "string" || !expectedIds.includes(key))) fail("POLICY_VIOLATION");
-    for (const reference of references) assertReadyReference(reference, resolved.get(reference.assetId) as ReadyMedia | undefined, ownerUserId);
-    return resolved as ReadonlyMap<string, ReadyMedia>;
-  } catch (error) {
-    if (error instanceof CatalogServiceError) throw error;
-    fail("POLICY_VIOLATION");
-  }
+  const safe = readExactNativeMap(resolved, expectedIds);
+  if (!safe) fail("POLICY_VIOLATION");
+  const result = new Map<string, ReadyMedia>();
+  for (const reference of references) result.set(reference.assetId, assertReadyReference(reference, safe.get(reference.assetId) as ReadyMedia | undefined, ownerUserId));
+  return result;
+}
+
+function exactCreatorSeed(value: unknown, userId: string): CreatorSeed | null {
+  const seed = readExactOwnRecord(value, ["userId", "capabilityState", "capabilityVersion", "approvedRevisionId", "displayName", "introduction"]);
+  if (!seed || seed.userId !== userId || (seed.capabilityState !== "active" && seed.capabilityState !== "suspended")
+    || !Number.isInteger(seed.capabilityVersion) || (seed.capabilityVersion as number) <= 0 || !validUuid(seed.approvedRevisionId)
+    || typeof seed.displayName !== "string" || typeof seed.introduction !== "string") return null;
+  return { userId, capabilityState: seed.capabilityState, capabilityVersion: seed.capabilityVersion as number, approvedRevisionId: seed.approvedRevisionId, displayName: seed.displayName, introduction: seed.introduction };
+}
+
+function exactHolds(value: unknown, showcaseIds: readonly string[]): { pageHeld: boolean; heldShowcaseIds: Set<string> } | null {
+  const holds = readExactOwnRecord(value, ["pageHeld", "heldShowcaseIds"]);
+  if (!holds || typeof holds.pageHeld !== "boolean") return null;
+  const heldShowcaseIds = readExactNativeStringSet(holds.heldShowcaseIds);
+  if (!heldShowcaseIds || [...heldShowcaseIds].some((showcaseId) => !showcaseIds.includes(showcaseId))) return null;
+  return { pageHeld: holds.pageHeld, heldShowcaseIds };
 }
 
 function normalizeDraft(input: DraftInput) {
@@ -230,8 +245,8 @@ export function createCatalogService(input: CatalogServiceInput) {
   const id = input.idFactory ?? randomUUID;
 
   async function requireCreator(database: PawketDatabase | PawketTransaction, userId: string, activeOnly: boolean) {
-    const seed = await input.creatorSeeds.getCreatorSeed(database, userId);
-    if (!seed || seed.userId !== userId || (activeOnly && seed.capabilityState !== "active")) fail("NOT_FOUND");
+    const seed = exactCreatorSeed(await input.creatorSeeds.getCreatorSeed(database, userId), userId);
+    if (!seed || (activeOnly && seed.capabilityState !== "active")) fail("NOT_FOUND");
     return seed;
   }
 
@@ -469,7 +484,8 @@ export function createCatalogService(input: CatalogServiceInput) {
           media: mediaRows.filter((item) => item.showcaseId === showcase.id).map((item) => ({ assetId: item.assetId, alternativeText: item.alternativeText })),
         }));
         const revisionId = id();
-        const holds = await input.visibility.readHolds(tx, page.id, revisionId, showcaseIds);
+        const holds = exactHolds(await input.visibility.readHolds(tx, page.id, revisionId, showcaseIds), showcaseIds);
+        if (!holds) fail("POLICY_VIOLATION");
         if (holds.pageHeld || showcases.some((showcase) => holds.heldShowcaseIds.has(showcase.id))) fail("POLICY_VIOLATION");
 
         const references: MediaReference[] = [];

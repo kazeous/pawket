@@ -33,7 +33,6 @@ type ServiceOptions = Readonly<{
   displayName?: string;
   introduction?: string;
   idFactory?: () => string;
-  privateSentinel?: string;
 }>;
 
 function service(database = db, clock = at, options: ServiceOptions = {}) {
@@ -47,8 +46,6 @@ function service(database = db, clock = at, options: ServiceOptions = {}) {
       approvedRevisionId,
       displayName: options.displayName ?? "Artist",
       introduction: options.introduction ?? "Approved intro",
-      portfolioUrls: options.privateSentinel ? [options.privateSentinel] : undefined,
-      applicantEmail: options.privateSentinel,
     }; }, async getCreatorSeeds(_database, userIds) { return new Map(userIds.map((userId) => [userId, {
       userId, capabilityState: "active" as const, capabilityVersion: 1, approvedRevisionId,
       displayName: options.displayName ?? "Artist", introduction: options.introduction ?? "Approved intro",
@@ -130,8 +127,8 @@ describe("catalog handle lifecycle", () => {
     const requestTwo = "request-init-race-two";
     const pageIdOne = randomUUID();
     const pageIdTwo = randomUUID();
-    const seedOne = { approvedRevisionId: randomUUID(), displayName: "Artist One", introduction: "Approved intro one", privateSentinel: "PRIVATE-PORTFOLIO-ONE" } as const;
-    const seedTwo = { approvedRevisionId: randomUUID(), displayName: "Artist Two", introduction: "Approved intro two", privateSentinel: "PRIVATE-PORTFOLIO-TWO" } as const;
+    const seedOne = { approvedRevisionId: randomUUID(), displayName: "Artist One", introduction: "Approved intro one" } as const;
+    const seedTwo = { approvedRevisionId: randomUUID(), displayName: "Artist Two", introduction: "Approved intro two" } as const;
     const initialized = await Promise.all([
       service(db, at, { ...seedOne, idFactory: () => pageIdOne }).initialize({ userId, requestId: requestOne }),
       service(db, at, { ...seedTwo, idFactory: () => pageIdTwo }).initialize({ userId, requestId: requestTwo }),
@@ -178,7 +175,6 @@ describe("catalog handle lifecycle", () => {
       aggregateId: pageId,
       payload: { pageId, version: 1, correlationId: winning.requestId, actorUserId: userId },
     });
-    expect(JSON.stringify({ initialized, pageRows, draftRows, initializationEvents })).not.toContain("PRIVATE-PORTFOLIO");
   });
 
   test("reorders a complete 12-item reverse safely", async () => {

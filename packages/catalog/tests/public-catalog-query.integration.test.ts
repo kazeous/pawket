@@ -41,13 +41,41 @@ let pageHoldIds = new Set<string>();
 let showcaseHoldIds = new Set<string>();
 let publishingMode: "disabled" | "general_audience" = "general_audience";
 let mediaResolveCalls = 0;
-let mediaMapMode: "exact" | "get_only" | "missing" | "extra" | "wrong_key" | "wrong_asset" | "wrong_owner" | "wrong_purpose" | "outer_get_only" | "outer_missing" | "outer_extra" = "exact";
-let identityBatchMode: "exact" | "missing" | "extra" = "exact";
-let visibilityBatchMode: "exact" | "missing" | "extra" = "exact";
+let mediaMapMode: "exact" | "get_only" | "missing" | "extra" | "wrong_key" | "wrong_asset" | "wrong_owner" | "wrong_purpose" | "masked_extra" | "subclass" | "proxy" | "outer_get_only" | "outer_missing" | "outer_extra" | "outer_masked_extra" | "outer_subclass" | "outer_proxy" = "exact";
+let identityBatchMode: "exact" | "missing" | "extra" | "masked_extra" | "subclass" | "proxy" = "exact";
+let identityValueMode: "exact" | "extra" | "prototype" | "accessor" | "proxy" = "exact";
+let visibilityBatchMode: "exact" | "missing" | "extra" | "masked_extra" | "subclass" | "proxy" = "exact";
+let holdValueMode: "exact" | "extra" | "prototype" | "accessor" | "proxy" = "exact";
+let holdSetMode: "exact" | "masked_extra" | "subclass" | "proxy" = "exact";
+let mediaValueMode: "exact" | "extra" | "prototype" | "accessor" | "proxy" | "derivative_extra" | "derivative_prototype" | "derivative_accessor" = "exact";
+let boundaryGetterCalls = 0;
 const providerCalls = { identitySingle: 0, identityBatch: 0, visibilitySingle: 0, visibilityBatch: 0, mediaSingle: 0, mediaBatch: 0 };
 function resetProviderCalls() { for (const key of Object.keys(providerCalls) as (keyof typeof providerCalls)[]) providerCalls[key] = 0; }
 function mutateAssetMap(result: Map<string, ReadyMedia>): unknown {
   const [firstKey, firstValue] = result.entries().next().value ?? [];
+  if (firstKey && firstValue && mediaValueMode !== "exact") {
+    let mutated: ReadyMedia;
+    if (mediaValueMode === "extra") mutated = { ...firstValue, unexpected: true } as unknown as ReadyMedia;
+    else if (mediaValueMode === "prototype") mutated = Object.assign(Object.create({ ownerUserId: firstValue.ownerUserId }), { assetId: firstValue.assetId, purpose: firstValue.purpose, derivatives: firstValue.derivatives }) as ReadyMedia;
+    else if (mediaValueMode === "accessor") {
+      const value = { ...firstValue } as Record<string, unknown>;
+      Object.defineProperty(value, "ownerUserId", { enumerable: true, get() { boundaryGetterCalls += 1; return firstValue.ownerUserId; } });
+      mutated = value as ReadyMedia;
+    } else if (mediaValueMode === "proxy") mutated = new Proxy(firstValue, {});
+    else {
+      const thumb = mediaValueMode === "derivative_extra"
+        ? { ...firstValue.derivatives.thumb, unexpected: true }
+        : mediaValueMode === "derivative_prototype"
+          ? Object.assign(Object.create({ width: firstValue.derivatives.thumb.width }), { derivativeId: firstValue.derivatives.thumb.derivativeId, height: firstValue.derivatives.thumb.height })
+          : (() => {
+              const value = { ...firstValue.derivatives.thumb } as Record<string, unknown>;
+              Object.defineProperty(value, "width", { enumerable: true, get() { boundaryGetterCalls += 1; return firstValue.derivatives.thumb.width; } });
+              return value;
+            })();
+      mutated = { ...firstValue, derivatives: { ...firstValue.derivatives, thumb } } as ReadyMedia;
+    }
+    result.set(firstKey, mutated);
+  }
   if (mediaMapMode === "get_only") return { get: result.get.bind(result) };
   if (mediaMapMode === "missing" && firstKey) result.delete(firstKey);
   if (mediaMapMode === "extra" && firstValue) result.set(randomUUID(), firstValue);
@@ -55,6 +83,42 @@ function mutateAssetMap(result: Map<string, ReadyMedia>): unknown {
   if (mediaMapMode === "wrong_asset" && firstKey && firstValue) result.set(firstKey, { ...firstValue, assetId: randomUUID() });
   if (mediaMapMode === "wrong_owner" && firstKey && firstValue) result.set(firstKey, { ...firstValue, ownerUserId: `foreign-${randomUUID()}` });
   if (mediaMapMode === "wrong_purpose" && firstKey && firstValue) result.set(firstKey, { ...firstValue, purpose: firstValue.purpose === "avatar" ? "cover" : "avatar" });
+  if (mediaMapMode === "masked_extra" && firstValue) {
+    const visibleKeys = [...result.keys()];
+    result.set(randomUUID(), firstValue);
+    Object.defineProperty(result, "size", { get() { boundaryGetterCalls += 1; return visibleKeys.length; } });
+    Object.defineProperty(result, "keys", { get() { boundaryGetterCalls += 1; return () => visibleKeys.values(); } });
+    Object.defineProperty(result, "get", { get() { boundaryGetterCalls += 1; return Map.prototype.get.bind(result); } });
+  }
+  if (mediaMapMode === "subclass") return new (class extends Map<string, ReadyMedia> {})(result);
+  if (mediaMapMode === "proxy") return new Proxy(result, {});
+  return result;
+}
+
+function mutateSeed(seed: CreatorSeed): CreatorSeed {
+  if (identityValueMode === "extra") return { ...seed, unexpected: true } as unknown as CreatorSeed;
+  if (identityValueMode === "prototype") return Object.assign(Object.create({ capabilityState: seed.capabilityState }), { userId: seed.userId, capabilityVersion: seed.capabilityVersion, approvedRevisionId: seed.approvedRevisionId, displayName: seed.displayName, introduction: seed.introduction }) as CreatorSeed;
+  if (identityValueMode === "accessor") {
+    const value = { ...seed } as Record<string, unknown>;
+    Object.defineProperty(value, "capabilityState", { enumerable: true, get() { boundaryGetterCalls += 1; return seed.capabilityState; } });
+    return value as CreatorSeed;
+  }
+  if (identityValueMode === "proxy") return new Proxy(seed, {});
+  return seed;
+}
+
+function spoofMap<K, V>(result: Map<K, V>, mode: "exact" | "missing" | "extra" | "masked_extra" | "subclass" | "proxy", extraKey: K, extraValue: V): unknown {
+  if (mode === "missing") result.delete(result.keys().next().value as K);
+  if (mode === "extra") result.set(extraKey, extraValue);
+  if (mode === "masked_extra") {
+    const visibleKeys = [...result.keys()];
+    result.set(extraKey, extraValue);
+    Object.defineProperty(result, "size", { get() { boundaryGetterCalls += 1; return visibleKeys.length; } });
+    Object.defineProperty(result, "keys", { get() { boundaryGetterCalls += 1; return () => visibleKeys.values(); } });
+    Object.defineProperty(result, "get", { get() { boundaryGetterCalls += 1; return Map.prototype.get.bind(result); } });
+  }
+  if (mode === "subclass") return new (class extends Map<K, V> {})(result);
+  if (mode === "proxy") return new Proxy(result, {});
   return result;
 }
 
@@ -63,17 +127,15 @@ const creatorSeeds = {
     providerCalls.identitySingle += 1;
     const capabilityState = capabilities.get(userId);
     if (!capabilityState) return null;
-    return { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" };
+    return mutateSeed({ userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" });
   },
   async getCreatorSeeds(_database: unknown, userIds: readonly string[]) {
     providerCalls.identityBatch += 1;
     const result = new Map(userIds.map((userId) => {
       const capabilityState = capabilities.get(userId);
-      return [userId, capabilityState ? { userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" } : null] as const;
+      return [userId, capabilityState ? mutateSeed({ userId, capabilityState, capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Seed", introduction: "Seed intro" }) : null] as const;
     }));
-    if (identityBatchMode === "missing") result.delete(userIds[0] ?? "");
-    if (identityBatchMode === "extra") result.set(`foreign-${randomUUID()}`, null);
-    return result;
+    return spoofMap(result, identityBatchMode, `foreign-${randomUUID()}`, null) as ReadonlyMap<string, CreatorSeed | null>;
   },
 };
 const mediaCatalog = {
@@ -94,6 +156,9 @@ const mediaCatalog = {
     if (mediaMapMode === "outer_get_only") return { get: result.get.bind(result) } as unknown as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
     if (mediaMapMode === "outer_missing") result.delete(requests[0]?.ownerUserId ?? "");
     if (mediaMapMode === "outer_extra") result.set(`foreign-${randomUUID()}`, new Map());
+    if (mediaMapMode === "outer_masked_extra") return spoofMap(result, "masked_extra", `foreign-${randomUUID()}`, new Map()) as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
+    if (mediaMapMode === "outer_subclass") return spoofMap(result, "subclass", `foreign-${randomUUID()}`, new Map()) as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
+    if (mediaMapMode === "outer_proxy") return spoofMap(result, "proxy", `foreign-${randomUUID()}`, new Map()) as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
     return result as ReadonlyMap<string, ReadonlyMap<string, ReadyMedia>>;
   },
 };
@@ -104,10 +169,26 @@ const visibility = {
   },
   async readHoldsBatch(_database: unknown, requests: readonly { pageId: string; revisionId: string; showcaseIds: readonly string[] }[]) {
     providerCalls.visibilityBatch += 1;
-    const result = new Map(requests.map((request) => [request.pageId, { pageHeld: pageHoldIds.has(request.pageId), heldShowcaseIds: new Set(request.showcaseIds.filter((id) => showcaseHoldIds.has(id))) }] as const));
-    if (visibilityBatchMode === "missing") result.delete(requests[0]?.pageId ?? "");
-    if (visibilityBatchMode === "extra") result.set(randomUUID(), { pageHeld: false, heldShowcaseIds: new Set() });
-    return result;
+    const result = new Map(requests.map((request) => {
+      let heldShowcaseIds: Set<string> = new Set(request.showcaseIds.filter((id) => showcaseHoldIds.has(id)));
+      if (holdSetMode === "masked_extra") {
+        heldShowcaseIds.add(randomUUID());
+        Object.defineProperty(heldShowcaseIds, Symbol.iterator, { get() { boundaryGetterCalls += 1; return () => new Set<string>().values(); } });
+        Object.defineProperty(heldShowcaseIds, "has", { get() { boundaryGetterCalls += 1; return () => false; } });
+      } else if (holdSetMode === "subclass") heldShowcaseIds = new (class extends Set<string> {})(heldShowcaseIds);
+      else if (holdSetMode === "proxy") heldShowcaseIds = new Proxy(heldShowcaseIds, {});
+      let snapshot: { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> } = { pageHeld: pageHoldIds.has(request.pageId), heldShowcaseIds };
+      if (holdValueMode === "extra") snapshot = { ...snapshot, unexpected: true } as typeof snapshot;
+      else if (holdValueMode === "prototype") snapshot = Object.assign(Object.create({ pageHeld: snapshot.pageHeld }), { heldShowcaseIds: snapshot.heldShowcaseIds }) as typeof snapshot;
+      else if (holdValueMode === "accessor") {
+        const pageHeld = snapshot.pageHeld;
+        const value = { ...snapshot } as Record<string, unknown>;
+        Object.defineProperty(value, "pageHeld", { enumerable: true, get() { boundaryGetterCalls += 1; return pageHeld; } });
+        snapshot = value as typeof snapshot;
+      } else if (holdValueMode === "proxy") snapshot = new Proxy(snapshot, {});
+      return [request.pageId, snapshot] as const;
+    }));
+    return spoofMap(result, visibilityBatchMode, randomUUID(), { pageHeld: false, heldShowcaseIds: new Set<string>() }) as ReadonlyMap<string, { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }>;
   },
 };
 
@@ -348,6 +429,39 @@ describe("effective public catalog query", () => {
     expect(await query.readRevisionTarget(db, heldTarget)).toEqual({ target: heldTarget, pageId: creator.pageId, creatorUserId: creator.userId, canonicalHandle: handle, displayName: `Creator ${handle}`, showcaseTitle: `${handle} work 0`, mediaAssetIds: [creator.showcaseAssets[0]!.assetId] });
   });
 
+  test("normalizes exact moderation targets and rejects extras, prototypes, accessors, and malformed identities symmetrically", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`targetshape-${randomUUID().slice(0, 4)}`);
+    const query = composition().query;
+    const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    const visible = await query.resolveVisibleReportTarget(db, target);
+    const historical = await query.readRevisionTarget(db, target);
+    expect(visible?.target).toEqual(target);
+    expect(historical?.target).toEqual(target);
+    expect(visible?.target).not.toBe(target);
+    expect(historical?.target).not.toBe(target);
+
+    const accessor = { targetType: "page", publicationRevisionId: creator.revisionId } as Record<string, unknown>;
+    Object.defineProperty(accessor, "targetId", { enumerable: true, get() { boundaryGetterCalls += 1; return creator.pageId; } });
+    const malformed = [
+      { ...target, unexpected: true },
+      Object.assign(Object.create({ targetId: target.targetId }), { targetType: target.targetType, publicationRevisionId: target.publicationRevisionId }),
+      new Proxy(target, {}),
+      accessor,
+      { ...target, targetType: "invalid" },
+      { ...target, targetId: randomUUID() },
+      { ...target, targetId: "malformed" },
+      { ...target, publicationRevisionId: randomUUID() },
+      { ...target, publicationRevisionId: "malformed" },
+      null,
+    ];
+    for (const candidate of malformed) {
+      expect(await query.resolveVisibleReportTarget(db, candidate as never)).toBeNull();
+      expect(await query.readRevisionTarget(db, candidate as never)).toBeNull();
+    }
+    expect(boundaryGetterCalls).toBe(0);
+  });
+
   test.each([
     ["canonicalHandle", { canonicalHandle: `mismatch-${randomUUID().slice(0, 6)}` }],
     ["displayName", { displayName: "Tampered" }],
@@ -405,6 +519,85 @@ describe("effective public catalog query", () => {
     mediaMapMode = scenario;
     try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); }
     finally { mediaMapMode = "exact"; }
+  });
+
+  test.each(["masked_extra", "subclass", "proxy"] as const)("denies a spoofable inner media Map (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`innermap-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    mediaMapMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { mediaMapMode = "exact"; }
+  });
+
+  test.each(["outer_masked_extra", "outer_subclass", "outer_proxy"] as const)("denies a spoofable outer media Map (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`outermap-${randomUUID().slice(0, 4)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    mediaMapMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { mediaMapMode = "exact"; }
+  });
+
+  test.each(["extra", "prototype", "accessor", "proxy", "derivative_extra", "derivative_prototype", "derivative_accessor"] as const)("denies an inexact ReadyMedia record (%s) without invoking accessors", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`mediavalue-${randomUUID().slice(0, 4)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    mediaValueMode = scenario;
+    try {
+      expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
+      expect(await composition().query.isDerivativePreviewable(db, creator.userId, creator.avatar.assetId, "thumb")).toBe(false);
+      expect(boundaryGetterCalls).toBe(0);
+    } finally { mediaValueMode = "exact"; }
+  });
+
+  test.each(["extra", "prototype", "accessor", "proxy"] as const)("denies an inexact Identity seed (%s) without invoking accessors", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`seedvalue-${randomUUID().slice(0, 4)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    identityValueMode = scenario;
+    try {
+      expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
+      expect(await composition().query.isDerivativePreviewable(db, creator.userId, creator.avatar.assetId, "thumb")).toBe(false);
+      expect(boundaryGetterCalls).toBe(0);
+    }
+    finally { identityValueMode = "exact"; }
+  });
+
+  test.each(["masked_extra", "subclass", "proxy"] as const)("denies a spoofable Identity batch Map (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`seedmap-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    identityBatchMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { identityBatchMode = "exact"; }
+  });
+
+  test.each(["extra", "prototype", "accessor", "proxy"] as const)("denies an inexact hold snapshot (%s) without invoking accessors", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`holdvalue-${randomUUID().slice(0, 4)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    holdValueMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { holdValueMode = "exact"; }
+  });
+
+  test.each(["masked_extra", "subclass", "proxy"] as const)("denies a spoofable held-showcase Set (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`holdset-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    holdSetMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { holdSetMode = "exact"; }
+  });
+
+  test.each(["masked_extra", "subclass", "proxy"] as const)("denies a spoofable Visibility batch Map (%s)", async (scenario) => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience"; boundaryGetterCalls = 0;
+    const creator = await publishCreator(`holdmap-${randomUUID().slice(0, 5)}`);
+    const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId))).find((claim) => claim.kind === "canonical")!.normalizedHandle;
+    visibilityBatchMode = scenario;
+    try { expect(await composition().query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" }); expect(boundaryGetterCalls).toBe(0); }
+    finally { visibilityBatchMode = "exact"; }
   });
 
   test.each(["identity_missing", "identity_extra", "visibility_missing", "visibility_extra"] as const)("fails closed for an inexact provider batch result (%s)", async (scenario) => {

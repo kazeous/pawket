@@ -55,6 +55,7 @@ function harness(input: {
   heldShowcaseIds?: ReadonlySet<string>;
   mutateMedia?: (media: ReadyMedia, reference: MediaReference) => ReadyMedia | null;
   mutateResolvedMap?: (result: Map<string, ReadyMedia>, references: readonly MediaReference[]) => unknown;
+  mutateHolds?: (snapshot: { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }) => unknown;
 } = {}) {
   let capabilityState = input.capabilityState === undefined ? "active" : input.capabilityState;
   let seedInterceptor: (() => Promise<void>) | null = null;
@@ -100,10 +101,11 @@ function harness(input: {
   const visibility = {
     async readHolds() {
       if (failVisibility) throw new Error("injected visibility failure");
-      return {
+      const snapshot = {
         pageHeld: input.pageHeld ?? false,
         heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>(),
       };
+      return (input.mutateHolds?.(snapshot) ?? snapshot) as typeof snapshot;
     },
     async readHoldsBatch(_database: unknown, requests: readonly { pageId: string; revisionId: string; showcaseIds: readonly string[] }[]) {
       return new Map(requests.map((request) => [request.pageId, { pageHeld: input.pageHeld ?? false, heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>() }] as const));
@@ -598,6 +600,81 @@ describe("creator publication", () => {
     const page = await preparedPage(testHarness, `badmap-${randomUUID().slice(0, 6)}`);
     const before = await authoritativePublication(page.pageId, page.userId);
     await expect(testHarness.service.publish(publishCommand(page, "bad-map"))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test.each(["masked_extra", "subclass", "proxy"] as const)("rejects a spoofable MediaCatalogPort map (%s) without state drift", async (scenario) => {
+    let getterCalls = 0;
+    const testHarness = harness({ mutateResolvedMap(result) {
+      if (scenario === "subclass") return new (class extends Map<string, ReadyMedia> {})(result);
+      if (scenario === "proxy") return new Proxy(result, {});
+      const visibleKeys = [...result.keys()];
+      result.set(randomUUID(), result.values().next().value!);
+      Object.defineProperty(result, "size", { get() { getterCalls += 1; return visibleKeys.length; } });
+      Object.defineProperty(result, "keys", { get() { getterCalls += 1; return () => visibleKeys.values(); } });
+      Object.defineProperty(result, "get", { get() { getterCalls += 1; return Map.prototype.get.bind(result); } });
+      return result;
+    } });
+    const page = await preparedPage(testHarness, `spoofmap-${randomUUID().slice(0, 5)}`);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    await expect(testHarness.service.publish(publishCommand(page, `spoof-map-${scenario}`))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(getterCalls).toBe(0);
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test.each(["media_extra", "media_prototype", "media_accessor", "media_proxy", "derivative_extra", "derivative_prototype", "derivative_accessor"] as const)("rejects a non-plain or inexact ReadyMedia value (%s) without invoking accessors", async (scenario) => {
+    let getterCalls = 0;
+    const testHarness = harness({ mutateMedia(item) {
+      if (scenario === "media_extra") return { ...item, unexpected: true } as unknown as ReadyMedia;
+      if (scenario === "media_prototype") return Object.assign(Object.create({ ownerUserId: item.ownerUserId }), { assetId: item.assetId, purpose: item.purpose, derivatives: item.derivatives }) as ReadyMedia;
+      if (scenario === "media_accessor") {
+        const value = { ...item } as Record<string, unknown>;
+        Object.defineProperty(value, "ownerUserId", { enumerable: true, get() { getterCalls += 1; return item.ownerUserId; } });
+        return value as ReadyMedia;
+      }
+      if (scenario === "media_proxy") return new Proxy(item, {});
+      const thumb = scenario === "derivative_extra"
+        ? { ...item.derivatives.thumb, unexpected: true }
+        : scenario === "derivative_prototype"
+          ? Object.assign(Object.create({ width: item.derivatives.thumb.width }), { derivativeId: item.derivatives.thumb.derivativeId, height: item.derivatives.thumb.height })
+          : (() => {
+              const value = { ...item.derivatives.thumb } as Record<string, unknown>;
+              Object.defineProperty(value, "width", { enumerable: true, get() { getterCalls += 1; return item.derivatives.thumb.width; } });
+              return value;
+            })();
+      return { ...item, derivatives: { ...item.derivatives, thumb } } as ReadyMedia;
+    } });
+    const page = await preparedPage(testHarness, `spoofmedia-${randomUUID().slice(0, 4)}`);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    await expect(testHarness.service.publish(publishCommand(page, `spoof-media-${scenario}`))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(getterCalls).toBe(0);
+    expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test.each(["extra", "prototype", "accessor", "proxy", "set_masked_extra", "set_subclass", "set_proxy"] as const)("rejects a non-plain publication hold snapshot (%s) without invoking accessors", async (scenario) => {
+    let getterCalls = 0;
+    const testHarness = harness({ mutateHolds(snapshot) {
+      if (scenario === "extra") return { ...snapshot, unexpected: true };
+      if (scenario === "prototype") return Object.assign(Object.create({ pageHeld: snapshot.pageHeld }), { heldShowcaseIds: snapshot.heldShowcaseIds });
+      if (scenario === "accessor") {
+        const value = { ...snapshot } as Record<string, unknown>;
+        Object.defineProperty(value, "pageHeld", { enumerable: true, get() { getterCalls += 1; return false; } });
+        return value;
+      }
+      if (scenario === "proxy") return new Proxy(snapshot, {});
+      let held = new Set<string>();
+      if (scenario === "set_masked_extra") {
+        held.add(randomUUID());
+        Object.defineProperty(held, Symbol.iterator, { get() { getterCalls += 1; return () => new Set<string>().values(); } });
+        Object.defineProperty(held, "has", { get() { getterCalls += 1; return () => false; } });
+      } else if (scenario === "set_subclass") held = new (class extends Set<string> {})(held);
+      else held = new Proxy(held, {});
+      return { ...snapshot, heldShowcaseIds: held };
+    } });
+    const page = await preparedPage(testHarness, `spoofholds-${randomUUID().slice(0, 4)}`);
+    const before = await authoritativePublication(page.pageId, page.userId);
+    await expect(testHarness.service.publish(publishCommand(page, `spoof-holds-${scenario}`))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    expect(getterCalls).toBe(0);
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
   });
 
