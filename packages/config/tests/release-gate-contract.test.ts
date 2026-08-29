@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const workflow = readFileSync(path.join(repositoryRoot, ".github/workflows/verify.yml"), "utf8");
-const gitleaksIgnore = readFileSync(path.join(repositoryRoot, ".gitleaksignore"), "utf8").trim();
+const gitleaksIgnore = readFileSync(path.join(repositoryRoot, ".gitleaksignore"), "utf8")
+  .replace(/\r\n?/gu, "\n")
+  .trim();
 
 function indexOfRequired(text: string): number {
   const index = workflow.indexOf(text);
