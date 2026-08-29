@@ -153,12 +153,64 @@ BEGIN
       RAISE EXCEPTION 'public media assets must start awaiting_upload' USING ERRCODE = '23514';
     END IF;
   ELSE
+    PERFORM 1 FROM public_media_assets WHERE id = NEW.id FOR UPDATE;
+    IF NEW.updated_at < OLD.updated_at THEN
+      RAISE EXCEPTION 'media asset timestamps cannot move backwards' USING ERRCODE = '23514';
+    END IF;
+    IF OLD.source_deleted_at IS NOT NULL AND NEW.source_deleted_at IS DISTINCT FROM OLD.source_deleted_at THEN
+      RAISE EXCEPTION 'source cleanup timestamp is immutable once recorded' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.source_object_version_id IS NOT NULL OR OLD.source_object_etag IS NOT NULL OR OLD.actual_source_bytes IS NOT NULL THEN
+      IF NEW.source_object_key IS DISTINCT FROM OLD.source_object_key
+        OR NEW.source_object_version_id IS DISTINCT FROM OLD.source_object_version_id
+        OR NEW.source_object_etag IS DISTINCT FROM OLD.source_object_etag
+        OR NEW.actual_source_bytes IS DISTINCT FROM OLD.actual_source_bytes
+      THEN
+        RAISE EXCEPTION 'pinned media source identity is immutable' USING ERRCODE = '55000';
+      END IF;
+    END IF;
     IF OLD.state IN ('failed', 'deleted') THEN
       IF NEW.state IS DISTINCT FROM OLD.state THEN
         RAISE EXCEPTION 'failed and deleted media assets are terminal' USING ERRCODE = '55000';
       END IF;
+      IF ROW(NEW.id, NEW.owner_user_id, NEW.purpose, NEW.declared_source_format, NEW.state,
+        NEW.source_allocation_bytes, NEW.source_object_key, NEW.source_object_version_id,
+        NEW.source_object_etag, NEW.normalized_master_object_key, NEW.normalized_master_object_version_id,
+        NEW.actual_source_bytes, NEW.width, NEW.height, NEW.failure_code, NEW.ready_at,
+        NEW.deletion_reviewed_at) IS DISTINCT FROM ROW(OLD.id, OLD.owner_user_id, OLD.purpose,
+        OLD.declared_source_format, OLD.state, OLD.source_allocation_bytes, OLD.source_object_key,
+        OLD.source_object_version_id, OLD.source_object_etag, OLD.normalized_master_object_key,
+        OLD.normalized_master_object_version_id, OLD.actual_source_bytes, OLD.width, OLD.height,
+        OLD.failure_code, OLD.ready_at, OLD.deletion_reviewed_at)
+      THEN
+        RAISE EXCEPTION 'failed and deleted media evidence is immutable' USING ERRCODE = '55000';
+      END IF;
     ELSIF OLD.state = 'ready' AND NEW.state NOT IN ('ready', 'deleted') THEN
       RAISE EXCEPTION 'ready media assets may only be cleaned up to deleted' USING ERRCODE = '55000';
+    ELSIF OLD.state = 'ready' THEN
+      IF NEW.state = 'ready' AND ROW(NEW.id, NEW.owner_user_id, NEW.purpose, NEW.declared_source_format,
+        NEW.state, NEW.source_allocation_bytes, NEW.source_object_key, NEW.source_object_version_id,
+        NEW.source_object_etag, NEW.normalized_master_object_key, NEW.normalized_master_object_version_id,
+        NEW.actual_source_bytes, NEW.width, NEW.height, NEW.failure_code, NEW.ready_at,
+        NEW.deletion_reviewed_at) IS DISTINCT FROM ROW(OLD.id, OLD.owner_user_id, OLD.purpose,
+        OLD.declared_source_format, OLD.state, OLD.source_allocation_bytes, OLD.source_object_key,
+        OLD.source_object_version_id, OLD.source_object_etag, OLD.normalized_master_object_key,
+        OLD.normalized_master_object_version_id, OLD.actual_source_bytes, OLD.width, OLD.height,
+        OLD.failure_code, OLD.ready_at, OLD.deletion_reviewed_at)
+      THEN
+        RAISE EXCEPTION 'ready media evidence is immutable except source cleanup' USING ERRCODE = '55000';
+      END IF;
+      IF NEW.state = 'deleted' AND ROW(NEW.id, NEW.owner_user_id, NEW.purpose, NEW.declared_source_format,
+        NEW.source_allocation_bytes, NEW.source_object_key, NEW.source_object_version_id,
+        NEW.source_object_etag, NEW.normalized_master_object_key, NEW.normalized_master_object_version_id,
+        NEW.actual_source_bytes, NEW.width, NEW.height, NEW.failure_code, NEW.ready_at) IS DISTINCT FROM
+        ROW(OLD.id, OLD.owner_user_id, OLD.purpose, OLD.declared_source_format, OLD.source_allocation_bytes,
+        OLD.source_object_key, OLD.source_object_version_id, OLD.source_object_etag,
+        OLD.normalized_master_object_key, OLD.normalized_master_object_version_id, OLD.actual_source_bytes,
+        OLD.width, OLD.height, OLD.failure_code, OLD.ready_at)
+      THEN
+        RAISE EXCEPTION 'ready media evidence is immutable during deletion cleanup' USING ERRCODE = '55000';
+      END IF;
     ELSIF OLD.state = 'awaiting_upload' AND NEW.state NOT IN ('awaiting_upload', 'pending', 'failed') THEN
       RAISE EXCEPTION 'invalid awaiting_upload media transition' USING ERRCODE = '23514';
     ELSIF OLD.state = 'pending' AND NEW.state NOT IN ('pending', 'processing', 'failed') THEN
@@ -177,9 +229,9 @@ BEGIN
     RAISE EXCEPTION 'source object key must match its upload intent' USING ERRCODE = '23514';
   END IF;
   IF NEW.state IN ('pending', 'processing', 'ready')
-    AND NOT EXISTS (SELECT 1 FROM public_media_upload_intents i WHERE i.asset_id = NEW.id AND i.object_key = NEW.source_object_key)
+    AND NOT EXISTS (SELECT 1 FROM public_media_upload_intents i WHERE i.asset_id = NEW.id AND i.object_key = NEW.source_object_key AND i.state = 'completed' AND i.completed_at IS NOT NULL)
   THEN
-    RAISE EXCEPTION 'pinned media assets require a matching upload intent' USING ERRCODE = '23514';
+    RAISE EXCEPTION 'pinned media assets require a completed matching upload intent' USING ERRCODE = '23514';
   END IF;
   IF NEW.state = 'ready' THEN
     PERFORM 1 FROM public_media_assets WHERE id = NEW.id FOR UPDATE;
@@ -223,6 +275,7 @@ CREATE OR REPLACE FUNCTION public_media_guard_upload_intent_lifecycle() RETURNS 
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  PERFORM 1 FROM public_media_assets WHERE id = COALESCE(NEW.asset_id, OLD.asset_id) FOR UPDATE;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'public media upload intents are terminal and cannot be deleted' USING ERRCODE = '55000';
   END IF;
@@ -259,6 +312,11 @@ CREATE OR REPLACE FUNCTION public_media_guard_upload_intent_key() RETURNS trigge
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM 1 FROM public_media_assets WHERE id = NEW.asset_id FOR UPDATE;
+  ELSE
+    PERFORM 1 FROM public_media_assets WHERE id = OLD.asset_id FOR UPDATE;
+  END IF;
   IF NEW.object_key IS DISTINCT FROM ('quarantine/' || NEW.asset_id::text || '/' || NEW.id::text) THEN
     RAISE EXCEPTION 'upload intent object key must bind asset and intent' USING ERRCODE = '23514';
   END IF;

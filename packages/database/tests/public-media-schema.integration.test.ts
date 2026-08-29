@@ -26,7 +26,7 @@ let db: ReturnType<typeof drizzle>;
 const at = "2026-08-29T12:00:00.000Z";
 const later = "2026-08-29T12:15:00.000Z";
 
-async function fixture() {
+async function fixture(withIntent = true) {
   const userId = `media-user-${randomUUID()}`;
   const assetId = randomUUID();
   const intentId = randomUUID();
@@ -48,8 +48,12 @@ async function fixture() {
     createdAt: new Date(at),
     updatedAt: new Date(at),
   });
-  await insertIntent(assetId, userId, intentId);
+  if (withIntent) await insertIntent(assetId, userId, intentId);
   return { userId, assetId, intentId };
+}
+
+async function completeIntent(f: { assetId: string; intentId: string }) {
+  await client.unsafe(`update public_media_upload_intents set state = 'completed', completed_at = '${later}' where id = '${f.intentId}'`);
 }
 
 async function insertIntent(assetId: string, ownerUserId: string, intentId = randomUUID()) {
@@ -134,6 +138,7 @@ describe("public media persistence", () => {
 
   test("ready requires all four verified fixed derivatives", async () => {
     const f = await fixture();
+    await completeIntent(f);
     await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
     await client.unsafe(`update public_media_assets set state = 'processing' where id = '${f.assetId}'`);
     await expect(client.unsafe(`update public_media_assets set state = 'ready' where id = '${f.assetId}'`)).rejects.toThrow(/require/i);
@@ -180,6 +185,7 @@ describe("public media persistence", () => {
     });
     await expect(client.unsafe(`update public_media_processing_attempts set outcome_code = 'succeeded' where id = '${attemptId}'`)).rejects.toThrow();
     await expect(client.unsafe(`delete from public_media_processing_attempts where id = '${attemptId}'`)).rejects.toThrow();
+    await completeIntent(f);
     await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
     await client.unsafe(`update public_media_assets set state = 'failed', failure_code = 'failed_validation' where id = '${f.assetId}'`);
     await expect(client.unsafe(`update public_media_assets set state = 'pending' where id = '${f.assetId}'`)).rejects.toThrow();
@@ -187,6 +193,7 @@ describe("public media persistence", () => {
 
   test("allows only reviewed ready cleanup and freezes derivatives at terminal states", async () => {
     const f = await fixture();
+    await completeIntent(f);
     await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
     await client.unsafe(`update public_media_assets set state = 'processing' where id = '${f.assetId}'`);
     for (const variant of ["master", "thumb", "display", "large"] as const) await insertDerivative(f.assetId, variant);
@@ -217,6 +224,7 @@ describe("public media persistence", () => {
 
     const f = await fixture();
     await expect(client.unsafe(`update public_media_assets set state = 'pending' where id = '${f.assetId}'`)).rejects.toThrow();
+    await completeIntent(f);
     await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
     await expect(client.unsafe(`update public_media_assets set actual_source_bytes = 1025 where id = '${f.assetId}'`)).rejects.toThrow();
     await client.unsafe(`update public_media_assets set state = 'processing' where id = '${f.assetId}'`);
@@ -239,6 +247,95 @@ describe("public media persistence", () => {
     await expect(client.unsafe(`delete from public_media_upload_intents where id = '${completed.intentId}'`)).rejects.toThrow();
   });
 
+  test("requires a completed matching intent before consuming source bytes", async () => {
+    const issued = await fixture();
+    await expectSqlState(
+      client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${issued.assetId}'`),
+      "23514",
+      /completed|intent/i,
+    );
+
+    const expired = await fixture();
+    await client.unsafe(`update public_media_upload_intents set state = 'expired' where id = '${expired.intentId}'`);
+    await expectSqlState(
+      client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${expired.assetId}'`),
+      "23514",
+      /completed|intent/i,
+    );
+
+    const missing = await fixture(false);
+    await expectSqlState(
+      client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${missing.assetId}'`),
+      "23514",
+      /intent/i,
+    );
+
+    const completed = await fixture();
+    await completeIntent(completed);
+    await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${completed.assetId}'`);
+  });
+
+  test("freezes the pinned source tuple while allowing legal processing progression", async () => {
+    const f = await fixture();
+    await completeIntent(f);
+    await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
+    await expect(client.unsafe(`update public_media_assets set source_object_version_id = 'source-v2' where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set source_object_version_id = null, source_object_etag = null, actual_source_bytes = null where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set actual_source_bytes = 511 where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set source_object_key = 'quarantine/${f.assetId}/${randomUUID()}' where id = '${f.assetId}'`)).rejects.toThrow();
+    await client.unsafe(`update public_media_assets set state = 'processing', updated_at = '${later}' where id = '${f.assetId}'`);
+    await client.unsafe(`update public_media_assets set state = 'failed', failure_code = 'malformed_image', updated_at = '${later}' where id = '${f.assetId}'`);
+    await expect(client.unsafe(`update public_media_assets set source_object_etag = 'etag-v2' where id = '${f.assetId}'`)).rejects.toThrow();
+    await client.unsafe(`update public_media_assets set source_deleted_at = '${later}', updated_at = '${later}' where id = '${f.assetId}'`);
+    await expect(client.unsafe(`update public_media_assets set source_deleted_at = null where id = '${f.assetId}'`)).rejects.toThrow();
+  });
+
+  test("uses parent-first locking for source-key races and rejects mismatches", async () => {
+    const f = await fixture(false);
+    const alternateIntentId = randomUUID();
+    let releaseAsset!: () => void;
+    const assetUpdate = client.begin(async (tx) => {
+      await tx.unsafe(`select id from public_media_assets where id = '${f.assetId}' for update`);
+      await tx.unsafe(`update public_media_assets set source_object_key = 'quarantine/${f.assetId}/${alternateIntentId}' where id = '${f.assetId}'`);
+      await new Promise<void>((resolve) => { releaseAsset = resolve; });
+    });
+    while (!releaseAsset) await new Promise((resolve) => setTimeout(resolve, 1));
+
+    let insertSettled = false;
+    const intentInsert = client2.unsafe(`insert into public_media_upload_intents
+      (id, asset_id, owner_user_id, purpose, declared_source_format, max_source_bytes, max_source_pixels, object_key, state, expires_at, completed_at, created_at, updated_at)
+      values ('${f.intentId}', '${f.assetId}', '${f.userId}', 'showcase', 'jpeg', 10485760, 40000000,
+        'quarantine/${f.assetId}/${f.intentId}', 'issued', '${later}', null, '${at}', '${at}')`)
+      .then(() => { insertSettled = true; }, () => { insertSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(insertSettled).toBe(false);
+    releaseAsset();
+    await assetUpdate;
+    await intentInsert;
+    const [asset] = await client.unsafe<{ source_object_key: string }[]>(`select source_object_key from public_media_assets where id = '${f.assetId}'`);
+    expect(asset?.source_object_key).toBe(`quarantine/${f.assetId}/${alternateIntentId}`);
+    const [intentCount] = await client.unsafe<{ count: number }[]>(`select count(*)::int as count from public_media_upload_intents where asset_id = '${f.assetId}'`);
+    expect(intentCount?.count).toBe(0);
+  });
+
+  test("allows only monotonic cleanup on ready and then freezes deleted evidence", async () => {
+    const f = await fixture();
+    await completeIntent(f);
+    await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${f.assetId}'`);
+    await client.unsafe(`update public_media_assets set state = 'processing' where id = '${f.assetId}'`);
+    for (const variant of ["master", "thumb", "display", "large"] as const) await insertDerivative(f.assetId, variant);
+    await client.unsafe(`update public_media_assets set state = 'ready', ready_at = '${at}', width = 4096, height = 300,
+      normalized_master_object_key = 'derivatives/${f.assetId}/master/hash.webp', normalized_master_object_version_id = 'version-master'
+      where id = '${f.assetId}'`);
+    await client.unsafe(`update public_media_assets set source_deleted_at = '${later}', updated_at = '${later}' where id = '${f.assetId}'`);
+    await expect(client.unsafe(`update public_media_assets set source_deleted_at = null where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set actual_source_bytes = 511 where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set ready_at = '${later}' where id = '${f.assetId}'`)).rejects.toThrow();
+    await client.unsafe(`update public_media_assets set state = 'deleted', deletion_reviewed_at = '${later}' where id = '${f.assetId}'`);
+    await expect(client.unsafe(`update public_media_assets set source_deleted_at = '${at}' where id = '${f.assetId}'`)).rejects.toThrow();
+    await expect(client.unsafe(`update public_media_assets set failure_code = 'storage_error' where id = '${f.assetId}'`)).rejects.toThrow();
+  });
+
   test("enforces per-variant byte caps at both boundaries", async () => {
     const caps = { master: 10 * 1024 * 1024, thumb: 512 * 1024, display: 3 * 1024 * 1024, large: 6 * 1024 * 1024 } as const;
     for (const variant of ["master", "thumb", "display", "large"] as const) {
@@ -253,6 +350,7 @@ describe("public media persistence", () => {
 
   test("readiness takes a parent lock and serializes delete-versus-ready races", async () => {
     const readyFirst = await fixture();
+    await completeIntent(readyFirst);
     await client.unsafe(`update public_media_assets set state = 'pending', source_object_version_id = 'source-v1', source_object_etag = 'etag-v1', actual_source_bytes = 512 where id = '${readyFirst.assetId}'`);
     await client.unsafe(`update public_media_assets set state = 'processing' where id = '${readyFirst.assetId}'`);
     for (const variant of ["master", "thumb", "display", "large"] as const) await insertDerivative(readyFirst.assetId, variant);
@@ -277,6 +375,7 @@ describe("public media persistence", () => {
     expect(String(deleteResult.error)).toMatch(/readiness|terminal|mutate/i);
 
     const deleteFirst = await fixture();
+    await completeIntent(deleteFirst);
     await insertDerivative(deleteFirst.assetId, "thumb");
     let releaseDelete!: () => void;
     const deleteTransaction = client2.begin(async (tx) => {
