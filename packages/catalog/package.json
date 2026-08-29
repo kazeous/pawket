@@ -1,0 +1,13 @@
+{
+  "name": "@pawket/catalog",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "tsup", "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@pawket/database": "workspace:*",
+    "@pawket/security": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

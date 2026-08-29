@@ -5,7 +5,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./increment-two": "./src/increment-two.ts"
+    "./increment-two": "./src/increment-two.ts",
+    "./increment-three": "./src/increment-three.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
