@@ -18,7 +18,7 @@ export type IncrementThreeServerEnv = {
   PUBLIC_MEDIA_RETENTION_ACCEPTANCE_REFERENCE?: string;
 };
 
-const bucketNamePattern = /^(?!.*\.\.)[a-z0-9](?:[a-z0-9.-]{1,61})[a-z0-9]$/u;
+const bucketNamePattern = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/u;
 
 const optionalBoundedString = (maximum = 2_048) =>
   z.preprocess(
@@ -100,6 +100,12 @@ export function resolveIncrementThreeEnv(
       resolved.PUBLIC_MEDIA_QUARANTINE_BUCKET === resolved.PUBLIC_MEDIA_DERIVATIVE_BUCKET
     ) {
       failures.push({ field: "PUBLIC_MEDIA_DERIVATIVE_BUCKET", reason: "must differ from PUBLIC_MEDIA_QUARANTINE_BUCKET" });
+    }
+    for (const field of ["PUBLIC_MEDIA_QUARANTINE_BUCKET", "PUBLIC_MEDIA_DERIVATIVE_BUCKET"] as const) {
+      const bucket = resolved[field];
+      if (bucket && (bucket.length < 3 || bucket.length > 63 || !bucketNamePattern.test(bucket))) {
+        failures.push({ field, reason: "must be a DNS-safe bucket name" });
+      }
     }
     if (resolved.PUBLIC_MEDIA_S3_ENDPOINT) {
       try {
