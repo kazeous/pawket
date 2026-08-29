@@ -33,6 +33,7 @@ type ServiceOptions = Readonly<{
   displayName?: string;
   introduction?: string;
   idFactory?: () => string;
+  publishingMode?: "disabled" | "general_audience";
 }>;
 
 function service(database = db, clock = at, options: ServiceOptions = {}) {
@@ -51,6 +52,7 @@ function service(database = db, clock = at, options: ServiceOptions = {}) {
       displayName: options.displayName ?? "Artist", introduction: options.introduction ?? "Approved intro",
     }] as const)); } },
     commandFingerprintKey: commandKey,
+    publishingMode: options.publishingMode ?? "general_audience",
     now: () => clock,
     ...(options.idFactory ? { idFactory: options.idFactory } : {}),
   });

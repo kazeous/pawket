@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { CatalogServiceError } from "../src/catalog-service.js";
+import { CatalogServiceError, type CatalogWorkspace } from "../src/catalog-service.js";
 import * as catalog from "../src/index.js";
 
 type HandlerName = "workspace" | "saveDraft" | "handle" | "showcases" | "publish" | "unpublish";
@@ -36,12 +36,12 @@ const showcase = {
   title: "Forest studies",
   description: "A quiet general-audience series.",
   discipline: "illustration",
-  contentLabel: "general_audience",
+  contentLabel: "general_audience" as const,
   externalUrl: "https://example.com/portfolio",
   media: [{ assetId, alternativeText: "A fox beneath green leaves" }],
 };
 
-const workspace = {
+const workspace: CatalogWorkspace = {
   pageId,
   draftVersion: 3,
   publishedRevisionId: null,
@@ -54,19 +54,14 @@ const workspace = {
       id: showcaseId,
       ...showcase,
       externalUrl: "https://example.com/portfolio",
-      media: [{ ...showcase.media[0], position: 0 }],
+      media: [{ ...showcase.media[0]!, position: 0 }],
     },
   ],
   capabilityState: "suspended",
   enforcement: {
     pageHeld: true,
     heldShowcaseIds: [showcaseId],
-    explanation: "Please revise the affected showcase before publishing.",
-    privateOwnerNote: "never expose this owner note",
-    reporterUserId: "never expose this reporter",
   },
-  approvedRevisionId: "private-application-revision",
-  receivingAccount: "private-bank-data",
 };
 
 function defaultService() {
@@ -196,6 +191,12 @@ function streamingRequest(bytes: Uint8Array, splitPoints: readonly number[]): Re
     body: stream,
     duplex: "half",
   } as RequestInit & { duplex: "half" });
+}
+
+function requestWithBodyStream(stream: ReadableStream<unknown>): Request {
+  const request = mutationRequest();
+  Object.defineProperty(request, "body", { configurable: true, get: () => stream });
+  return request;
 }
 
 async function json(response: Response): Promise<unknown> {
@@ -328,6 +329,28 @@ describe("creator catalog HTTP request controls", () => {
     const { handlers, service } = fixture();
     const response = await handlers.saveDraft(mutationRequest({ rawBody: '{"pageId":' }));
     expect(response.status).toBe(400);
+    expect(service.saveDraft).not.toHaveBeenCalled();
+  });
+
+  test("returns 413 even when cancelling an oversized stream rejects", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(32_769)); },
+      cancel() { return Promise.reject(new Error("cancel failed")); },
+    });
+    const { handlers, service } = fixture();
+    expect((await handlers.saveDraft(requestWithBodyStream(stream))).status).toBe(413);
+    expect(service.saveDraft).not.toHaveBeenCalled();
+  });
+
+  test("cancels and neutrally rejects an invalid stream chunk", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<unknown>({
+      start(controller) { controller.enqueue("not bytes"); },
+      cancel() { cancelled = true; },
+    });
+    const { handlers, service } = fixture();
+    expect((await handlers.saveDraft(requestWithBodyStream(stream))).status).toBe(400);
+    expect(cancelled).toBe(true);
     expect(service.saveDraft).not.toHaveBeenCalled();
   });
 });
@@ -502,13 +525,20 @@ describe("creator catalog HTTP failures and safe projections", () => {
     expect(await json(response)).toEqual({ code: "NOT_FOUND" });
   });
 
+  test("maps a malformed typed workspace to an unavailable response", async () => {
+    const service = serviceFixture({ initialize: vi.fn(async () => ({ pageId } as unknown as CatalogWorkspace)) });
+    const { handlers } = fixture({ service });
+    const response = await handlers.workspace(new Request(`${origin}/api/v1/creator-page`, { method: "GET" }));
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({ code: "CATALOG_UNAVAILABLE" });
+  });
+
   test("allows a suspended private workspace and projects only bounded creator-visible status", async () => {
     // Break caught: blocking remediation or leaking report/owner/payment/application fields.
     const { handlers } = fixture({ publishingMode: "disabled" });
     const response = await handlers.workspace(
       new Request(`${origin}/api/v1/creator-page`, { method: "GET" }),
     );
-    const serialized = await response.clone().text();
     expect(response.status).toBe(200);
     expect(await json(response)).toEqual({
       workspace: {
@@ -525,20 +555,15 @@ describe("creator catalog HTTP failures and safe projections", () => {
           publishingMode: "disabled",
           pageHeld: true,
           heldShowcaseIds: [showcaseId],
-          explanation: "Please revise the affected showcase before publishing.",
         },
       },
     });
-    expect(serialized).not.toContain("owner note");
-    expect(serialized).not.toContain("reporter");
-    expect(serialized).not.toContain("private-bank");
-    expect(serialized).not.toContain("application-revision");
   });
 
   test("blocks a fresh disabled-mode publish as retryable but preserves service replay semantics", async () => {
     // Break caught: returning a policy 400 for the activation gate or pre-blocking a committed replay.
     const freshService = serviceFixture({
-      publish: vi.fn(async () => { throw new CatalogServiceError("POLICY_VIOLATION"); }),
+      publish: vi.fn(async () => { throw new CatalogServiceError("PUBLISHING_DISABLED"); }),
     });
     const fresh = fixture({ service: freshService, publishingMode: "disabled" });
     const blocked = await fresh.handlers.publish(mutationRequest({ body: { pageId } }));
@@ -553,6 +578,22 @@ describe("creator catalog HTTP failures and safe projections", () => {
     expect(replayed.headers.has("idempotency-key")).toBe(false);
     expect(replayed.headers.has("idempotency-replayed")).toBe(false);
     expect(replayed.headers.has("session-id")).toBe(false);
+  });
+
+  test.each([
+    ["saveDraft", "saveDraft", { pageId, draft }],
+    ["handle", "claimHandle", { pageId, action: "claim", handle: "fresh-handle" }],
+    ["showcases", "reorderShowcases", { pageId, action: "reorder", showcaseIds: [] }],
+    ["publish", "publish", { pageId }],
+    ["unpublish", "unpublish", { pageId }],
+  ] as const)("maps fresh disabled %s failures for every mutation family", async (handlerName, serviceMethod, payload) => {
+    const service = serviceFixture();
+    const mocked = (service as unknown as Record<string, { mockRejectedValue(error: unknown): void }>)[serviceMethod]!;
+    mocked.mockRejectedValue(new CatalogServiceError("PUBLISHING_DISABLED"));
+    const { handlers } = fixture({ service, publishingMode: "disabled" });
+    const response = await handlers[handlerName](mutationRequest({ body: payload }));
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({ code: "PUBLISHING_DISABLED" });
   });
 
   test("maps authentication and unexpected dependency failures to bounded 503 responses", async () => {

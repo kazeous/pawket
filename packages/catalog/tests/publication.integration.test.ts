@@ -58,8 +58,11 @@ function harness(input: {
   mutateHolds?: (snapshot: { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }) => unknown;
 } = {}) {
   let capabilityState = input.capabilityState === undefined ? "active" : input.capabilityState;
+  let pageHeld = input.pageHeld ?? false;
+  let heldShowcaseIds = input.heldShowcaseIds ?? new Set<string>();
   let seedInterceptor: (() => Promise<void>) | null = null;
   let failVisibility = false;
+  let malformedVisibility = false;
   const media = new Map<string, ReadyMedia>();
   const creatorSeeds = {
     async getCreatorSeed(_database: unknown, userId: string): Promise<CreatorSeed | null> {
@@ -101,25 +104,22 @@ function harness(input: {
   const visibility = {
     async readHolds() {
       if (failVisibility) throw new Error("injected visibility failure");
+      if (malformedVisibility) return { pageHeld: "not-a-boolean", heldShowcaseIds: new Set<string>() } as unknown as { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> };
       const snapshot = {
-        pageHeld: input.pageHeld ?? false,
-        heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>(),
+        pageHeld,
+        heldShowcaseIds,
       };
       return (input.mutateHolds?.(snapshot) ?? snapshot) as typeof snapshot;
     },
     async readHoldsBatch(_database: unknown, requests: readonly { pageId: string; revisionId: string; showcaseIds: readonly string[] }[]) {
-      return new Map(requests.map((request) => [request.pageId, { pageHeld: input.pageHeld ?? false, heldShowcaseIds: input.heldShowcaseIds ?? new Set<string>() }] as const));
+      return new Map(requests.map((request) => [request.pageId, { pageHeld, heldShowcaseIds }] as const));
     },
   };
-  const service = createCatalogService({
-    db,
-    creatorSeeds,
-    mediaCatalog,
-    visibility,
-    publishingMode: input.publishingMode ?? "general_audience",
-    commandFingerprintKey,
-    now: () => at,
+  const serviceForMode = (publishingMode: "disabled" | "general_audience", withVisibility = true) => createCatalogService({
+    db, creatorSeeds, mediaCatalog, publishingMode, commandFingerprintKey, now: () => at,
+    ...(withVisibility ? { visibility } : {}),
   });
+  const service = serviceForMode(input.publishingMode ?? "general_audience");
   const queryInput = {
     db,
     creatorSeeds,
@@ -134,11 +134,14 @@ function harness(input: {
   };
   return {
     service,
+    serviceForMode,
     query,
     media,
     setCapability(value: CreatorSeed["capabilityState"] | null) { capabilityState = value; },
+    setHolds(value: { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }) { pageHeld = value.pageHeld; heldShowcaseIds = new Set(value.heldShowcaseIds); },
     setSeedInterceptor(value: (() => Promise<void>) | null) { seedInterceptor = value; },
     failVisibility() { failVisibility = true; },
+    malformVisibility() { malformedVisibility = true; },
   };
 }
 
@@ -316,7 +319,7 @@ describe("creator publication", () => {
   ] as const)("publish fails closed for %s without authoritative side effects", async (scenario) => {
     // Break caught: one required guard is skipped or checked after publication state starts changing.
     const testHarness = harness({
-      publishingMode: scenario === "disabled_mode" ? "disabled" : "general_audience",
+      publishingMode: "general_audience",
       capabilityState: "active",
       pageHeld: scenario === "held_page",
       mutateMedia: scenario === "wrong_owner"
@@ -329,7 +332,8 @@ describe("creator publication", () => {
     const page = await preparedPage(testHarness, label, { withHandle: scenario !== "missing_handle", withMedia: scenario !== "pending_asset" });
     if (scenario === "suspended") testHarness.setCapability("suspended");
     const before = await authoritativePublication(page.pageId, page.userId);
-    await expect(testHarness.service.publish({
+    const publishService = scenario === "disabled_mode" ? testHarness.serviceForMode("disabled") : testHarness.service;
+    await expect(publishService.publish({
       ...publishCommand(page, scenario),
       expectedVersion: scenario === "stale_version" ? page.version - 1 : page.version,
     })).rejects.toMatchObject({ code: expect.any(String) });
@@ -345,6 +349,25 @@ describe("creator publication", () => {
     const before = await authoritativePublication(page.pageId, page.userId);
     await expect(testHarness.service.publish(publishCommand(page, "held-showcase"))).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
     expect(await authoritativePublication(page.pageId, page.userId)).toEqual(before);
+  });
+
+  test("workspace returns authoritative capability and current published hold state", async () => {
+    const testHarness = harness();
+    const page = await preparedPage(testHarness, `workspace-state-${randomUUID().slice(0, 6)}`);
+    const beforePublish = await testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId });
+    expect(beforePublish.capabilityState).toBe("active");
+    expect(beforePublish.enforcement).toEqual({ pageHeld: false, heldShowcaseIds: [] });
+    const showcaseId = beforePublish.showcases[0]!.id;
+    await testHarness.service.publish(publishCommand(page, "workspace-state"));
+    testHarness.setHolds({ pageHeld: false, heldShowcaseIds: new Set([showcaseId]) });
+    const held = await testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId });
+    expect(held.capabilityState).toBe("active");
+    expect(held.enforcement).toEqual({ pageHeld: false, heldShowcaseIds: [showcaseId] });
+    await expect(testHarness.serviceForMode("general_audience", false).getWorkspace({ actorUserId: page.userId, pageId: page.pageId })).rejects.toThrow();
+    testHarness.malformVisibility();
+    await expect(testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId })).rejects.toThrow();
+    testHarness.failVisibility();
+    await expect(testHarness.service.getWorkspace({ actorUserId: page.userId, pageId: page.pageId })).rejects.toThrow();
   });
 
   test("publish and unpublish replay exact immutable outcomes and preserve revision history", async () => {

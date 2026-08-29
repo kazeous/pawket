@@ -38,6 +38,34 @@ export const HANDLE_RENAME_COOLDOWN_MS = 30 * 24 * 60 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
 
 export type CatalogActor = Readonly<{ userId: string; sessionId: string; primaryAuthenticatedAt: Date }>;
+export type CatalogWorkspace = Readonly<{
+  pageId: string;
+  draftVersion: number;
+  publishedRevisionId: string | null;
+  canonicalHandle: string | null;
+  aliases: readonly string[];
+  renameAvailableAt: Date | null;
+  draft: Readonly<{
+    displayName: string;
+    introduction: string;
+    primaryDiscipline: string;
+    secondaryDisciplines: readonly string[];
+    avatarAssetId: string | null;
+    coverAssetId: string | null;
+  }>;
+  showcases: readonly Readonly<{
+    id: string;
+    position: number;
+    title: string;
+    description: string;
+    discipline: string;
+    contentLabel: "general_audience";
+    externalUrl: string | null;
+    media: readonly Readonly<{ assetId: string; alternativeText: string; position: number }>[];
+  }>[];
+  capabilityState: "active" | "suspended";
+  enforcement: Readonly<{ pageHeld: boolean; heldShowcaseIds: readonly string[] }>;
+}>;
 export type VersionedCatalogCommand = Readonly<{
   actor: CatalogActor;
   pageId: string;
@@ -69,7 +97,7 @@ type CatalogServiceInput = Readonly<{
   creatorSeeds: IdentityCreatorSeedPort;
   mediaCatalog?: MediaCatalogPort;
   visibility?: VisibilityReadPort;
-  publishingMode?: "disabled" | "general_audience";
+  publishingMode: "disabled" | "general_audience";
   commandFingerprintKey: Uint8Array;
   now?: () => Date;
   idFactory?: () => string;
@@ -101,7 +129,7 @@ export type SuspensionPublicationClear = Readonly<{
 }>;
 
 export class CatalogServiceError extends Error {
-  constructor(readonly code: "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "HANDLE_UNAVAILABLE" | "RECENT_AUTH_REQUIRED" | "RENAME_COOLDOWN" | "POLICY_VIOLATION") {
+  constructor(readonly code: "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "HANDLE_UNAVAILABLE" | "RECENT_AUTH_REQUIRED" | "RENAME_COOLDOWN" | "POLICY_VIOLATION" | "PUBLISHING_DISABLED") {
     super(code);
   }
 }
@@ -256,25 +284,43 @@ export function createCatalogService(input: CatalogServiceInput) {
     return page;
   }
 
-  async function workspace(database: PawketDatabase | PawketTransaction, userId: string, pageId: string, version?: number) {
+  async function workspace(database: PawketDatabase | PawketTransaction, userId: string, pageId: string, version?: number): Promise<CatalogWorkspace> {
     policy(validUuid(pageId));
-    await requireCreator(database, userId, false);
+    const seed = await requireCreator(database, userId, false);
     const [page] = await database.select().from(creatorPages).where(and(eq(creatorPages.id, pageId), eq(creatorPages.userId, userId))).limit(1);
     if (!page) fail("NOT_FOUND");
     const [draft] = await database.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, page.id)).limit(1);
     if (!draft) fail("NOT_FOUND");
     const handles = await database.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, page.id));
     const showcases = await database.select().from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position));
+    if (showcases.some((showcase) => showcase.contentLabel !== "general_audience")) throw new Error("Catalog workspace malformed");
     const showcaseRows = await Promise.all(showcases.map(async (showcase) => ({
       id: showcase.id, position: showcase.position, title: showcase.title, description: showcase.description, discipline: showcase.discipline,
-      contentLabel: showcase.contentLabel, externalUrl: showcase.externalUrl,
+      contentLabel: "general_audience" as const, externalUrl: showcase.externalUrl,
       media: (await database.select().from(creatorShowcaseDraftMedia).where(eq(creatorShowcaseDraftMedia.showcaseId, showcase.id)).orderBy(asc(creatorShowcaseDraftMedia.position))).map((media) => ({ assetId: media.assetId, alternativeText: media.alternativeText, position: media.position })),
     })));
     const canonical = handles.find((handle) => handle.kind === "canonical")?.normalizedHandle ?? null;
+    let enforcement: CatalogWorkspace["enforcement"] = { pageHeld: false, heldShowcaseIds: [] };
+    if (page.publishedRevisionId) {
+      if (!input.visibility) throw new Error("Catalog visibility unavailable");
+      const publishedShowcases = await database.select({ sourceShowcaseId: creatorPublicationShowcases.sourceShowcaseId })
+        .from(creatorPublicationShowcases)
+        .where(eq(creatorPublicationShowcases.revisionId, page.publishedRevisionId))
+        .orderBy(asc(creatorPublicationShowcases.position));
+      const showcaseIds = publishedShowcases.map((showcase) => showcase.sourceShowcaseId);
+      const holds = exactHolds(await input.visibility.readHolds(database, page.id, page.publishedRevisionId, showcaseIds), showcaseIds);
+      if (!holds) throw new Error("Catalog visibility malformed");
+      enforcement = {
+        pageHeld: holds.pageHeld,
+        heldShowcaseIds: showcaseIds.filter((showcaseId) => holds.heldShowcaseIds.has(showcaseId)),
+      };
+    }
     return {
       pageId: page.id, draftVersion: version ?? page.draftVersion, publishedRevisionId: page.publishedRevisionId, canonicalHandle: canonical,
       aliases: handles.filter((handle) => handle.kind === "alias").map((handle) => handle.normalizedHandle), renameAvailableAt: page.renameAvailableAt,
       draft: { displayName: draft.displayName, introduction: draft.shortIntroduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId }, showcases: showcaseRows,
+      capabilityState: seed.capabilityState,
+      enforcement,
     };
   }
 
@@ -296,7 +342,6 @@ export function createCatalogService(input: CatalogServiceInput) {
     policy(validUuid(command.pageId) && validIdempotencyKey(command.idempotencyKey) && validRequestId(command.requestId) && Number.isInteger(command.expectedVersion));
     const at = now();
     return input.db.transaction(async (tx) => {
-      await requireCreator(tx, command.actor.userId, activeOnly);
       const page = await lockOwnedPage(tx, command.actor.userId, command.pageId);
       const started = await beginIdempotentCommand(tx, {
         actorUserId: command.actor.userId, commandScope: scope,
@@ -309,6 +354,8 @@ export function createCatalogService(input: CatalogServiceInput) {
         return { pageId: replay.pageId, draftVersion: replay.version };
       }
       if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+      if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
+      await requireCreator(tx, command.actor.userId, activeOnly);
       beforeChange?.(at);
       if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
       await change(tx, page, at);
@@ -349,6 +396,7 @@ export function createCatalogService(input: CatalogServiceInput) {
         const existing = await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
         if (existing[0]) return workspace(tx, command.userId, existing[0].id);
         const seed = await requireCreator(tx, command.userId, true);
+        if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
         const pageId = id();
         const displayName = normalizeProfileText(seed.displayName, { minCodePoints: 1, maxCodePoints: 80 });
         const introduction = normalizeProfileText(seed.introduction, { minCodePoints: 1, maxCodePoints: 500 });
@@ -451,8 +499,9 @@ export function createCatalogService(input: CatalogServiceInput) {
           return replay;
         }
         if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
         await requireCreator(tx, command.actor.userId, true);
-        if (input.publishingMode !== "general_audience" || !input.mediaCatalog || !input.visibility) fail("POLICY_VIOLATION");
+        if (!input.mediaCatalog || !input.visibility) fail("POLICY_VIOLATION");
         if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
 
         const [draft] = await tx.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, page.id)).limit(1).for("update");
@@ -595,6 +644,7 @@ export function createCatalogService(input: CatalogServiceInput) {
           return replay;
         }
         if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
+        if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
         await requireCreator(tx, command.actor.userId, true);
         if (page.draftVersion !== command.expectedVersion) fail("VERSION_CONFLICT");
         if (!page.publishedRevisionId) fail("POLICY_VIOLATION");

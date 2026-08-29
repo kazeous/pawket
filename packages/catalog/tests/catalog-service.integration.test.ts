@@ -44,7 +44,7 @@ async function approvedCreator(label: string): Promise<string> {
   return userId;
 }
 
-function service(capabilityState: "active" | "suspended" | null = "active") {
+function service(capabilityState: "active" | "suspended" | null = "active", publishingMode: "disabled" | "general_audience" = "general_audience") {
   return createCatalogService({
     db,
     creatorSeeds: {
@@ -57,6 +57,7 @@ function service(capabilityState: "active" | "suspended" | null = "active") {
       },
     },
     commandFingerprintKey: commandKey,
+    publishingMode,
     now: () => at,
   });
 }
@@ -362,9 +363,42 @@ describe("catalog authoring service", () => {
     const userId = await approvedCreator("capability");
     const page = await service().initialize({ userId, requestId: "request-capability-initialize" });
     await expect(service(null).getWorkspace({ actorUserId: userId, pageId: page.pageId })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(service("suspended").getWorkspace({ actorUserId: userId, pageId: page.pageId })).resolves.toMatchObject({ pageId: page.pageId });
+    await expect(service("suspended").getWorkspace({ actorUserId: userId, pageId: page.pageId })).resolves.toMatchObject({
+      pageId: page.pageId,
+      capabilityState: "suspended",
+      enforcement: { pageHeld: false, heldShowcaseIds: [] },
+    });
     await expect(service("suspended").saveDraft({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "suspended-key-0001", requestId: "request-suspended-draft", draft: { displayName: "Remediation", introduction: "Private changes", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } })).resolves.toEqual({ pageId: page.pageId, draftVersion: 2 });
     await expect(service("suspended").claimHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "suspended-key-0002", requestId: "request-suspended-handle", handle: "blocked-handle" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  test("disabled mode rejects every fresh catalog mutation without authoritative drift", async () => {
+    const userId = await approvedCreator("disabled-all");
+    const enabled = service();
+    const page = await enabled.initialize({ userId, requestId: "request-disabled-init" });
+    const disabled = service("active", "disabled");
+    const replayCommand = { actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-replay-01", requestId: "request-disabled-replay", draft: { displayName: "Replay", introduction: "Replay intro", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } } as const;
+    const replayResult = await enabled.saveDraft(replayCommand);
+    await expect(disabled.saveDraft(replayCommand)).resolves.toEqual(replayResult);
+    const commands = [
+      () => disabled.saveDraft({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-save-01", requestId: "request-disabled-save", draft: { displayName: "Artist", introduction: "Intro", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } }),
+      () => disabled.claimHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-claim-01", requestId: "request-disabled-claim", handle: "disabled-claim" }),
+      () => disabled.renameHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-rename-01", requestId: "request-disabled-rename", handle: "disabled-rename" }),
+      () => disabled.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-upsert-01", requestId: "request-disabled-upsert", showcase: { position: 0, title: "Title", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } }),
+      () => disabled.removeShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-remove-01", requestId: "request-disabled-remove", showcaseId: randomUUID() }),
+      () => disabled.reorderShowcases({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-reorder-01", requestId: "request-disabled-reorder", showcaseIds: [] }),
+      () => disabled.publish({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-publish-01", requestId: "request-disabled-publish" }),
+      () => disabled.unpublish({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "disabled-unpublish-01", requestId: "request-disabled-unpublish" }),
+    ];
+    const before = await authoritativeState({ pageIds: [page.pageId], actorUserIds: [userId] });
+    for (const command of commands) await expect(command()).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
+    expect(await authoritativeState({ pageIds: [page.pageId], actorUserIds: [userId] })).toEqual(before);
+
+    const newUserId = await approvedCreator("disabled-lazy");
+    const beforeNew = await authoritativeState({ pageIds: [], actorUserIds: [newUserId] });
+    await expect(disabled.initialize({ userId: newUserId, requestId: "request-disabled-lazy" })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
+    expect(await authoritativeState({ pageIds: [], actorUserIds: [newUserId] })).toEqual(beforeNew);
+    await expect(disabled.getWorkspace({ actorUserId: userId, pageId: page.pageId })).resolves.toMatchObject({ pageId: page.pageId });
   });
 
   test("rejects malformed UUID command paths before PostgreSQL casts", async () => {

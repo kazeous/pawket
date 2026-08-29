@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   CatalogServiceError,
   type CatalogActor,
+  type CatalogWorkspace,
   type PublishResult,
   type UnpublishResult,
 } from "./catalog-service.js";
@@ -21,8 +22,8 @@ const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 type Session = CatalogActor;
 
 type CatalogService = {
-  initialize(command: { userId: string; requestId: string }): Promise<unknown>;
-  getWorkspace(command: { actorUserId: string; pageId: string }): Promise<unknown>;
+  initialize(command: { userId: string; requestId: string }): Promise<CatalogWorkspace>;
+  getWorkspace(command: { actorUserId: string; pageId: string }): Promise<CatalogWorkspace>;
   saveDraft(command: Record<string, unknown>): Promise<unknown>;
   claimHandle(command: Record<string, unknown>): Promise<unknown>;
   renameHandle(command: Record<string, unknown>): Promise<unknown>;
@@ -93,6 +94,7 @@ function failureResponse(input: Input, operation: string, error: unknown): Respo
       RECENT_AUTH_REQUIRED: { status: 403, code: "RECENT_AUTH_REQUIRED" },
       RENAME_COOLDOWN: { status: 409, code: "RENAME_COOLDOWN" },
       POLICY_VIOLATION: { status: 400, code: "POLICY_VIOLATION" },
+      PUBLISHING_DISABLED: { status: 503, code: "PUBLISHING_DISABLED" },
     };
     ({ status, code } = mapping[error.code]);
   } else if (error && typeof error === "object" && "code" in error && error.code === "PUBLISHING_DISABLED") {
@@ -213,10 +215,13 @@ async function readBody(request: Request): Promise<BodyResult> {
       const next = await reader.read();
       if (next.done) break;
       const chunk = next.value;
-      if (!(chunk instanceof Uint8Array)) return { kind: "invalid" };
+      if (!(chunk instanceof Uint8Array)) {
+        try { await reader.cancel(); } catch { /* best effort */ }
+        return { kind: "invalid" };
+      }
       size += chunk.byteLength;
       if (size > MAX_BODY_BYTES) {
-        await reader.cancel();
+        try { await reader.cancel(); } catch { /* best effort */ }
         return { kind: "too_large" };
       }
       chunks.push(chunk);
@@ -290,16 +295,11 @@ function projectPublication(value: PublishResult | UnpublishResult): Record<stri
   };
 }
 
-function projectWorkspace(value: unknown, publishingMode: Input["publishingMode"]): Record<string, unknown> {
-  if (!value || typeof value !== "object") throw new Error("invalid workspace");
-  const workspace = value as Record<string, unknown>;
-  const sourceDraft = workspace.draft as Record<string, unknown>;
-  const sourceShowcases = Array.isArray(workspace.showcases) ? workspace.showcases : [];
-  const enforcement = workspace.enforcement && typeof workspace.enforcement === "object" ? workspace.enforcement as Record<string, unknown> : {};
-  const capabilityState = workspace.capabilityState === "suspended" ? "suspended" : "active";
-  const heldShowcaseIds = Array.isArray(enforcement.heldShowcaseIds)
-    ? enforcement.heldShowcaseIds.filter((id): id is string => typeof id === "string").slice(0, 12)
-    : [];
+function projectWorkspace(workspace: CatalogWorkspace, publishingMode: Input["publishingMode"]): Record<string, unknown> {
+  const sourceDraft = workspace.draft;
+  const sourceShowcases = workspace.showcases;
+  const enforcement = workspace.enforcement;
+  const heldShowcaseIds = enforcement.heldShowcaseIds.slice(0, 12);
   const safeDraft = {
     displayName: sourceDraft.displayName,
     introduction: sourceDraft.introduction,
@@ -308,12 +308,9 @@ function projectWorkspace(value: unknown, publishingMode: Input["publishingMode"
     avatarAssetId: sourceDraft.avatarAssetId,
     coverAssetId: sourceDraft.coverAssetId,
   };
-  const safeShowcases = sourceShowcases.map((item) => {
-    const showcase = item as Record<string, unknown>;
-    const media = Array.isArray(showcase.media) ? showcase.media.map((entry) => {
-      const image = entry as Record<string, unknown>;
-      return { assetId: image.assetId, alternativeText: image.alternativeText, position: image.position };
-    }) : [];
+  const safeShowcases = sourceShowcases.slice(0, 12).map((item) => {
+    const showcase = item;
+    const media = showcase.media.slice(0, 4).map((image) => ({ assetId: image.assetId, alternativeText: image.alternativeText, position: image.position }));
     return {
       id: showcase.id,
       position: showcase.position,
@@ -325,23 +322,21 @@ function projectWorkspace(value: unknown, publishingMode: Input["publishingMode"
       media,
     };
   });
-  const renameAvailableAt = workspace.renameAvailableAt instanceof Date ? workspace.renameAvailableAt.toISOString() : workspace.renameAvailableAt ?? null;
-  const explanation = typeof enforcement.explanation === "string" ? [...enforcement.explanation].slice(0, 500).join("") : null;
+  const renameAvailableAt = workspace.renameAvailableAt?.toISOString() ?? null;
   return {
     pageId: workspace.pageId,
     draftVersion: workspace.draftVersion,
     publishedRevisionId: workspace.publishedRevisionId,
     canonicalHandle: workspace.canonicalHandle,
-    aliases: Array.isArray(workspace.aliases) ? workspace.aliases.filter((alias): alias is string => typeof alias === "string") : [],
+    aliases: workspace.aliases.slice(0, 30),
     renameAvailableAt,
     draft: safeDraft,
     showcases: safeShowcases,
     status: {
-      capabilityState,
+      capabilityState: workspace.capabilityState,
       publishingMode,
-      pageHeld: enforcement.pageHeld === true,
+      pageHeld: enforcement.pageHeld,
       heldShowcaseIds,
-      explanation,
     },
   };
 }
@@ -436,12 +431,7 @@ export function createCatalogHttpHandlers(input: Input): CatalogHttpHandlers {
         ? await input.service.publish(baseCommand(controls, value.pageId))
         : await input.service.unpublish(baseCommand(controls, value.pageId));
       return resultResponse(input, operation, { result: projectPublication(result as PublishResult | UnpublishResult) });
-    } catch (error) {
-      if (operation === "publish" && input.publishingMode === "disabled" && error instanceof CatalogServiceError && error.code === "POLICY_VIOLATION") {
-        return failureResponse(input, operation, { code: "PUBLISHING_DISABLED" });
-      }
-      return failureResponse(input, operation, error);
-    }
+    } catch (error) { return failureResponse(input, operation, error); }
   }
 
   return {
