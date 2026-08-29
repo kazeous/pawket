@@ -1,18 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 
-import { eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
+  creatorHandleClaims,
   creatorPages,
   creatorPageDrafts,
+  creatorShowcaseDraftMedia,
+  creatorShowcaseDrafts,
   identityUsers,
+  systemCommandIdempotency,
   systemOutbox,
   createDatabase,
   type PawketDatabase,
 } from "@pawket/database";
-import { createCatalogService } from "../src/index.js";
+import { CatalogServiceError, createCatalogService } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for catalog integration tests");
@@ -56,6 +60,72 @@ function service(capabilityState: "active" | "suspended" | null = "active") {
 
 function actor(userId: string) {
   return { userId, sessionId: "session-catalog", primaryAuthenticatedAt: new Date(at) };
+}
+
+type AuthoritativeStateScope = Readonly<{
+  pageIds: readonly string[];
+  actorUserIds: readonly string[];
+}>;
+
+async function authoritativeState(scope: AuthoritativeStateScope) {
+  const [pages, drafts, handles, showcases, outbox, idempotency] = await Promise.all([
+    db.select().from(creatorPages).where(inArray(creatorPages.id, [...scope.pageIds])).orderBy(asc(creatorPages.id)),
+    db.select().from(creatorPageDrafts).where(inArray(creatorPageDrafts.pageId, [...scope.pageIds])).orderBy(asc(creatorPageDrafts.pageId)),
+    db.select().from(creatorHandleClaims).where(inArray(creatorHandleClaims.pageId, [...scope.pageIds])).orderBy(asc(creatorHandleClaims.id)),
+    db.select().from(creatorShowcaseDrafts).where(inArray(creatorShowcaseDrafts.pageId, [...scope.pageIds])).orderBy(asc(creatorShowcaseDrafts.id)),
+    db.select().from(systemOutbox).where(inArray(systemOutbox.aggregateId, [...scope.pageIds])).orderBy(asc(systemOutbox.id)),
+    db.select().from(systemCommandIdempotency).where(inArray(systemCommandIdempotency.actorUserId, [...scope.actorUserIds])).orderBy(asc(systemCommandIdempotency.id)),
+  ]);
+  const showcaseIds = showcases.map((showcase) => showcase.id);
+  const media = showcaseIds.length === 0
+    ? []
+    : await db.select().from(creatorShowcaseDraftMedia).where(inArray(creatorShowcaseDraftMedia.showcaseId, showcaseIds)).orderBy(asc(creatorShowcaseDraftMedia.id));
+  return { pages, drafts, handles, showcases, media, outbox, idempotency };
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected promise to reject");
+}
+
+function postgresErrorCode(error: unknown): string | undefined {
+  let current = error;
+  while (current && typeof current === "object") {
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string") return candidate.code;
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
+function errorChainText(error: unknown): string {
+  const messages: string[] = [];
+  let current = error;
+  while (current && typeof current === "object") {
+    const candidate = current as { message?: unknown; cause?: unknown };
+    if (typeof candidate.message === "string") messages.push(candidate.message);
+    current = candidate.cause;
+  }
+  return messages.join("\n");
+}
+
+async function expectCatalogFailureWithoutMutation(input: Readonly<{
+  scope: AuthoritativeStateScope;
+  code: CatalogServiceError["code"];
+  invoke: () => Promise<unknown>;
+  forbiddenValues?: readonly string[];
+  label?: string;
+}>) {
+  const before = await authoritativeState(input.scope);
+  const error = await rejectionOf(input.invoke());
+  expect(error, `${input.label ?? input.code} error type`).toBeInstanceOf(CatalogServiceError);
+  expect(error, `${input.label ?? input.code} error code`).toMatchObject({ code: input.code });
+  for (const forbidden of input.forbiddenValues ?? []) expect(JSON.stringify(error), `${input.label ?? input.code} error leakage`).not.toContain(forbidden);
+  expect(await authoritativeState(input.scope), `${input.label ?? input.code} authoritative state`).toEqual(before);
 }
 
 beforeAll(async () => {
@@ -108,20 +178,168 @@ describe("catalog authoring service", () => {
     await expect(catalog.saveDraft({ ...command, expectedVersion: 1, idempotencyKey: "draft-key-0003" })).rejects.toMatchObject({ code: "VERSION_CONFLICT" });
   });
 
-  test("keeps showcase drafts private while enforcing approved authored content constraints", async () => {
-    // Break caught: unsafe portfolio content, non-NFC alternative text, or a fifth private media reference being accepted.
-    const userId = await approvedCreator("showcase");
+  test("rejects same-key different-body upsert, remove, and reorder without changing authoritative state", async () => {
+    // Break caught: an idempotency conflict is checked after a catalog write or leaves a replacement command record/event behind.
+    const userId = await approvedCreator("idempotency-conflicts");
     const catalog = service();
-    const page = await catalog.initialize({ userId, requestId: "request-showcase-initialize" });
-    const created = await catalog.upsertShowcase({
-      actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "showcase-key-0001", requestId: "request-showcase-one",
-      showcase: { position: 0, title: "Café", description: "", discipline: "illustration", contentLabel: "general_audience", externalUrl: "https://example.test/work", media: [{ assetId: randomUUID(), alternativeText: "Cafe\u0301 work" }] },
+    const page = await catalog.initialize({ userId, requestId: "request-conflicts-initialize" });
+    const scope = { pageIds: [page.pageId], actorUserIds: [userId] } as const;
+    const firstUpsert = {
+      actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "conflict-upsert-key", requestId: "request-conflict-upsert",
+      showcase: { position: 0, title: "First", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    } as const;
+    await expect(catalog.upsertShowcase(firstUpsert)).resolves.toEqual({ pageId: page.pageId, draftVersion: 2 });
+    const firstId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]!.id;
+    await expectCatalogFailureWithoutMutation({
+      scope,
+      code: "IDEMPOTENCY_CONFLICT",
+      label: "upsert same-key different-body",
+      invoke: () => catalog.upsertShowcase({ ...firstUpsert, showcase: { ...firstUpsert.showcase, title: "Different" } }),
     });
-    expect((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]).toMatchObject({ title: "Café", externalUrl: "https://example.test/work", media: [{ alternativeText: "Café work" }] });
-    await expect(catalog.upsertShowcase({
-      actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "showcase-key-0002", requestId: "request-showcase-two",
-      showcase: { position: 1, title: "Unsafe", description: "", discipline: "not-a-discipline", contentLabel: "general_audience", externalUrl: "http://example.test", media: Array.from({ length: 5 }, () => ({ assetId: randomUUID(), alternativeText: "image" })) },
-    })).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+
+    await catalog.upsertShowcase({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "conflict-second-create", requestId: "request-conflict-second-create",
+      showcase: { position: 1, title: "Second", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    });
+    const secondId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases.find((showcase) => showcase.title === "Second")!.id;
+    const firstRemove = { actor: actor(userId), pageId: page.pageId, expectedVersion: 3, idempotencyKey: "conflict-remove-key", requestId: "request-conflict-remove", showcaseId: firstId } as const;
+    await expect(catalog.removeShowcase(firstRemove)).resolves.toEqual({ pageId: page.pageId, draftVersion: 4 });
+    await expectCatalogFailureWithoutMutation({
+      scope,
+      code: "IDEMPOTENCY_CONFLICT",
+      label: "remove same-key different-body",
+      invoke: () => catalog.removeShowcase({ ...firstRemove, showcaseId: secondId }),
+    });
+
+    await catalog.upsertShowcase({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: 4, idempotencyKey: "conflict-third-create", requestId: "request-conflict-third-create",
+      showcase: { position: 0, title: "Third", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    });
+    const thirdId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases.find((showcase) => showcase.title === "Third")!.id;
+    const firstReorder = { actor: actor(userId), pageId: page.pageId, expectedVersion: 5, idempotencyKey: "conflict-reorder-key", requestId: "request-conflict-reorder", showcaseIds: [secondId, thirdId] } as const;
+    await expect(catalog.reorderShowcases(firstReorder)).resolves.toEqual({ pageId: page.pageId, draftVersion: 6 });
+    await expectCatalogFailureWithoutMutation({
+      scope,
+      code: "IDEMPOTENCY_CONFLICT",
+      label: "reorder same-key different-body",
+      invoke: () => catalog.reorderShowcases({ ...firstReorder, showcaseIds: [thirdId, secondId] }),
+    });
+  });
+
+  test("rejects foreign draft, handle, showcase update/remove, and reorder probes without leaking or mutating either page", async () => {
+    // Break caught: a foreign command reveals ownership or changes either aggregate/domain/outbox/idempotency state before rejection.
+    const targetUserId = await approvedCreator("foreign-target");
+    const actorUserId = await approvedCreator("foreign-actor");
+    const catalog = service();
+    const targetPage = await catalog.initialize({ userId: targetUserId, requestId: "request-foreign-target-initialize" });
+    const actorPage = await catalog.initialize({ userId: actorUserId, requestId: "request-foreign-actor-initialize" });
+    await catalog.upsertShowcase({
+      actor: actor(targetUserId), pageId: targetPage.pageId, expectedVersion: 1, idempotencyKey: "foreign-target-create", requestId: "request-foreign-target-create",
+      showcase: { position: 0, title: "Target", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    });
+    await catalog.upsertShowcase({
+      actor: actor(actorUserId), pageId: actorPage.pageId, expectedVersion: 1, idempotencyKey: "foreign-actor-create", requestId: "request-foreign-actor-create",
+      showcase: { position: 0, title: "Actor", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    });
+    const targetShowcaseId = (await catalog.getWorkspace({ actorUserId: targetUserId, pageId: targetPage.pageId })).showcases[0]!.id;
+    const actorShowcaseId = (await catalog.getWorkspace({ actorUserId, pageId: actorPage.pageId })).showcases[0]!.id;
+    const scope = { pageIds: [targetPage.pageId, actorPage.pageId], actorUserIds: [targetUserId, actorUserId] } as const;
+    const forbiddenValues = [targetUserId, actorUserId, targetPage.pageId, actorPage.pageId, targetShowcaseId, actorShowcaseId];
+    const probes: ReadonlyArray<Readonly<{ name: string; code: CatalogServiceError["code"]; invoke: () => Promise<unknown> }>> = [
+      {
+        name: "foreign save draft",
+        code: "NOT_FOUND",
+        invoke: () => catalog.saveDraft({ actor: actor(actorUserId), pageId: targetPage.pageId, expectedVersion: 2, idempotencyKey: "foreign-save-draft", requestId: "request-foreign-save-draft", draft: { displayName: "Actor", introduction: "Valid private edit", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } }),
+      },
+      {
+        name: "foreign claim handle",
+        code: "NOT_FOUND",
+        invoke: () => catalog.claimHandle({ actor: actor(actorUserId), pageId: targetPage.pageId, expectedVersion: 2, idempotencyKey: "foreign-claim-handle", requestId: "request-foreign-claim-handle", handle: "foreign-safe-handle" }),
+      },
+      {
+        name: "foreign existing-showcase update",
+        code: "NOT_FOUND",
+        invoke: () => catalog.upsertShowcase({ actor: actor(actorUserId), pageId: actorPage.pageId, expectedVersion: 2, idempotencyKey: "foreign-upsert-existing", requestId: "request-foreign-upsert-existing", showcase: { id: targetShowcaseId, position: 1, title: "Valid update", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } }),
+      },
+      {
+        name: "foreign showcase remove",
+        code: "NOT_FOUND",
+        invoke: () => catalog.removeShowcase({ actor: actor(actorUserId), pageId: actorPage.pageId, expectedVersion: 2, idempotencyKey: "foreign-remove-existing", requestId: "request-foreign-remove-existing", showcaseId: targetShowcaseId }),
+      },
+      {
+        name: "foreign showcase reorder",
+        code: "POLICY_VIOLATION",
+        invoke: () => catalog.reorderShowcases({ actor: actor(actorUserId), pageId: actorPage.pageId, expectedVersion: 2, idempotencyKey: "foreign-reorder-existing", requestId: "request-foreign-reorder-existing", showcaseIds: [targetShowcaseId] }),
+      },
+    ];
+    for (const probe of probes) await expectCatalogFailureWithoutMutation({ scope, code: probe.code, invoke: probe.invoke, forbiddenValues, label: probe.name });
+  });
+
+  test("rejects one invalid showcase field at a time, including occupied positions, without partial state", async () => {
+    // Break caught: any individual policy/identifier failure is accepted, leaks a driver error, or leaves aggregate/idempotency side effects.
+    const userId = await approvedCreator("showcase-invalid");
+    const foreignUserId = await approvedCreator("showcase-invalid-foreign");
+    const catalog = service();
+    const page = await catalog.initialize({ userId, requestId: "request-showcase-invalid-initialize" });
+    const foreignPage = await catalog.initialize({ userId: foreignUserId, requestId: "request-showcase-invalid-foreign-initialize" });
+    const validPendingAssetId = randomUUID();
+    const created = await catalog.upsertShowcase({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "showcase-valid-pending", requestId: "request-showcase-valid-pending",
+      showcase: { position: 0, title: "Café", description: "", discipline: "illustration", contentLabel: "general_audience", externalUrl: "https://example.test/work", media: [{ assetId: validPendingAssetId, alternativeText: "Cafe\u0301 work" }] },
+    });
+    await catalog.upsertShowcase({
+      actor: actor(foreignUserId), pageId: foreignPage.pageId, expectedVersion: 1, idempotencyKey: "showcase-foreign-valid", requestId: "request-showcase-foreign-valid",
+      showcase: { position: 0, title: "Foreign", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] },
+    });
+    const workspace = await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId });
+    const existingId = workspace.showcases[0]!.id;
+    const foreignShowcaseId = (await catalog.getWorkspace({ actorUserId: foreignUserId, pageId: foreignPage.pageId })).showcases[0]!.id;
+    expect(workspace.showcases[0]).toMatchObject({
+      title: "Café",
+      externalUrl: "https://example.test/work",
+      media: [{ assetId: validPendingAssetId, alternativeText: "Café work" }],
+    });
+
+    const scope = { pageIds: [page.pageId, foreignPage.pageId], actorUserIds: [userId, foreignUserId] } as const;
+    type ShowcaseProbeInput = Readonly<{
+      id?: string;
+      position: unknown;
+      title: unknown;
+      description: unknown;
+      discipline: unknown;
+      contentLabel: unknown;
+      externalUrl: unknown;
+      media: readonly Readonly<{ assetId: unknown; alternativeText: unknown }>[];
+    }>;
+    const validShowcase: ShowcaseProbeInput = { position: 1, title: "Valid", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] };
+    const upsert = (index: number, showcase: ShowcaseProbeInput) => catalog.upsertShowcase({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: `invalid-showcase-${index}`, requestId: `request-invalid-showcase-${index}`, showcase,
+    });
+    const probes: ReadonlyArray<Readonly<{ name: string; invoke: () => Promise<unknown> }>> = [
+      { name: "position outside 0-11", invoke: () => upsert(1, { ...validShowcase, position: 12 }) },
+      { name: "occupied active position", invoke: () => upsert(2, { ...validShowcase, position: 0 }) },
+      { name: "invalid discipline", invoke: () => upsert(3, { ...validShowcase, discipline: "music" }) },
+      { name: "non-general content label", invoke: () => upsert(4, { ...validShowcase, contentLabel: "age_restricted" }) },
+      { name: "HTTP destination", invoke: () => upsert(5, { ...validShowcase, externalUrl: "http://example.test/work" }) },
+      { name: "malformed HTTPS destination", invoke: () => upsert(6, { ...validShowcase, externalUrl: "https://" }) },
+      { name: "five media", invoke: () => upsert(7, { ...validShowcase, media: Array.from({ length: 5 }, () => ({ assetId: randomUUID(), alternativeText: "Image" })) }) },
+      { name: "empty alternative text", invoke: () => upsert(8, { ...validShowcase, media: [{ assetId: randomUUID(), alternativeText: "" }] }) },
+      { name: "301 astral-code-point alternative text", invoke: () => upsert(9, { ...validShowcase, media: [{ assetId: randomUUID(), alternativeText: "\u{1F3A8}".repeat(301) }] }) },
+      { name: "markup alternative text", invoke: () => upsert(10, { ...validShowcase, media: [{ assetId: randomUUID(), alternativeText: "<image>" }] }) },
+      { name: "control alternative text", invoke: () => upsert(11, { ...validShowcase, media: [{ assetId: randomUUID(), alternativeText: "image\u0000" }] }) },
+      { name: "bidi alternative text", invoke: () => upsert(12, { ...validShowcase, media: [{ assetId: randomUUID(), alternativeText: "image\u202E" }] }) },
+      { name: "invalid existing-showcase update", invoke: () => upsert(13, { ...validShowcase, id: existingId, position: 0, title: "<unsafe>" }) },
+      { name: "malformed workspace page ID", invoke: () => catalog.getWorkspace({ actorUserId: userId, pageId: "not-a-uuid" }) },
+      { name: "malformed draft asset ID", invoke: () => catalog.saveDraft({ actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "invalid-draft-asset", requestId: "request-invalid-draft-asset", draft: { displayName: "Artist", introduction: "Intro", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: "not-a-uuid", coverAssetId: null } }) },
+      { name: "malformed showcase media ID", invoke: () => upsert(16, { ...validShowcase, media: [{ assetId: "not-a-uuid", alternativeText: "Image" }] }) },
+      { name: "malformed existing showcase ID", invoke: () => upsert(17, { ...validShowcase, id: "not-a-uuid" }) },
+      { name: "malformed remove ID", invoke: () => catalog.removeShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "invalid-remove-id", requestId: "request-invalid-remove-id", showcaseId: "not-a-uuid" }) },
+      { name: "malformed reorder ID", invoke: () => catalog.reorderShowcases({ actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "invalid-reorder-id", requestId: "request-invalid-reorder-id", showcaseIds: ["not-a-uuid"] }) },
+      { name: "duplicate reorder IDs", invoke: () => catalog.reorderShowcases({ actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "invalid-reorder-duplicates", requestId: "request-invalid-reorder-duplicates", showcaseIds: [existingId, existingId] }) },
+      { name: "foreign-page reorder IDs", invoke: () => catalog.reorderShowcases({ actor: actor(userId), pageId: page.pageId, expectedVersion: created.draftVersion, idempotencyKey: "invalid-reorder-foreign", requestId: "request-invalid-reorder-foreign", showcaseIds: [foreignShowcaseId] }) },
+    ];
+
+    for (const probe of probes) await expectCatalogFailureWithoutMutation({ scope, code: "POLICY_VIOLATION", invoke: probe.invoke, label: probe.name });
   });
 
   test("replay remains the original stable command outcome after a later write", async () => {
@@ -160,11 +378,10 @@ describe("catalog authoring service", () => {
     const userId = await approvedCreator("outbox"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "request-outbox-initialize" });
     await catalog.claimHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "outbox-key-0001", requestId: "request-outbox-claim", handle: "outbox-artist" });
     const events = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
-    expect(events.map((event) => event.eventType)).toEqual(["creator.page_initialized.v1", "creator.handle_claimed.v1"]);
-    expect(events.map((event) => event.payload)).toEqual([
-      { pageId: page.pageId, version: 1, correlationId: "request-outbox-initialize", actorUserId: userId },
-      { pageId: page.pageId, version: 2, correlationId: "request-outbox-claim", actorUserId: userId },
-    ]);
+    expect(Object.fromEntries(events.map((event) => [event.eventType, event.payload]))).toEqual({
+      "creator.page_initialized.v1": { pageId: page.pageId, version: 1, correlationId: "request-outbox-initialize", actorUserId: userId },
+      "creator.handle_claimed.v1": { pageId: page.pageId, version: 2, correlationId: "request-outbox-claim", actorUserId: userId },
+    });
     expect(JSON.stringify(events)).not.toContain("Approved Artist");
     expect(JSON.stringify(events)).not.toContain("session-catalog");
   });
@@ -188,46 +405,106 @@ describe("catalog authoring service", () => {
   test("records one replay-safe, bounded outbox event for every authoring mutation family", async () => {
     // Break caught: a command mutates twice on replay, misses its durable event, or writes profile/session data into an event.
     const userId = await approvedCreator("event-matrix"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "matrix-init" });
-    async function assertCommand(name: string, eventType: string, version: number, invoke: () => Promise<{ pageId: string; draftVersion: number }>) {
-      const before = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+    async function assertCommand(name: string, eventType: string, version: number, requestId: string, invoke: () => Promise<{ pageId: string; draftVersion: number }>) {
+      const before = await db.select({ id: systemOutbox.id, eventType: systemOutbox.eventType, eventVersion: systemOutbox.eventVersion, aggregateType: systemOutbox.aggregateType, aggregateId: systemOutbox.aggregateId, payload: systemOutbox.payload }).from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+      const beforeEventIds = new Set(before.map((event) => event.id));
       const first = await invoke();
       expect(first, `${name} first result`).toEqual({ pageId: page.pageId, draftVersion: version });
       expect((await db.select({ version: creatorPages.draftVersion }).from(creatorPages).where(eq(creatorPages.id, page.pageId)))[0]?.version, `${name} page version`).toBe(version);
-      const after = await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+      const after = await db.select({ id: systemOutbox.id, eventType: systemOutbox.eventType, eventVersion: systemOutbox.eventVersion, aggregateType: systemOutbox.aggregateType, aggregateId: systemOutbox.aggregateId, payload: systemOutbox.payload }).from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
       expect(after).toHaveLength(before.length + 1);
-      expect(after.at(-1)).toMatchObject({ eventType, eventVersion: 1, payload: { pageId: page.pageId, version, correlationId: expect.any(String), actorUserId: userId } });
-      await expect(invoke(), `${name} replay`).resolves.toEqual(first);
-      expect(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId))).toHaveLength(after.length);
+      const newEvents = after.filter((event) => !beforeEventIds.has(event.id));
+      expect(newEvents, `${name} new event`).toHaveLength(1);
+      const newEvent = newEvents[0]!;
+      expect({
+        eventType: newEvent.eventType,
+        eventVersion: newEvent.eventVersion,
+        aggregateType: newEvent.aggregateType,
+        aggregateId: newEvent.aggregateId,
+        payload: newEvent.payload,
+      }).toEqual({
+        eventType,
+        eventVersion: 1,
+        aggregateType: "creator_page",
+        aggregateId: page.pageId,
+        payload: { pageId: page.pageId, version, correlationId: requestId, actorUserId: userId },
+      });
+      const replay = await invoke();
+      expect(replay, `${name} replay result`).toEqual({ pageId: page.pageId, draftVersion: version });
+      expect(replay, `${name} replay matches first`).toEqual(first);
+      expect((await db.select({ version: creatorPages.draftVersion }).from(creatorPages).where(eq(creatorPages.id, page.pageId)))[0]?.version, `${name} replay page version`).toBe(version);
+      const afterReplay = await db.select({ id: systemOutbox.id }).from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId));
+      expect(afterReplay, `${name} replay event count`).toHaveLength(after.length);
+      expect(new Set(afterReplay.map((event) => event.id)), `${name} replay event IDs`).toEqual(new Set(after.map((event) => event.id)));
     }
     const claim = { actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "matrix-claim-0001", requestId: "matrix-claim", handle: "matrix-one" } as const;
-    await assertCommand("claim", "creator.handle_claimed.v1", 2, () => catalog.claimHandle(claim));
+    await assertCommand("claim", "creator.handle_claimed.v1", 2, claim.requestId, () => catalog.claimHandle(claim));
     const rename = { actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "matrix-rename-0001", requestId: "matrix-rename", handle: "matrix-two" } as const;
-    await assertCommand("rename", "creator.handle_renamed.v1", 3, () => catalog.renameHandle(rename));
+    await assertCommand("rename", "creator.handle_renamed.v1", 3, rename.requestId, () => catalog.renameHandle(rename));
     const draft = { actor: actor(userId), pageId: page.pageId, expectedVersion: 3, idempotencyKey: "matrix-draft-0001", requestId: "matrix-draft", draft: { displayName: "Matrix Artist", introduction: "Matrix intro", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } } as const;
-    await assertCommand("save draft", "creator.page_draft_saved.v1", 4, () => catalog.saveDraft(draft));
+    await assertCommand("save draft", "creator.page_draft_saved.v1", 4, draft.requestId, () => catalog.saveDraft(draft));
     const create = { actor: actor(userId), pageId: page.pageId, expectedVersion: 4, idempotencyKey: "matrix-create-0001", requestId: "matrix-create", showcase: { position: 0, title: "Before", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [{ assetId: randomUUID(), alternativeText: "Before image" }] } } as const;
-    await assertCommand("showcase create", "creator.showcase_upserted.v1", 5, () => catalog.upsertShowcase(create));
+    await assertCommand("showcase create", "creator.showcase_upserted.v1", 5, create.requestId, () => catalog.upsertShowcase(create));
     const showcaseId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]!.id;
     const update = { actor: actor(userId), pageId: page.pageId, expectedVersion: 5, idempotencyKey: "matrix-update-0001", requestId: "matrix-update", showcase: { ...create.showcase, id: showcaseId, title: "After", media: [{ assetId: randomUUID(), alternativeText: "After image" }] } } as const;
-    await assertCommand("showcase update", "creator.showcase_upserted.v1", 6, () => catalog.upsertShowcase(update));
+    await assertCommand("showcase update", "creator.showcase_upserted.v1", 6, update.requestId, () => catalog.upsertShowcase(update));
     expect((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]).toMatchObject({ id: showcaseId, title: "After", media: [{ alternativeText: "After image" }] });
     const second = { actor: actor(userId), pageId: page.pageId, expectedVersion: 6, idempotencyKey: "matrix-second-0001", requestId: "matrix-second", showcase: { ...create.showcase, position: 1, title: "Second", media: [] } } as const;
-    await assertCommand("second create", "creator.showcase_upserted.v1", 7, () => catalog.upsertShowcase(second));
+    await assertCommand("second create", "creator.showcase_upserted.v1", 7, second.requestId, () => catalog.upsertShowcase(second));
     const remove = { actor: actor(userId), pageId: page.pageId, expectedVersion: 7, idempotencyKey: "matrix-remove-0001", requestId: "matrix-remove", showcaseId } as const;
-    await assertCommand("showcase remove", "creator.showcase_removed.v1", 8, () => catalog.removeShowcase(remove));
+    await assertCommand("showcase remove", "creator.showcase_removed.v1", 8, remove.requestId, () => catalog.removeShowcase(remove));
     const remainingId = (await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases[0]!.id;
     const reorder = { actor: actor(userId), pageId: page.pageId, expectedVersion: 8, idempotencyKey: "matrix-reorder-0001", requestId: "matrix-reorder", showcaseIds: [remainingId] } as const;
-    await assertCommand("showcase reorder", "creator.showcase_reordered.v1", 9, () => catalog.reorderShowcases(reorder));
+    await assertCommand("showcase reorder", "creator.showcase_reordered.v1", 9, reorder.requestId, () => catalog.reorderShowcases(reorder));
     const serialized = JSON.stringify(await db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, page.pageId)));
     for (const forbidden of ["session", "Matrix Artist", "Matrix intro", "assetId", "alternativeText", "portfolio", "application"]) expect(serialized).not.toContain(forbidden);
   });
 
-  test("maps active-showcase overflow to a stable policy error without partial state", async () => {
-    // Break caught: the database trigger leaks its raw error when a thirteenth active showcase is attempted.
-    const userId = await approvedCreator("overflow"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "overflow-init" });
+  test("rejects an occupied active position without partial state", async () => {
+    // Break caught: an occupied active position overwrites/replaces the existing showcase or advances command state.
+    const userId = await approvedCreator("occupied-position"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "occupied-position-init" });
+    await catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "occupied-position-first", requestId: "occupied-position-first", showcase: { position: 0, title: "First", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } });
+    await expectCatalogFailureWithoutMutation({
+      scope: { pageIds: [page.pageId], actorUserIds: [userId] },
+      code: "POLICY_VIOLATION",
+      invoke: () => catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "occupied-position-next", requestId: "occupied-position-next", showcase: { position: 0, title: "Second", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } }),
+    });
+  });
+
+  test("enforces the 12-active-showcase database trigger independently and restores the transactional index DDL", async () => {
+    // Break caught: removing the position collision reveals that the database count trigger permits a thirteenth active row.
+    const userId = await approvedCreator("active-count-trigger"); const catalog = service(); const page = await catalog.initialize({ userId, requestId: "active-count-trigger-init" });
     let version = 1;
-    for (let position = 0; position < 12; position += 1) version = (await catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: `overflow-key-${position}`, requestId: `overflow-${position}`, showcase: { position, title: `Item ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } })).draftVersion;
-    await expect(catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: "overflow-key-last", requestId: "overflow-last", showcase: { position: 11, title: "Thirteenth", description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } })).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
-    expect((await catalog.getWorkspace({ actorUserId: userId, pageId: page.pageId })).showcases).toHaveLength(12);
+    for (let position = 0; position < 12; position += 1) {
+      version = (await catalog.upsertShowcase({ actor: actor(userId), pageId: page.pageId, expectedVersion: version, idempotencyKey: `active-count-${position}`, requestId: `active-count-${position}`, showcase: { position, title: `Item ${position}`, description: "", discipline: "other", contentLabel: "general_audience", externalUrl: null, media: [] } })).draftVersion;
+    }
+    expect(version).toBe(13);
+
+    const triggerFailure = await rejectionOf(db.transaction(async (tx) => {
+      await tx.execute(sql.raw('drop index "creator_showcase_drafts_active_position_uidx"'));
+      await tx.insert(creatorShowcaseDrafts).values({
+        id: randomUUID(), pageId: page.pageId, position: 0, title: "Thirteenth", description: "", discipline: "other",
+        contentLabel: "general_audience", externalUrl: null, removedAt: null, createdAt: at, updatedAt: at,
+      });
+    }));
+    expect(postgresErrorCode(triggerFailure)).toBe("23514");
+    expect(errorChainText(triggerFailure)).toContain("creator pages may have at most 12 active showcases");
+
+    const activeRows = await db.select({ id: creatorShowcaseDrafts.id, position: creatorShowcaseDrafts.position }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.pageId), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position));
+    expect(activeRows).toHaveLength(12);
+    expect(activeRows.map((row) => row.position)).toEqual(Array.from({ length: 12 }, (_, position) => position));
+    const restoredIndex = await db.execute<{ indexname: string; indexdef: string }>(sql`
+      select indexname, indexdef
+      from pg_indexes
+      where schemaname = current_schema()
+        and tablename = 'creator_showcase_drafts'
+        and indexname = 'creator_showcase_drafts_active_position_uidx'
+    `);
+    expect(restoredIndex).toHaveLength(1);
+    expect(restoredIndex[0]?.indexdef).toContain("CREATE UNIQUE INDEX creator_showcase_drafts_active_position_uidx");
+    expect(restoredIndex[0]?.indexdef).toContain("WHERE (removed_at IS NULL)");
+    const duplicatePositionFailure = await rejectionOf(db.update(creatorShowcaseDrafts).set({ position: 0 }).where(eq(creatorShowcaseDrafts.id, activeRows[1]!.id)));
+    expect(postgresErrorCode(duplicatePositionFailure)).toBe("23505");
+    expect((await db.select({ position: creatorShowcaseDrafts.position }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.pageId, page.pageId), isNull(creatorShowcaseDrafts.removedAt))).orderBy(asc(creatorShowcaseDrafts.position))).map((row) => row.position)).toEqual(Array.from({ length: 12 }, (_, position) => position));
   });
 });
