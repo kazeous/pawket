@@ -73,7 +73,7 @@ export const publicMediaAssets = pgTable(
     ),
     check(
       "public_media_assets_actual_bytes_check",
-      sql`${table.actualSourceBytes} is null or ${table.actualSourceBytes} between 0 and 10485760`,
+      sql`${table.actualSourceBytes} is null or (${table.actualSourceBytes} between 1 and 10485760 and ${table.actualSourceBytes} <= ${table.sourceAllocationBytes})`,
     ),
     check(
       "public_media_assets_dimensions_check",
@@ -97,6 +97,17 @@ export const publicMediaAssets = pgTable(
       "public_media_assets_source_version_check",
       sql`(${table.sourceObjectVersionId} is null and ${table.sourceObjectEtag} is null)
         or (${table.sourceObjectVersionId} is not null and ${table.sourceObjectEtag} is not null)`,
+    ),
+    check(
+      "public_media_assets_source_identity_check",
+      sql`(${table.sourceObjectVersionId} is null and ${table.sourceObjectEtag} is null)
+        or (char_length(${table.sourceObjectVersionId}) between 1 and 512 and char_length(${table.sourceObjectEtag}) between 1 and 512)`,
+    ),
+    check(
+      "public_media_assets_source_pinning_check",
+      sql`(${table.state} in ('pending','processing','ready','deleted') and ${table.sourceObjectVersionId} is not null and ${table.sourceObjectEtag} is not null and ${table.actualSourceBytes} is not null)
+        or (${table.state} in ('awaiting_upload','failed') and ${table.sourceObjectVersionId} is null and ${table.sourceObjectEtag} is null and ${table.actualSourceBytes} is null)
+        or (${table.state} = 'failed' and ${table.sourceObjectVersionId} is not null and ${table.sourceObjectEtag} is not null and ${table.actualSourceBytes} is not null)`,
     ),
     check(
       "public_media_assets_failure_check",
@@ -191,7 +202,6 @@ export const publicMediaDerivatives = pgTable(
   },
   (table) => [
     uniqueIndex("public_media_derivatives_asset_variant_uidx").on(table.assetId, table.variant),
-    index("public_media_derivatives_asset_idx").on(table.assetId, table.variant),
     index("public_media_derivatives_cleanup_idx").on(table.assetId, table.verifiedAt),
     check("public_media_derivatives_variant_check", sql`${table.variant} in (${sql.raw(variantValues)})`),
     check("public_media_derivatives_format_check", sql`${table.format} = 'webp'`),
@@ -199,7 +209,20 @@ export const publicMediaDerivatives = pgTable(
       "public_media_derivatives_dimensions_check",
       sql`${table.width} between 1 and 4096 and ${table.height} between 1 and 4096 and ${table.width} * ${table.height} <= 40000000`,
     ),
-    check("public_media_derivatives_bytes_check", sql`${table.byteSize} between 1 and 10485760`),
+    check(
+      "public_media_derivatives_variant_dimensions_check",
+      sql`(${table.variant} = 'master' and ${table.width} <= 4096 and ${table.height} <= 4096)
+        or (${table.variant} = 'thumb' and ${table.width} <= 384 and ${table.height} <= 384)
+        or (${table.variant} = 'display' and ${table.width} <= 1280 and ${table.height} <= 1280)
+        or (${table.variant} = 'large' and ${table.width} <= 2400 and ${table.height} <= 2400)`,
+    ),
+    check(
+      "public_media_derivatives_bytes_check",
+      sql`(${table.variant} = 'master' and ${table.byteSize} between 1 and 10485760)
+        or (${table.variant} = 'thumb' and ${table.byteSize} between 1 and 524288)
+        or (${table.variant} = 'display' and ${table.byteSize} between 1 and 3145728)
+        or (${table.variant} = 'large' and ${table.byteSize} between 1 and 6291456)`,
+    ),
     check(
       "public_media_derivatives_hash_check",
       sql`${table.contentHash} ~ '^sha256:v1:[A-Za-z0-9_-]{43}$'`,
@@ -228,7 +251,6 @@ export const publicMediaProcessingAttempts = pgTable(
       table.attemptNumber,
     ),
     index("public_media_processing_attempts_worker_idx").on(table.workerId, table.startedAt),
-    index("public_media_processing_attempts_asset_idx").on(table.assetId, table.attemptNumber),
     index("public_media_processing_attempts_retry_idx").on(table.nextRetryAt, table.finishedAt),
     check("public_media_processing_attempts_number_check", sql`${table.attemptNumber} between 1 and 8`),
     check("public_media_processing_attempts_worker_check", sql`char_length(${table.workerId}) between 1 and 128`),

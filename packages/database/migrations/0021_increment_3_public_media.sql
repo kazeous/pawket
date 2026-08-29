@@ -23,12 +23,14 @@ CREATE TABLE "public_media_assets" (
 	CONSTRAINT "public_media_assets_source_format_check" CHECK ("declared_source_format" in ('jpeg','png','webp')),
 	CONSTRAINT "public_media_assets_state_check" CHECK ("state" in ('awaiting_upload','pending','processing','ready','failed','deleted')),
 	CONSTRAINT "public_media_assets_allocation_check" CHECK ("source_allocation_bytes" between 0 and 10485760),
-	CONSTRAINT "public_media_assets_actual_bytes_check" CHECK ("actual_source_bytes" is null or "actual_source_bytes" between 0 and 10485760),
+	CONSTRAINT "public_media_assets_actual_bytes_check" CHECK ("actual_source_bytes" is null or ("actual_source_bytes" between 1 and 10485760 and "actual_source_bytes" <= "source_allocation_bytes")),
 	CONSTRAINT "public_media_assets_dimensions_check" CHECK (("width" is null and "height" is null) or ("width" between 1 and 4096 and "height" between 1 and 4096 and "width" * "height" <= 40000000)),
 	CONSTRAINT "public_media_assets_master_identity_check" CHECK (("normalized_master_object_key" is null and "normalized_master_object_version_id" is null) or ("normalized_master_object_key" is not null and "normalized_master_object_version_id" is not null)),
 	CONSTRAINT "public_media_assets_master_key_check" CHECK ("normalized_master_object_key" is null or "normalized_master_object_key" ~ '^derivatives/[0-9a-f-]{36}/master/[A-Za-z0-9_-]+[.]webp$'),
 	CONSTRAINT "public_media_assets_master_version_check" CHECK ("normalized_master_object_version_id" is null or char_length("normalized_master_object_version_id") between 1 and 512),
 	CONSTRAINT "public_media_assets_source_version_check" CHECK (("source_object_version_id" is null and "source_object_etag" is null) or ("source_object_version_id" is not null and "source_object_etag" is not null)),
+	CONSTRAINT "public_media_assets_source_identity_check" CHECK (("source_object_version_id" is null and "source_object_etag" is null) or (char_length("source_object_version_id") between 1 and 512 and char_length("source_object_etag") between 1 and 512)),
+	CONSTRAINT "public_media_assets_source_pinning_check" CHECK (("state" in ('pending','processing','ready','deleted') and "source_object_version_id" is not null and "source_object_etag" is not null and "actual_source_bytes" is not null) or ("state" in ('awaiting_upload','failed') and "source_object_version_id" is null and "source_object_etag" is null and "actual_source_bytes" is null) or ("state" = 'failed' and "source_object_version_id" is not null and "source_object_etag" is not null and "actual_source_bytes" is not null)),
 	CONSTRAINT "public_media_assets_failure_check" CHECK (("failure_code" is null and "state" <> 'failed') or ("failure_code" is not null and "state" = 'failed')),
 	CONSTRAINT "public_media_assets_failure_code_check" CHECK ("failure_code" is null or "failure_code" in ('failed_validation','unsupported_format','malformed_image','dimensions_exceeded','output_too_large','storage_error','processing_error','derivative_key_conflict')),
 	CONSTRAINT "public_media_assets_ready_time_check" CHECK (("ready_at" is null and "state" not in ('ready','deleted')) or ("ready_at" is not null and "state" in ('ready','deleted') and "ready_at" >= "created_at")),
@@ -102,7 +104,7 @@ CREATE TABLE "public_media_derivatives" (
 	CONSTRAINT "public_media_derivatives_format_check" CHECK ("format" = 'webp'),
 	CONSTRAINT "public_media_derivatives_dimensions_check" CHECK ("width" between 1 and 4096 and "height" between 1 and 4096 and "width" * "height" <= 40000000),
 	CONSTRAINT "public_media_derivatives_variant_dimensions_check" CHECK (("variant" = 'master' and "width" <= 4096 and "height" <= 4096) or ("variant" = 'thumb' and "width" <= 384 and "height" <= 384) or ("variant" = 'display' and "width" <= 1280 and "height" <= 1280) or ("variant" = 'large' and "width" <= 2400 and "height" <= 2400)),
-	CONSTRAINT "public_media_derivatives_bytes_check" CHECK ("byte_size" between 1 and 10485760),
+	CONSTRAINT "public_media_derivatives_bytes_check" CHECK (("variant" = 'master' and "byte_size" between 1 and 10485760) or ("variant" = 'thumb' and "byte_size" between 1 and 524288) or ("variant" = 'display' and "byte_size" between 1 and 3145728) or ("variant" = 'large' and "byte_size" between 1 and 6291456)),
 	CONSTRAINT "public_media_derivatives_hash_check" CHECK ("content_hash" ~ '^sha256:v1:[A-Za-z0-9_-]{43}$'),
 	CONSTRAINT "public_media_derivatives_object_key_check" CHECK ("object_key" ~ '^derivatives/[0-9a-f-]{36}/(master|thumb|display|large)/[A-Za-z0-9_-]+[.]webp$'),
 	CONSTRAINT "public_media_derivatives_object_version_check" CHECK (char_length("object_version_id") between 1 and 512),
@@ -112,8 +114,6 @@ CREATE TABLE "public_media_derivatives" (
 ALTER TABLE "public_media_derivatives" ADD CONSTRAINT "public_media_derivatives_asset_id_public_media_assets_id_fk" FOREIGN KEY ("asset_id") REFERENCES "public_media_assets"("id") ON DELETE restrict ON UPDATE restrict;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "public_media_derivatives_asset_variant_uidx" ON "public_media_derivatives" USING btree ("asset_id","variant");
---> statement-breakpoint
-CREATE INDEX "public_media_derivatives_asset_idx" ON "public_media_derivatives" USING btree ("asset_id","variant");
 --> statement-breakpoint
 CREATE INDEX "public_media_derivatives_cleanup_idx" ON "public_media_derivatives" USING btree ("asset_id","verified_at");
 --> statement-breakpoint
@@ -141,8 +141,6 @@ ALTER TABLE "public_media_processing_attempts" ADD CONSTRAINT "public_media_proc
 CREATE UNIQUE INDEX "public_media_processing_attempts_asset_number_uidx" ON "public_media_processing_attempts" USING btree ("asset_id","attempt_number");
 --> statement-breakpoint
 CREATE INDEX "public_media_processing_attempts_worker_idx" ON "public_media_processing_attempts" USING btree ("worker_id","started_at");
---> statement-breakpoint
-CREATE INDEX "public_media_processing_attempts_asset_idx" ON "public_media_processing_attempts" USING btree ("asset_id","attempt_number");
 --> statement-breakpoint
 CREATE INDEX "public_media_processing_attempts_retry_idx" ON "public_media_processing_attempts" USING btree ("next_retry_at","finished_at");
 --> statement-breakpoint
@@ -172,6 +170,20 @@ BEGIN
       RAISE EXCEPTION 'ready media cleanup requires review' USING ERRCODE = '55000';
     END IF;
   END IF;
+  IF NEW.source_object_key !~ ('^quarantine/' || NEW.id::text || '/[0-9a-f-]{36}$') THEN
+    RAISE EXCEPTION 'source object key is not bound to asset' USING ERRCODE = '23514';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public_media_upload_intents i WHERE i.asset_id = NEW.id AND i.object_key IS DISTINCT FROM NEW.source_object_key) THEN
+    RAISE EXCEPTION 'source object key must match its upload intent' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.state IN ('pending', 'processing', 'ready')
+    AND NOT EXISTS (SELECT 1 FROM public_media_upload_intents i WHERE i.asset_id = NEW.id AND i.object_key = NEW.source_object_key)
+  THEN
+    RAISE EXCEPTION 'pinned media assets require a matching upload intent' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.state = 'ready' THEN
+    PERFORM 1 FROM public_media_assets WHERE id = NEW.id FOR UPDATE;
+  END IF;
   IF NEW.state = 'ready' THEN
     IF NEW.normalized_master_object_key IS NULL
       OR NEW.normalized_master_object_version_id IS NULL
@@ -179,6 +191,14 @@ BEGIN
       OR NEW.height IS NULL
     THEN
       RAISE EXCEPTION 'ready media assets require a normalized master and dimensions' USING ERRCODE = '23514';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public_media_derivatives d
+      WHERE d.asset_id = NEW.id AND d.variant = 'master' AND d.verified_at IS NOT NULL
+        AND d.object_key = NEW.normalized_master_object_key
+        AND d.object_version_id = NEW.normalized_master_object_version_id
+    ) THEN
+      RAISE EXCEPTION 'ready media assets require normalized master identity to match verified master derivative' USING ERRCODE = '23514';
     END IF;
     IF EXISTS (
       SELECT 1
@@ -199,21 +219,78 @@ CREATE TRIGGER public_media_assets_lifecycle_guard
 BEFORE INSERT OR UPDATE ON "public_media_assets"
 FOR EACH ROW EXECUTE FUNCTION public_media_guard_asset_lifecycle();
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION public_media_guard_upload_intent_lifecycle() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'public media upload intents are terminal and cannot be deleted' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.state IN ('completed', 'expired') THEN
+    IF NEW IS DISTINCT FROM OLD THEN
+      RAISE EXCEPTION 'completed and expired upload intents are immutable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.state NOT IN ('issued', 'completed', 'expired') OR (NEW.state <> OLD.state AND NEW.state NOT IN ('completed', 'expired')) THEN
+    RAISE EXCEPTION 'upload intents only transition issued to completed or expired' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.asset_id IS DISTINCT FROM OLD.asset_id
+    OR NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id OR NEW.purpose IS DISTINCT FROM OLD.purpose
+    OR NEW.declared_source_format IS DISTINCT FROM OLD.declared_source_format
+    OR NEW.max_source_bytes IS DISTINCT FROM OLD.max_source_bytes OR NEW.max_source_pixels IS DISTINCT FROM OLD.max_source_pixels
+    OR NEW.object_key IS DISTINCT FROM OLD.object_key OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+  THEN
+    RAISE EXCEPTION 'upload intent identity and grant scope are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF NEW.state = 'completed' AND NEW.completed_at IS NULL THEN
+    RAISE EXCEPTION 'completed upload intents require completion time' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER public_media_upload_intents_lifecycle_guard
+BEFORE UPDATE OR DELETE ON "public_media_upload_intents"
+FOR EACH ROW EXECUTE FUNCTION public_media_guard_upload_intent_lifecycle();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION public_media_guard_upload_intent_key() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.object_key IS DISTINCT FROM ('quarantine/' || NEW.asset_id::text || '/' || NEW.id::text) THEN
+    RAISE EXCEPTION 'upload intent object key must bind asset and intent' USING ERRCODE = '23514';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public_media_assets a WHERE a.id = NEW.asset_id AND a.source_object_key = NEW.object_key) THEN
+    RAISE EXCEPTION 'upload intent object key must match asset source key' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER public_media_upload_intents_key_guard
+BEFORE INSERT OR UPDATE ON "public_media_upload_intents"
+FOR EACH ROW EXECUTE FUNCTION public_media_guard_upload_intent_key();
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION public_media_guard_derivative_mutation() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE asset_state text;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    SELECT state INTO asset_state FROM public_media_assets WHERE id = OLD.asset_id;
+    SELECT state INTO asset_state FROM public_media_assets WHERE id = OLD.asset_id FOR UPDATE;
   ELSE
-    SELECT state INTO asset_state FROM public_media_assets WHERE id = NEW.asset_id;
+    SELECT state INTO asset_state FROM public_media_assets WHERE id = NEW.asset_id FOR UPDATE;
   END IF;
   IF asset_state IN ('ready', 'failed', 'deleted') THEN
     RAISE EXCEPTION 'derivatives cannot mutate after asset readiness or terminal failure' USING ERRCODE = '55000';
   END IF;
-  IF TG_OP <> 'INSERT' AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.asset_id IS DISTINCT FROM OLD.asset_id OR NEW.variant IS DISTINCT FROM OLD.variant) THEN
+  IF TG_OP = 'UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.asset_id IS DISTINCT FROM OLD.asset_id OR NEW.variant IS DISTINCT FROM OLD.variant) THEN
     RAISE EXCEPTION 'derivative identity is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP <> 'DELETE' AND NEW.object_key !~ ('^derivatives/' || NEW.asset_id::text || '/' || NEW.variant || '/[A-Za-z0-9_-]+[.]webp$') THEN
+    RAISE EXCEPTION 'derivative object key is not bound to asset and variant' USING ERRCODE = '23514';
   END IF;
   IF TG_OP = 'DELETE' THEN
     RETURN OLD;

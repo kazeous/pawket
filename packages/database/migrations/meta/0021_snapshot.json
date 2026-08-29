@@ -1,6 +1,6 @@
 {
-  "id": "b7773659-f85c-45f1-9bd5-12c64a04d3e5",
-  "prevId": "ccf7039f-1386-4473-846c-3ade8ca931d0",
+  "id": "3fdf1dd2-d482-45cc-8817-bcc58be33f51",
+  "prevId": "156a5d84-61c8-4976-b870-70d3a3dcaa8c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5223,7 +5223,7 @@
         },
         "public_media_assets_actual_bytes_check": {
           "name": "public_media_assets_actual_bytes_check",
-          "value": "\"public_media_assets\".\"actual_source_bytes\" is null or \"public_media_assets\".\"actual_source_bytes\" between 0 and 10485760"
+          "value": "\"public_media_assets\".\"actual_source_bytes\" is null or (\"public_media_assets\".\"actual_source_bytes\" between 1 and 10485760 and \"public_media_assets\".\"actual_source_bytes\" <= \"public_media_assets\".\"source_allocation_bytes\")"
         },
         "public_media_assets_dimensions_check": {
           "name": "public_media_assets_dimensions_check",
@@ -5244,6 +5244,14 @@
         "public_media_assets_source_version_check": {
           "name": "public_media_assets_source_version_check",
           "value": "(\"public_media_assets\".\"source_object_version_id\" is null and \"public_media_assets\".\"source_object_etag\" is null)\n        or (\"public_media_assets\".\"source_object_version_id\" is not null and \"public_media_assets\".\"source_object_etag\" is not null)"
+        },
+        "public_media_assets_source_identity_check": {
+          "name": "public_media_assets_source_identity_check",
+          "value": "(\"public_media_assets\".\"source_object_version_id\" is null and \"public_media_assets\".\"source_object_etag\" is null)\n        or (char_length(\"public_media_assets\".\"source_object_version_id\") between 1 and 512 and char_length(\"public_media_assets\".\"source_object_etag\") between 1 and 512)"
+        },
+        "public_media_assets_source_pinning_check": {
+          "name": "public_media_assets_source_pinning_check",
+          "value": "(\"public_media_assets\".\"state\" in ('pending','processing','ready','deleted') and \"public_media_assets\".\"source_object_version_id\" is not null and \"public_media_assets\".\"source_object_etag\" is not null and \"public_media_assets\".\"actual_source_bytes\" is not null)\n        or (\"public_media_assets\".\"state\" in ('awaiting_upload','failed') and \"public_media_assets\".\"source_object_version_id\" is null and \"public_media_assets\".\"source_object_etag\" is null and \"public_media_assets\".\"actual_source_bytes\" is null)\n        or (\"public_media_assets\".\"state\" = 'failed' and \"public_media_assets\".\"source_object_version_id\" is not null and \"public_media_assets\".\"source_object_etag\" is not null and \"public_media_assets\".\"actual_source_bytes\" is not null)"
         },
         "public_media_assets_failure_check": {
           "name": "public_media_assets_failure_check",
@@ -5377,27 +5385,6 @@
           "method": "btree",
           "with": {}
         },
-        "public_media_derivatives_asset_idx": {
-          "name": "public_media_derivatives_asset_idx",
-          "columns": [
-            {
-              "expression": "asset_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "variant",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "public_media_derivatives_cleanup_idx": {
           "name": "public_media_derivatives_cleanup_idx",
           "columns": [
@@ -5451,9 +5438,13 @@
           "name": "public_media_derivatives_dimensions_check",
           "value": "\"public_media_derivatives\".\"width\" between 1 and 4096 and \"public_media_derivatives\".\"height\" between 1 and 4096 and \"public_media_derivatives\".\"width\" * \"public_media_derivatives\".\"height\" <= 40000000"
         },
+        "public_media_derivatives_variant_dimensions_check": {
+          "name": "public_media_derivatives_variant_dimensions_check",
+          "value": "(\"public_media_derivatives\".\"variant\" = 'master' and \"public_media_derivatives\".\"width\" <= 4096 and \"public_media_derivatives\".\"height\" <= 4096)\n        or (\"public_media_derivatives\".\"variant\" = 'thumb' and \"public_media_derivatives\".\"width\" <= 384 and \"public_media_derivatives\".\"height\" <= 384)\n        or (\"public_media_derivatives\".\"variant\" = 'display' and \"public_media_derivatives\".\"width\" <= 1280 and \"public_media_derivatives\".\"height\" <= 1280)\n        or (\"public_media_derivatives\".\"variant\" = 'large' and \"public_media_derivatives\".\"width\" <= 2400 and \"public_media_derivatives\".\"height\" <= 2400)"
+        },
         "public_media_derivatives_bytes_check": {
           "name": "public_media_derivatives_bytes_check",
-          "value": "\"public_media_derivatives\".\"byte_size\" between 1 and 10485760"
+          "value": "(\"public_media_derivatives\".\"variant\" = 'master' and \"public_media_derivatives\".\"byte_size\" between 1 and 10485760)\n        or (\"public_media_derivatives\".\"variant\" = 'thumb' and \"public_media_derivatives\".\"byte_size\" between 1 and 524288)\n        or (\"public_media_derivatives\".\"variant\" = 'display' and \"public_media_derivatives\".\"byte_size\" between 1 and 3145728)\n        or (\"public_media_derivatives\".\"variant\" = 'large' and \"public_media_derivatives\".\"byte_size\" between 1 and 6291456)"
         },
         "public_media_derivatives_hash_check": {
           "name": "public_media_derivatives_hash_check",
@@ -5564,27 +5555,6 @@
             },
             {
               "expression": "started_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "public_media_processing_attempts_asset_idx": {
-          "name": "public_media_processing_attempts_asset_idx",
-          "columns": [
-            {
-              "expression": "asset_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "attempt_number",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
