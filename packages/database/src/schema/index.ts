@@ -33,6 +33,13 @@ export {
   publicMediaUploadIntents,
 } from "./public-media.js";
 export {
+  publicContentReports,
+  publicContentTriageEvents,
+  publicReportChallenges,
+  publicReportSecurityEvents,
+  publicVisibilityHolds,
+} from "./public-trust.js";
+export {
   paymentsReceivingAccountOnboarding,
   paymentsUnmatchedDeposits,
   paymentsVerificationDepositChallenges,

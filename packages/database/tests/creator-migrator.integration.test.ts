@@ -197,7 +197,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(22);
+  expect(journal?.count).toBe(23);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -290,7 +290,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(22);
+      expect(after?.count).toBe(23);
     } finally {
       await client.end();
       await rm(through0019, { recursive: true, force: true });
@@ -299,7 +299,7 @@ describe("configured Drizzle creator migrator", () => {
 
   test("upgrades the configured journal from index 20 to public media index 21", async () => {
     // Break caught: the media migration exists on disk but is skipped after a deployed catalog head.
-    const { client, journalSchema } = await createIsolatedClient("media-upgrade");
+    const { client, schemaName, journalSchema } = await createIsolatedClient("media-upgrade");
     const through0020 = await createMigrationsThrough(20);
     try {
       await migrate(drizzle(client), { migrationsFolder: through0020, migrationsSchema: journalSchema });
@@ -308,20 +308,47 @@ describe("configured Drizzle creator migrator", () => {
       );
       expect(before?.count).toBe(21);
       await expect(
-        client<{ name: string | null }[]>`select to_regclass('public_media_assets')::text as name`,
-      ).resolves.toEqual([{ name: null }]);
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_media_assets`}) is not null as present`,
+      ).resolves.toEqual([{ present: false }]);
 
       await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
       await expect(
-        client<{ name: string | null }[]>`select to_regclass('public_media_assets')::text as name`,
-      ).resolves.toEqual([{ name: "public_media_assets" }]);
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_media_assets`}) is not null as present`,
+      ).resolves.toEqual([{ present: true }]);
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(22);
+      expect(after?.count).toBe(23);
     } finally {
       await client.end();
       await rm(through0020, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 21 to public trust index 22", async () => {
+    const { client, schemaName, journalSchema } = await createIsolatedClient("trust-upgrade");
+    const through0021 = await createMigrationsThrough(21);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0021, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(22);
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_content_reports`}) is not null as present`,
+      ).resolves.toEqual([{ present: false }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_content_reports`}) is not null as present`,
+      ).resolves.toEqual([{ present: true }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(23);
+    } finally {
+      await client.end();
+      await rm(through0021, { recursive: true, force: true });
     }
   });
 

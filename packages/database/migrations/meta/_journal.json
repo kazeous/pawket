@@ -155,6 +155,13 @@
       "when": 1788040471734,
       "tag": "0021_increment_3_public_media",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1788109226886,
+      "tag": "0022_increment_3_public_trust",
+      "breakpoints": true
     }
   ]
 }

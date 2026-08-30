@@ -1,1 +1,20 @@
-export {};
+export {
+  PUBLIC_REPORT_REASONS,
+  normalizeReportDetail,
+  normalizeReportReason,
+  normalizeReportTarget,
+  type PublicReportReason,
+} from "./report-policy.js";
+export {
+  createReportService,
+  PublicReportError,
+  type AuthenticatedReportCommand,
+  type GuestReportCommand,
+  type ReportChallenge,
+  type SubmitReportCommand,
+} from "./report-service.js";
+export type {
+  CatalogModerationSnapshotPort,
+  ModerationTargetSnapshot,
+  ReportTarget,
+} from "./trust-ports.js";
