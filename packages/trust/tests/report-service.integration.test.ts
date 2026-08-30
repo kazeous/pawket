@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -343,28 +343,107 @@ describe("contextual report submission", () => {
 
   test("serializes challenge issuance at five active rows per network", async () => {
     const cappedNetwork = `hmac-sha256:v1:${"u".repeat(43)}`;
-    const settled = await Promise.allSettled(Array.from({ length: 6 }, () => service().issueChallenge({ networkKeyHmac: cappedNetwork })));
+    const [clockRow] = await connection.db.execute<{ databaseNow: string }>(sql`select statement_timestamp() as "databaseNow"`);
+    const databaseNow = new Date(clockRow!.databaseNow);
+    const reportService = service({ clock: () => databaseNow });
+    const settled = await Promise.allSettled(Array.from({ length: 6 }, () => reportService.issueChallenge({ networkKeyHmac: cappedNetwork })));
     expect(settled.filter((item) => item.status === "fulfilled")).toHaveLength(5);
     expect(settled.filter((item) => item.status === "rejected")).toHaveLength(1);
     expect(settled.find((item) => item.status === "rejected")).toMatchObject({ reason: { code: "REPORT_NOT_ACCEPTED", status: 429 } });
     const rows = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, cappedNetwork));
-    expect(rows.filter((row) => row.consumedAt === null && row.expiresAt > now)).toHaveLength(5);
+    expect(rows.filter((row) => row.consumedAt === null && row.expiresAt > databaseNow)).toHaveLength(5);
   });
 
-  test("deletes a deterministic bounded batch of expired challenges during issuance", async () => {
-    const cleanupNetwork = `hmac-sha256:v1:${"v".repeat(43)}`;
-    await connection.db.insert(publicReportChallenges).values(Array.from({ length: 23 }, (_, index) => ({
-      id: randomUUID(),
-      tokenHash: `sha256:v1:${Buffer.from(`expired-${index}`.padEnd(32, "x")).toString("base64url").slice(0, 43)}`,
-      networkKeyHmac: cleanupNetwork,
-      issuedAt: new Date(now.getTime() - 1_200_000 - index),
-      expiresAt: new Date(now.getTime() - 600_000 - index),
+  test("globally deletes exactly the oldest twenty expired challenges in expires-at/id order", async () => {
+    const abandonedNetwork = `hmac-sha256:v1:${"v".repeat(43)}`;
+    const issuerNetwork = `hmac-sha256:v1:${"x".repeat(43)}`;
+    const ids = Array.from({ length: 23 }, (_, index) => `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+    await connection.db.insert(publicReportChallenges).values(ids.toReversed().map((id, reverseIndex) => {
+      const index = 22 - reverseIndex;
+      const expiresAt = new Date(now.getTime() - (index < 10 ? 1_200_000 : 600_000));
+      return {
+        id,
+        tokenHash: hashOpaqueToken(`global-expired-${index}`, "public-report-challenge"),
+        networkKeyHmac: abandonedNetwork,
+        issuedAt: new Date(expiresAt.getTime() - 600_000),
+        expiresAt,
+        consumedAt: null,
+      };
+    }));
+    await service().issueChallenge({ networkKeyHmac: issuerNetwork });
+    const abandoned = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, abandonedNetwork));
+    expect(abandoned.map((row) => row.id).sort()).toEqual(ids.slice(20));
+    expect(await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, issuerNetwork))).toHaveLength(1);
+  });
+
+  test("uses database statement time rather than the caller clock for expired cleanup", async () => {
+    const sourceNetwork = `hmac-sha256:v1:${"y".repeat(43)}`;
+    const issuerNetwork = `hmac-sha256:v1:${"z".repeat(43)}`;
+    const [clockRow] = await connection.db.execute<{ databaseNow: string }>(sql`select statement_timestamp() as "databaseNow"`);
+    const databaseNow = new Date(clockRow!.databaseNow);
+    const expiresAt = new Date(databaseNow.getTime() + 60_000);
+    const futureId = randomUUID();
+    await connection.db.insert(publicReportChallenges).values({
+      id: futureId,
+      tokenHash: hashOpaqueToken("database-future-challenge", "public-report-challenge"),
+      networkKeyHmac: sourceNetwork,
+      issuedAt: new Date(expiresAt.getTime() - 600_000),
+      expiresAt,
+      consumedAt: null,
+    });
+    await service({ clock: () => new Date(databaseNow.getTime() + 3_600_000) }).issueChallenge({ networkKeyHmac: issuerNetwork });
+    expect(await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.id, futureId))).toHaveLength(1);
+  });
+
+  test("concurrent issuers skip locked expired rows without double-counting cleanup", async () => {
+    const abandonedNetwork = `hmac-sha256:v1:${"1".repeat(43)}`;
+    const issuerB = `hmac-sha256:v1:${"2".repeat(43)}`;
+    const issuerC = `hmac-sha256:v1:${"3".repeat(43)}`;
+    const issuerD = `hmac-sha256:v1:${"4".repeat(43)}`;
+    const ids = Array.from({ length: 40 }, (_, index) => `50000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+    await connection.db.insert(publicReportChallenges).values(ids.map((id, index) => ({
+      id,
+      tokenHash: hashOpaqueToken(`concurrent-expired-${index}`, "public-report-challenge"),
+      networkKeyHmac: abandonedNetwork,
+      issuedAt: new Date(now.getTime() - 1_200_000),
+      expiresAt: new Date(now.getTime() - 600_000),
       consumedAt: null,
     })));
-    await service().issueChallenge({ networkKeyHmac: cleanupNetwork });
-    const rows = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, cleanupNetwork));
-    expect(rows).toHaveLength(4);
-    expect(rows.filter((row) => row.expiresAt <= now)).toHaveLength(3);
+
+    let locked!: () => void;
+    let release!: () => void;
+    const lockedRows = new Promise<void>((resolve) => { locked = resolve; });
+    const releaseRows = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = connection.db.transaction(async (tx) => {
+      await tx.execute(sql`
+        select id from public_report_challenges
+        where network_key_hmac = ${abandonedNetwork}
+        order by expires_at, id
+        limit 20
+        for update
+      `);
+      locked();
+      await releaseRows;
+    });
+    await lockedRows;
+    const issuers = Promise.all([
+      service().issueChallenge({ networkKeyHmac: issuerB }),
+      service().issueChallenge({ networkKeyHmac: issuerC }),
+    ]);
+    const beforeRelease = await Promise.race([
+      issuers.then(() => "issued" as const),
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 1_000)),
+    ]);
+    expect(beforeRelease).toBe("issued");
+    const remainingWhileLocked = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, abandonedNetwork));
+    release();
+    await blocker;
+    expect(remainingWhileLocked.map((row) => row.id).sort()).toEqual(ids.slice(0, 20));
+    await service().issueChallenge({ networkKeyHmac: issuerD });
+    expect(await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, abandonedNetwork))).toEqual([]);
+    for (const networkKeyHmac of [issuerB, issuerC, issuerD]) {
+      expect(await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, networkKeyHmac))).toHaveLength(1);
+    }
   });
 
   test("does not persist guest rejection telemetry before valid proof-of-work", async () => {

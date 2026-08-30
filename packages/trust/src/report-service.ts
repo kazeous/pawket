@@ -448,10 +448,10 @@ export function createReportService(input: ReportServiceFactoryInput) {
             with expired as (
               select id
               from public_report_challenges
-              where network_key_hmac = ${normalized.networkKeyHmac}
-                and expires_at <= ${now.toISOString()}::timestamptz
+              where expires_at <= statement_timestamp()
               order by expires_at, id
               limit ${CHALLENGE_CLEANUP_LIMIT}
+              for update skip locked
             )
             delete from public_report_challenges as challenge
             using expired
