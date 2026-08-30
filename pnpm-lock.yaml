@@ -114,6 +114,9 @@ importers:
       '@pawket/payments':
         specifier: workspace:*
         version: link:../../packages/payments
+      '@pawket/public-media':
+        specifier: workspace:*
+        version: link:../../packages/public-media
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue

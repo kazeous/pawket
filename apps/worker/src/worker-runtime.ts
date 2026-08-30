@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { types as nodeTypes } from "node:util";
 
 import { Worker, type Job, type Processor } from "bullmq";
 
@@ -31,14 +32,25 @@ import {
 } from "@pawket/observability";
 import { scanVerificationDepositRefundWindows } from "@pawket/payments";
 import {
+  processPublicMediaAsset,
+  type ObjectStoragePort,
+} from "@pawket/public-media";
+import {
+  MEDIA_PROCESS_JOB,
+  MEDIA_QUEUE,
   OUTBOX_JOB,
   SYSTEM_QUEUE,
   connectQueueProducer,
   connectQueueWorker,
+  createMediaQueue,
   createQueueConnection,
   createSystemQueue,
   createWorkerConnection,
   dispatchOutboxBatch,
+  enqueueMediaAsset,
+  parsePublicMediaCompletedPayload,
+  type MediaAssetJob,
+  type MediaQueuePublisher,
   type SystemOutboxJob,
 } from "@pawket/queue";
 
@@ -88,19 +100,28 @@ type DatabaseResource = ReturnType<typeof createDatabase>;
 type ConnectionResource = ReturnType<typeof createQueueConnection>;
 type QueueResource = ReturnType<typeof createSystemQueue>;
 type WorkerResource = Pick<Worker<SystemOutboxJob>, "close" | "disconnect">;
+type MediaQueueResource = ReturnType<typeof createMediaQueue>;
+type MediaWorkerResource = Pick<Worker<MediaAssetJob>, "close" | "disconnect">;
 
 export type WorkerRuntimeDependencies = {
   createDatabase(databaseUrl: string): DatabaseResource;
   createProducerConnection(valkeyUrl: string): ConnectionResource;
   createWorkerConnection(valkeyUrl: string): ConnectionResource;
   createQueue(connection: ConnectionResource): QueueResource;
+  createMediaQueue(connection: ConnectionResource): MediaQueueResource;
   createWorker(
     processor: Processor<SystemOutboxJob>,
     connection: ConnectionResource,
     concurrency: number,
   ): WorkerResource;
+  createMediaWorker(
+    processor: Processor<MediaAssetJob>,
+    connection: ConnectionResource,
+    concurrency: number,
+  ): MediaWorkerResource;
   dispatch: typeof dispatchOutboxBatch;
   acknowledge: typeof acknowledgeOutboxEvent;
+  processMediaAsset: typeof processPublicMediaAsset;
   scanRefundWindows: typeof scanVerificationDepositRefundWindows;
   readBacklogMetrics: typeof readOperationalBacklogMetrics;
   runRetention: typeof runRetentionSweep;
@@ -121,6 +142,10 @@ export type StartWorkerOptions = {
   securityEmail?: {
     keyring: EncryptionKeyring;
     sender: SecurityEmailSender;
+  };
+  publicMedia?: {
+    storage: ObjectStoragePort;
+    concurrency: number;
   };
   healthState?: WorkerHealthState;
   retention?: {
@@ -152,14 +177,22 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   createProducerConnection: createQueueConnection,
   createWorkerConnection,
   createQueue: createSystemQueue,
+  createMediaQueue,
   createWorker(processor, connection, concurrency) {
     return new Worker<SystemOutboxJob>(SYSTEM_QUEUE, processor, {
       concurrency,
       connection,
     });
   },
+  createMediaWorker(processor, connection, concurrency) {
+    return new Worker<MediaAssetJob>(MEDIA_QUEUE, processor, {
+      concurrency,
+      connection,
+    });
+  },
   dispatch: dispatchOutboxBatch,
   acknowledge: acknowledgeOutboxEvent,
+  processMediaAsset: processPublicMediaAsset,
   scanRefundWindows: scanVerificationDepositRefundWindows,
   readBacklogMetrics: readOperationalBacklogMetrics,
   runRetention: runRetentionSweep,
@@ -171,6 +204,7 @@ export function createWorkerJobProcessor(input: {
   logger: RuntimeLogger;
   database: DatabaseResource["db"];
   acknowledge: typeof acknowledgeOutboxEvent;
+  mediaQueue?: MediaQueuePublisher;
   securityEmail?: {
     keyring: EncryptionKeyring;
     sender: SecurityEmailSender;
@@ -275,6 +309,13 @@ export function createWorkerJobProcessor(input: {
                 outcome: materialized === "created" ? "queued" : "attention_required",
               });
             }
+          } else if (job.data.eventType === "media.public_upload_completed.v1") {
+            if (!input.mediaQueue) throw new Error("Public media processing unavailable");
+            const payload = parsePublicMediaCompletedPayload(job.data.payload);
+            if (payload.assetId !== job.data.aggregateId) {
+              throw new Error("Invalid public media completion payload");
+            }
+            await enqueueMediaAsset(input.mediaQueue, payload.assetId);
           } else if (
             job.data.eventType !== "system.foundation.ping.v1" &&
             !SAFE_PAYMENTS_EVENTS.has(job.data.eventType) &&
@@ -322,6 +363,59 @@ export function createWorkerJobProcessor(input: {
   };
 }
 
+function exactMediaJobData(value: unknown): { assetId: string } | null {
+  if (!value || typeof value !== "object" || nodeTypes.isProxy(value)) return null;
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== 1 || ownKeys[0] !== "assetId") return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, "assetId");
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
+    const assetId = descriptor.value;
+    return typeof assetId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(assetId)
+      ? { assetId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function createMediaJobProcessor(input: {
+  logger: RuntimeLogger;
+  database: DatabaseResource["db"];
+  storage: ObjectStoragePort;
+  processAsset?: typeof processPublicMediaAsset;
+}): Processor<MediaAssetJob> {
+  return async (job: Job<MediaAssetJob>) => {
+    const data = exactMediaJobData(job.data);
+    if (
+      !job.id ||
+      job.name !== MEDIA_PROCESS_JOB ||
+      !data ||
+      job.id !== data.assetId
+    ) throw new Error("Invalid public media worker job");
+    return withRequestContext(
+      { requestId: job.id, jobId: job.id },
+      async () => {
+        try {
+          await (input.processAsset ?? processPublicMediaAsset)(
+            input.database,
+            input.storage,
+            data.assetId,
+            { workerId: `media-job:${data.assetId}` },
+          );
+        } catch {
+          input.logger.error(
+            { category: "public_media_worker_failed", jobId: job.id },
+            "Public media worker job failed",
+          );
+          throw new Error("Public media worker processing failed");
+        }
+      },
+    );
+  };
+}
+
 export async function startWorker(options: StartWorkerOptions): Promise<WorkerHandle> {
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
@@ -337,6 +431,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let workerConnection: ConnectionResource | undefined;
   let queue: QueueResource | undefined;
   let worker: WorkerResource | undefined;
+  let mediaQueue: MediaQueueResource | undefined;
+  let mediaWorker: MediaWorkerResource | undefined;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -357,8 +453,14 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       }
     };
 
+    if (mediaWorker) {
+      await attemptCleanup("media-worker", () => mediaWorker?.disconnect());
+    }
     if (worker) {
       await attemptCleanup("worker", () => worker?.disconnect());
+    }
+    if (mediaQueue) {
+      await attemptCleanup("media-queue", () => mediaQueue?.disconnect());
     }
     if (queue) {
       await attemptCleanup("queue", () => queue?.disconnect());
@@ -381,16 +483,32 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
     await connectQueueWorker(workerConnection, options.producerOperationTimeoutMs);
     queue = dependencies.createQueue(producerConnection);
+    if (options.publicMedia) {
+      mediaQueue = dependencies.createMediaQueue(producerConnection);
+    }
     worker = dependencies.createWorker(
       createWorkerJobProcessor({
         logger,
         database: database.db,
         acknowledge: dependencies.acknowledge,
+        mediaQueue,
         securityEmail: options.securityEmail,
       }),
       workerConnection,
       options.concurrency,
     );
+    if (options.publicMedia) {
+      mediaWorker = dependencies.createMediaWorker(
+        createMediaJobProcessor({
+          logger,
+          database: database.db,
+          storage: options.publicMedia.storage,
+          processAsset: dependencies.processMediaAsset,
+        }),
+        workerConnection,
+        options.publicMedia.concurrency,
+      );
+    }
     if (options.healthState) {
       options.healthState.initializedAt = Date.now();
       options.healthState.stopping = false;
@@ -598,14 +716,18 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     };
     const gracefulClose = async (): Promise<void> => {
       await currentDispatch;
+      if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       await attemptClose("worker", () => worker.close());
+      if (mediaQueue) await attemptClose("media-queue", () => mediaQueue.close());
       await attemptClose("queue", () => queue.close());
       await attemptClose("producer-valkey", () => producerConnection.quit());
       await attemptClose("worker-valkey", () => workerConnection.quit());
       await attemptClose("postgres", () => database.close());
     };
     const forceClose = (): void => {
+      if (mediaWorker) void attemptClose("media-worker-force", () => mediaWorker.disconnect());
       void attemptClose("worker-force", () => worker.disconnect());
+      if (mediaQueue) void attemptClose("media-queue-force", () => mediaQueue.disconnect());
       void attemptClose("queue-force", () => queue.disconnect());
       try {
         producerConnection.disconnect();

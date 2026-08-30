@@ -53,6 +53,12 @@ ENV APP_BUILD_REVISION=$SOURCE_COMMIT
 WORKDIR /app
 
 COPY --from=build --chown=node:node /app/apps/worker/dist/index.js ./worker.js
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/sharp@0.35.4_@types+node@24.13.3/node_modules/sharp ./node_modules/sharp
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/@img+colour@1.1.0/node_modules/@img/colour ./node_modules/@img/colour
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/detect-libc@2.1.2/node_modules/detect-libc ./node_modules/detect-libc
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/semver@7.8.5/node_modules/semver ./node_modules/semver
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/@img+sharp-linux-arm64@0.35.4/node_modules/@img/sharp-linux-arm64 ./node_modules/@img/sharp-linux-arm64
+COPY --from=build --chown=node:node /app/node_modules/.pnpm/@img+sharp-libvips-linux-arm64@1.3.3/node_modules/@img/sharp-libvips-linux-arm64 ./node_modules/@img/sharp-libvips-linux-arm64
 
 USER node
 ENTRYPOINT ["node"]

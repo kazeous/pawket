@@ -13,6 +13,7 @@
     "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/payments": "workspace:*",
+    "@pawket/public-media": "workspace:*",
     "@pawket/queue": "workspace:*",
     "@pawket/security": "workspace:*",
     "bullmq": "6.2.0",
