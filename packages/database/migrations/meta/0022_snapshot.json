@@ -6212,6 +6212,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "public_content_triage_events_report_version_uidx": {
+          "name": "public_content_triage_events_report_version_uidx",
+          "columns": [
+            {
+              "expression": "report_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "resulting_report_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {

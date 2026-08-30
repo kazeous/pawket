@@ -10,6 +10,7 @@ import {
   creatorHandleClaims,
   creatorPages,
   identityUsers,
+  publicContentReports,
   type PawketDatabase,
 } from "@pawket/database";
 import {
@@ -201,6 +202,12 @@ function composition() {
 }
 
 function actor(userId: string) { return { userId, sessionId: "session-query", primaryAuthenticatedAt: at }; }
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 function readyMedia(ownerUserId: string, purpose: MediaReference["purpose"]): ReadyMedia {
   return {
@@ -615,5 +622,79 @@ describe("effective public catalog query", () => {
     const creator = await publishCreator(`notready-${randomUUID().slice(0, 6)}`);
     media.delete(creator.cover.assetId);
     expect(await composition().query.isDerivativePreviewable(db, creator.userId, creator.cover.assetId, "large")).toBe(false);
+  });
+
+  test("holds the visibility fence through report commit when reporting wins the page race", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`report-first-${randomUUID().slice(0, 5)}`);
+    const catalog = composition();
+    const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    const resolved = deferred();
+    const release = deferred();
+    const reportPromise = db.transaction(async (tx) => {
+      const snapshot = await catalog.query.resolveVisibleReportTarget(tx, target);
+      resolved.resolve();
+      await release.promise;
+      if (!snapshot) return { accepted: false } as const;
+      const reportId = randomUUID();
+      await tx.insert(publicContentReports).values({
+        id: reportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
+        targetType: target.targetType, targetId: target.targetId,
+        publicationRevisionId: target.publicationRevisionId, reason: "privacy", detail: null,
+        reporterUserId: creator.userId, state: "open", version: 1, createdAt: at, updatedAt: at,
+      });
+      return { accepted: true } as const;
+    });
+    await resolved.promise;
+    const unpublishPromise = catalog.service.unpublish({
+      actor: actor(creator.userId), pageId: creator.pageId, expectedVersion: creator.version,
+      idempotencyKey: `report-race-unpublish-${creator.pageId}`, requestId: `report-race-unpublish-${creator.pageId}`,
+    });
+    const observedBeforeReportCommit = await Promise.race([
+      unpublishPromise.then(() => "unpublished" as const),
+      new Promise<"blocked">((done) => setTimeout(() => done("blocked"), 100)),
+    ]);
+    release.resolve();
+    const report = await reportPromise;
+    await unpublishPromise;
+    expect(observedBeforeReportCommit).toBe("blocked");
+    expect(report.accepted).toBe(true);
+  });
+
+  test("rejects the report when unpublish is queued first on the visibility fence", async () => {
+    pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";
+    const creator = await publishCreator(`unpublish-first-${randomUUID().slice(0, 4)}`);
+    const catalog = composition();
+    const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
+    const locked = deferred();
+    const release = deferred();
+    const blocker = db.transaction(async (tx) => {
+      await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.id, creator.pageId)).for("update");
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    const unpublishPromise = catalog.service.unpublish({
+      actor: actor(creator.userId), pageId: creator.pageId, expectedVersion: creator.version,
+      idempotencyKey: `queued-unpublish-${creator.pageId}`, requestId: `queued-unpublish-${creator.pageId}`,
+    });
+    await new Promise((done) => setTimeout(done, 50));
+    const reportPromise = db.transaction(async (tx) => {
+      const snapshot = await catalog.query.resolveVisibleReportTarget(tx, target);
+      if (!snapshot) return { accepted: false } as const;
+      const reportId = randomUUID();
+      await tx.insert(publicContentReports).values({
+        id: reportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
+        targetType: target.targetType, targetId: target.targetId,
+        publicationRevisionId: target.publicationRevisionId, reason: "privacy", detail: null,
+        reporterUserId: creator.userId, state: "open", version: 1, createdAt: at, updatedAt: at,
+      });
+      return { accepted: true } as const;
+    });
+    await new Promise((done) => setTimeout(done, 50));
+    release.resolve();
+    await blocker;
+    await unpublishPromise;
+    await expect(reportPromise).resolves.toEqual({ accepted: false });
   });
 });

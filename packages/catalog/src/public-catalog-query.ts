@@ -174,7 +174,13 @@ export function createPublicCatalogQuery(input: Input) {
     try {
       const [revision] = await database.select().from(creatorPublicationRevisions).where(eq(creatorPublicationRevisions.id, normalizedTarget.publicationRevisionId)).limit(1);
       if (!revision || !publicHandle(revision.canonicalHandle)) return null;
-      const [page] = await database.select().from(creatorPages).where(eq(creatorPages.id, revision.pageId)).limit(1);
+      // Visibility-sensitive consumers serialize on the same page row that
+      // publish, unpublish, suspension clearing, and future visibility-hold
+      // writers lock first. A transactional caller retains this fence until
+      // its commit, so the exact visible snapshot cannot be invalidated while
+      // the consumer records its decision.
+      const pageQuery = database.select().from(creatorPages).where(eq(creatorPages.id, revision.pageId)).limit(1);
+      const [page] = visibleOnly ? await pageQuery.for("update") : await pageQuery;
       if (!page) return null;
       if (visibleOnly) {
         const current = await loadEffective(database, page.id);

@@ -82,6 +82,23 @@ function service(overrides: Readonly<{
   });
 }
 
+function factoryInput() {
+  return {
+    db: connection.db,
+    lookupHmacKey,
+    clock: () => new Date(now),
+    nonce: () => randomUUID().replaceAll("-", ""),
+    catalogModeration: {
+      async resolveVisibleReportTarget(_db: unknown, candidate: ReportTarget) {
+        return candidate.targetType === target.targetType && candidate.targetId === target.targetId && candidate.publicationRevisionId === target.publicationRevisionId
+          ? { target: { ...target }, pageId: target.targetId, creatorUserId, canonicalHandle: "creator-user", displayName: "Creator User", showcaseTitle: null, mediaAssetIds: [] }
+          : null;
+      },
+      async readRevisionTarget() { return null; },
+    },
+  };
+}
+
 describe("contextual report submission", () => {
   beforeAll(async () => {
     await admin.unsafe(`create schema "${schemaName}"`);
@@ -193,6 +210,78 @@ describe("contextual report submission", () => {
     expect(trapCalls).toBe(0);
   });
 
+  test("snapshots exact factory dependencies and port methods without invoking traps", async () => {
+    const base = factoryInput();
+    let trapCalls = 0;
+    const proxiedInput = new Proxy(base, {
+      get() { trapCalls += 1; throw new Error("factory trap"); },
+    });
+    expect(() => createReportService(proxiedInput as never)).toThrowError(PublicReportError);
+    expect(trapCalls).toBe(0);
+
+    const accessorInput = { ...base } as Record<string, unknown>;
+    Object.defineProperty(accessorInput, "lookupHmacKey", { enumerable: true, get() { trapCalls += 1; throw new Error("key getter"); } });
+    expect(() => createReportService(accessorInput as never)).toThrowError(PublicReportError);
+    expect(trapCalls).toBe(0);
+
+    expect(() => createReportService({ ...base, unexpected: true } as never)).toThrowError(PublicReportError);
+    expect(() => createReportService(Object.assign({ ...base }, { [Symbol("extra")]: true }) as never)).toThrowError(PublicReportError);
+
+    const accessorPort = { async readRevisionTarget() { return null; } } as Record<string, unknown>;
+    Object.defineProperty(accessorPort, "resolveVisibleReportTarget", { enumerable: true, get() { trapCalls += 1; throw new Error("port getter"); } });
+    expect(() => createReportService({ ...base, catalogModeration: accessorPort } as never)).toThrowError(PublicReportError);
+    expect(trapCalls).toBe(0);
+
+    const proxiedClock = new Proxy(() => new Date(now), { apply() { trapCalls += 1; throw new Error("clock trap"); } });
+    expect(() => createReportService({ ...base, clock: proxiedClock })).toThrowError(PublicReportError);
+    expect(trapCalls).toBe(0);
+
+    const broadCatalog = {
+      ...base.catalogModeration,
+      async resolvePublicCreator() { return { kind: "not_found" as const }; },
+      async listPublicCreators() { return { items: [], nextCursor: null }; },
+      async isDerivativePublic() { return false; },
+    };
+    expect(() => createReportService({ ...base, catalogModeration: broadCatalog })).not.toThrow();
+  });
+
+  test("keeps snapshotted port behavior across TOCTOU mutation and normalizes hostile thrown values", async () => {
+    const actorUserId = `boundary-actor-${randomUUID()}`;
+    await seedUser(actorUserId);
+    let originalCalls = 0;
+    let replacementCalls = 0;
+    const port = {
+      async resolveVisibleReportTarget() { originalCalls += 1; return null; },
+      async readRevisionTarget() { return null; },
+    };
+    const reportService = createReportService({ ...factoryInput(), catalogModeration: port });
+    port.resolveVisibleReportTarget = async () => { replacementCalls += 1; throw new Error("replacement escaped"); };
+    await expect(reportService.submitReport({ requester: { kind: "authenticated", actorUserId }, target: { ...target, targetId: randomUUID() }, reason: "privacy", detail: null }))
+      .rejects.toMatchObject({ code: "REPORT_NOT_ACCEPTED", status: 400 });
+    expect({ originalCalls, replacementCalls }).toEqual({ originalCalls: 1, replacementCalls: 0 });
+
+    let prototypeTrapCalls = 0;
+    const hostileThrown = new Proxy(new Error("raw hostile error"), {
+      getPrototypeOf() { prototypeTrapCalls += 1; throw new Error("prototype trap escaped"); },
+    });
+    await expect(createReportService({ ...factoryInput(), clock: () => { throw hostileThrown; } }).issueChallenge({ networkKeyHmac }))
+      .rejects.toMatchObject({ code: "REPORT_NOT_ACCEPTED", status: 400 });
+
+    const failingDb = {
+      insert() { throw hostileThrown; },
+      async transaction() { throw hostileThrown; },
+    };
+    await expect(createReportService({ ...factoryInput(), db: failingDb as never }).submitReport({ requester: { kind: "authenticated", actorUserId }, target, reason: "privacy", detail: null }))
+      .rejects.toMatchObject({ code: "REPORT_NOT_ACCEPTED", status: 400 });
+    let resultTrapCalls = 0;
+    const hostileResult = new Proxy({}, { get() { resultTrapCalls += 1; throw new Error("database result trap escaped"); } });
+    const returningDb = { async transaction() { return hostileResult; } };
+    await expect(createReportService({ ...factoryInput(), db: returningDb as never }).submitReport({ requester: { kind: "authenticated", actorUserId }, target, reason: "privacy", detail: null }))
+      .rejects.toMatchObject({ code: "REPORT_NOT_ACCEPTED", status: 400 });
+    expect(prototypeTrapCalls).toBe(0);
+    expect(resultTrapCalls).toBe(1);
+  });
+
   test("concurrent exact duplicate submissions produce one logical authenticated report", async () => {
     const actorUserId = `actor-${randomUUID()}`;
     await seedUser(actorUserId);
@@ -205,10 +294,99 @@ describe("contextual report submission", () => {
     expect(await connection.db.select().from(publicVisibilityHolds)).toEqual([]);
   });
 
+  test("passes the transaction to the snapshotted port and cannot commit before resolution", async () => {
+    const actorUserId = `transaction-port-${randomUUID()}`;
+    await seedUser(actorUserId);
+    const transactionTarget = { targetType: "page", targetId: randomUUID(), publicationRevisionId: randomUUID() } as const;
+    await schemaClient`
+      insert into creator_pages (id, user_id, draft_version, initialized_from_revision_id, created_at, updated_at)
+      values (${transactionTarget.targetId}, ${actorUserId}, 1, ${randomUUID()}, ${now.toISOString()}, ${now.toISOString()})`;
+    await schemaClient`
+      insert into creator_publication_revisions
+        (id, page_id, revision_number, canonical_handle, display_name, short_introduction,
+         primary_discipline, secondary_disciplines, taxonomy_version, policy_version,
+         actor_user_id, actor_session_id, expected_draft_version, request_id, published_at)
+      values (${transactionTarget.publicationRevisionId}, ${transactionTarget.targetId}, 1, 'transaction-port', 'Transaction Port', 'Introduction',
+        'illustration', array[]::text[], 'creator-discipline-v1', 'general-audience-v1',
+        ${actorUserId}, 'transaction-port-session', 1, 'transaction-port-publication', ${now.toISOString()})`;
+    let resolveStarted!: () => void;
+    let releaseResolve!: () => void;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    let receivedRootDatabase = true;
+    const reportService = createReportService({
+      ...factoryInput(),
+      catalogModeration: {
+        async resolveVisibleReportTarget(database, candidate) {
+          receivedRootDatabase = database === connection.db;
+          resolveStarted();
+          await release;
+          return { target: candidate, pageId: transactionTarget.targetId, creatorUserId: actorUserId, canonicalHandle: "transaction-port", displayName: "Transaction Port", showcaseTitle: null, mediaAssetIds: [] };
+        },
+        async readRevisionTarget() { return null; },
+      },
+    });
+    const pending = reportService.submitReport({ requester: { kind: "authenticated", actorUserId }, target: transactionTarget, reason: "privacy", detail: null });
+    await started;
+    expect(receivedRootDatabase).toBe(false);
+    expect(await connection.db.select().from(publicContentReports).where(eq(publicContentReports.reporterUserId, actorUserId))).toEqual([]);
+    releaseResolve();
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
   test("target exhaustion stays uniform and does not use requester 429 semantics", async () => {
     const actorUserId = `target-limited-actor-${randomUUID()}`;
     await seedUser(actorUserId);
     await expect(service().submitReport({ requester: { kind: "authenticated", actorUserId }, target, reason: "privacy", detail: null }))
       .rejects.toMatchObject({ code: "REPORT_NOT_ACCEPTED", status: 400 });
+  });
+
+  test("serializes challenge issuance at five active rows per network", async () => {
+    const cappedNetwork = `hmac-sha256:v1:${"u".repeat(43)}`;
+    const settled = await Promise.allSettled(Array.from({ length: 6 }, () => service().issueChallenge({ networkKeyHmac: cappedNetwork })));
+    expect(settled.filter((item) => item.status === "fulfilled")).toHaveLength(5);
+    expect(settled.filter((item) => item.status === "rejected")).toHaveLength(1);
+    expect(settled.find((item) => item.status === "rejected")).toMatchObject({ reason: { code: "REPORT_NOT_ACCEPTED", status: 429 } });
+    const rows = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, cappedNetwork));
+    expect(rows.filter((row) => row.consumedAt === null && row.expiresAt > now)).toHaveLength(5);
+  });
+
+  test("deletes a deterministic bounded batch of expired challenges during issuance", async () => {
+    const cleanupNetwork = `hmac-sha256:v1:${"v".repeat(43)}`;
+    await connection.db.insert(publicReportChallenges).values(Array.from({ length: 23 }, (_, index) => ({
+      id: randomUUID(),
+      tokenHash: `sha256:v1:${Buffer.from(`expired-${index}`.padEnd(32, "x")).toString("base64url").slice(0, 43)}`,
+      networkKeyHmac: cleanupNetwork,
+      issuedAt: new Date(now.getTime() - 1_200_000 - index),
+      expiresAt: new Date(now.getTime() - 600_000 - index),
+      consumedAt: null,
+    })));
+    await service().issueChallenge({ networkKeyHmac: cleanupNetwork });
+    const rows = await connection.db.select().from(publicReportChallenges).where(eq(publicReportChallenges.networkKeyHmac, cleanupNetwork));
+    expect(rows).toHaveLength(4);
+    expect(rows.filter((row) => row.expiresAt <= now)).toHaveLength(3);
+  });
+
+  test("does not persist guest rejection telemetry before valid proof-of-work", async () => {
+    const botNetwork = `hmac-sha256:v1:${"w".repeat(43)}`;
+    const invalidTarget = { ...target, targetId: randomUUID() };
+    const before = await connection.db.select().from(publicReportSecurityEvents).where(eq(publicReportSecurityEvents.networkKeyHmac, botNetwork));
+    await Promise.allSettled(Array.from({ length: 8 }, () => service().submitReport({
+      requester: { kind: "guest", networkKeyHmac: botNetwork }, target: invalidTarget,
+      reason: "privacy", detail: null, challenge: { token: "invalid", solution: 0 },
+    })));
+    const after = await connection.db.select().from(publicReportSecurityEvents).where(eq(publicReportSecurityEvents.networkKeyHmac, botNetwork));
+    expect(after).toHaveLength(before.length);
+  });
+
+  test("bounds concurrent authenticated rejection telemetry per requester window", async () => {
+    const actorUserId = `rejected-bound-${randomUUID()}`;
+    await seedUser(actorUserId);
+    await Promise.allSettled(Array.from({ length: 12 }, () => service().submitReport({
+      requester: { kind: "authenticated", actorUserId }, target: { ...target, targetId: randomUUID() },
+      reason: "privacy", detail: null,
+    })));
+    const rows = await connection.db.select().from(publicReportSecurityEvents).where(eq(publicReportSecurityEvents.actorUserId, actorUserId));
+    expect(rows.filter((row) => row.outcome === "rejected")).toHaveLength(10);
   });
 });

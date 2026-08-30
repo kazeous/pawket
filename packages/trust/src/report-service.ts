@@ -71,6 +71,10 @@ const REQUESTER_WINDOW_MS = 15 * 60_000;
 const GUEST_REQUESTER_LIMIT = 5;
 const ACTOR_REQUESTER_LIMIT = 10;
 const TARGET_REVISION_LIMIT = 3;
+const ACTIVE_CHALLENGE_LIMIT = 5;
+const CHALLENGE_CLEANUP_LIMIT = 20;
+const GUEST_REJECTION_LIMIT = 5;
+const ACTOR_REJECTION_LIMIT = 10;
 const CHALLENGE_DIFFICULTY = 18 as const;
 const TOKEN = /^[A-Za-z0-9_-]+[.][A-Za-z0-9_-]{43}$/u;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/u;
@@ -80,6 +84,11 @@ const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as objec
 const arrayBufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "buffer")?.get;
 const arrayByteOffsetGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteOffset")?.get;
 const arrayByteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength")?.get;
+const TRANSACTION_ISSUED = Object.freeze({ issued: true });
+const TRANSACTION_CAPPED = Object.freeze({ capped: true });
+const TRANSACTION_ACCEPTED = Object.freeze({ accepted: true });
+const TRANSACTION_REJECTED = Object.freeze({ rejected: true });
+const TRANSACTION_EXHAUSTED = Object.freeze({ exhausted: true });
 
 export class PublicReportError extends Error {
   readonly code = "REPORT_NOT_ACCEPTED" as const;
@@ -103,8 +112,7 @@ function snapshotKey(value: Uint8Array): Buffer {
     const copy = Buffer.alloc(byteLength);
     Uint8Array.prototype.set.call(copy, new Uint8Array(sourceBuffer, byteOffset, byteLength));
     return copy;
-  } catch (error) {
-    if (error instanceof PublicReportError) throw error;
+  } catch {
     fail();
   }
 }
@@ -116,8 +124,7 @@ function safeNow(clock: () => Date): Date {
     const time = Reflect.apply(dateGetTime, value, []) as number;
     if (!Number.isFinite(time) || !Number.isInteger(time)) fail();
     return new Date(time);
-  } catch (error) {
-    if (error instanceof PublicReportError) throw error;
+  } catch {
     fail();
   }
 }
@@ -127,8 +134,7 @@ function safeNonce(provider: () => string): string {
     const value = provider();
     if (typeof value !== "string" || !NONCE.test(value)) fail();
     return value;
-  } catch (error) {
-    if (error instanceof PublicReportError) throw error;
+  } catch {
     fail();
   }
 }
@@ -266,9 +272,13 @@ function targetHashes(target: ReportTarget) {
   };
 }
 
-async function lockAbuseKeys(tx: PawketTransaction, requester: SafeRequester, targetHash: string, revisionHash: string) {
+async function lockRequester(tx: PawketTransaction, requester: SafeRequester) {
   const requesterKey = requester.kind === "guest" ? requester.networkKeyHmac : requester.actorUserId;
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`pawket.trust.requester.${requester.kind}.${requesterKey}`}, 0))`);
+}
+
+async function lockAbuseKeys(tx: PawketTransaction, requester: SafeRequester, targetHash: string, revisionHash: string) {
+  await lockRequester(tx, requester);
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`pawket.trust.target.${targetHash}.${revisionHash}`}, 0))`);
 }
 
@@ -288,6 +298,20 @@ async function insertSecurityEvent(
     createdAt: input.now,
     expiresAt: new Date(input.now.getTime() + SECURITY_RETENTION_MS),
   });
+}
+
+async function insertRejectedSecurityEventIfAllowed(
+  tx: PawketTransaction,
+  input: { requester: SafeRequester; targetHash: string; revisionHash: string; category: RejectCategory; now: Date },
+) {
+  const cutoff = new Date(input.now.getTime() - REQUESTER_WINDOW_MS);
+  const rows = input.requester.kind === "guest"
+    ? await tx.execute<{ count: number }>(sql`select count(*)::int as count from public_report_security_events where outcome = 'rejected' and network_key_hmac = ${input.requester.networkKeyHmac} and created_at >= ${cutoff.toISOString()}::timestamptz and expires_at > ${input.now.toISOString()}::timestamptz`)
+    : await tx.execute<{ count: number }>(sql`select count(*)::int as count from public_report_security_events where outcome = 'rejected' and actor_user_id = ${input.requester.actorUserId} and created_at >= ${cutoff.toISOString()}::timestamptz and expires_at > ${input.now.toISOString()}::timestamptz`);
+  const limit = input.requester.kind === "guest" ? GUEST_REJECTION_LIMIT : ACTOR_REJECTION_LIMIT;
+  if ((rows[0]?.count ?? 0) < limit) {
+    await insertSecurityEvent(tx, { ...input, outcome: "rejected" });
+  }
 }
 
 async function countAccepted(tx: PawketTransaction, requester: SafeRequester, targetHash: string, revisionHash: string, now: Date) {
@@ -319,37 +343,144 @@ async function duplicateExists(tx: PawketTransaction, requester: SafeRequester, 
   return rows[0]?.present === true;
 }
 
-export function createReportService(input: Readonly<{
+type ReportServiceFactoryInput = Readonly<{
   db: PawketDatabase;
   catalogModeration: CatalogModerationSnapshotPort;
   lookupHmacKey: Uint8Array;
   clock?: () => Date;
   nonce?: () => string;
-}>) {
-  const key = snapshotKey(input.lookupHmacKey);
-  const clock = input.clock ?? (() => new Date());
-  const nonce = input.nonce ?? (() => randomBytes(24).toString("base64url"));
-  const resolveVisible = input.catalogModeration.resolveVisibleReportTarget.bind(input.catalogModeration);
+}>;
+
+function snapshotOwnMethod(value: unknown, name: string): { receiver: object; method: (...arguments_: never[]) => unknown } | null {
+  try {
+    if (value === null || typeof value !== "object" || isProxy(value)) return null;
+    if (Reflect.ownKeys(value).some((key) => typeof key === "symbol")) return null;
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, name);
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function" || isProxy(descriptor.value)) return null;
+    return { receiver: value, method: descriptor.value as (...arguments_: never[]) => unknown };
+  } catch {
+    return null;
+  }
+}
+
+function snapshotInheritedMethod(value: unknown, name: string): { receiver: object; method: (...arguments_: never[]) => unknown } | null {
+  try {
+    if (value === null || typeof value !== "object" || isProxy(value)) return null;
+    let owner: object | null = value;
+    for (let depth = 0; owner && depth < 8; depth += 1) {
+      if (isProxy(owner)) return null;
+      const descriptor = Reflect.getOwnPropertyDescriptor(owner, name);
+      if (descriptor) {
+        if (!("value" in descriptor) || typeof descriptor.value !== "function" || isProxy(descriptor.value)) return null;
+        return { receiver: value, method: descriptor.value as (...arguments_: never[]) => unknown };
+      }
+      owner = Reflect.getPrototypeOf(owner);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotCallable(value: unknown): ((...arguments_: never[]) => unknown) | null {
+  try {
+    return typeof value === "function" && !isProxy(value) ? value as (...arguments_: never[]) => unknown : null;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotFactory(input: unknown) {
+  try {
+    const record = readExactOwnDataRecord(input, [
+      ["db", "catalogModeration", "lookupHmacKey"],
+      ["db", "catalogModeration", "lookupHmacKey", "clock"],
+      ["db", "catalogModeration", "lookupHmacKey", "nonce"],
+      ["db", "catalogModeration", "lookupHmacKey", "clock", "nonce"],
+    ]);
+    if (!record) fail();
+    const transaction = snapshotInheritedMethod(record.db, "transaction");
+    const resolveVisible = snapshotOwnMethod(record.catalogModeration, "resolveVisibleReportTarget");
+    const readRevision = snapshotOwnMethod(record.catalogModeration, "readRevisionTarget");
+    const clock = record.clock === undefined ? (() => new Date()) : snapshotCallable(record.clock);
+    const nonce = record.nonce === undefined ? (() => randomBytes(24).toString("base64url")) : snapshotCallable(record.nonce);
+    if (!transaction || !resolveVisible || !readRevision || !clock || !nonce) fail();
+    return {
+      key: snapshotKey(record.lookupHmacKey as Uint8Array),
+      clock: clock as () => Date,
+      nonce: nonce as () => string,
+      runTransaction: <T>(callback: (tx: PawketTransaction) => Promise<T>) => Reflect.apply(
+        transaction.method,
+        transaction.receiver,
+        [callback],
+      ) as Promise<T>,
+      resolveVisible: (tx: PawketTransaction, target: ReportTarget) => Reflect.apply(
+        resolveVisible.method,
+        resolveVisible.receiver,
+        [tx, target],
+      ) as Promise<unknown>,
+    };
+  } catch {
+    fail();
+  }
+}
+
+export function createReportService(input: ReportServiceFactoryInput) {
+  const { key, clock, nonce, runTransaction, resolveVisible } = snapshotFactory(input);
 
   return {
     async issueChallenge(command: Readonly<{ networkKeyHmac: string }>): Promise<ReportChallenge> {
       const normalized = normalizeIssueCommand(command);
       if (!normalized) fail();
       const now = safeNow(clock);
-      const challenge = issueToken(now, safeNonce(nonce), key);
+      let challenge: ReportChallenge;
       try {
-        await input.db.insert(publicReportChallenges).values({
-          id: randomUUID(),
-          tokenHash: hashOpaqueToken(challenge.token, "public-report-challenge"),
-          networkKeyHmac: normalized.networkKeyHmac,
-          issuedAt: now,
-          expiresAt: new Date(Date.parse(challenge.expiresAt)),
-          consumedAt: null,
-        });
-        return challenge;
+        challenge = issueToken(now, safeNonce(nonce), key);
       } catch {
         fail();
       }
+      let result: unknown;
+      try {
+        result = await runTransaction(async (tx) => {
+          const requester = { kind: "guest", networkKeyHmac: normalized.networkKeyHmac } as const;
+          await lockRequester(tx, requester);
+          await tx.execute(sql`
+            with expired as (
+              select id
+              from public_report_challenges
+              where network_key_hmac = ${normalized.networkKeyHmac}
+                and expires_at <= ${now.toISOString()}::timestamptz
+              order by expires_at, id
+              limit ${CHALLENGE_CLEANUP_LIMIT}
+            )
+            delete from public_report_challenges as challenge
+            using expired
+            where challenge.id = expired.id
+          `);
+          const active = await tx.execute<{ count: number }>(sql`
+            select count(*)::int as count
+            from public_report_challenges
+            where network_key_hmac = ${normalized.networkKeyHmac}
+              and consumed_at is null
+              and expires_at > ${now.toISOString()}::timestamptz
+          `);
+          if ((active[0]?.count ?? 0) >= ACTIVE_CHALLENGE_LIMIT) return TRANSACTION_CAPPED;
+          await tx.insert(publicReportChallenges).values({
+            id: randomUUID(),
+            tokenHash: hashOpaqueToken(challenge.token, "public-report-challenge"),
+            networkKeyHmac: normalized.networkKeyHmac,
+            issuedAt: now,
+            expiresAt: new Date(Date.parse(challenge.expiresAt)),
+            consumedAt: null,
+          });
+          return TRANSACTION_ISSUED;
+        });
+      } catch {
+        fail();
+      }
+      if (result === TRANSACTION_CAPPED) fail(429);
+      if (result !== TRANSACTION_ISSUED) fail();
+      return challenge;
     },
 
     async submitReport(command: SubmitReportCommand): Promise<Readonly<{ accepted: true; reportReference: string }>> {
@@ -357,21 +488,17 @@ export function createReportService(input: Readonly<{
       if (!normalized) fail();
       const now = safeNow(clock);
       const hashes = targetHashes(normalized.target);
+      let result: unknown;
+      let acceptedReportReference: string | null = null;
       try {
-        const result = await input.db.transaction(async (tx) => {
+        result = await runTransaction(async (tx) => {
           let rawSnapshot: unknown;
           try { rawSnapshot = await resolveVisible(tx, normalized.target); } catch { rawSnapshot = null; }
           const snapshot = exactModerationSnapshot(rawSnapshot, normalized.target);
-          if (!snapshot) {
-            await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "invalid_target", now });
-            return { kind: "rejected" as const, category: "invalid_target" as const };
-          }
-
           await lockAbuseKeys(tx, normalized.requester, hashes.targetHash, hashes.revisionHash);
           if (normalized.requester.kind === "guest") {
             if (!normalized.challenge || !verifySignedToken(normalized.challenge.token, normalized.challenge.solution, now, key)) {
-              await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "invalid_challenge", now });
-              return { kind: "rejected" as const, category: "invalid_challenge" as const };
+              return TRANSACTION_REJECTED;
             }
             const consumed = await tx.update(publicReportChallenges).set({ consumedAt: now }).where(and(
               eq(publicReportChallenges.tokenHash, hashOpaqueToken(normalized.challenge.token, "public-report-challenge")),
@@ -381,24 +508,27 @@ export function createReportService(input: Readonly<{
               gt(publicReportChallenges.expiresAt, now),
             )).returning({ id: publicReportChallenges.id });
             if (consumed.length !== 1) {
-              await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "invalid_challenge", now });
-              return { kind: "rejected" as const, category: "invalid_challenge" as const };
+              return TRANSACTION_REJECTED;
             }
           }
 
           const counts = await countAccepted(tx, normalized.requester, hashes.targetHash, hashes.revisionHash, now);
           const requesterLimit = normalized.requester.kind === "guest" ? GUEST_REQUESTER_LIMIT : ACTOR_REQUESTER_LIMIT;
           if (counts.requester >= requesterLimit) {
-            await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "rate_limited", now });
-            return { kind: "rejected" as const, category: "rate_limited" as const, status: 429 as const };
+            await insertRejectedSecurityEventIfAllowed(tx, { requester: normalized.requester, ...hashes, category: "rate_limited", now });
+            return TRANSACTION_EXHAUSTED;
+          }
+          if (!snapshot) {
+            await insertRejectedSecurityEventIfAllowed(tx, { requester: normalized.requester, ...hashes, category: "invalid_target", now });
+            return TRANSACTION_REJECTED;
           }
           if (counts.target >= TARGET_REVISION_LIMIT) {
-            await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "rate_limited", now });
-            return { kind: "rejected" as const, category: "rate_limited" as const, status: 400 as const };
+            await insertRejectedSecurityEventIfAllowed(tx, { requester: normalized.requester, ...hashes, category: "rate_limited", now });
+            return TRANSACTION_REJECTED;
           }
           if (await duplicateExists(tx, normalized.requester, normalized.target, hashes.targetHash, hashes.revisionHash, now)) {
-            await insertSecurityEvent(tx, { requester: normalized.requester, ...hashes, outcome: "rejected", category: "duplicate", now });
-            return { kind: "rejected" as const, category: "duplicate" as const };
+            await insertRejectedSecurityEventIfAllowed(tx, { requester: normalized.requester, ...hashes, category: "duplicate", now });
+            return TRANSACTION_REJECTED;
           }
 
           const reportId = randomUUID();
@@ -426,14 +556,15 @@ export function createReportService(input: Readonly<{
             payload: { reportId, targetType: normalized.target.targetType, reason: normalized.reason },
             occurredAt: now,
           });
-          return { kind: "accepted" as const, reportReference };
+          acceptedReportReference = reportReference;
+          return TRANSACTION_ACCEPTED;
         });
-        if (result.kind === "rejected") fail("status" in result ? result.status : 400);
-        return { accepted: true, reportReference: result.reportReference };
-      } catch (error) {
-        if (error instanceof PublicReportError) throw error;
+      } catch {
         fail();
       }
+      if (result === TRANSACTION_EXHAUSTED) fail(429);
+      if (result !== TRANSACTION_ACCEPTED || acceptedReportReference === null) fail();
+      return { accepted: true, reportReference: acceptedReportReference };
     },
   };
 }

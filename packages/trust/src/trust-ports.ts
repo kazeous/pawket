@@ -17,6 +17,12 @@ export type ModerationTargetSnapshot = Readonly<{
 }>;
 
 export type CatalogModerationSnapshotPort = Readonly<{
+  /**
+   * The implementation must acquire the creator-page visibility fence and
+   * retain it through the caller's transaction commit. Catalog publish,
+   * unpublish, suspension clearing, and future Task 12 hold writers must lock
+   * that page row first, before their own subordinate rows/fences.
+   */
   resolveVisibleReportTarget(
     db: PawketDatabase | PawketTransaction,
     target: ReportTarget,

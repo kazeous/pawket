@@ -149,6 +149,7 @@ export const publicContentTriageEvents = pgTable("public_content_triage_events",
   occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }).notNull(),
 }, (table) => [
   index("public_content_triage_events_report_idx").on(table.reportId, table.occurredAt, table.id),
+  uniqueIndex("public_content_triage_events_report_version_uidx").on(table.reportId, table.resultingReportVersion),
   check("public_content_triage_events_action_check", sql`${table.action} in ('dismiss','hide','restore')`),
   check("public_content_triage_events_state_check", sql`${table.beforeState} in (${sql.raw(states)}) and ${table.afterState} in (${sql.raw(states)})`),
   check("public_content_triage_events_version_check", sql`${table.expectedReportVersion} > 0 and ${table.resultingReportVersion} = ${table.expectedReportVersion} + 1`),

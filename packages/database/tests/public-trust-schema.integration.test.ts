@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { drizzle } from "drizzle-orm/postgres-js";
+import { sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -105,9 +106,47 @@ describe("public trust persistence", () => {
     await expect(insertReport({ detail: "contains\ncontrol" })).rejects.toThrow();
   });
 
+  test("defers every report transition until one exact immutable triage fact exists", async () => {
+    const reportId = await insertReport();
+    await expect(client`
+      select * from trust_transition_public_content_report(
+        ${reportId}, 1, 'dismissed', ${new Date(now.getTime() + 1_000).toISOString()}
+      )
+    `).rejects.toThrow(/exact immutable triage fact/i);
+  });
+
+  test("an alternate same-signature function cannot authorize a factless transition", async () => {
+    const reportId = await insertReport();
+    const attackerSchema = `trust_attacker_${process.pid}_${Date.now()}`;
+    await client.unsafe(`create schema "${attackerSchema}"`);
+    await client.unsafe(`
+      create function "${attackerSchema}".trust_transition_public_content_report(
+        p_report_id uuid, p_expected_version integer, p_next_state text, p_updated_at timestamptz
+      ) returns void language plpgsql as $$
+      begin
+        perform set_config('pawket.trust_report_transition', p_report_id::text, true);
+        update "${schemaName}".public_content_reports
+        set state = p_next_state, version = version + 1, updated_at = p_updated_at
+        where id = p_report_id and version = p_expected_version;
+      end;
+      $$
+    `);
+    try {
+      await expect(client.begin(async (tx) => {
+        await tx.unsafe(`select "${attackerSchema}".trust_transition_public_content_report($1, 1, 'dismissed', $2)`, [
+          reportId,
+          new Date(now.getTime() + 1_000).toISOString(),
+        ]);
+      })).rejects.toThrow(/exact immutable triage fact/i);
+    } finally {
+      await client.unsafe(`drop schema if exists "${attackerSchema}" cascade`);
+    }
+  });
+
   test("report and triage history are append-only", async () => {
     const reportId = await insertReport();
     const eventId = randomUUID();
+    const transitionAt = new Date(now.getTime() + 1_000);
     const event = {
       id: eventId,
       reportId,
@@ -121,15 +160,17 @@ describe("public trust persistence", () => {
       resultingReportVersion: 2,
       beforeState: "open",
       afterState: "dismissed",
-      occurredAt: now,
+      occurredAt: transitionAt,
     } as const;
     await expect(db.insert(publicContentTriageEvents).values(event)).rejects.toThrow(/resulting report state|version/i);
-    await client`select * from trust_transition_public_content_report(${reportId}, 1, 'dismissed', ${new Date(now.getTime() + 1_000).toISOString()})`;
-    await db.insert(publicContentTriageEvents).values(event);
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select * from trust_transition_public_content_report(${reportId}, 1, 'dismissed', ${transitionAt.toISOString()}::timestamptz)`);
+      await tx.insert(publicContentTriageEvents).values(event);
+    });
     await expect(client`delete from public_content_reports where id = ${reportId}`).rejects.toThrow(/append-only/i);
     await expect(client`update public_content_reports set reason = 'other' where id = ${reportId}`).rejects.toThrow(/triage|append-only/i);
     await client`select set_config('pawket.trust_report_transition', ${reportId}, true)`;
-    await expect(client`update public_content_reports set state = 'closed', version = 3 where id = ${reportId}`).rejects.toThrow(/approved triage function/i);
+    await expect(client`update public_content_reports set state = 'closed', version = 3 where id = ${reportId}`).rejects.toThrow(/invalid.*transition/i);
     await expect(client`delete from public_content_triage_events where id = ${eventId}`).rejects.toThrow(/append-only/i);
   });
 
@@ -191,6 +232,7 @@ describe("public trust persistence", () => {
   test("active holds cannot be deleted or retargeted and release only once", async () => {
     const reportId = await insertReport();
     const holdId = randomUUID();
+    const hiddenAt = new Date(now.getTime() + 500);
     await expect(client`
       insert into public_visibility_holds
         (id, report_id, target_type, target_id, publication_revision_id, reason,
@@ -198,18 +240,36 @@ describe("public trust persistence", () => {
       values (${randomUUID()}, ${reportId}, 'page', ${randomUUID()}, ${revisionId}, 'privacy_review',
         ${userId}, 'owner-session', 'wrong-hide-request', 1, ${now.toISOString()})
     `).rejects.toThrow(/bind.*source report|exact target/i);
-    await client`select * from trust_transition_public_content_report(${reportId}, 1, 'held', ${new Date(now.getTime() + 500).toISOString()})`;
-    await db.insert(publicVisibilityHolds).values({
-      id: holdId, reportId, targetType: "page", targetId: pageId,
-      publicationRevisionId: revisionId, reason: "privacy_review",
-      actorUserId: userId, actorSessionId: "owner-session", requestId: "hide-request",
-      version: 1, createdAt: now, releasedAt: null, releasedByUserId: null,
-      releasedBySessionId: null, releaseReason: null, releaseRequestId: null,
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select * from trust_transition_public_content_report(${reportId}, 1, 'held', ${hiddenAt.toISOString()}::timestamptz)`);
+      await tx.insert(publicVisibilityHolds).values({
+        id: holdId, reportId, targetType: "page", targetId: pageId,
+        publicationRevisionId: revisionId, reason: "privacy_review",
+        actorUserId: userId, actorSessionId: "owner-session", requestId: "hide-request",
+        version: 1, createdAt: now, releasedAt: null, releasedByUserId: null,
+        releasedBySessionId: null, releaseReason: null, releaseRequestId: null,
+      });
+      await tx.insert(publicContentTriageEvents).values({
+        id: randomUUID(), reportId, holdId, action: "hide", actorUserId: userId,
+        actorSessionId: "owner-session", reason: "privacy_review", requestId: "hide-request",
+        expectedReportVersion: 1, resultingReportVersion: 2, beforeState: "open", afterState: "held",
+        occurredAt: hiddenAt,
+      });
     });
     await expect(client`delete from public_visibility_holds where id = ${holdId}`).rejects.toThrow(/append-only/i);
     await expect(client`update public_visibility_holds set target_id = ${randomUUID()} where id = ${holdId}`).rejects.toThrow(/append-only|retarget/i);
     await expect(client`update public_visibility_holds set released_at = ${new Date(now.getTime() + 500).toISOString()}, version = 2 where id = ${holdId}`).rejects.toThrow();
-    await client`update public_visibility_holds set released_at = ${new Date(now.getTime() + 1_000).toISOString()}, released_by_user_id = ${userId}, released_by_session_id = 'owner-session', release_reason = 'restored', release_request_id = 'restore-request', version = 2 where id = ${holdId}`;
+    const restoredAt = new Date(now.getTime() + 1_000);
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select * from trust_transition_public_content_report(${reportId}, 2, 'closed', ${restoredAt.toISOString()}::timestamptz)`);
+      await tx.execute(sql`update public_visibility_holds set released_at = ${restoredAt.toISOString()}::timestamptz, released_by_user_id = ${userId}, released_by_session_id = 'owner-session', release_reason = 'restored', release_request_id = 'restore-request', version = 2 where id = ${holdId}`);
+      await tx.insert(publicContentTriageEvents).values({
+        id: randomUUID(), reportId, holdId, action: "restore", actorUserId: userId,
+        actorSessionId: "owner-session", reason: "restored", requestId: "restore-request",
+        expectedReportVersion: 2, resultingReportVersion: 3, beforeState: "held", afterState: "closed",
+        occurredAt: restoredAt,
+      });
+    });
     await expect(client`update public_visibility_holds set released_at = ${new Date(now.getTime() + 2_000).toISOString()} where id = ${holdId}`).rejects.toThrow(/final|once/i);
   });
 });

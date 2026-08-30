@@ -112,6 +112,7 @@ CREATE INDEX "public_content_reports_queue_idx" ON "public_content_reports" USIN
 CREATE INDEX "public_content_reports_duplicate_idx" ON "public_content_reports" USING btree ("target_type","target_id","publication_revision_id","reporter_user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "public_content_reports_authenticated_target_uidx" ON "public_content_reports" USING btree ("target_type","target_id","publication_revision_id","reporter_user_id") WHERE "public_content_reports"."reporter_user_id" is not null;--> statement-breakpoint
 CREATE INDEX "public_content_triage_events_report_idx" ON "public_content_triage_events" USING btree ("report_id","occurred_at","id");--> statement-breakpoint
+CREATE UNIQUE INDEX "public_content_triage_events_report_version_uidx" ON "public_content_triage_events" USING btree ("report_id","resulting_report_version");--> statement-breakpoint
 CREATE UNIQUE INDEX "public_report_challenges_token_hash_uidx" ON "public_report_challenges" USING btree ("token_hash");--> statement-breakpoint
 CREATE INDEX "public_report_challenges_expiry_idx" ON "public_report_challenges" USING btree ("expires_at","id");--> statement-breakpoint
 CREATE INDEX "public_report_security_events_expiry_idx" ON "public_report_security_events" USING btree ("expires_at","id");--> statement-breakpoint
@@ -122,6 +123,7 @@ CREATE UNIQUE INDEX "public_visibility_holds_active_target_uidx" ON "public_visi
 CREATE INDEX "public_visibility_holds_report_idx" ON "public_visibility_holds" USING btree ("report_id","created_at");--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_report_target() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF NEW.state <> 'open' OR NEW.version <> 1 OR NEW.updated_at <> NEW.created_at THEN
@@ -150,19 +152,11 @@ BEFORE INSERT ON public_content_reports
 FOR EACH ROW EXECUTE FUNCTION trust_guard_report_target();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_report_mutation() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
-DECLARE
-  call_stack text;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'public content reports are append-only' USING ERRCODE = '55000';
-  END IF;
-
-  GET DIAGNOSTICS call_stack = PG_CONTEXT;
-  IF current_setting('pawket.trust_report_transition', true) IS DISTINCT FROM OLD.id::text
-     OR position('PL/pgSQL function trust_transition_public_content_report(uuid,integer,text,timestamp with time zone)' in call_stack) = 0
-  THEN
-    RAISE EXCEPTION 'public content report state changes require the approved triage function' USING ERRCODE = '55000';
   END IF;
 
   IF ROW(NEW.id, NEW.report_reference, NEW.target_type, NEW.target_id,
@@ -195,12 +189,12 @@ CREATE OR REPLACE FUNCTION trust_transition_public_content_report(
   p_updated_at timestamptz
 ) RETURNS TABLE (report_id uuid, report_state text, report_version integer)
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF p_next_state NOT IN ('dismissed', 'held', 'closed') THEN
     RAISE EXCEPTION 'invalid public content report triage transition' USING ERRCODE = '22023';
   END IF;
-  PERFORM set_config('pawket.trust_report_transition', p_report_id::text, true);
   RETURN QUERY
     UPDATE public_content_reports report
     SET state = p_next_state, version = report.version + 1, updated_at = p_updated_at
@@ -208,8 +202,34 @@ BEGIN
     RETURNING report.id, report.state, report.version;
 END;
 $$;--> statement-breakpoint
+CREATE OR REPLACE FUNCTION trust_require_exact_triage_fact() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+  matching_fact_count integer;
+BEGIN
+  SELECT count(*)::integer INTO matching_fact_count
+  FROM public_content_triage_events event
+  WHERE event.report_id = NEW.id
+    AND event.expected_report_version = OLD.version
+    AND event.resulting_report_version = NEW.version
+    AND event.before_state = OLD.state
+    AND event.after_state = NEW.state
+    AND event.occurred_at = NEW.updated_at;
+  IF matching_fact_count <> 1 THEN
+    RAISE EXCEPTION 'public content report transition requires one exact immutable triage fact' USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;--> statement-breakpoint
+CREATE CONSTRAINT TRIGGER public_content_reports_exact_triage_fact
+AFTER UPDATE ON public_content_reports
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION trust_require_exact_triage_fact();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_challenge_mutation() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -232,6 +252,7 @@ BEFORE UPDATE OR DELETE ON public_report_challenges
 FOR EACH ROW EXECUTE FUNCTION trust_guard_challenge_mutation();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_security_event_mutation() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' AND OLD.expires_at <= statement_timestamp() THEN
@@ -245,6 +266,7 @@ BEFORE UPDATE OR DELETE ON public_report_security_events
 FOR EACH ROW EXECUTE FUNCTION trust_guard_security_event_mutation();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_visibility_hold() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
@@ -277,6 +299,12 @@ BEGIN
   THEN
     RAISE EXCEPTION 'public visibility holds are append-only and cannot be retargeted' USING ERRCODE = '55000';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public_content_reports report
+    WHERE report.id = NEW.report_id AND report.state = 'closed'
+  ) THEN
+    RAISE EXCEPTION 'public visibility hold release requires the matching closed report transition' USING ERRCODE = '23514';
+  END IF;
   RETURN NEW;
 END;
 $$;--> statement-breakpoint
@@ -285,6 +313,7 @@ BEFORE INSERT OR UPDATE OR DELETE ON public_visibility_holds
 FOR EACH ROW EXECUTE FUNCTION trust_guard_visibility_hold();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_guard_triage_event() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   RAISE EXCEPTION 'public content triage events are append-only' USING ERRCODE = '55000';
@@ -295,6 +324,7 @@ BEFORE UPDATE OR DELETE ON public_content_triage_events
 FOR EACH ROW EXECUTE FUNCTION trust_guard_triage_event();--> statement-breakpoint
 CREATE OR REPLACE FUNCTION trust_validate_triage_event_binding() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path FROM CURRENT
 AS $$
 BEGIN
   IF NOT EXISTS (
@@ -302,6 +332,7 @@ BEGIN
     WHERE report.id = NEW.report_id
       AND report.state = NEW.after_state
       AND report.version = NEW.resulting_report_version
+      AND report.updated_at = NEW.occurred_at
   ) THEN
     RAISE EXCEPTION 'triage event must bind the resulting report state and version' USING ERRCODE = '23514';
   END IF;
