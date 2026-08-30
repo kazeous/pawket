@@ -21,6 +21,7 @@ export {
   recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
   setOutboxMetrics,
+  setPublicMediaCleanupOldestEligibleMetric,
   setRevisionAttestationMetric,
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,

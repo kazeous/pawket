@@ -42,7 +42,7 @@ export type { CreatorCapability, CreatorCapabilityPort } from "./media-ports.js"
 
 export type UploadIntentResult = Readonly<{ assetId: string; intentId: string; expiresAt: Date; url: string; requiredHeaders: Record<string, string> }>;
 export type CompletedUploadResult = Readonly<{ assetId: string; intentId: string; state: "pending"; sourceObjectVersionId: string; actualSourceBytes: number }>;
-export type DeliveryGrant = Readonly<{ location: { area: "derivative"; key: string; versionId: string }; contentLength: number; contentType: "image/webp" }>;
+export type DeliveryGrant = Readonly<{ location: { area: "derivative"; key: string; versionId: string }; contentLength: number; contentType: "image/webp"; contentHash: string }>;
 export type ReadyMediaProjection = Readonly<{ assetId: string; ownerUserId: string; purpose: MediaPurpose; derivatives: Readonly<Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }>> }>;
 type ReadyMediaRecord = { assetId: string; ownerUserId: string; purpose: MediaPurpose; derivatives: Partial<Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }>> };
 
@@ -360,9 +360,9 @@ export function createPublicMediaService(input: ServiceInput) {
   async function getDeliveryGrant(command: Readonly<{ assetId: string; variant: "thumb" | "display" | "large" }>): Promise<DeliveryGrant> {
     const safeCommand = readExactOwnRecord(command, ["assetId", "variant"]);
     if (!safeCommand || !validUuid(safeCommand.assetId) || !["thumb", "display", "large"].includes(safeCommand.variant as string) || !isMediaVariant(safeCommand.variant) || safeCommand.variant === "master") fail("INVALID_INPUT");
-    const [row] = await input.db.select({ objectKey: publicMediaDerivatives.objectKey, objectVersionId: publicMediaDerivatives.objectVersionId, byteSize: publicMediaDerivatives.byteSize }).from(publicMediaDerivatives).innerJoin(publicMediaAssets, eq(publicMediaAssets.id, publicMediaDerivatives.assetId)).where(and(eq(publicMediaDerivatives.assetId, safeCommand.assetId), eq(publicMediaDerivatives.variant, safeCommand.variant), eq(publicMediaAssets.state, "ready"))).limit(1);
-    if (!row || !row.objectKey || !isOpaqueVersionId(row.objectVersionId) || !Number.isSafeInteger(row.byteSize) || row.byteSize < 1) fail("MEDIA_NOT_READY");
-    return { location: { area: "derivative", key: row.objectKey, versionId: row.objectVersionId }, contentLength: row.byteSize, contentType: "image/webp" };
+    const [row] = await input.db.select({ objectKey: publicMediaDerivatives.objectKey, objectVersionId: publicMediaDerivatives.objectVersionId, byteSize: publicMediaDerivatives.byteSize, contentHash: publicMediaDerivatives.contentHash }).from(publicMediaDerivatives).innerJoin(publicMediaAssets, eq(publicMediaAssets.id, publicMediaDerivatives.assetId)).where(and(eq(publicMediaDerivatives.assetId, safeCommand.assetId), eq(publicMediaDerivatives.variant, safeCommand.variant), eq(publicMediaAssets.state, "ready"))).limit(1);
+    if (!row || !row.objectKey || !isOpaqueVersionId(row.objectVersionId) || !Number.isSafeInteger(row.byteSize) || row.byteSize < 1 || !/^sha256:v1:[A-Za-z0-9_-]{43}$/u.test(row.contentHash)) fail("MEDIA_NOT_READY");
+    return { location: { area: "derivative", key: row.objectKey, versionId: row.objectVersionId }, contentLength: row.byteSize, contentType: "image/webp", contentHash: row.contentHash };
   }
 
   return { createUploadIntent, completeUpload, resolveReadyAssets, resolveReadyAssetsBatch, getDeliveryGrant };

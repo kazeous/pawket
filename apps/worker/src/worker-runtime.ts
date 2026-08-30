@@ -26,6 +26,7 @@ import {
   setOutboxMetrics,
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,
+  setPublicMediaCleanupOldestEligibleMetric,
   setWorkerLastSuccessMetric,
   setWorkerScanHealthMetric,
   withRequestContext,
@@ -34,7 +35,10 @@ import { scanVerificationDepositRefundWindows } from "@pawket/payments";
 import {
   processPublicMediaAsset,
   PublicMediaWorkerRetryableError,
+  runPublicMediaCleanup,
   type ObjectStoragePort,
+  type PublicMediaCleanupRule,
+  type PublicMediaRetentionHoldPort,
 } from "@pawket/public-media";
 import {
   MEDIA_PROCESS_JOB,
@@ -126,6 +130,7 @@ export type WorkerRuntimeDependencies = {
   scanRefundWindows: typeof scanVerificationDepositRefundWindows;
   readBacklogMetrics: typeof readOperationalBacklogMetrics;
   runRetention: typeof runRetentionSweep;
+  runMediaCleanup: typeof runPublicMediaCleanup;
   hostname(): string;
   randomUUID(): string;
 };
@@ -147,6 +152,15 @@ export type StartWorkerOptions = {
   publicMedia?: {
     storage: ObjectStoragePort;
     concurrency: number;
+    cleanup?: {
+      holds: PublicMediaRetentionHoldPort;
+      mode: "report_only" | "enforce";
+      retentionMode: "report_only" | "enforce";
+      globalPause: boolean;
+      acceptanceReference?: string;
+      batchSize: number;
+      scanIntervalMs: number;
+    };
   };
   healthState?: WorkerHealthState;
   retention?: {
@@ -197,6 +211,7 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   scanRefundWindows: scanVerificationDepositRefundWindows,
   readBacklogMetrics: readOperationalBacklogMetrics,
   runRetention: runRetentionSweep,
+  runMediaCleanup: runPublicMediaCleanup,
   hostname,
   randomUUID,
 };
@@ -539,6 +554,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (options.healthState) {
       options.healthState.initializedAt = Date.now();
       options.healthState.stopping = false;
+      options.healthState.publicMediaCleanupConfigured = options.publicMedia?.cleanup !== undefined;
+      options.healthState.publicMediaCleanupMaximumAgeMs = options.publicMedia?.cleanup
+        ? options.publicMedia.cleanup.scanIntervalMs + 300_000
+        : null;
+      options.healthState.lastPublicMediaCleanupScanSucceededAt = null;
+      options.healthState.oldestPublicMediaCleanupCandidateAt = null;
     }
   } catch {
     await startupCleanup();
@@ -550,6 +571,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let currentDispatch: Promise<void> | undefined;
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
+  let lastMediaCleanupScanAt = 0;
   let stopPromise: Promise<void> | undefined;
   let resolveStopped!: () => void;
   const whenStopped = new Promise<void>((resolve) => {
@@ -561,6 +583,95 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.retention) {
     setWorkerScanHealthMetric({ scan: "retention", healthy: false });
   }
+  if (options.publicMedia?.cleanup) {
+    setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
+  }
+
+  const cleanupRules: readonly PublicMediaCleanupRule[] = [
+    "processed_source",
+    "failed_quarantine",
+    "ready_unreferenced",
+    "superseded_derivative",
+  ];
+
+  const scanMediaCleanupIfDue = async (scanAt: number): Promise<void> => {
+    const cleanup = options.publicMedia?.cleanup;
+    if (!cleanup || scanAt - lastMediaCleanupScanAt < cleanup.scanIntervalMs) return;
+    lastMediaCleanupScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
+    try {
+      const result = await dependencies.runMediaCleanup({
+        db: database.db,
+        storage: options.publicMedia!.storage,
+        holds: cleanup.holds,
+        now: new Date(scanAt),
+        batchSize: cleanup.batchSize,
+        mode: cleanup.mode,
+        retentionMode: cleanup.retentionMode,
+        globalPause: cleanup.globalPause,
+        ...(cleanup.acceptanceReference === undefined
+          ? {}
+          : { acceptanceReference: cleanup.acceptanceReference }),
+      });
+      for (const rule of cleanupRules) {
+        for (const disposition of ["candidate", "protected", "processed", "failed"] as const) {
+          recordRetentionMetrics({
+            dataset: rule,
+            mode: cleanup.mode,
+            disposition,
+            count: result.counts[rule][disposition],
+          });
+        }
+      }
+      if (options.healthState) {
+        options.healthState.oldestPublicMediaCleanupCandidateAt =
+          result.oldestEligibleAt?.getTime() ?? null;
+      }
+      setPublicMediaCleanupOldestEligibleMetric({
+        timestampSeconds: result.oldestEligibleAt === null
+          ? null
+          : result.oldestEligibleAt.getTime() / 1_000,
+      });
+      if (result.failedCount > 0) {
+        logger.error(
+          {
+            category: "public_media_cleanup_scan_failed",
+            workerId,
+            mode: cleanup.mode,
+            failedCount: result.failedCount,
+          },
+          "Public media cleanup scan failed",
+        );
+        return;
+      }
+      setWorkerLastSuccessMetric({
+        scan: "public_media_cleanup",
+        timestampSeconds: scanAt / 1_000,
+      });
+      setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: true });
+      if (options.healthState) {
+        options.healthState.lastPublicMediaCleanupScanSucceededAt = scanAt;
+      }
+      logger.info(
+        {
+          workerId,
+          mode: cleanup.mode,
+          paused: cleanup.globalPause,
+          candidateCount: result.candidateCount,
+          protectedCount: result.protectedCount,
+          processedCount: result.processedCount,
+          failedCount: result.failedCount,
+        },
+        "Public media cleanup scan completed",
+      );
+    } catch {
+      setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
+      logger.error(
+        { category: "public_media_cleanup_scan_failed", workerId, mode: cleanup.mode },
+        "Public media cleanup scan failed",
+      );
+    }
+  };
 
   const scanRetentionIfDue = async (scanAt: number): Promise<void> => {
     if (
@@ -708,6 +819,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         "Outbox polling failed",
       );
     } finally {
+      await scanMediaCleanupIfDue(Date.now());
       await scanRetentionIfDue(Date.now());
       currentDispatch = undefined;
       if (running) {

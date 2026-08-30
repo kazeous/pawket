@@ -127,6 +127,12 @@ const workerScanHealthy = new Gauge({
   registers: [metricsRegistry],
 });
 
+const publicMediaCleanupOldestEligibleTimestampSeconds = new Gauge({
+  name: "pawket_public_media_cleanup_oldest_eligible_timestamp_seconds",
+  help: "Unix timestamp of the oldest public-media cleanup candidate, or zero when none are eligible.",
+  registers: [metricsRegistry],
+});
+
 const retentionRecordsTotal = new Counter({
   name: "pawket_retention_records_total",
   help: "Retention scan results by closed dataset, mode, and disposition.",
@@ -231,13 +237,17 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "refund", "retention"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention"]);
 const allowedRetentionDatasets = new Set([
   "application_content",
+  "failed_quarantine",
+  "processed_source",
   "provisional_accounts",
+  "ready_unreferenced",
   "receiving_accounts",
   "security_throttles",
   "sessions",
+  "superseded_derivative",
   "verifications",
 ]);
 const allowedRetentionModes = new Set(["enforce", "report_only"]);
@@ -447,6 +457,19 @@ export function setWorkerScanHealthMetric(input: {
     rejectUnsafeMetric();
   }
   workerScanHealthy.set({ scan: input.scan }, input.healthy ? 1 : 0);
+}
+
+export function setPublicMediaCleanupOldestEligibleMetric(input: {
+  timestampSeconds: number | null;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    input.timestampSeconds !== null &&
+    (!Number.isFinite(input.timestampSeconds) || input.timestampSeconds < 0)
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicMediaCleanupOldestEligibleTimestampSeconds.set(input.timestampSeconds ?? 0);
 }
 
 export function recordRetentionMetrics(input: {

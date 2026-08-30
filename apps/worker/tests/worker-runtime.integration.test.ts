@@ -43,6 +43,7 @@ import {
   startWorker,
   type WorkerRuntimeDependencies,
 } from "../src/worker-runtime.js";
+import { createWorkerHealthState } from "../src/worker-health.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const valkeyUrl = process.env.TEST_VALKEY_URL;
@@ -1275,6 +1276,151 @@ describe("worker shutdown", () => {
       "worker-valkey",
       "postgres",
     ]);
+  });
+
+  test("runs bounded public-media cleanup scans periodically and records freshness", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const doubles = runtimeDoubles();
+    const healthState = createWorkerHealthState();
+    const oldestEligibleAt = new Date("2026-08-20T00:00:00.000Z");
+    const cleanupCalls: unknown[] = [];
+    const runMediaCleanup = vi.fn(async (input: unknown) => {
+      cleanupCalls.push(input);
+      return {
+        results: [],
+        counts: {
+          processed_source: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+          failed_quarantine: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+          ready_unreferenced: { candidate: 1, protected: 1, processed: 0, failed: 0 },
+          superseded_derivative: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+        },
+        candidateCount: 1,
+        protectedCount: 1,
+        processedCount: 0,
+        failedCount: 0,
+        oldestEligibleAt,
+      };
+    });
+    const storage = {} as never;
+    const holds = { protectedAssetIds: vi.fn(async () => new Set<string>()) };
+    const dependencies = {
+      ...doubles.dependencies,
+      scanRefundWindows: vi.fn(async () => ({
+        dueSoon: 0,
+        dueToday: 0,
+        overdue: 0,
+        attention: 0,
+        outstandingAmountVnd: 0,
+      })),
+      readBacklogMetrics: vi.fn(async () => ({
+        outbox: { pending: 0, oldestAgeSeconds: 0 },
+        email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+      })),
+      runMediaCleanup,
+    } as Partial<WorkerRuntimeDependencies>;
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: doubles.signalSource,
+      dependencies,
+      healthState,
+      publicMedia: {
+        storage,
+        concurrency: 2,
+        cleanup: {
+          holds,
+          mode: "report_only",
+          retentionMode: "report_only",
+          globalPause: false,
+          batchSize: 25,
+          scanIntervalMs: 60_000,
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls[0]).toEqual(expect.objectContaining({
+      storage,
+      holds,
+      mode: "report_only",
+      retentionMode: "report_only",
+      globalPause: false,
+      batchSize: 25,
+    }));
+    expect(healthState.lastPublicMediaCleanupScanSucceededAt).toBe(Date.now());
+    expect(healthState.oldestPublicMediaCleanupCandidateAt).toBe(oldestEligibleAt.getTime());
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(cleanupCalls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cleanupCalls).toHaveLength(2);
+
+    await handle.stop();
+  });
+
+  test("marks public-media cleanup failure unhealthy without logging provider secrets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const doubles = runtimeDoubles();
+    const healthState = createWorkerHealthState();
+    const logOutput: string[] = [];
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: doubles.signalSource,
+      dependencies: {
+        ...doubles.dependencies,
+        scanRefundWindows: vi.fn(async () => ({
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        })),
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        })),
+        runMediaCleanup: vi.fn(async () => {
+          throw new Error("dummy-secret-source-key-version");
+        }),
+      } as Partial<WorkerRuntimeDependencies>,
+      healthState,
+      logger: {
+        info() {},
+        error(data, message) {
+          logOutput.push(JSON.stringify({ data, message }));
+        },
+      },
+      publicMedia: {
+        storage: {} as never,
+        concurrency: 2,
+        cleanup: {
+          holds: { protectedAssetIds: vi.fn(async () => new Set<string>()) },
+          mode: "report_only",
+          retentionMode: "report_only",
+          globalPause: false,
+          batchSize: 25,
+          scanIntervalMs: 60_000,
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await handle.stop();
+
+    expect(healthState.publicMediaCleanupConfigured).toBe(true);
+    expect(healthState.lastPublicMediaCleanupScanSucceededAt).toBeNull();
+    expect(logOutput.join("\n")).toContain("public_media_cleanup_scan_failed");
+    expect(logOutput.join("\n")).not.toContain("dummy-secret-source-key-version");
   });
 
   test("SIGTERM stops polling and closes BullMQ before Valkey and PostgreSQL", async () => {
