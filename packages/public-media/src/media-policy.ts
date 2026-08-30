@@ -58,3 +58,11 @@ export function sourceFormatForContentType(contentType: string): SourceFormat | 
   if (normalized === "image/webp") return "webp";
   return null;
 }
+
+/**
+ * Version IDs are provider-owned opaque values. Keep them printable and
+ * bounded at this boundary while allowing URL/base64-safe punctuation.
+ */
+export function isOpaqueVersionId(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= 512 && value === value.trim() && value.toLowerCase() !== "null" && /^[A-Za-z0-9/_+=.~\-]+$/u.test(value);
+}

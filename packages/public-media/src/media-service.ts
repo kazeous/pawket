@@ -21,7 +21,7 @@ import {
   MAX_SOURCE_BYTES,
   MAX_SOURCE_PIXELS,
   MediaPolicyError,
-  sourceFormatForContentType,
+  isOpaqueVersionId,
   UPLOAD_INTENT_LIFETIME_MS,
   type MediaPurpose,
   type SourceFormat,
@@ -84,15 +84,85 @@ export class PublicMediaServiceError extends Error {
 
 function fail(code: MediaPolicyError["code"]): never { throw new PublicMediaServiceError(code); }
 function validUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
-function validActor(actor: MediaActor): boolean { return Boolean(actor && typeof actor.userId === "string" && ID_KEY.test(actor.userId)); }
+function validActor(actor: MediaActor): boolean {
+  try {
+    if (!actor || typeof actor !== "object") return false;
+    const descriptor = Object.getOwnPropertyDescriptor(actor, "userId");
+    return Boolean(descriptor && "value" in descriptor && typeof descriptor.value === "string" && ID_KEY.test(descriptor.value));
+  } catch {
+    return false;
+  }
+}
 function validRequest(value: string | undefined): boolean { return typeof value === "string" && REQUEST_ID.test(value); }
+function exactKeys(value: object, expected: readonly string[]): boolean {
+  try {
+    const keys = Object.keys(value);
+    return keys.length === expected.length && keys.every((key) => expected.includes(key));
+  } catch {
+    return false;
+  }
+}
+function exactDataRecord(value: unknown, expected: readonly string[]): Record<string, unknown> | null {
+  try {
+    if (!value || typeof value !== "object" || !exactKeys(value, expected)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (!expected.every((key) => Boolean(descriptors[key] && "value" in descriptors[key]!))) return null;
+    return Object.fromEntries(expected.map((key) => [key, descriptors[key]!.value]));
+  } catch {
+    return null;
+  }
+}
+function exactPlainRecord(value: unknown, expected: readonly string[]): value is Record<string, unknown> {
+  try {
+    if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype || !exactKeys(value, expected)) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    return expected.every((key) => Boolean(descriptors[key] && "value" in descriptors[key]!));
+  } catch {
+    return false;
+  }
+}
+function validResolveReference(value: unknown): value is ResolveReference {
+  try {
+    if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Object.keys(descriptors);
+    if (!keys.includes("assetId") || !keys.includes("purpose") || keys.some((key) => key !== "assetId" && key !== "purpose" && key !== "altText")) return false;
+    if (!descriptors.assetId || !descriptors.purpose || !("value" in descriptors.assetId) || !("value" in descriptors.purpose)) return false;
+    if (descriptors.altText && !("value" in descriptors.altText)) return false;
+    return validUuid(descriptors.assetId.value) && isMediaPurpose(descriptors.purpose.value) && (!descriptors.altText || descriptors.altText.value === undefined || descriptors.altText.value === null || typeof descriptors.altText.value === "string");
+  } catch {
+    return false;
+  }
+}
+function validResolveBatchRequest(value: unknown): value is { ownerUserId: string; references: readonly ResolveReference[] } {
+  try {
+    if (!exactPlainRecord(value, ["ownerUserId", "references"])) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    return typeof descriptors.ownerUserId?.value === "string" && ID_KEY.test(descriptors.ownerUserId.value) && Array.isArray(descriptors.references?.value) && descriptors.references.value.every(validResolveReference);
+  } catch {
+    return false;
+  }
+}
+function normalizeResolveReference(value: unknown): ResolveReference | null {
+  try {
+    if (!validResolveReference(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value as object);
+    return { assetId: descriptors.assetId!.value as string, purpose: descriptors.purpose!.value as MediaPurpose, ...(descriptors.altText ? { altText: descriptors.altText.value as string | null | undefined } : {}) };
+  } catch {
+    return null;
+  }
+}
 function exactActiveCreator(value: unknown, userId: string): boolean {
-  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
-  const keys = Object.keys(value);
-  if (keys.length !== 2 || !keys.includes("userId") || !keys.includes("state")) return false;
-  const user = Object.getOwnPropertyDescriptor(value, "userId");
-  const state = Object.getOwnPropertyDescriptor(value, "state");
-  return Boolean(user && state && "value" in user && "value" in state && user.value === userId && state.value === "active");
+  try {
+    if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+    const keys = Object.keys(value);
+    if (keys.length !== 2 || !keys.includes("userId") || !keys.includes("state")) return false;
+    const user = Object.getOwnPropertyDescriptor(value, "userId");
+    const state = Object.getOwnPropertyDescriptor(value, "state");
+    return Boolean(user && state && "value" in user && "value" in state && user.value === userId && state.value === "active");
+  } catch {
+    return false;
+  }
 }
 function mapStorageError(error: unknown): never {
   if (error instanceof PublicMediaServiceError) throw error;
@@ -103,11 +173,11 @@ function parseIntentReference(value: string): { assetId: string; intentId: strin
   const match = /^media-upload-v1:([0-9a-f-]{36}):([0-9a-f-]{36})$/u.exec(value);
   return match && validUuid(match[1]) && validUuid(match[2]) ? { assetId: match[1], intentId: match[2] } : null;
 }
-function parseCompletionReference(value: string): CompletedUploadResult | null {
-  const match = /^media-complete-v1:([0-9a-f-]{36}):([0-9a-f-]{36}):([^:]+):(\d+)$/u.exec(value);
+function parseCompletionReference(value: string): { assetId: string; intentId: string; actualSourceBytes: number } | null {
+  const match = /^media-complete-v2:([0-9a-f-]{36}):([0-9a-f-]{36}):(\d{1,16})$/u.exec(value);
   if (!match || !validUuid(match[1]) || !validUuid(match[2])) return null;
-  const bytes = Number(match[4]);
-  return Number.isSafeInteger(bytes) && bytes > 0 ? { assetId: match[1], intentId: match[2], state: "pending", sourceObjectVersionId: match[3]!, actualSourceBytes: bytes } : null;
+  const bytes = Number(match[3]);
+  return Number.isSafeInteger(bytes) && bytes > 0 && bytes <= MAX_SOURCE_BYTES ? { assetId: match[1], intentId: match[2], actualSourceBytes: bytes } : null;
 }
 export function createPublicMediaService(input: ServiceInput) {
   const now = input.now ?? (() => new Date());
@@ -132,9 +202,11 @@ export function createPublicMediaService(input: ServiceInput) {
 
   async function createUploadIntent(command: CreateUploadIntentInput): Promise<UploadIntentResult> {
     if (input.publishingMode !== "general_audience") fail("PUBLISHING_DISABLED");
-    if (!command || typeof command !== "object" || !validActor(command.actor) || !isMediaPurpose(command.purpose) || !validRequest(command.requestId) || !ID_KEY.test(command.idempotencyKey)) fail("INVALID_INPUT");
-    const format = command.declaredSourceFormat ?? (command.contentType ? sourceFormatForContentType(command.contentType) : null);
-    const contentType = command.contentType?.trim().toLowerCase();
+    const normalizedCommand = exactDataRecord(command, ["actor", "purpose", "declaredSourceFormat", "contentType", "declaredBytes", "idempotencyKey", "requestId"]);
+    if (!normalizedCommand || !validActor(normalizedCommand.actor as MediaActor) || !isMediaPurpose(normalizedCommand.purpose) || !isSourceFormat(normalizedCommand.declaredSourceFormat) || typeof normalizedCommand.contentType !== "string" || typeof normalizedCommand.idempotencyKey !== "string" || !ID_KEY.test(normalizedCommand.idempotencyKey) || !validRequest(normalizedCommand.requestId as string)) fail("INVALID_INPUT");
+    command = normalizedCommand as CreateUploadIntentInput;
+    const format = command.declaredSourceFormat;
+    const contentType = command.contentType.trim().toLowerCase();
     const declaredBytes = command.declaredBytes;
     if (!format || !isSourceFormat(format) || !contentType || FORMAT_BY_MIME[contentType] !== format || !Number.isSafeInteger(declaredBytes) || (declaredBytes as number) < 1 || (declaredBytes as number) > MAX_SOURCE_BYTES) fail("INVALID_INPUT");
     const safeDeclaredBytes = declaredBytes as number;
@@ -181,7 +253,9 @@ export function createPublicMediaService(input: ServiceInput) {
   }
 
   async function completeUpload(command: CompleteUploadInput): Promise<CompletedUploadResult> {
-    if (!command || typeof command !== "object" || !validActor(command.actor) || !validUuid(command.assetId) || !validUuid(command.intentId) || !validRequest(command.requestId) || !ID_KEY.test(command.idempotencyKey)) fail("INVALID_INPUT");
+    const normalizedCommand = exactDataRecord(command, ["actor", "assetId", "intentId", "idempotencyKey", "requestId"]);
+    if (!normalizedCommand || !validActor(normalizedCommand.actor as MediaActor) || !validUuid(normalizedCommand.assetId) || !validUuid(normalizedCommand.intentId) || typeof normalizedCommand.idempotencyKey !== "string" || !ID_KEY.test(normalizedCommand.idempotencyKey) || !validRequest(normalizedCommand.requestId as string)) fail("INVALID_INPUT");
+    command = normalizedCommand as CompleteUploadInput;
     const at = now();
     try {
       return await input.db.transaction(async (tx) => {
@@ -199,8 +273,8 @@ export function createPublicMediaService(input: ServiceInput) {
           const started = await beginIdempotentCommand(tx, { actorUserId: command.actor.userId, commandScope: "public-media.upload-complete", keyHash: createLookupHmac({ value: command.idempotencyKey, context: "public-media-command-key", key: fingerprintKey }), requestFingerprint: fingerprint({ assetId: asset.id, intentId: intent.id, requestId: command.requestId ?? null }), expiresAt: new Date(at.getTime() + 24 * 60 * 60_000), now: at });
           if (started.kind === "replay") {
             const replay = parseCompletionReference(started.resultReference);
-            if (!replay || replay.assetId !== asset.id || replay.intentId !== intent.id || intent.state !== "completed" || replay.sourceObjectVersionId !== asset.sourceObjectVersionId || replay.actualSourceBytes !== asset.actualSourceBytes) fail("IDEMPOTENCY_CONFLICT");
-            return replay;
+            if (!replay || replay.assetId !== asset.id || replay.intentId !== intent.id || intent.state !== "completed" || !isOpaqueVersionId(asset.sourceObjectVersionId) || replay.actualSourceBytes !== asset.actualSourceBytes) fail("IDEMPOTENCY_CONFLICT");
+            return { assetId: asset.id, intentId: intent.id, state: "pending", sourceObjectVersionId: asset.sourceObjectVersionId, actualSourceBytes: asset.actualSourceBytes };
           }
           if (started.kind !== "acquired") fail("IDEMPOTENCY_CONFLICT");
           idempotencyRecordId = started.recordId;
@@ -215,20 +289,28 @@ export function createPublicMediaService(input: ServiceInput) {
         if (at.getTime() >= intent.expiresAt.getTime()) fail("UPLOAD_EXPIRED");
         if (intent.objectKey !== asset.sourceObjectKey) fail("UPLOAD_CONTENT_INVALID");
         const head = await input.storage.headObject({ area: "quarantine", key: intent.objectKey });
-        if (!head || typeof head.versionId !== "string" || !head.versionId || head.versionId === "null" || head.versionId.length > 512 || head.versionId !== head.versionId.trim() || /[\u0000-\u001f\u007f]/u.test(head.versionId) || typeof head.etag !== "string" || !head.etag || head.etag.length > 512 || head.etag !== head.etag.trim() || /[\u0000-\u001f\u007f]/u.test(head.etag) || !Number.isSafeInteger(head.contentLength) || head.contentLength <= 0 || head.contentLength !== asset.sourceAllocationBytes || head.contentLength !== intent.maxSourceBytes || head.contentLength > MAX_SOURCE_BYTES || head.contentType !== MIME_BY_FORMAT[asset.declaredSourceFormat as SourceFormat]) fail("UPLOAD_CONTENT_INVALID");
+        if (!head || !isOpaqueVersionId(head.versionId) || typeof head.etag !== "string" || !head.etag || head.etag.length > 512 || head.etag !== head.etag.trim() || /[\u0000-\u001f\u007f]/u.test(head.etag) || !Number.isSafeInteger(head.contentLength) || head.contentLength <= 0 || head.contentLength !== asset.sourceAllocationBytes || head.contentLength !== intent.maxSourceBytes || head.contentLength > MAX_SOURCE_BYTES || head.contentType !== MIME_BY_FORMAT[asset.declaredSourceFormat as SourceFormat]) fail("UPLOAD_CONTENT_INVALID");
         await tx.update(publicMediaUploadIntents).set({ state: "completed", completedAt: at, updatedAt: at }).where(eq(publicMediaUploadIntents.id, intent.id));
         await tx.update(publicMediaAssets).set({ state: "pending", sourceObjectVersionId: head.versionId, sourceObjectEtag: head.etag, actualSourceBytes: head.contentLength, updatedAt: at }).where(and(eq(publicMediaAssets.id, asset.id), eq(publicMediaAssets.state, "awaiting_upload")));
         const result: CompletedUploadResult = { assetId: asset.id, intentId: intent.id, state: "pending", sourceObjectVersionId: head.versionId, actualSourceBytes: head.contentLength };
         await insertOutboxEvent(tx, { eventType: "media.public_upload_completed.v1", eventVersion: 1, aggregateType: "public_media_asset", aggregateId: asset.id, payload: { assetId: asset.id, ownerUserId: asset.ownerUserId, purpose: asset.purpose }, occurredAt: at });
-        if (idempotencyRecordId && !await completeIdempotentCommand(tx, { recordId: idempotencyRecordId, resultReference: `media-complete-v1:${result.assetId}:${result.intentId}:${result.sourceObjectVersionId}:${result.actualSourceBytes}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
+        if (idempotencyRecordId && !await completeIdempotentCommand(tx, { recordId: idempotencyRecordId, resultReference: `media-complete-v2:${result.assetId}:${result.intentId}:${result.actualSourceBytes}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
         return result;
       });
     } catch (error) { return mapStorageError(error); }
   }
 
   async function resolveReadyAssets(db: PawketDatabase | PawketTransaction, ownerUserId: string, references: readonly ResolveReference[]): Promise<ReadonlyMap<string, ReadyMediaProjection>> {
-    if (!ID_KEY.test(ownerUserId) || !Array.isArray(references) || references.length === 0) return new Map();
-    const ids = [...new Set(references.filter((r) => validUuid(r.assetId) && isMediaPurpose(r.purpose)).map((r) => r.assetId))];
+    let safeReferences: (ResolveReference | null)[];
+    try {
+      if (typeof ownerUserId !== "string" || !ID_KEY.test(ownerUserId) || !Array.isArray(references) || references.length === 0 || !references.every(validResolveReference)) return new Map();
+      safeReferences = references.map(normalizeResolveReference);
+    } catch {
+      return new Map();
+    }
+    if (safeReferences.some((reference): reference is null => reference === null)) return new Map();
+    const resolvedReferences = safeReferences as ResolveReference[];
+    const ids = [...new Set(resolvedReferences.map((r) => r.assetId))];
     if (ids.length === 0) return new Map();
     const rows = await db.select({ assetId: publicMediaAssets.id, ownerUserId: publicMediaAssets.ownerUserId, purpose: publicMediaAssets.purpose, derivativeId: publicMediaDerivatives.id, variant: publicMediaDerivatives.variant, width: publicMediaDerivatives.width, height: publicMediaDerivatives.height }).from(publicMediaAssets).innerJoin(publicMediaDerivatives, eq(publicMediaDerivatives.assetId, publicMediaAssets.id)).where(and(inArray(publicMediaAssets.id, ids), eq(publicMediaAssets.ownerUserId, ownerUserId), eq(publicMediaAssets.state, "ready"), inArray(publicMediaDerivatives.variant, ["thumb", "display", "large"])));
     const byId = new Map<string, { assetId: string; ownerUserId: string; purpose: MediaPurpose; derivatives: Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }> }>();
@@ -239,7 +321,7 @@ export function createPublicMediaService(input: ServiceInput) {
       byId.set(row.assetId, current);
     }
     const result = new Map<string, ReadyMediaProjection>();
-    for (const reference of references) {
+    for (const reference of resolvedReferences) {
       const value = byId.get(reference.assetId);
       if (!value || value.purpose !== reference.purpose || !value.derivatives.thumb || !value.derivatives.display || !value.derivatives.large) continue;
       result.set(reference.assetId, { assetId: value.assetId, ownerUserId: value.ownerUserId, purpose: value.purpose, derivatives: { thumb: value.derivatives.thumb, display: value.derivatives.display, large: value.derivatives.large } });
@@ -248,9 +330,23 @@ export function createPublicMediaService(input: ServiceInput) {
   }
 
   async function resolveReadyAssetsBatch(db: PawketDatabase | PawketTransaction, requests: readonly Readonly<{ ownerUserId: string; references: readonly ResolveReference[] }>[]): Promise<ReadonlyMap<string, ReadonlyMap<string, ReadyMediaProjection>>> {
-    const owners = [...new Set(requests.filter((r) => ID_KEY.test(r.ownerUserId)).map((r) => r.ownerUserId))];
-    const ids = [...new Set(requests.flatMap((r) => r.references).filter((r) => validUuid(r.assetId) && isMediaPurpose(r.purpose)).map((r) => r.assetId))];
     const result = new Map<string, Map<string, ReadyMediaProjection>>();
+    let safeRequests: { ownerUserId: string; references: (ResolveReference | null)[] }[];
+    try {
+      if (!Array.isArray(requests) || requests.length === 0 || !requests.every(validResolveBatchRequest)) return result;
+      safeRequests = requests.map((request) => {
+        const descriptors = Object.getOwnPropertyDescriptors(request as object);
+        const references = (descriptors.references!.value as readonly unknown[]).map(normalizeResolveReference);
+        return { ownerUserId: descriptors.ownerUserId!.value as string, references };
+      });
+    } catch {
+      return result;
+    }
+    if (safeRequests.some((request) => request.references.some((reference): reference is null => reference === null))) return result;
+    const resolvedRequests = safeRequests as { ownerUserId: string; references: ResolveReference[] }[];
+    const owners = [...new Set(resolvedRequests.map((r) => r.ownerUserId))];
+    const ids = [...new Set(resolvedRequests.flatMap((r) => r.references).map((r) => r.assetId))];
+    for (const ownerUserId of owners) result.set(ownerUserId, new Map());
     if (owners.length === 0 || ids.length === 0) return result;
     const rows = await db.select({ assetId: publicMediaAssets.id, ownerUserId: publicMediaAssets.ownerUserId, purpose: publicMediaAssets.purpose, derivativeId: publicMediaDerivatives.id, variant: publicMediaDerivatives.variant, width: publicMediaDerivatives.width, height: publicMediaDerivatives.height }).from(publicMediaAssets).innerJoin(publicMediaDerivatives, eq(publicMediaDerivatives.assetId, publicMediaAssets.id)).where(and(inArray(publicMediaAssets.id, ids), inArray(publicMediaAssets.ownerUserId, owners), eq(publicMediaAssets.state, "ready"), inArray(publicMediaDerivatives.variant, ["thumb", "display", "large"])));
     const all = new Map<string, Map<string, ReadyMediaRecord>>();
@@ -261,7 +357,7 @@ export function createPublicMediaService(input: ServiceInput) {
       current.derivatives[row.variant] = { derivativeId: row.derivativeId, width: row.width, height: row.height };
       owner.set(row.assetId, current); all.set(row.ownerUserId, owner);
     }
-    for (const request of requests) {
+    for (const request of resolvedRequests) {
       const source = all.get(request.ownerUserId) ?? new Map();
       const out = new Map<string, ReadyMediaProjection>();
       for (const ref of request.references) {

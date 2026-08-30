@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, beforeAll, test } from "vitest";
-import { PutBucketVersioningCommand, S3Client } from "@aws-sdk/client-s3";
+import { S3Client } from "@aws-sdk/client-s3";
 
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
+import { deleteEveryObjectVersion, ensureVersionedBuckets } from "./s3-test-helpers.js";
 
 const endpoint = process.env.PUBLIC_MEDIA_S3_ENDPOINT ?? "http://localhost:9090";
 const region = process.env.PUBLIC_MEDIA_S3_REGION ?? "us-east-1";
@@ -22,37 +23,54 @@ async function readBytes(stream: NodeJS.ReadableStream): Promise<Uint8Array> {
 
 describe("private S3 object storage", () => {
   beforeAll(async () => {
-    for (const Bucket of [quarantineBucket, derivativeBucket]) await client.send(new PutBucketVersioningCommand({ Bucket, VersioningConfiguration: { Status: "Enabled" } }));
+    await ensureVersionedBuckets(client, [quarantineBucket, derivativeBucket]);
   });
 
   test("presigns, PUTs, HEADs, GETs, lists, overwrites, and deletes exact versions", async () => {
     const key = `quarantine/${randomUUID()}/${randomUUID()}`;
     const bytes = new Uint8Array([1, 2, 3]);
-    const grant = await storage.presignPut({ key, contentType: "image/png", contentLength: bytes.byteLength, expiresInSeconds: 900 });
-    expect(grant.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(900_000);
-    expect(new URL(grant.url).searchParams.get("X-Amz-SignedHeaders")).toContain("content-type");
-    expect(new URL(grant.url).searchParams.get("X-Amz-SignedHeaders")).toContain("content-length");
-    const response = await fetch(grant.url, { method: "PUT", headers: grant.requiredHeaders, body: bytes });
-    expect(response.ok).toBe(true);
-    const first = await storage.headObject({ area: "quarantine", key });
-    expect(first).toMatchObject({ contentLength: 3, contentType: "image/png", versionId: expect.any(String) });
-    await fetch(grant.url, { method: "PUT", headers: grant.requiredHeaders, body: new Uint8Array([4, 5, 6]) });
-    const second = await storage.headObject({ area: "quarantine", key });
-    expect(second?.versionId).not.toBe(first?.versionId);
-    expect(new Uint8Array(await readBytes(await storage.getObject({ area: "quarantine", key, versionId: first!.versionId! })))).toEqual(bytes);
-    expect(await storage.listObjectVersions({ area: "quarantine", key })).toEqual(expect.arrayContaining([{ versionId: first!.versionId, isDeleteMarker: false }, { versionId: second!.versionId, isDeleteMarker: false }]));
-    await storage.deleteObject({ area: "quarantine", key, versionId: first!.versionId! });
-    expect((await storage.listObjectVersions({ area: "quarantine", key })).map((version) => version.versionId)).not.toContain(first!.versionId);
+    try {
+      const grant = await storage.presignPut({ key, contentType: "image/png", contentLength: bytes.byteLength, expiresInSeconds: 900 });
+      expect(grant.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(900_000);
+      const signedUrl = new URL(grant.url);
+      expect(decodeURIComponent(signedUrl.searchParams.get("X-Amz-Credential") ?? "").split("/", 1)[0]).toBe(accessKeyId);
+      expect(signedUrl.searchParams.get("X-Amz-SignedHeaders")).toBe("content-length;content-type;host");
+      expect(grant.requiredHeaders).toEqual({ "content-type": "image/png", "content-length": "3" });
+      expect(grant.url).not.toContain(secretAccessKey);
+      expect(JSON.stringify(grant)).not.toContain(secretAccessKey);
+      const response = await fetch(grant.url, { method: "PUT", headers: grant.requiredHeaders, body: bytes });
+      expect(response.ok).toBe(true);
+      const first = await storage.headObject({ area: "quarantine", key });
+      expect(first).toMatchObject({ contentLength: 3, contentType: "image/png", versionId: expect.any(String) });
+      await fetch(grant.url, { method: "PUT", headers: grant.requiredHeaders, body: new Uint8Array([4, 5, 6]) });
+      const second = await storage.headObject({ area: "quarantine", key });
+      expect(second?.versionId).not.toBe(first?.versionId);
+      expect(new Uint8Array(await readBytes(await storage.getObject({ area: "quarantine", key, versionId: first!.versionId! })))).toEqual(bytes);
+      expect(await storage.listObjectVersions({ area: "quarantine", key })).toEqual(expect.arrayContaining([{ versionId: first!.versionId, isDeleteMarker: false }, { versionId: second!.versionId, isDeleteMarker: false }]));
+      await storage.deleteObject({ area: "quarantine", key, versionId: first!.versionId! });
+      expect((await storage.listObjectVersions({ area: "quarantine", key })).map((version) => version.versionId)).not.toContain(first!.versionId);
+    } finally {
+      await deleteEveryObjectVersion(storage, { area: "quarantine", key });
+    }
+    expect(await storage.listObjectVersions({ area: "quarantine", key })).toEqual([]);
   });
 
   test("stores private derivative SHA metadata and maps invalid/missing objects safely", async () => {
     const assetId = randomUUID();
     const key = `derivatives/${assetId}/display/${randomUUID()}.webp`;
     const hash = "sha256:v1:" + "a".repeat(43);
-    await storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([8, 9]), sha256: hash });
-    expect(await storage.headObject({ area: "derivative", key })).toMatchObject({ contentLength: 2, contentType: "image/webp", sha256: hash, versionId: expect.any(String) });
-    await expect(storage.headObject({ area: "invalid", key } as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
-    await expect(storage.presignPut({ key: "quarantine/nope", contentType: "image/gif", contentLength: 1, expiresInSeconds: 900 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
-    expect(await storage.headObject({ area: "quarantine", key: `quarantine/${randomUUID()}/${randomUUID()}` })).toBeNull();
+    try {
+      await storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([8, 9]), sha256: hash });
+      expect(await storage.headObject({ area: "derivative", key })).toMatchObject({ contentLength: 2, contentType: "image/webp", sha256: hash, versionId: expect.any(String) });
+      await expect(storage.headObject({ area: "invalid", key } as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      for (const versionId of [" null ", "NULL", "version\ncontrol", "x".repeat(513)]) {
+        await expect(storage.headObject({ area: "derivative", key, versionId })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      }
+      await expect(storage.presignPut({ key: "quarantine/nope", contentType: "image/gif", contentLength: 1, expiresInSeconds: 900 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      expect(await storage.headObject({ area: "quarantine", key: `quarantine/${randomUUID()}/${randomUUID()}` })).toBeNull();
+    } finally {
+      await deleteEveryObjectVersion(storage, { area: "derivative", key });
+    }
+    expect(await storage.listObjectVersions({ area: "derivative", key })).toEqual([]);
   });
 });

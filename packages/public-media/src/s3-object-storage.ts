@@ -9,7 +9,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import type { HeadObjectResult, ObjectLocation, ObjectStoragePort } from "./object-storage-port.js";
-import { MediaPolicyError } from "./media-policy.js";
+import { isOpaqueVersionId, MediaPolicyError } from "./media-policy.js";
 
 export type S3ObjectStorageOptions = Readonly<{
   endpoint: string;
@@ -36,7 +36,7 @@ function validateKey(key: string): void {
 function validateAreaKey(location: ObjectLocation): void {
   if (!location || typeof location !== "object") throw new MediaPolicyError("INVALID_INPUT");
   if (location.area !== "quarantine" && location.area !== "derivative") throw new MediaPolicyError("INVALID_INPUT");
-  if (location.versionId !== undefined && (typeof location.versionId !== "string" || !location.versionId || location.versionId === "null" || location.versionId.length > 512)) throw new MediaPolicyError("INVALID_INPUT");
+  if (location.versionId !== undefined && !isOpaqueVersionId(location.versionId)) throw new MediaPolicyError("INVALID_INPUT");
   validateKey(location.key);
   const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
   const pattern = location.area === "quarantine"
@@ -111,7 +111,7 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
         const etag = typeof result.ETag === "string" ? result.ETag.trim() : "";
         const sha256 = result.Metadata?.sha256;
         const contentLength = result.ContentLength;
-        if (typeof versionId !== "string" || !versionId || versionId === "null" || versionId.length > 512 || /[\u0000-\u001f\u007f]/u.test(versionId) || typeof contentLength !== "number" || !Number.isSafeInteger(contentLength) || contentLength < 0 || !contentType || contentType.length > 128 || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u.test(contentType) || !etag || etag.length > 512 || /[\u0000-\u001f\u007f]/u.test(etag) || (sha256 !== undefined && (typeof sha256 !== "string" || !/^sha256:v1:[A-Za-z0-9_-]{43}$/u.test(sha256)))) throw new MediaPolicyError("STORAGE_ERROR");
+        if (!isOpaqueVersionId(versionId) || typeof contentLength !== "number" || !Number.isSafeInteger(contentLength) || contentLength < 0 || !contentType || contentType.length > 128 || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u.test(contentType) || !etag || etag.length > 512 || /[\u0000-\u001f\u007f]/u.test(etag) || (sha256 !== undefined && (typeof sha256 !== "string" || !/^sha256:v1:[A-Za-z0-9_-]{43}$/u.test(sha256)))) throw new MediaPolicyError("STORAGE_ERROR");
         return {
           contentLength,
           contentType,
@@ -136,11 +136,11 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
           const result = await client.send(new ListObjectVersionsCommand({ Bucket: parts.Bucket, Prefix: parts.Key, KeyMarker: keyMarker, VersionIdMarker: versionIdMarker }));
           if (!result || typeof result !== "object" || (result.IsTruncated !== undefined && typeof result.IsTruncated !== "boolean") || (result.Versions !== undefined && !Array.isArray(result.Versions)) || (result.DeleteMarkers !== undefined && !Array.isArray(result.DeleteMarkers))) throw new MediaPolicyError("STORAGE_ERROR");
           for (const item of result.Versions ?? []) {
-            if (!item || typeof item !== "object" || typeof item.Key !== "string" || item.Key !== parts.Key || typeof item.VersionId !== "string" || !item.VersionId || item.VersionId === "null" || item.VersionId.length > 512 || /[\u0000-\u001f\u007f]/u.test(item.VersionId)) throw new MediaPolicyError("STORAGE_ERROR");
+            if (!item || typeof item !== "object" || typeof item.Key !== "string" || item.Key !== parts.Key || !isOpaqueVersionId(item.VersionId)) throw new MediaPolicyError("STORAGE_ERROR");
             output.push({ versionId: item.VersionId, isDeleteMarker: false });
           }
           for (const item of result.DeleteMarkers ?? []) {
-            if (!item || typeof item !== "object" || typeof item.Key !== "string" || item.Key !== parts.Key || typeof item.VersionId !== "string" || !item.VersionId || item.VersionId === "null" || item.VersionId.length > 512 || /[\u0000-\u001f\u007f]/u.test(item.VersionId)) throw new MediaPolicyError("STORAGE_ERROR");
+            if (!item || typeof item !== "object" || typeof item.Key !== "string" || item.Key !== parts.Key || !isOpaqueVersionId(item.VersionId)) throw new MediaPolicyError("STORAGE_ERROR");
             output.push({ versionId: item.VersionId, isDeleteMarker: true });
           }
           if (result.IsTruncated !== true) return output;

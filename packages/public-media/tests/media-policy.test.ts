@@ -5,6 +5,7 @@ import {
   MAX_SOURCE_PIXELS,
   MEDIA_VARIANTS,
   UPLOAD_INTENT_LIFETIME_MS,
+  isOpaqueVersionId,
   sourceFormatForContentType,
 } from "../src/media-policy.js";
 
@@ -23,5 +24,20 @@ describe("public media policy", () => {
     expect(sourceFormatForContentType("image/webp")).toBe("webp");
     expect(sourceFormatForContentType("image/gif")).toBeNull();
     expect(sourceFormatForContentType("image/svg+xml")).toBeNull();
+  });
+
+  test.each([
+    ["version/with+opaque=_-~", true],
+    ["/+=._~-", true],
+    [" null ", false],
+    ["NULL", false],
+    ["version with space", false],
+    ["version\nnewline", false],
+    [`version${String.fromCharCode(0x85)}control`, false],
+    ["x".repeat(512), true],
+    ["x".repeat(513), false],
+    [null, false],
+  ])("validates provider version IDs (%s)", (value, expected) => {
+    expect(isOpaqueVersionId(value)).toBe(expected);
   });
 });
