@@ -58,8 +58,8 @@ async function responseBytes(response: Response): Promise<Buffer> {
   return Buffer.from(await response.arrayBuffer());
 }
 
-function expectSafeHeaders(response: Response): void {
-  expect(response.headers.get("cache-control")).toBe("public, no-store");
+function expectSafeHeaders(response: Response, cacheControl = "public, no-store"): void {
+  expect(response.headers.get("cache-control")).toBe(cacheControl);
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
 }
@@ -164,16 +164,24 @@ describe("public media delivery", () => {
     expect(calls.getObject).not.toHaveBeenCalled();
   });
 
-  test("authorizes private preview only for an authenticated owning active creator and exact draft reference", async () => {
+  test.each(["GET", "HEAD"] as const)("marks an authorized private preview %s response private and non-cacheable", async (method) => {
     const { handlers, calls } = fixture();
     const response = await handlers.deliver(
       new Request(`https://pawket.test/media/${assetId}/thumb?preview=1`, {
+        method,
         headers: { authorization: "Bearer private-session" },
       }),
       assetId,
       "thumb",
     );
     expect(response.status).toBe(200);
+    expectSafeHeaders(response, "private, no-store");
+    if (method === "HEAD") {
+      expect(response.body).toBeNull();
+      expect(calls.getObject).not.toHaveBeenCalled();
+    } else {
+      expect(await responseBytes(response)).toEqual(bytes);
+    }
     expect(calls.authenticate).toHaveBeenCalledOnce();
     expect(calls.previewVisibility).toHaveBeenCalledOnce();
     expect(calls.previewVisibility.mock.calls[0]?.slice(1)).toEqual(["creator-001", assetId, "thumb"]);
@@ -191,7 +199,9 @@ describe("public media delivery", () => {
       catalog: { isDerivativePublic: vi.fn(async () => true), isDerivativePreviewable: previewVisibility },
     });
     const response = await handlers.deliver(
-      new Request(`https://pawket.test/media/${assetId}/large?preview=1`),
+      new Request(`https://pawket.test/media/${assetId}/large?preview=1`, {
+        headers: { authorization: "Bearer neutral-preview" },
+      }),
       assetId,
       "large",
     );

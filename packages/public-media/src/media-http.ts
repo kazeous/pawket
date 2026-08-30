@@ -37,11 +37,12 @@ type Input = Readonly<{
   onMetric?: (metric: Readonly<{ operation: "delivery"; outcome: "succeeded" | "storage_unavailable" | "not_found" }>) => void;
 }>;
 
-const COMMON_HEADERS = {
-  "cache-control": "public, no-store",
+const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "content-security-policy": "default-src 'none'; sandbox",
 };
+const PUBLIC_HEADERS = { ...SECURITY_HEADERS, "cache-control": "public, no-store" };
+const PRIVATE_HEADERS = { ...SECURITY_HEADERS, "cache-control": "private, no-store" };
 const REQUEST_METHOD_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "method")?.get;
 const REQUEST_URL_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "url")?.get;
 const REQUEST_HEADERS_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "headers")?.get;
@@ -67,14 +68,14 @@ const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 
 function notFound(input: Input): Response {
   metric(input, "not_found");
-  return new Response(null, { status: 404, headers: COMMON_HEADERS });
+  return new Response(null, { status: 404, headers: PUBLIC_HEADERS });
 }
 
 function unavailable(input: Input, headOnly = false): Response {
   metric(input, "storage_unavailable");
   return new Response(headOnly ? null : JSON.stringify({ code: "MEDIA_UNAVAILABLE" }), {
     status: 503,
-    headers: { ...COMMON_HEADERS, "content-type": "application/json; charset=utf-8" },
+    headers: { ...PUBLIC_HEADERS, "content-type": "application/json; charset=utf-8" },
   });
 }
 
@@ -277,17 +278,20 @@ export function createMediaHttpHandlers(input: Input): MediaHttpHandlers {
     const request = snapshotRequest(requestValue);
     if (!request) return notFound(input);
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return new Response(null, { status: 405, headers: { ...COMMON_HEADERS, allow: "GET, HEAD" } });
+      return new Response(null, { status: 405, headers: { ...PUBLIC_HEADERS, allow: "GET, HEAD" } });
     }
     if (typeof assetIdValue !== "string" || typeof variantValue !== "string") return notFound(input);
     const assetId = assetIdValue;
     const variant = variantValue;
     if (!UUID.test(assetId) || !isDeliverableVariant(variant)) return notFound(input);
 
+    const isPreview = previewRequested(request.url);
+    let responseHeaders = PUBLIC_HEADERS;
     try {
-      if (previewRequested(request.url)) {
+      if (isPreview) {
         const session = exactSession(await input.authenticate(request.headers));
         if (!session || await input.catalog.isDerivativePreviewable(input.db, session.userId, assetId, variant) !== true) return notFound(input);
+        responseHeaders = PRIVATE_HEADERS;
       } else if (await input.catalog.isDerivativePublic(input.db, assetId, variant) !== true) {
         return notFound(input);
       }
@@ -308,7 +312,7 @@ export function createMediaHttpHandlers(input: Input): MediaHttpHandlers {
     try {
       if (!exactHead(await input.storage.headObject(grant.location), grant)) return unavailable(input, request.method === "HEAD");
       const headers = {
-        ...COMMON_HEADERS,
+        ...responseHeaders,
         "content-type": "image/webp",
         "content-length": String(grant.contentLength),
       };
