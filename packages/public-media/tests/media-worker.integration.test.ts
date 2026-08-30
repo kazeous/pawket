@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { readdir, readFile } from "node:fs/promises";
 
@@ -30,6 +31,7 @@ import type {
 import { ObjectStorageConflictError } from "../src/object-storage-port.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
+const valkeyUrl = process.env.TEST_VALKEY_URL;
 const migrationsDirectory = new URL("../../database/migrations/", import.meta.url);
 const initialAt = new Date("2026-08-30T08:00:00.000Z");
 
@@ -50,14 +52,15 @@ async function migrate(database: PawketDatabase, filename: string): Promise<void
 
 async function createSchemaDatabase(
   schemaName: string,
-): Promise<{ db: PawketDatabase; close: () => Promise<void> }> {
+): Promise<{ db: PawketDatabase; close: () => Promise<void>; url: string }> {
   const root = createDatabase(databaseUrl!);
   try {
     await root.db.execute(sql.raw(`create schema "${schemaName}"`));
   } finally {
     await root.close();
   }
-  return createDatabase(`${databaseUrl!}?options=-csearch_path%3D${schemaName},public`);
+  const url = `${databaseUrl!}?options=-csearch_path%3D${schemaName},public`;
+  return { ...createDatabase(url), url };
 }
 
 type StoredVersion = {
@@ -180,7 +183,7 @@ class VersionedMemoryStorage implements ObjectStoragePort {
 
 describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
   const schemaName = `public_media_worker_${process.pid}_${Date.now()}`;
-  let connection: { db: PawketDatabase; close: () => Promise<void> };
+  let connection: { db: PawketDatabase; close: () => Promise<void>; url: string };
   let sourceBytes: Uint8Array;
 
   beforeAll(async () => {
@@ -434,7 +437,10 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
         workerId: "runtime-media-worker-one",
         now: () => new Date(initialAt.getTime() + 1_000),
       }),
-    ).rejects.toMatchObject({ code: "processing_lease_active" });
+    ).rejects.toMatchObject({
+      code: "processing_lease_active",
+      retryAt: new Date(initialAt.getTime() + 10 * 60_000),
+    });
 
     release.resolve();
     await expect(first).resolves.toMatchObject({ state: "ready" });
@@ -445,6 +451,186 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toMatchObject({ outcomeCode: "succeeded" });
   });
+
+  test.skipIf(!valkeyUrl)(
+    "BullMQ defers repeated early delivery until an expired hard-death lease can be taken over",
+    async () => {
+      const queueModulePath = "../../queue/src/index.js";
+      const runtimeModulePath = "../../../apps/worker/src/worker-runtime.js";
+      const { createMediaQueue, createQueueConnection, MEDIA_PROCESS_JOB } = await import(
+        queueModulePath
+      );
+      const { startWorker } = await import(runtimeModulePath);
+      const isolatedUrl = new URL(valkeyUrl!);
+      isolatedUrl.pathname = "/14";
+      const runtimeValkeyUrl = isolatedUrl.toString();
+      const inspectionConnection = createQueueConnection(runtimeValkeyUrl);
+      const queue = createMediaQueue(inspectionConnection);
+      const handles: Array<{ stop(): Promise<void> }> = [];
+      const logger = { info() {}, error() {} };
+
+      const waitForJobState = async (
+        state: "completed" | "delayed",
+        minimumAttemptsStarted: number,
+        timeoutMs = 10_000,
+      ) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const job = await queue.getJob(fixture.assetId);
+          if (
+            job &&
+            (await job.getState()) === state &&
+            job.attemptsStarted >= minimumAttemptsStarted
+          ) {
+            return job;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const job = await queue.getJob(fixture.assetId);
+        throw new Error(
+          `Timed out waiting for ${state}; actual=${job ? await job.getState() : "missing"}; ` +
+            `attemptsMade=${job?.attemptsMade ?? "missing"}; ` +
+            `attemptsStarted=${job?.attemptsStarted ?? "missing"}`,
+        );
+      };
+
+      const storage = new VersionedMemoryStorage();
+      const fixture = await seedPendingAsset(storage);
+      const leaseExpiresAtMs = Date.now() + 5_000;
+      const crashedClaimAt = new Date(leaseExpiresAtMs - 10 * 60_000);
+
+      try {
+        await queue.waitUntilReady();
+        await queue.obliterate({ force: true });
+
+        await expect(
+          processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+            workerId: "hard-death-runtime",
+            now: () => crashedClaimAt,
+            checkpoint: async (stage) => {
+              if (stage === "after_claim") throw new Error("simulated-hard-death");
+            },
+          }),
+        ).rejects.toThrow("simulated-hard-death");
+
+        const earlyHandle = await startWorker({
+          databaseUrl: connection.url,
+          valkeyUrl: runtimeValkeyUrl,
+          concurrency: 1,
+          batchSize: 10,
+          leaseMs: 30_000,
+          signalSource: new EventEmitter(),
+          logger,
+          publicMedia: { storage, concurrency: 1 },
+          dependencies: {
+            hostname: () => "early-runtime",
+            randomUUID: () => "00000000-0000-4000-8000-000000000001",
+          },
+        });
+        handles.push(earlyHandle);
+
+        await queue.add(
+          MEDIA_PROCESS_JOB,
+          { assetId: fixture.assetId },
+          {
+            attempts: 8,
+            backoff: { type: "exponential", delay: 1_000 },
+            removeOnComplete: false,
+            removeOnFail: false,
+          },
+        );
+        const firstDelay = await waitForJobState("delayed", 1);
+        expect(firstDelay.attemptsMade).toBe(0);
+
+        await firstDelay.promote();
+        const secondDelay = await waitForJobState("delayed", 2);
+        expect(secondDelay.attemptsMade).toBe(0);
+        const attemptsBeforeExpiry = await connection.db
+          .select()
+          .from(publicMediaProcessingAttempts)
+          .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+        expect(attemptsBeforeExpiry).toHaveLength(1);
+        expect(attemptsBeforeExpiry[0]).toMatchObject({
+          attemptNumber: 1,
+          workerId: "hard-death-runtime",
+          finishedAt: null,
+          outcomeCode: "started",
+        });
+
+        await earlyHandle.stop();
+        handles.splice(handles.indexOf(earlyHandle), 1);
+        const waitUntilExpiryMs = Math.max(0, leaseExpiresAtMs - Date.now() + 50);
+        await new Promise((resolve) => setTimeout(resolve, waitUntilExpiryMs));
+
+        const takeoverHandle = await startWorker({
+          databaseUrl: connection.url,
+          valkeyUrl: runtimeValkeyUrl,
+          concurrency: 1,
+          batchSize: 10,
+          leaseMs: 30_000,
+          signalSource: new EventEmitter(),
+          logger,
+          publicMedia: { storage, concurrency: 1 },
+          dependencies: {
+            hostname: () => "takeover-runtime",
+            randomUUID: () => "00000000-0000-4000-8000-000000000002",
+          },
+        });
+        handles.push(takeoverHandle);
+
+        await waitForJobState("completed", 3);
+        await expect.poll(
+          async () => (await queue.getJob(fixture.assetId))?.attemptsMade,
+          { timeout: 2_000 },
+        ).toBe(1);
+        const completedJob = await queue.getJob(fixture.assetId);
+        expect(completedJob).not.toBeUndefined();
+        expect(completedJob?.attemptsStarted).toBe(3);
+
+        const attempts = await connection.db
+          .select()
+          .from(publicMediaProcessingAttempts)
+          .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+        expect(attempts).toHaveLength(2);
+        expect(attempts).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              attemptNumber: 1,
+              workerId: "hard-death-runtime",
+              outcomeCode: "retryable",
+            }),
+            expect.objectContaining({
+              attemptNumber: 2,
+              workerId: "takeover-runtime:00000000-0000-4000-8000-000000000002",
+              outcomeCode: "succeeded",
+            }),
+          ]),
+        );
+        expect(attempts.every((attempt) => attempt.finishedAt !== null)).toBe(true);
+
+        const [asset] = await connection.db
+          .select()
+          .from(publicMediaAssets)
+          .where(eq(publicMediaAssets.id, fixture.assetId));
+        expect(asset).toMatchObject({ state: "ready", failureCode: null });
+        const events = await connection.db
+          .select()
+          .from(systemOutbox)
+          .where(eq(systemOutbox.aggregateId, fixture.assetId));
+        expect(events.filter((event) => event.eventType === "media.public_asset_ready.v1")).toHaveLength(1);
+        expect(events.filter((event) => event.eventType === "media.public_asset_failed.v1")).toHaveLength(0);
+        expect(storage.puts).toHaveLength(4);
+      } finally {
+        await Promise.all(handles.splice(0).map((handle) => handle.stop()));
+        await queue.obliterate({ force: true }).catch(() => undefined);
+        await queue.close().catch(() => undefined);
+        if (inspectionConnection.status !== "end") {
+          await inspectionConnection.quit().catch(() => inspectionConnection.disconnect());
+        }
+      }
+    },
+    20_000,
+  );
 
   test("a stale claimant cannot publish ready or leave the takeover attempt unfinished", async () => {
     const storage = new VersionedMemoryStorage();

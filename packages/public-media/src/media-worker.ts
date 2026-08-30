@@ -59,6 +59,7 @@ export class PublicMediaWorkerRetryableError extends Error {
       | "attempt_fenced"
       | "storage_unavailable"
       | "storage_error",
+    readonly retryAt: Date | null = null,
   ) {
     super(code);
     this.name = "PublicMediaWorkerRetryableError";
@@ -95,8 +96,8 @@ type StoredDerivative = Readonly<{
   versionId: string;
 }>;
 
-function retryable(code: PublicMediaWorkerRetryableError["code"]): never {
-  throw new PublicMediaWorkerRetryableError(code);
+function retryable(code: PublicMediaWorkerRetryableError["code"], retryAt?: Date): never {
+  throw new PublicMediaWorkerRetryableError(code, retryAt ? new Date(retryAt) : null);
 }
 
 function validateInput(assetId: unknown, options: ProcessPublicMediaAssetOptions): { workerId: string } {
@@ -156,7 +157,7 @@ async function claimAsset(
     if (asset.state === "processing" && latest?.finishedAt === null) {
       const leaseExpiresAt = latest.startedAt.getTime() + PROCESSING_LEASE_MS;
       if (leaseExpiresAt > at.getTime()) {
-        retryable("processing_lease_active");
+        retryable("processing_lease_active", new Date(leaseExpiresAt));
       }
       if (latest.attemptNumber >= MAX_ATTEMPTS) {
         await tx

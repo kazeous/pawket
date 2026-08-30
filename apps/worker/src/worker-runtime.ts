@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { types as nodeTypes } from "node:util";
 
-import { Worker, type Job, type Processor } from "bullmq";
+import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 
 import {
   acknowledgeOutboxEvent,
@@ -33,6 +33,7 @@ import {
 import { scanVerificationDepositRefundWindows } from "@pawket/payments";
 import {
   processPublicMediaAsset,
+  PublicMediaWorkerRetryableError,
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import {
@@ -405,7 +406,31 @@ export function createMediaJobProcessor(input: {
             data.assetId,
             { workerId: input.workerId },
           );
-        } catch {
+        } catch (error) {
+          if (
+            error instanceof PublicMediaWorkerRetryableError &&
+            error.code === "processing_lease_active"
+          ) {
+            const retryAt = error.retryAt;
+            const retryAtMs = retryAt instanceof Date ? retryAt.getTime() : Number.NaN;
+            if (!Number.isFinite(retryAtMs) || !job.token) {
+              input.logger.error(
+                { category: "public_media_worker_delay_failed", jobId: job.id },
+                "Public media worker delay failed",
+              );
+              throw new Error("Public media worker delay failed");
+            }
+            try {
+              await job.moveToDelayed(retryAtMs, job.token);
+            } catch {
+              input.logger.error(
+                { category: "public_media_worker_delay_failed", jobId: job.id },
+                "Public media worker delay failed",
+              );
+              throw new Error("Public media worker delay failed");
+            }
+            throw new DelayedError();
+          }
           input.logger.error(
             { category: "public_media_worker_failed", jobId: job.id },
             "Public media worker job failed",

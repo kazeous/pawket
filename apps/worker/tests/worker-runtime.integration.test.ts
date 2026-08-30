@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer, type Socket } from "node:net";
 
-import { Queue } from "bullmq";
+import { DelayedError, Queue } from "bullmq";
 
 import {
   afterAll,
@@ -25,6 +25,7 @@ import {
   metricsRegistry,
   type RequestContext,
 } from "@pawket/observability";
+import { PublicMediaWorkerRetryableError } from "@pawket/public-media";
 import {
   createQueueConnection,
   createMediaQueue,
@@ -231,6 +232,66 @@ describe("public media runtime handoff", () => {
     ).rejects.toThrow("Invalid public media worker job");
     expect(processAsset).toHaveBeenCalledTimes(1);
   });
+
+  test("an active PostgreSQL lease moves the BullMQ job to its exact retry timestamp", async () => {
+    const assetId = randomUUID();
+    const retryAt = new Date("2026-08-30T08:10:00.000Z");
+    const moveToDelayed = vi.fn(async () => undefined);
+    const processor = createMediaJobProcessor({
+      logger,
+      database: {} as never,
+      storage: {} as never,
+      workerId: "runtime-worker:lease-delay",
+      processAsset: vi.fn(async () => {
+        throw new PublicMediaWorkerRetryableError("processing_lease_active", retryAt);
+      }),
+    });
+
+    await expect(
+      processor({
+        id: assetId,
+        name: MEDIA_PROCESS_JOB,
+        data: { assetId },
+        token: "active-lock-token",
+        moveToDelayed,
+      } as never),
+    ).rejects.toBeInstanceOf(DelayedError);
+    expect(moveToDelayed).toHaveBeenCalledOnce();
+    expect(moveToDelayed).toHaveBeenCalledWith(retryAt.getTime(), "active-lock-token");
+  });
+
+  test.each(["missing_token", "lost_lock"] as const)(
+    "lease delay fails closed on %s without reporting completion",
+    async (failureMode) => {
+      const assetId = randomUUID();
+      const moveToDelayed = vi.fn(async () => {
+        if (failureMode === "lost_lock") throw new Error("dummy-secret-lock-error");
+      });
+      const processor = createMediaJobProcessor({
+        logger,
+        database: {} as never,
+        storage: {} as never,
+        workerId: "runtime-worker:lease-delay-failure",
+        processAsset: vi.fn(async () => {
+          throw new PublicMediaWorkerRetryableError(
+            "processing_lease_active",
+            new Date("2026-08-30T08:10:00.000Z"),
+          );
+        }),
+      });
+
+      await expect(
+        processor({
+          id: assetId,
+          name: MEDIA_PROCESS_JOB,
+          data: { assetId },
+          ...(failureMode === "missing_token" ? {} : { token: "expired-lock-token" }),
+          moveToDelayed,
+        } as never),
+      ).rejects.toThrow("Public media worker delay failed");
+      if (failureMode === "missing_token") expect(moveToDelayed).not.toHaveBeenCalled();
+    },
+  );
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
