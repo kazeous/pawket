@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { S3Client } from "@aws-sdk/client-s3";
 
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
+import { ObjectStorageConflictError } from "../src/object-storage-port.js";
 import { deleteEveryS3ObjectVersion, ensureVersionedBuckets, runCleanupSteps } from "./s3-test-helpers.js";
 
 const endpoint = process.env.PUBLIC_MEDIA_S3_ENDPOINT ?? "http://localhost:9090";
@@ -65,8 +66,16 @@ describe("private S3 object storage", () => {
     const hash = "sha256:v1:" + "a".repeat(43);
     let primaryFailed = false;
     try {
-      await storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([8, 9]), sha256: hash });
-      expect(await storage.headObject({ area: "derivative", key })).toMatchObject({ contentLength: 2, contentType: "image/webp", sha256: hash, versionId: expect.any(String) });
+      const created = await storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([8, 9]), sha256: hash, createOnly: true });
+      const first = await storage.headObject({ area: "derivative", key });
+      expect(first).toMatchObject({ contentLength: 2, contentType: "image/webp", sha256: hash, versionId: created.versionId });
+      await expect(
+        storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([9, 8]), sha256: hash, createOnly: true }),
+      ).rejects.toBeInstanceOf(ObjectStorageConflictError);
+      expect(await storage.headObject({ area: "derivative", key })).toMatchObject({
+        contentLength: 2,
+        versionId: created.versionId,
+      });
       await expect(storage.headObject({ area: "invalid", key } as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
       for (const versionId of [" null ", "NULL", "version\ncontrol", "x".repeat(513)]) {
         await expect(storage.headObject({ area: "derivative", key, versionId })).rejects.toMatchObject({ code: "INVALID_INPUT" });

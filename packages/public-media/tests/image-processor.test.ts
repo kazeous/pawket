@@ -193,4 +193,88 @@ describe("deterministic public image processor", () => {
       expect(metadata.height).toBe(12);
     }
   });
+
+  test("rejects a TypedArray proxy as a closed processing error without invoking traps", async () => {
+    let trapCalls = 0;
+    const hostile = new Proxy(fixtures.png, {
+      get() {
+        trapCalls += 1;
+        throw new Error("proxy get trap escaped");
+      },
+      getPrototypeOf() {
+        trapCalls += 1;
+        throw new Error("proxy prototype trap escaped");
+      },
+    });
+
+    await expect(processPublicImage(hostile)).rejects.toEqual(
+      expect.objectContaining<Partial<PublicImageProcessingError>>({ code: "failed_validation" }),
+    );
+    expect(trapCalls).toBe(0);
+  });
+
+  test("rejects Uint8Array subclasses without invoking hostile accessors", async () => {
+    let accessorCalls = 0;
+    class HostileBytes extends Uint8Array {
+      override get byteLength(): number {
+        accessorCalls += 1;
+        throw new Error("subclass byteLength escaped");
+      }
+    }
+    const hostile = new HostileBytes(fixtures.png);
+
+    await expect(processPublicImage(hostile)).rejects.toEqual(
+      expect.objectContaining<Partial<PublicImageProcessingError>>({ code: "failed_validation" }),
+    );
+    expect(accessorCalls).toBe(0);
+  });
+
+  test("snapshots native Uint8Array bytes without invoking shadowed accessors or iterators", async () => {
+    const baseline = await processPublicImage(fixtures.png);
+    const native = new Uint8Array(fixtures.png);
+    let accessorCalls = 0;
+    Object.defineProperties(native, {
+      byteLength: {
+        get() {
+          accessorCalls += 1;
+          throw new Error("shadowed byteLength escaped");
+        },
+      },
+      [Symbol.iterator]: {
+        get() {
+          accessorCalls += 1;
+          throw new Error("shadowed iterator escaped");
+        },
+      },
+    });
+
+    const processed = await processPublicImage(native);
+
+    expect(accessorCalls).toBe(0);
+    expect(processed.outputs.map((output) => output.sha256)).toEqual(
+      baseline.outputs.map((output) => output.sha256),
+    );
+  });
+
+  test("rejects shared backing memory at the unknown boundary", async () => {
+    const shared = new SharedArrayBuffer(fixtures.png.byteLength);
+    new Uint8Array(shared).set(fixtures.png);
+
+    await expect(processPublicImage(new Uint8Array(shared))).rejects.toEqual(
+      expect.objectContaining<Partial<PublicImageProcessingError>>({ code: "failed_validation" }),
+    );
+  });
+
+  test("takes the native byte snapshot before asynchronous source mutation", async () => {
+    const baseline = await processPublicImage(fixtures.png);
+    const mutable = new Uint8Array(fixtures.png);
+
+    const processing = processPublicImage(mutable);
+    mutable.fill(0);
+    const processed = await processing;
+
+    expect(processed.outputs.map((output) => output.sha256)).toEqual(
+      baseline.outputs.map((output) => output.sha256),
+    );
+  });
 });

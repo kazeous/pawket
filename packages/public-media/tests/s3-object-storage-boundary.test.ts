@@ -4,6 +4,7 @@ import { NoSuchKey, NotFound, S3Client, S3ServiceException } from "@aws-sdk/clie
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
+import { ObjectStorageConflictError } from "../src/object-storage-port.js";
 
 const options = {
   endpoint: "https://objects.example.test",
@@ -56,6 +57,50 @@ describe("S3 response runtime boundary", () => {
       sha256: hash,
     });
     expect(send).toHaveBeenCalledOnce();
+  });
+
+  test("uses provider-backed create-only PUT and returns its exact opaque version", async () => {
+    const versionId = "opaque:create-only/version+=作品";
+    const send = mockSend({ VersionId: versionId, ETag: '"created"' });
+    const storage = createS3ObjectStorage(options);
+    const key = `derivatives/${randomUUID()}/master/${"a".repeat(43)}.webp`;
+
+    await expect(
+      storage.putObject({
+        area: "derivative",
+        key,
+        contentType: "image/webp",
+        body: new Uint8Array([1, 2, 3]),
+        sha256: `sha256:v1:${"a".repeat(43)}`,
+        createOnly: true,
+      }),
+    ).resolves.toEqual({ versionId });
+    expect((send.mock.calls[0]?.[0] as { input?: unknown }).input).toMatchObject({
+      IfNoneMatch: "*",
+    });
+  });
+
+  test.each([
+    ["PreconditionFailed", 412],
+    ["ConditionalRequestConflict", 409],
+  ] as const)("maps provider %s to a typed create-only conflict", async (name, httpStatusCode) => {
+    vi.spyOn(S3Client.prototype, "send").mockRejectedValue({
+      name,
+      $metadata: { httpStatusCode },
+    });
+    const storage = createS3ObjectStorage(options);
+    const key = `derivatives/${randomUUID()}/master/${"b".repeat(43)}.webp`;
+
+    await expect(
+      storage.putObject({
+        area: "derivative",
+        key,
+        contentType: "image/webp",
+        body: new Uint8Array([4, 5, 6]),
+        sha256: `sha256:v1:${"b".repeat(43)}`,
+        createOnly: true,
+      }),
+    ).rejects.toBeInstanceOf(ObjectStorageConflictError);
   });
 
   test.each([

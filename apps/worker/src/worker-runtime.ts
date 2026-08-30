@@ -384,6 +384,7 @@ export function createMediaJobProcessor(input: {
   logger: RuntimeLogger;
   database: DatabaseResource["db"];
   storage: ObjectStoragePort;
+  workerId: string;
   processAsset?: typeof processPublicMediaAsset;
 }): Processor<MediaAssetJob> {
   return async (job: Job<MediaAssetJob>) => {
@@ -402,7 +403,7 @@ export function createMediaJobProcessor(input: {
             input.database,
             input.storage,
             data.assetId,
-            { workerId: `media-job:${data.assetId}` },
+            { workerId: input.workerId },
           );
         } catch {
           input.logger.error(
@@ -503,6 +504,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
           logger,
           database: database.db,
           storage: options.publicMedia.storage,
+          workerId,
           processAsset: dependencies.processMediaAsset,
         }),
         workerConnection,

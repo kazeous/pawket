@@ -27,6 +27,7 @@ import {
 } from "@pawket/observability";
 import {
   createQueueConnection,
+  createMediaQueue,
   createSystemQueue,
   dispatchOutboxBatch,
   MEDIA_PROCESS_JOB,
@@ -205,6 +206,7 @@ describe("public media runtime handoff", () => {
       logger,
       database: {} as never,
       storage: {} as never,
+      workerId: "runtime-worker:host-one:process-one",
       processAsset,
     });
 
@@ -217,7 +219,7 @@ describe("public media runtime handoff", () => {
       expect.anything(),
       expect.anything(),
       assetId,
-      expect.objectContaining({ workerId: `media-job:${assetId}` }),
+      expect.objectContaining({ workerId: "runtime-worker:host-one:process-one" }),
     );
 
     await expect(
@@ -242,7 +244,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 }
 
 async function waitForJobState(
-  queue: ReturnType<typeof createSystemQueue>,
+  queue: ReturnType<typeof createSystemQueue> | ReturnType<typeof createMediaQueue>,
   jobId: string,
   expectedState: string,
 ): Promise<void> {
@@ -526,6 +528,7 @@ describe("worker runtime integration", () => {
   const runtimeUrl = isolatedValkeyUrl(valkeyUrl, 12);
   const inspectionConnection = createQueueConnection(runtimeUrl);
   const inspectionQueue = createSystemQueue(inspectionConnection);
+  const inspectionMediaQueue = createMediaQueue(inspectionConnection);
   const handles: Array<{ stop(): Promise<void> }> = [];
 
   beforeAll(async () => {
@@ -536,10 +539,12 @@ describe("worker runtime integration", () => {
     await Promise.all(handles.splice(0).map((handle) => handle.stop()));
     await db.delete(systemOutbox);
     await inspectionQueue.obliterate({ force: true });
+    await inspectionMediaQueue.obliterate({ force: true });
   });
 
   afterAll(async () => {
     await inspectionQueue.close();
+    await inspectionMediaQueue.close();
     await inspectionConnection.quit();
     await database.close();
   });
@@ -606,6 +611,56 @@ describe("worker runtime integration", () => {
     const metricsAfter = await workerMetricSnapshot("completed");
     expect(metricsAfter.jobs - metricsBefore.jobs).toBe(1);
     expect(metricsAfter.durations - metricsBefore.durations).toBe(1);
+  });
+
+  test("the eighth caught media failure completes in BullMQ without a ninth call", async () => {
+    const assetId = randomUUID();
+    const observedWorkerIds: string[] = [];
+    const processMediaAsset = vi.fn<WorkerRuntimeDependencies["processMediaAsset"]>(
+      async (_database, _storage, observedAssetId, processOptions) => {
+        expect(observedAssetId).toBe(assetId);
+        observedWorkerIds.push(processOptions.workerId ?? "");
+        if (observedWorkerIds.length < 8) throw new Error("simulated caught media failure");
+        return { assetId, state: "failed", failureCode: "processing_error" };
+      },
+    );
+    const workerUuid = "11111111-1111-4111-8111-111111111111";
+    const handle = await startWorker({
+      databaseUrl,
+      valkeyUrl: runtimeUrl,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      publicMedia: { storage: {} as never, concurrency: 1 },
+      dependencies: {
+        processMediaAsset,
+        hostname: () => "media-runtime-host",
+        randomUUID: () => workerUuid,
+      },
+      logger: { info() {}, error() {} },
+    });
+    handles.push(handle);
+    await inspectionMediaQueue.add(
+      MEDIA_PROCESS_JOB,
+      { assetId },
+      {
+        jobId: assetId,
+        attempts: 8,
+        backoff: { type: "fixed", delay: 1 },
+        removeOnComplete: false,
+        removeOnFail: false,
+      },
+    );
+
+    await waitForJobState(inspectionMediaQueue, assetId, "completed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(processMediaAsset).toHaveBeenCalledTimes(8);
+    expect(new Set(observedWorkerIds)).toEqual(
+      new Set([`media-runtime-host:${workerUuid}`]),
+    );
+    expect((await inspectionMediaQueue.getJob(assetId))?.attemptsMade).toBe(8);
   });
 
   test("a lost Valkey job is redispatched after lease expiry and acknowledged after handling", async () => {

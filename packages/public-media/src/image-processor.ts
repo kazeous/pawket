@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { types as nodeTypes } from "node:util";
 
 import sharp from "sharp";
 
@@ -62,11 +64,49 @@ function contentHash(bytes: Uint8Array): string {
   return `sha256:v1:${createHash("sha256").update(bytes).digest("base64url")}`;
 }
 
-export async function processPublicImage(value: unknown): Promise<ProcessedPublicImage> {
-  if (!(value instanceof Uint8Array) || value.byteLength < 1 || value.byteLength > MAX_SOURCE_BYTES) {
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+)?.get;
+const BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer")?.get;
+
+function snapshotPublicImageBytes(value: unknown): Uint8Array {
+  try {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      nodeTypes.isProxy(value) ||
+      !BYTE_LENGTH_GETTER ||
+      !BUFFER_GETTER
+    ) {
+      fail("failed_validation");
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Uint8Array.prototype && prototype !== Buffer.prototype) {
+      fail("failed_validation");
+    }
+    const byteLength = Reflect.apply(BYTE_LENGTH_GETTER, value, []) as unknown;
+    const backingBuffer = Reflect.apply(BUFFER_GETTER, value, []) as unknown;
+    if (
+      !Number.isSafeInteger(byteLength) ||
+      (byteLength as number) < 1 ||
+      (byteLength as number) > MAX_SOURCE_BYTES ||
+      (typeof SharedArrayBuffer !== "undefined" && backingBuffer instanceof SharedArrayBuffer)
+    ) {
+      fail("failed_validation");
+    }
+    const snapshot = new Uint8Array(byteLength as number);
+    Uint8Array.prototype.set.call(snapshot, value as Uint8Array);
+    return snapshot;
+  } catch (error) {
+    if (error instanceof PublicImageProcessingError) throw error;
     fail("failed_validation");
   }
-  const sourceBytes = Uint8Array.from(value);
+}
+
+export async function processPublicImage(value: unknown): Promise<ProcessedPublicImage> {
+  const sourceBytes = snapshotPublicImageBytes(value);
   let signature: ReturnType<typeof inspectApprovedImageSignature>;
   try {
     signature = inspectApprovedImageSignature(sourceBytes);

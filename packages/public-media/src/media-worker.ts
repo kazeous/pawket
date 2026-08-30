@@ -21,7 +21,11 @@ import {
   type ProcessedPublicImage,
   type PublicImageOutput,
 } from "./image-processor.js";
-import type { HeadObjectResult, ObjectStoragePort } from "./object-storage-port.js";
+import {
+  ObjectStorageConflictError,
+  type HeadObjectResult,
+  type ObjectStoragePort,
+} from "./object-storage-port.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const WORKER_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -39,6 +43,7 @@ export type ProcessPublicMediaAssetOptions = Readonly<{
   now?: () => Date;
   idFactory?: () => string;
   checkpoint?: (stage: MediaProcessingCheckpoint) => Promise<void> | void;
+  processImage?: typeof processPublicImage;
 }>;
 
 export type ProcessPublicMediaAssetResult = Readonly<{
@@ -48,7 +53,13 @@ export type ProcessPublicMediaAssetResult = Readonly<{
 }>;
 
 export class PublicMediaWorkerRetryableError extends Error {
-  constructor(readonly code: "processing_lease_active" | "storage_unavailable" | "storage_error") {
+  constructor(
+    readonly code:
+      | "processing_lease_active"
+      | "attempt_fenced"
+      | "storage_unavailable"
+      | "storage_error",
+  ) {
     super(code);
     this.name = "PublicMediaWorkerRetryableError";
   }
@@ -144,7 +155,7 @@ async function claimAsset(
 
     if (asset.state === "processing" && latest?.finishedAt === null) {
       const leaseExpiresAt = latest.startedAt.getTime() + PROCESSING_LEASE_MS;
-      if (latest.workerId !== workerId && leaseExpiresAt > at.getTime()) {
+      if (leaseExpiresAt > at.getTime()) {
         retryable("processing_lease_active");
       }
       if (latest.attemptNumber >= MAX_ATTEMPTS) {
@@ -292,23 +303,25 @@ async function ensureDerivativeVersion(
     }
     return { output, key, versionId: current.versionId };
   }
-  await storage.putObject({
-    area: "derivative",
-    key,
-    contentType: "image/webp",
-    body: output.bytes,
-    sha256: output.sha256,
-  });
-  const created = await storage.headObject({ area: "derivative", key });
-  if (!created) retryable("storage_unavailable");
-  if (!matchesDerivative(created, output)) {
-    throw new PublicMediaWorkerTerminalError("derivative_key_conflict");
+  try {
+    const created = await storage.putObject({
+      area: "derivative",
+      key,
+      contentType: "image/webp",
+      body: output.bytes,
+      sha256: output.sha256,
+      createOnly: true,
+    });
+    return { output, key, versionId: created.versionId };
+  } catch (error) {
+    if (!(error instanceof ObjectStorageConflictError)) throw error;
+    const winner = await storage.headObject({ area: "derivative", key });
+    if (!winner) retryable("storage_unavailable");
+    if (!matchesDerivative(winner, output)) {
+      throw new PublicMediaWorkerTerminalError("derivative_key_conflict");
+    }
+    return { output, key, versionId: winner.versionId };
   }
-  const exact = await storage.headObject({ area: "derivative", key, versionId: created.versionId });
-  if (!matchesDerivative(exact, output) || exact.versionId !== created.versionId) {
-    retryable("storage_unavailable");
-  }
-  return { output, key, versionId: created.versionId };
 }
 
 type TerminalFailureCode =
@@ -322,7 +335,7 @@ type TerminalFailureCode =
 async function finalizeFailure(
   db: PawketDatabase,
   claimed: ClaimedAsset,
-  failureCode: TerminalFailureCode | "storage_error",
+  failureCode: TerminalFailureCode | "storage_error" | "processing_error",
   attemptOutcome: string,
   at: Date,
 ): Promise<ProcessPublicMediaAssetResult> {
@@ -334,9 +347,15 @@ async function finalizeFailure(
       .limit(1)
       .for("update");
     if (!asset) return { assetId: claimed.assetId, state: "ignored" };
-    if (asset.state === "ready") return { assetId: claimed.assetId, state: "ready" };
-    if (asset.state === "failed") {
-      return { assetId: claimed.assetId, state: "failed", failureCode: asset.failureCode ?? failureCode };
+    const [latest] = await tx
+      .select({ id: publicMediaProcessingAttempts.id, finishedAt: publicMediaProcessingAttempts.finishedAt })
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, claimed.assetId))
+      .orderBy(desc(publicMediaProcessingAttempts.attemptNumber))
+      .limit(1)
+      .for("update");
+    if (asset.state !== "processing" || latest?.id !== claimed.attemptId || latest.finishedAt !== null) {
+      retryable("attempt_fenced");
     }
     await tx
       .update(publicMediaProcessingAttempts)
@@ -366,11 +385,12 @@ async function finalizeFailure(
 async function recordRetryableFailure(
   db: PawketDatabase,
   claimed: ClaimedAsset,
-  error: PublicMediaWorkerRetryableError,
+  error: unknown,
+  terminalFailureCode: "storage_error" | "processing_error",
   at: Date,
 ): Promise<ProcessPublicMediaAssetResult | null> {
   if (claimed.attemptNumber >= MAX_ATTEMPTS) {
-    return finalizeFailure(db, claimed, "storage_error", "storage_error", at);
+    return finalizeFailure(db, claimed, terminalFailureCode, terminalFailureCode, at);
   }
   await db.transaction(async (tx) => {
     const [asset] = await tx
@@ -380,6 +400,16 @@ async function recordRetryableFailure(
       .limit(1)
       .for("update");
     if (!asset || asset.state !== "processing") return;
+    const [latest] = await tx
+      .select({ id: publicMediaProcessingAttempts.id, finishedAt: publicMediaProcessingAttempts.finishedAt })
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, claimed.assetId))
+      .orderBy(desc(publicMediaProcessingAttempts.attemptNumber))
+      .limit(1)
+      .for("update");
+    if (latest?.id !== claimed.attemptId || latest.finishedAt !== null) {
+      retryable("attempt_fenced");
+    }
     await tx
       .update(publicMediaProcessingAttempts)
       .set({ outcomeCode: "retryable_error", finishedAt: at, nextRetryAt: at, updatedAt: at })
@@ -408,8 +438,16 @@ async function finalizeReady(
       .limit(1)
       .for("update");
     if (!asset) return { assetId: claimed.assetId, state: "ignored" };
-    if (asset.state === "ready") return { assetId: claimed.assetId, state: "ready" };
-    if (asset.state !== "processing") throw new Error("Public media asset lost processing claim");
+    const [latest] = await tx
+      .select({ id: publicMediaProcessingAttempts.id, finishedAt: publicMediaProcessingAttempts.finishedAt })
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, claimed.assetId))
+      .orderBy(desc(publicMediaProcessingAttempts.attemptNumber))
+      .limit(1)
+      .for("update");
+    if (asset.state !== "processing" || latest?.id !== claimed.attemptId || latest.finishedAt !== null) {
+      retryable("attempt_fenced");
+    }
     if (derivatives.length !== 4) throw new Error("Public media derivative set is incomplete");
     for (const derivative of derivatives) {
       const derivativeId = idFactory();
@@ -482,10 +520,20 @@ export async function processPublicMediaAsset(
   const { workerId } = validateInput(assetId, options);
   const now = options.now ?? (() => new Date());
   const idFactory = options.idFactory ?? randomUUID;
+  const processImage = options.processImage ?? processPublicImage;
   const claimed = await claimAsset(db, assetId, workerId, now(), idFactory);
   if (claimed.kind === "settled") return claimed.result;
+  let simulatedHardDeath: unknown;
+  const checkpoint = async (stage: MediaProcessingCheckpoint): Promise<void> => {
+    try {
+      await options.checkpoint?.(stage);
+    } catch (error) {
+      simulatedHardDeath = error;
+      throw error;
+    }
+  };
   try {
-    await options.checkpoint?.("after_claim");
+    await checkpoint("after_claim");
     const sourceLocation = {
       area: "quarantine" as const,
       key: claimed.sourceKey,
@@ -498,19 +546,20 @@ export async function processPublicMediaAsset(
     }
     const sourceStream = await storage.getObject(sourceLocation);
     const sourceBytes = await boundedBytes(sourceStream, claimed.actualSourceBytes);
-    const processed = await processPublicImage(sourceBytes);
+    const processed = await processImage(sourceBytes);
     if (processed.source.format !== claimed.declaredSourceFormat) {
       throw new PublicMediaWorkerTerminalError("failed_validation");
     }
     const derivatives: StoredDerivative[] = [];
     for (const output of processed.outputs) {
       derivatives.push(await ensureDerivativeVersion(storage, claimed.assetId, output));
-      if (output.variant === "master") await options.checkpoint?.("after_master_put");
+      if (output.variant === "master") await checkpoint("after_master_put");
     }
-    await options.checkpoint?.("after_derivatives_put");
-    await options.checkpoint?.("before_ready_commit");
+    await checkpoint("after_derivatives_put");
+    await checkpoint("before_ready_commit");
     return await finalizeReady(db, claimed, processed, derivatives, now(), idFactory);
   } catch (error) {
+    if (error === simulatedHardDeath) throw error;
     if (error instanceof PublicImageProcessingError) {
       const code = imageFailureCode(error);
       return finalizeFailure(db, claimed, code, code, now());
@@ -519,11 +568,11 @@ export async function processPublicMediaAsset(
       return finalizeFailure(db, claimed, error.code, error.code, now());
     }
     if (error instanceof MediaPolicyError) {
-      return (await recordRetryableFailure(db, claimed, storageError(error), now()))!;
+      return (await recordRetryableFailure(db, claimed, storageError(error), "storage_error", now()))!;
     }
     if (error instanceof PublicMediaWorkerRetryableError) {
-      return (await recordRetryableFailure(db, claimed, error, now()))!;
+      return (await recordRetryableFailure(db, claimed, error, "storage_error", now()))!;
     }
-    throw error;
+    return (await recordRetryableFailure(db, claimed, error, "processing_error", now()))!;
   }
 }

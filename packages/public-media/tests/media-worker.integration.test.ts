@@ -27,10 +27,19 @@ import type {
   ObjectLocation,
   ObjectStoragePort,
 } from "../src/object-storage-port.js";
+import { ObjectStorageConflictError } from "../src/object-storage-port.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const migrationsDirectory = new URL("../../database/migrations/", import.meta.url);
 const initialAt = new Date("2026-08-30T08:00:00.000Z");
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 async function migrate(database: PawketDatabase, filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -64,6 +73,15 @@ class VersionedMemoryStorage implements ObjectStoragePort {
   readonly reads: ObjectLocation[] = [];
   readonly puts: string[] = [];
   sourceHeadFailure = false;
+  readonly sourceHeadBehaviors: Array<"mismatch" | "retryable_error"> = [];
+  genericSourceHeadError: Error | null = null;
+  createOnlyRace: ((input: {
+    area: "derivative";
+    key: string;
+    contentType: "image/webp";
+    body: Uint8Array;
+    sha256: string;
+  }) => void) | null = null;
 
   private mapKey(area: ObjectLocation["area"], key: string): string {
     return `${area}:${key}`;
@@ -87,6 +105,14 @@ class VersionedMemoryStorage implements ObjectStoragePort {
   }
 
   async headObject(location: ObjectLocation): Promise<HeadObjectResult | null> {
+    if (location.area === "quarantine" && this.genericSourceHeadError) {
+      throw this.genericSourceHeadError;
+    }
+    const sourceBehavior =
+      location.area === "quarantine" ? this.sourceHeadBehaviors.shift() : undefined;
+    if (sourceBehavior === "retryable_error") {
+      throw new MediaPolicyError("STORAGE_UNAVAILABLE");
+    }
     if (location.area === "quarantine" && this.sourceHeadFailure) {
       throw new MediaPolicyError("STORAGE_UNAVAILABLE");
     }
@@ -94,7 +120,7 @@ class VersionedMemoryStorage implements ObjectStoragePort {
     const value = location.versionId
       ? versions.find((candidate) => candidate.versionId === location.versionId)
       : versions.at(-1);
-    return value
+    const result = value
       ? {
           contentLength: value.bytes.byteLength,
           contentType: value.contentType,
@@ -103,6 +129,7 @@ class VersionedMemoryStorage implements ObjectStoragePort {
           sha256: value.sha256,
         }
       : null;
+    return result && sourceBehavior === "mismatch" ? { ...result, etag: "etag-stale-mismatch" } : result;
   }
 
   async listObjectVersions(location: Omit<ObjectLocation, "versionId">) {
@@ -127,14 +154,23 @@ class VersionedMemoryStorage implements ObjectStoragePort {
     contentType: "image/webp";
     body: Uint8Array;
     sha256: string;
-  }): Promise<void> {
+    createOnly?: true;
+  }): Promise<{ versionId: string }> {
+    if (input.createOnly) {
+      const race = this.createOnlyRace;
+      this.createOnlyRace = null;
+      race?.(input);
+      const existing = this.versions.get(this.mapKey(input.area, input.key))?.at(-1);
+      if (existing) throw new ObjectStorageConflictError();
+    }
     this.puts.push(input.key);
-    this.seed(input, {
+    const versionId = this.seed(input, {
       bytes: input.body,
       contentType: input.contentType,
       etag: `etag-${this.puts.length}`,
       sha256: input.sha256,
     });
+    return { versionId };
   }
 
   async deleteObject(): Promise<void> {
@@ -341,8 +377,8 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
     ).rejects.toThrow(`simulated-crash:${crashAt}`);
     await expect(
       processPublicMediaAsset(connection.db, storage, fixture.assetId, {
-        workerId: "stable-media-job",
-        now: () => new Date(initialAt.getTime() + 1_000),
+        workerId: "replacement-media-worker",
+        now: () => new Date(initialAt.getTime() + 10 * 60_000 + 1),
       }),
     ).resolves.toMatchObject({ state: "ready" });
 
@@ -363,7 +399,181 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
         ),
       );
     expect(readyEvents).toHaveLength(1);
+    const attempts = await connection.db
+      .select()
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+    expect(attempts).toHaveLength(2);
+    expect(attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ attemptNumber: 1, outcomeCode: "retryable" }),
+        expect.objectContaining({ attemptNumber: 2, outcomeCode: "succeeded" }),
+      ]),
+    );
   });
+
+  test("an active lease blocks duplicate delivery even when the worker identity matches", async () => {
+    const storage = new VersionedMemoryStorage();
+    const fixture = await seedPendingAsset(storage);
+    const claimed = deferred();
+    const release = deferred();
+    const first = processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+      workerId: "runtime-media-worker-one",
+      now: () => initialAt,
+      checkpoint: async (stage) => {
+        if (stage === "after_claim") {
+          claimed.resolve();
+          await release.promise;
+        }
+      },
+    });
+    await claimed.promise;
+
+    await expect(
+      processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+        workerId: "runtime-media-worker-one",
+        now: () => new Date(initialAt.getTime() + 1_000),
+      }),
+    ).rejects.toMatchObject({ code: "processing_lease_active" });
+
+    release.resolve();
+    await expect(first).resolves.toMatchObject({ state: "ready" });
+    const attempts = await connection.db
+      .select()
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ outcomeCode: "succeeded" });
+  });
+
+  test("a stale claimant cannot publish ready or leave the takeover attempt unfinished", async () => {
+    const storage = new VersionedMemoryStorage();
+    const fixture = await seedPendingAsset(storage);
+    const firstClaimed = deferred();
+    const releaseFirst = deferred();
+    const secondClaimed = deferred();
+    const releaseSecond = deferred();
+    const first = processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+      workerId: "stale-media-worker",
+      now: () => initialAt,
+      checkpoint: async (stage) => {
+        if (stage === "after_claim") {
+          firstClaimed.resolve();
+          await releaseFirst.promise;
+        }
+      },
+    });
+    await firstClaimed.promise;
+    const second = processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+      workerId: "takeover-media-worker",
+      now: () => new Date(initialAt.getTime() + 10 * 60_000 + 1),
+      checkpoint: async (stage) => {
+        if (stage === "after_claim") {
+          secondClaimed.resolve();
+          await releaseSecond.promise;
+        }
+      },
+    });
+    await secondClaimed.promise;
+
+    releaseFirst.resolve();
+    const staleOutcome = await first.then(
+      (value) => ({ kind: "resolved" as const, value }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    const [duringTakeover] = await connection.db
+      .select({ state: publicMediaAssets.state })
+      .from(publicMediaAssets)
+      .where(eq(publicMediaAssets.id, fixture.assetId));
+    releaseSecond.resolve();
+    const takeoverOutcome = await second;
+
+    expect(staleOutcome).toMatchObject({
+      kind: "rejected",
+      error: { code: "attempt_fenced" },
+    });
+    expect(duringTakeover).toEqual({ state: "processing" });
+    expect(takeoverOutcome).toMatchObject({ state: "ready" });
+    const attempts = await connection.db
+      .select()
+      .from(publicMediaProcessingAttempts)
+      .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+    expect(attempts).toHaveLength(2);
+    expect(attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ attemptNumber: 1, outcomeCode: "retryable" }),
+        expect.objectContaining({ attemptNumber: 2, outcomeCode: "succeeded" }),
+      ]),
+    );
+  });
+
+  test.each(["mismatch", "retryable_error"] as const)(
+    "a stale claimant cannot move a takeover attempt to failed or pending after %s",
+    async (sourceBehavior) => {
+      const storage = new VersionedMemoryStorage();
+      const fixture = await seedPendingAsset(storage);
+      const firstClaimed = deferred();
+      const releaseFirst = deferred();
+      const secondClaimed = deferred();
+      const releaseSecond = deferred();
+      const first = processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+        workerId: "stale-media-worker",
+        now: () => initialAt,
+        checkpoint: async (stage) => {
+          if (stage === "after_claim") {
+            firstClaimed.resolve();
+            await releaseFirst.promise;
+          }
+        },
+      });
+      await firstClaimed.promise;
+      storage.sourceHeadBehaviors.push(sourceBehavior);
+      const second = processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+        workerId: "takeover-media-worker",
+        now: () => new Date(initialAt.getTime() + 10 * 60_000 + 1),
+        checkpoint: async (stage) => {
+          if (stage === "after_claim") {
+            secondClaimed.resolve();
+            await releaseSecond.promise;
+          }
+        },
+      });
+      await secondClaimed.promise;
+
+      releaseFirst.resolve();
+      const staleOutcome = await first.then(
+        (value) => ({ kind: "resolved" as const, value }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      );
+      const [duringTakeover] = await connection.db
+        .select({ state: publicMediaAssets.state })
+        .from(publicMediaAssets)
+        .where(eq(publicMediaAssets.id, fixture.assetId));
+      releaseSecond.resolve();
+      const takeoverOutcome = await second.then(
+        (value) => ({ kind: "resolved" as const, value }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      );
+
+      expect(staleOutcome).toMatchObject({
+        kind: "rejected",
+        error: { code: "attempt_fenced" },
+      });
+      expect(duringTakeover).toEqual({ state: "processing" });
+      expect(takeoverOutcome).toMatchObject({ kind: "resolved", value: { state: "ready" } });
+      const attempts = await connection.db
+        .select()
+        .from(publicMediaProcessingAttempts)
+        .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+      expect(attempts).toHaveLength(2);
+      expect(attempts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ attemptNumber: 1, outcomeCode: "retryable" }),
+          expect.objectContaining({ attemptNumber: 2, outcomeCode: "succeeded" }),
+        ]),
+      );
+    },
+  );
 
   test("a conflicting deterministic derivative key fails terminally without overwrite", async () => {
     const storage = new VersionedMemoryStorage();
@@ -398,6 +608,62 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
           .where(eq(publicMediaAssets.id, fixture.assetId))
       )[0],
     ).toMatchObject({ state: "failed", failureCode: "derivative_key_conflict" });
+  });
+
+  test("a create-only race reuses an exact winner without creating a second version", async () => {
+    const storage = new VersionedMemoryStorage();
+    const fixture = await seedPendingAsset(storage);
+    let racedKey: string | undefined;
+    storage.createOnlyRace = (input) => {
+      racedKey = input.key;
+      storage.seed(input, {
+        bytes: input.body,
+        contentType: input.contentType,
+        etag: "etag-race-winner",
+        sha256: input.sha256,
+      });
+    };
+
+    await expect(
+      processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+        workerId: "media-exact-race-worker",
+        now: () => initialAt,
+      }),
+    ).resolves.toMatchObject({ state: "ready" });
+
+    expect(racedKey).toBeDefined();
+    expect(storage.versions.get(`derivative:${racedKey}`)).toHaveLength(1);
+    expect(storage.puts).toHaveLength(3);
+  });
+
+  test("a create-only race with different bytes fails without overwriting the winner", async () => {
+    const storage = new VersionedMemoryStorage();
+    const fixture = await seedPendingAsset(storage);
+    let racedKey: string | undefined;
+    storage.createOnlyRace = (input) => {
+      racedKey = input.key;
+      storage.seed(input, {
+        bytes: Buffer.from("race-winner-different-bytes"),
+        contentType: input.contentType,
+        etag: "etag-race-conflict",
+        sha256: `sha256:v1:${"A".repeat(43)}`,
+      });
+    };
+
+    await expect(
+      processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+        workerId: "media-conflicting-race-worker",
+        now: () => initialAt,
+      }),
+    ).resolves.toMatchObject({ state: "failed", failureCode: "derivative_key_conflict" });
+
+    expect(racedKey).toBeDefined();
+    const versions = storage.versions.get(`derivative:${racedKey}`);
+    expect(versions).toHaveLength(1);
+    expect(Buffer.from(versions?.[0]?.bytes ?? [])).toEqual(
+      Buffer.from("race-winner-different-bytes"),
+    );
+    expect(storage.puts).toHaveLength(0);
   });
 
   test("storage failures remain retryable until attempt eight", async () => {
@@ -449,6 +715,61 @@ describe.skipIf(!databaseUrl)("crash-safe public media worker", () => {
       failureCode: "storage_error",
     });
   });
+
+  test.each(["processor", "storage"] as const)(
+    "a caught generic %s failure closes every attempt and terminalizes on call eight",
+    async (failureStage) => {
+      const storage = new VersionedMemoryStorage();
+      const fixture = await seedPendingAsset(storage);
+      const primaryError = new Error(`primary-${failureStage}-failure`);
+      if (failureStage === "storage") storage.genericSourceHeadError = primaryError;
+      const processImage = async (): Promise<never> => {
+        throw primaryError;
+      };
+
+      for (let attempt = 1; attempt < 8; attempt += 1) {
+        await expect(
+          processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+            workerId: `generic-${failureStage}-worker`,
+            now: () => new Date(initialAt.getTime() + attempt * 1_000),
+            ...(failureStage === "processor" ? { processImage } : {}),
+          }),
+        ).rejects.toBe(primaryError);
+      }
+      await expect(
+        processPublicMediaAsset(connection.db, storage, fixture.assetId, {
+          workerId: `generic-${failureStage}-worker`,
+          now: () => new Date(initialAt.getTime() + 8_000),
+          ...(failureStage === "processor" ? { processImage } : {}),
+        }),
+      ).resolves.toMatchObject({ state: "failed", failureCode: "processing_error" });
+
+      const attempts = await connection.db
+        .select()
+        .from(publicMediaProcessingAttempts)
+        .where(eq(publicMediaProcessingAttempts.assetId, fixture.assetId));
+      expect(attempts).toHaveLength(8);
+      expect(attempts.every((attempt) => attempt.finishedAt !== null)).toBe(true);
+      expect(attempts.at(-1)).toMatchObject({
+        attemptNumber: 8,
+        outcomeCode: "processing_error",
+      });
+      const failedEvents = await connection.db
+        .select()
+        .from(systemOutbox)
+        .where(
+          and(
+            eq(systemOutbox.aggregateId, fixture.assetId),
+            eq(systemOutbox.eventType, "media.public_asset_failed.v1"),
+          ),
+        );
+      expect(failedEvents).toHaveLength(1);
+      expect(failedEvents[0]?.payload).toEqual({
+        assetId: fixture.assetId,
+        failureCode: "processing_error",
+      });
+    },
+  );
 
   test("a ready replay is side-effect free", async () => {
     const storage = new VersionedMemoryStorage();

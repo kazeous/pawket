@@ -9,7 +9,12 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { types as nodeTypes } from "node:util";
 
-import type { HeadObjectResult, ObjectLocation, ObjectStoragePort } from "./object-storage-port.js";
+import {
+  ObjectStorageConflictError,
+  type HeadObjectResult,
+  type ObjectLocation,
+  type ObjectStoragePort,
+} from "./object-storage-port.js";
 import { isOpaqueVersionId, isRawStorageEtag, MediaPolicyError } from "./media-policy.js";
 import { readExactNativeArray, readExactOwnRecord, readPlainDataRecord } from "./runtime-boundary.js";
 
@@ -197,13 +202,18 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
     },
 
     async putObject(input) {
-      const request = readExactOwnRecord(input, ["area", "key", "contentType", "body", "sha256"], ["versionId"]);
-      if (!request || !(request.body instanceof Uint8Array) || typeof request.sha256 !== "string") throw new MediaPolicyError("INVALID_INPUT");
+      const request = readExactOwnRecord(input, ["area", "key", "contentType", "body", "sha256"], ["versionId", "createOnly"]);
+      if (!request || !(request.body instanceof Uint8Array) || typeof request.sha256 !== "string" || (request.createOnly !== undefined && request.createOnly !== true)) throw new MediaPolicyError("INVALID_INPUT");
       const location = validateAreaKey({ area: request.area, key: request.key, ...(request.versionId === undefined ? {} : { versionId: request.versionId }) });
       if (location.area !== "derivative" || request.contentType !== "image/webp" || request.body.byteLength < 1 || request.body.byteLength > 10 * 1024 * 1024 || !/^sha256:v1:[A-Za-z0-9_-]{43}$/u.test(request.sha256)) throw new MediaPolicyError("INVALID_INPUT");
       try {
-        await client.send(new PutObjectCommand({ Bucket: safeOptions.derivativeBucket, Key: location.key, Body: request.body, ContentType: "image/webp", ContentLength: request.body.byteLength, Metadata: { sha256: request.sha256 } }));
-      } catch {
+        const response = readPlainDataRecord(await client.send(new PutObjectCommand({ Bucket: safeOptions.derivativeBucket, Key: location.key, Body: request.body, ContentType: "image/webp", ContentLength: request.body.byteLength, Metadata: { sha256: request.sha256 }, ...(request.createOnly === true ? { IfNoneMatch: "*" } : {}) })));
+        if (!response || !isOpaqueVersionId(response.VersionId)) throw new Error("malformed PUT response");
+        return { versionId: response.VersionId };
+      } catch (error) {
+        if (request.createOnly === true && isCreateOnlyConflict(error)) {
+          throw new ObjectStorageConflictError();
+        }
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }
     },
@@ -237,6 +247,34 @@ function isNotFound(error: unknown): boolean {
       (name.value === "NotFound" || name.value === "NoSuchKey" || name.value === "NoSuchVersion")
     ) return true;
     if (metadata.kind === "data" && hasSafeNotFoundStatus(metadata.value)) return true;
+
+    const cause = readOwnDataValue(candidate, "cause");
+    if (cause.kind === "accessor" || cause.kind === "missing") return false;
+    candidate = cause.value;
+  }
+  return false;
+}
+
+function isCreateOnlyConflict(error: unknown): boolean {
+  const visited = new Set<object>();
+  let candidate: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (!candidate || typeof candidate !== "object" || nodeTypes.isProxy(candidate) || visited.has(candidate)) return false;
+    visited.add(candidate);
+    if (!hasSafeProviderErrorShape(candidate)) return false;
+
+    const name = readOwnDataValue(candidate, "name");
+    if (name.kind === "accessor") return false;
+    const metadata = readOwnDataValue(candidate, "$metadata");
+    if (metadata.kind === "accessor") return false;
+    if (
+      name.kind === "data" &&
+      (name.value === "PreconditionFailed" || name.value === "ConditionalRequestConflict")
+    ) return true;
+    if (metadata.kind === "data") {
+      const safeMetadata = readPlainDataRecord(metadata.value);
+      if (safeMetadata?.httpStatusCode === 412 || safeMetadata?.httpStatusCode === 409) return true;
+    }
 
     const cause = readOwnDataValue(candidate, "cause");
     if (cause.kind === "accessor" || cause.kind === "missing") return false;
