@@ -45,8 +45,8 @@ export type PublicMediaCleanupResult = Readonly<{
 
 type Input = Readonly<{
   db: PawketDatabase;
-  storage: Pick<ObjectStoragePort, "headObject" | "listObjectVersions" | "deleteObject">;
-  holds: PublicMediaRetentionHoldPort;
+  storage?: Pick<ObjectStoragePort, "headObject" | "listObjectVersions" | "deleteObject">;
+  holds?: PublicMediaRetentionHoldPort;
   now: Date;
   batchSize: number;
   mode: "report_only" | "enforce";
@@ -98,14 +98,12 @@ function configurationError(): never {
 function snapshotInput(value: unknown): Input {
   const input = readExactOwnRecord(
     value,
-    ["db", "storage", "holds", "now", "batchSize", "mode", "retentionMode", "globalPause"],
-    ["acceptanceReference", "acceptance"],
+    ["db", "now", "batchSize", "mode", "retentionMode", "globalPause"],
+    ["storage", "holds", "acceptanceReference", "acceptance"],
   );
   if (
     !input ||
     !input.db || typeof input.db !== "object" ||
-    !input.storage || typeof input.storage !== "object" ||
-    !input.holds || typeof input.holds !== "object" ||
     !(input.now instanceof Date) || !Number.isFinite(input.now.getTime()) ||
     !Number.isInteger(input.batchSize) || (input.batchSize as number) < 1 || (input.batchSize as number) > 500 ||
     (input.mode !== "report_only" && input.mode !== "enforce") ||
@@ -118,50 +116,56 @@ function snapshotInput(value: unknown): Input {
       input.retentionMode !== "enforce" ||
       typeof input.acceptanceReference !== "string" ||
       !ACCEPTANCE_REFERENCE.test(input.acceptanceReference) ||
-      !input.acceptance || typeof input.acceptance !== "object" || nodeTypes.isProxy(input.acceptance)
+      !input.acceptance || typeof input.acceptance !== "object" || nodeTypes.isProxy(input.acceptance) ||
+      !input.holds || typeof input.holds !== "object" || nodeTypes.isProxy(input.holds) ||
+      !input.storage || typeof input.storage !== "object" || nodeTypes.isProxy(input.storage)
     )
   ) configurationError();
-  const storage = input.storage as Partial<Input["storage"]>;
-  const holds = input.holds as Partial<PublicMediaRetentionHoldPort>;
+  if (input.storage !== undefined && (!input.storage || typeof input.storage !== "object" || nodeTypes.isProxy(input.storage))) configurationError();
+  if (input.holds !== undefined && (!input.holds || typeof input.holds !== "object" || nodeTypes.isProxy(input.holds))) configurationError();
+  const storage = input.storage as Partial<NonNullable<Input["storage"]>> | undefined;
+  const holdsRecord = input.holds === undefined ? undefined : readExactOwnRecord(input.holds, ["protectedAssetIds"]);
   const acceptanceRecord = input.acceptance === undefined
     ? undefined
-    : readExactOwnRecord(input.acceptance, ["readCurrentAcceptedRevision"]);
-  if (typeof storage.headObject !== "function" || typeof storage.listObjectVersions !== "function" || typeof storage.deleteObject !== "function" || typeof holds.protectedAssetIds !== "function") configurationError();
-  if (acceptanceRecord !== undefined && (!acceptanceRecord || typeof acceptanceRecord.readCurrentAcceptedRevision !== "function")) configurationError();
+    : readExactOwnRecord(input.acceptance, ["lockCurrentAcceptedRevision"]);
+  if (storage !== undefined && (typeof storage.headObject !== "function" || typeof storage.listObjectVersions !== "function" || typeof storage.deleteObject !== "function")) configurationError();
+  if (holdsRecord !== undefined && (!holdsRecord || typeof holdsRecord.protectedAssetIds !== "function")) configurationError();
+  if (acceptanceRecord !== undefined && (!acceptanceRecord || typeof acceptanceRecord.lockCurrentAcceptedRevision !== "function")) configurationError();
+  const holds = holdsRecord === undefined
+    ? undefined
+    : { protectedAssetIds: holdsRecord.protectedAssetIds as PublicMediaRetentionHoldPort["protectedAssetIds"] };
   const acceptance = acceptanceRecord === undefined
     ? undefined
-    : { readCurrentAcceptedRevision: acceptanceRecord.readCurrentAcceptedRevision as PublicMediaRetentionAcceptancePort["readCurrentAcceptedRevision"] };
+    : { lockCurrentAcceptedRevision: acceptanceRecord.lockCurrentAcceptedRevision as PublicMediaRetentionAcceptancePort["lockCurrentAcceptedRevision"] };
   return {
     db: input.db as PawketDatabase,
-    storage: storage as Input["storage"],
-    holds: holds as PublicMediaRetentionHoldPort,
     now: new Date(input.now.getTime()),
     batchSize: input.batchSize as number,
     mode: input.mode,
     retentionMode: input.retentionMode,
     globalPause: input.globalPause,
+    ...(storage === undefined ? {} : { storage: storage as NonNullable<Input["storage"]> }),
+    ...(holds === undefined ? {} : { holds }),
     ...(input.acceptanceReference === undefined ? {} : { acceptanceReference: input.acceptanceReference as string }),
     ...(acceptance === undefined ? {} : { acceptance: acceptance as PublicMediaRetentionAcceptancePort }),
   };
 }
 
-async function authorizeEnforcement(input: Input): Promise<void> {
+async function authorizeEnforcement(input: Input, tx: PawketTransaction): Promise<void> {
   if (input.mode !== "enforce") return;
+  let value: unknown;
   try {
-    const grant = readExactOwnRecord(
-      await input.acceptance!.readCurrentAcceptedRevision(input.db),
-      ["acceptedRevision"],
-    );
-    if (
-      !grant ||
-      typeof grant.acceptedRevision !== "string" ||
-      !ACCEPTANCE_REFERENCE.test(grant.acceptedRevision) ||
-      grant.acceptedRevision !== input.acceptanceReference
-    ) configurationError();
-  } catch (error) {
-    if (error instanceof PublicMediaCleanupConfigurationError) throw error;
+    value = await input.acceptance!.lockCurrentAcceptedRevision(tx);
+  } catch {
     configurationError();
   }
+  const grant = readExactOwnRecord(value, ["acceptedRevision"]);
+  if (
+    !grant ||
+    typeof grant.acceptedRevision !== "string" ||
+    !ACCEPTANCE_REFERENCE.test(grant.acceptedRevision) ||
+    grant.acceptedRevision !== input.acceptanceReference
+  ) configurationError();
 }
 
 function emptyCounts(): Record<PublicMediaCleanupRule, Record<PublicMediaCleanupDisposition, number>> {
@@ -358,10 +362,10 @@ function headMatches(head: HeadObjectResult, derivative: SafeDerivative): boolea
 
 async function deleteSource(input: Input, tx: PawketTransaction, candidate: Candidate): Promise<number> {
   const location = { area: "quarantine" as const, key: candidate.targetKey };
-  const before = exactVersions(await input.storage.listObjectVersions(location));
+  const before = exactVersions(await input.storage!.listObjectVersions(location));
   if (!before) throw new Error("PUBLIC_MEDIA_CLEANUP_STORAGE_INVALID");
-  for (const version of before) await input.storage.deleteObject({ ...location, versionId: version.versionId });
-  const after = exactVersions(await input.storage.listObjectVersions(location));
+  for (const version of before) await input.storage!.deleteObject({ ...location, versionId: version.versionId });
+  const after = exactVersions(await input.storage!.listObjectVersions(location));
   if (!after || after.length !== 0) throw new Error("PUBLIC_MEDIA_CLEANUP_STORAGE_INVALID");
   const updated = await tx.update(publicMediaAssets).set({ sourceDeletedAt: input.now, updatedAt: input.now }).where(and(eq(publicMediaAssets.id, candidate.assetId), eq(publicMediaAssets.state, candidate.rule === "processed_source" ? "ready" : "failed"), sql`${publicMediaAssets.sourceDeletedAt} is null`)).returning({ id: publicMediaAssets.id });
   if (updated.length !== 1) throw new Error("PUBLIC_MEDIA_CLEANUP_STATE_CHANGED");
@@ -385,11 +389,11 @@ async function deleteDerivatives(input: Input, tx: PawketTransaction, candidate:
   let bytesDeleted = 0;
   for (const derivative of derivatives) {
     const location = { area: "derivative" as const, key: derivative.objectKey, versionId: derivative.objectVersionId };
-    const before = await input.storage.headObject(location);
+    const before = await input.storage!.headObject(location);
     if (before === null) continue;
     if (!headMatches(before, derivative)) throw new Error("PUBLIC_MEDIA_CLEANUP_STORAGE_INVALID");
-    await input.storage.deleteObject(location);
-    if (await input.storage.headObject(location) !== null) throw new Error("PUBLIC_MEDIA_CLEANUP_STORAGE_INVALID");
+    await input.storage!.deleteObject(location);
+    if (await input.storage!.headObject(location) !== null) throw new Error("PUBLIC_MEDIA_CLEANUP_STORAGE_INVALID");
     bytesDeleted += derivative.byteSize;
   }
   const updated = await tx.update(publicMediaAssets).set({ state: "deleted", deletionReviewedAt: input.now, updatedAt: input.now }).where(and(eq(publicMediaAssets.id, candidate.assetId), eq(publicMediaAssets.state, "ready"))).returning({ id: publicMediaAssets.id });
@@ -500,17 +504,19 @@ async function candidateStillEligible(
 
 export async function runPublicMediaCleanup(value: Input): Promise<PublicMediaCleanupResult> {
   const input = snapshotInput(value);
-  await authorizeEnforcement(input);
   return input.db.transaction(async (tx) => {
+    await authorizeEnforcement(input, tx);
     const candidates = await claimCandidates(tx, input.now, input.batchSize);
     const expectedIds = new Set(candidates.map((candidate) => candidate.assetId));
     let protectedIds: ReadonlySet<string> | null = null;
-    if (input.mode === "report_only" || input.globalPause) {
+    if ((input.mode === "report_only" || input.globalPause) && input.holds) {
       try {
         protectedIds = exactProtectedIds(await input.holds.protectedAssetIds(tx, [...expectedIds]), expectedIds);
       } catch {
         protectedIds = null;
       }
+    } else if (input.mode === "report_only") {
+      protectedIds = new Set();
     }
     const counts = emptyCounts();
     const results: Array<{ assetId: string; rule: PublicMediaCleanupRule; eligibleAt: Date; objectKeyHash: string; disposition: PublicMediaCleanupDisposition; bytesDeleted: number }> = [];
@@ -529,7 +535,7 @@ export async function runPublicMediaCleanup(value: Input): Promise<PublicMediaCl
             disposition = "protected";
           } else {
             const exactHolds = exactProtectedIds(
-              await input.holds.protectedAssetIds(tx, [candidate.assetId]),
+              await input.holds!.protectedAssetIds(tx, [candidate.assetId]),
               new Set([candidate.assetId]),
             );
             if (!exactHolds) throw new Error("PUBLIC_MEDIA_CLEANUP_HOLD_INVALID");

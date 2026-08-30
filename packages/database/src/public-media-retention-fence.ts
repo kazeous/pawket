@@ -10,10 +10,19 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
  * Shared transaction fence for destructive public-media retention and every
  * writer that can create an asset reference or retention hold.
  *
- * Callers that also serialize an asset or creator page must acquire those row
- * locks first, in stable ID order, and acquire these fences last. A hold-only
- * writer acquires this fence before publishing the hold and revalidates the
- * asset after acquiring it.
+ * Cleanup owns the destructive order: stable asset rows, stable creator-page
+ * rows, then sorted fences. Existing Catalog mutations remain page-first:
+ * after locking their owned page they acquire sorted fences, never lock asset
+ * rows, and revalidate ready ownership/purpose through Catalog's consumer-owned
+ * media port before writing a new reference. Thus writer-first makes cleanup's
+ * final revalidation observe the reference; cleanup-first makes the waking
+ * writer observe the deleted/non-ready asset and roll back.
+ *
+ * Task 11/12 hold writers that do not need a creator-page row acquire sorted
+ * fences, revalidate the asset after acquiring them, then publish the hold.
+ * Task 13 cross-domain transitions must preserve whichever domain row order
+ * they already own and acquire this fence only after those rows; they must not
+ * add page-to-asset row locking. Every participant holds its fence to commit.
  */
 export async function acquirePublicMediaRetentionFences(
   tx: PawketTransaction,

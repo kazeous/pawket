@@ -51,6 +51,21 @@ function service(database = db, clock = at, options: ServiceOptions = {}) {
       userId, capabilityState: "active" as const, capabilityVersion: 1, approvedRevisionId,
       displayName: options.displayName ?? "Artist", introduction: options.introduction ?? "Approved intro",
     }] as const)); } },
+    mediaCatalog: {
+      async resolveReadyAssets(_database, ownerUserId, references) {
+        return new Map(references.map((reference) => [reference.assetId, {
+          assetId: reference.assetId,
+          ownerUserId,
+          purpose: reference.purpose,
+          derivatives: {
+            thumb: { derivativeId: randomUUID(), width: 384, height: 384 },
+            display: { derivativeId: randomUUID(), width: 1280, height: 900 },
+            large: { derivativeId: randomUUID(), width: 2400, height: 1600 },
+          },
+        }]));
+      },
+      async resolveReadyAssetsBatch() { return new Map(); },
+    },
     commandFingerprintKey: commandKey,
     publishingMode: options.publishingMode ?? "general_audience",
     now: () => clock,

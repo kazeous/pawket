@@ -258,7 +258,6 @@ describe("public media delivery", () => {
     ["content hash mismatch", () => Readable.from([Buffer.from([0, 1, 2, 3])])],
   ])("surfaces %s as a closed body-stream failure after committing safe headers", async (_scenario, createBody) => {
     const body = createBody();
-    const destroy = vi.spyOn(body, "destroy");
     const { handlers, calls } = fixture({
       storage: {
         headObject: vi.fn(async () => ({ contentLength: bytes.byteLength, contentType: "image/webp", etag: "etag", versionId: location.versionId, sha256: contentHash })),
@@ -269,7 +268,35 @@ describe("public media delivery", () => {
     expect(response.status).toBe(200);
     await expect(response.arrayBuffer()).rejects.toThrow("MEDIA_STREAM_UNAVAILABLE");
     expect(calls.metric).toHaveBeenCalledWith({ operation: "delivery", outcome: "storage_unavailable" });
-    expect(destroy).toHaveBeenCalled();
+    expect(body.destroyed).toBe(true);
+  });
+
+  test("closes the storage stream and records one bounded failure when the client cancels", async () => {
+    let emitted = false;
+    const body = new Readable({
+      read() {
+        if (emitted) return;
+        emitted = true;
+        this.push(bytes.subarray(0, 1));
+      },
+    });
+    const { handlers, calls } = fixture({
+      storage: {
+        headObject: vi.fn(async () => ({ contentLength: bytes.byteLength, contentType: "image/webp", etag: "etag", versionId: location.versionId, sha256: contentHash })),
+        getObject: vi.fn(async () => body),
+      },
+    });
+    const response = await handlers.deliver(new Request(`https://pawket.test/media/${assetId}/display`), assetId, "display");
+    const reader = response.body!.getReader();
+
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(Array.from(first.value ?? [])).toEqual(Array.from(bytes.subarray(0, 1)));
+    await reader.cancel();
+
+    expect(body.destroyed).toBe(true);
+    expect(calls.metric).toHaveBeenCalledTimes(1);
+    expect(calls.metric).toHaveBeenCalledWith({ operation: "delivery", outcome: "storage_unavailable" });
   });
 
   test("rejects hostile request and identifier shapes without invoking traps or ports", async () => {
@@ -303,6 +330,79 @@ describe("public media delivery", () => {
     expect(calls.getObject).not.toHaveBeenCalled();
   });
 
+  test("snapshots native request headers without invoking hostile own iterator or method traps", async () => {
+    const traps: PropertyKey[] = [];
+    const request = new Request(`https://pawket.test/media/${assetId}/thumb?preview=1`, {
+      headers: { authorization: "Bearer private-session" },
+    });
+    const hostileHeaders = request.headers;
+    for (const key of [Symbol.iterator, "entries", "forEach"] as const) {
+      Object.defineProperty(hostileHeaders, key, {
+        configurable: true,
+        get() {
+          traps.push(key);
+          throw new Error("headers trap secret");
+        },
+      });
+    }
+    let receivedHeaders: Headers | undefined;
+    const authenticate = vi.fn(async (headers: Headers) => {
+      receivedHeaders = headers;
+      expect(Object.getPrototypeOf(headers)).toBe(Headers.prototype);
+      expect(headers.get("authorization")).toBe("Bearer private-session");
+      return { userId: "creator-001" };
+    });
+    const { handlers } = fixture({ authenticate });
+
+    const response = await handlers.deliver(request, assetId, "thumb");
+
+    expect(traps).toEqual([]);
+    expect(authenticate).toHaveBeenCalledOnce();
+    expect(Object.is(receivedHeaders, hostileHeaders)).toBe(false);
+    expect(response.status).toBe(200);
+    expect(await responseBytes(response)).toEqual(bytes);
+  });
+
+  test("rejects an oversized typed-array chunk before any Uint8Array.from copy", async () => {
+    const oversized = new Uint8Array(bytes.byteLength + 1);
+    const copy = vi.spyOn(Uint8Array, "from");
+    const body = Readable.from([oversized]);
+    const { handlers } = fixture({
+      storage: {
+        headObject: vi.fn(async () => ({ contentLength: bytes.byteLength, contentType: "image/webp", etag: "etag", versionId: location.versionId, sha256: contentHash })),
+        getObject: vi.fn(async () => body),
+      },
+    });
+
+    const response = await handlers.deliver(new Request(`https://pawket.test/media/${assetId}/display`), assetId, "display");
+
+    expect(response.status).toBe(200);
+    await expect(response.arrayBuffer()).rejects.toThrow("MEDIA_STREAM_UNAVAILABLE");
+    expect(copy).not.toHaveBeenCalled();
+    copy.mockRestore();
+  });
+
+  test.each(["subclass", "shared-buffer"] as const)("rejects a %s stream chunk before copying", async (scenario) => {
+    class HostileChunk extends Uint8Array {}
+    const chunk = scenario === "subclass"
+      ? new HostileChunk(bytes.byteLength)
+      : new Uint8Array(new SharedArrayBuffer(bytes.byteLength));
+    const copy = vi.spyOn(Uint8Array, "from");
+    const body = Readable.from((async function* () { yield chunk; })());
+    const { handlers } = fixture({
+      storage: {
+        headObject: vi.fn(async () => ({ contentLength: bytes.byteLength, contentType: "image/webp", etag: "etag", versionId: location.versionId, sha256: contentHash })),
+        getObject: vi.fn(async () => body),
+      },
+    });
+
+    const response = await handlers.deliver(new Request(`https://pawket.test/media/${assetId}/display`), assetId, "display");
+
+    await expect(response.arrayBuffer()).rejects.toThrow("MEDIA_STREAM_UNAVAILABLE");
+    expect(copy).not.toHaveBeenCalled();
+    copy.mockRestore();
+  });
+
   test("maps ready-row and provider errors without exposing storage facts", async () => {
     const secret = "derivatives/private/key opaque-version creator-001";
     const { handlers, calls } = fixture({
@@ -323,5 +423,29 @@ describe("public media delivery", () => {
     expect(serialized).not.toContain(secret);
     expect(serialized).not.toMatch(/derivatives|opaque-version|creator-001/u);
     expect(calls.getObject).not.toHaveBeenCalled();
+  });
+
+  test("maps hostile unknown errors without prototype traps or provider text", async () => {
+    let traps = 0;
+    const hostile = new Proxy(new PublicMediaServiceError("MEDIA_NOT_READY"), {
+      getPrototypeOf() {
+        traps += 1;
+        throw new Error("provider prototype secret");
+      },
+      get() {
+        traps += 1;
+        throw new Error("provider getter secret");
+      },
+    });
+    const { handlers, calls } = fixture({
+      media: { getDeliveryGrant: vi.fn(async () => { throw hostile; }) },
+    });
+
+    const response = await handlers.deliver(new Request(`https://pawket.test/media/${assetId}/display`), assetId, "display");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ code: "MEDIA_UNAVAILABLE" });
+    expect(traps).toBe(0);
+    expect(JSON.stringify(calls.metric.mock.calls)).not.toMatch(/provider|prototype|getter|secret/u);
   });
 });

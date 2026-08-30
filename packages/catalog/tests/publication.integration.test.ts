@@ -63,6 +63,7 @@ function harness(input: {
   let seedInterceptor: (() => Promise<void>) | null = null;
   let failVisibility = false;
   let malformedVisibility = false;
+  let mediaMutationEnabled = true;
   const media = new Map<string, ReadyMedia>();
   const creatorSeeds = {
     async getCreatorSeed(_database: unknown, userId: string): Promise<CreatorSeed | null> {
@@ -89,10 +90,12 @@ function harness(input: {
       const resolved = new Map<string, ReadyMedia>();
       for (const reference of references) {
         const found = media.get(reference.assetId);
-        const value = found ? (input.mutateMedia?.(found, reference) ?? found) : null;
+        const value = found
+          ? (mediaMutationEnabled ? (input.mutateMedia?.(found, reference) ?? found) : found)
+          : null;
         if (value) resolved.set(reference.assetId, value);
       }
-      return (input.mutateResolvedMap?.(resolved, references) ?? resolved) as ReadonlyMap<string, ReadyMedia>;
+      return (mediaMutationEnabled ? (input.mutateResolvedMap?.(resolved, references) ?? resolved) : resolved) as ReadonlyMap<string, ReadyMedia>;
     },
     async resolveReadyAssetsBatch(_database: unknown, requests: readonly { ownerUserId: string; references: readonly MediaReference[] }[]) {
       return new Map(requests.map((request) => [request.ownerUserId, new Map(request.references.flatMap((reference) => {
@@ -140,6 +143,7 @@ function harness(input: {
     setCapability(value: CreatorSeed["capabilityState"] | null) { capabilityState = value; },
     setHolds(value: { pageHeld: boolean; heldShowcaseIds: ReadonlySet<string> }) { pageHeld = value.pageHeld; heldShowcaseIds = new Set(value.heldShowcaseIds); },
     setSeedInterceptor(value: (() => Promise<void>) | null) { seedInterceptor = value; },
+    setMediaMutationEnabled(value: boolean) { mediaMutationEnabled = value; },
     failVisibility() { failVisibility = true; },
     malformVisibility() { malformedVisibility = true; },
   };
@@ -191,36 +195,44 @@ async function preparedPage(testHarness: Harness, label: string, options: { with
   const avatar = readyMedia(userId, "avatar");
   const cover = readyMedia(userId, "cover");
   const showcaseMedia = readyMedia(userId, "showcase");
-  if (options.withMedia !== false) {
-    testHarness.media.set(avatar.assetId, avatar);
-    testHarness.media.set(cover.assetId, cover);
-    testHarness.media.set(showcaseMedia.assetId, showcaseMedia);
+  testHarness.media.set(avatar.assetId, avatar);
+  testHarness.media.set(cover.assetId, cover);
+  testHarness.media.set(showcaseMedia.assetId, showcaseMedia);
+  testHarness.setMediaMutationEnabled(false);
+  try {
+    version = (await testHarness.service.saveDraft({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: version,
+      idempotencyKey: `${label}-draft-key`, requestId: `request-${label}-draft`,
+      draft: {
+        displayName: "Before edit",
+        introduction: "Published introduction",
+        primaryDiscipline: "illustration",
+        secondaryDisciplines: ["drawing"],
+        avatarAssetId: avatar.assetId,
+        coverAssetId: cover.assetId,
+      },
+    })).draftVersion;
+    version = (await testHarness.service.upsertShowcase({
+      actor: actor(userId), pageId: page.pageId, expectedVersion: version,
+      idempotencyKey: `${label}-showcase-key`, requestId: `request-${label}-showcase`,
+      showcase: {
+        position: 0,
+        title: "Published showcase",
+        description: "A coherent immutable showcase",
+        discipline: "illustration",
+        contentLabel: "general_audience",
+        externalUrl: "https://example.test/work",
+        media: [{ assetId: showcaseMedia.assetId, alternativeText: "Finished illustration" }],
+      },
+    })).draftVersion;
+  } finally {
+    testHarness.setMediaMutationEnabled(true);
   }
-  version = (await testHarness.service.saveDraft({
-    actor: actor(userId), pageId: page.pageId, expectedVersion: version,
-    idempotencyKey: `${label}-draft-key`, requestId: `request-${label}-draft`,
-    draft: {
-      displayName: "Before edit",
-      introduction: "Published introduction",
-      primaryDiscipline: "illustration",
-      secondaryDisciplines: ["drawing"],
-      avatarAssetId: avatar.assetId,
-      coverAssetId: cover.assetId,
-    },
-  })).draftVersion;
-  version = (await testHarness.service.upsertShowcase({
-    actor: actor(userId), pageId: page.pageId, expectedVersion: version,
-    idempotencyKey: `${label}-showcase-key`, requestId: `request-${label}-showcase`,
-    showcase: {
-      position: 0,
-      title: "Published showcase",
-      description: "A coherent immutable showcase",
-      discipline: "illustration",
-      contentLabel: "general_audience",
-      externalUrl: "https://example.test/work",
-      media: [{ assetId: showcaseMedia.assetId, alternativeText: "Finished illustration" }],
-    },
-  })).draftVersion;
+  if (options.withMedia === false) {
+    testHarness.media.delete(avatar.assetId);
+    testHarness.media.delete(cover.assetId);
+    testHarness.media.delete(showcaseMedia.assetId);
+  }
   return { userId, pageId: page.pageId, version, handle: options.withHandle === false ? null : `${label}-artist`, avatar, cover, showcaseMedia };
 }
 

@@ -75,7 +75,7 @@ export function workerReadiness(input: {
     initialized &&
     poll === "up" &&
     refundScan === "up" &&
-    publicMediaCleanupScan !== "down" &&
+    publicMediaCleanupScan === "up" &&
     input.revision.revisionMatch;
 
   return {

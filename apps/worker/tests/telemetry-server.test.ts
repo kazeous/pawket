@@ -38,7 +38,7 @@ describe("worker telemetry server", () => {
     return { state, baseUrl: `http://127.0.0.1:${handle.port}` };
   }
 
-  test("serves liveness and fresh readiness with exact revision attestation", async () => {
+  test("serves liveness but rejects readiness when the Increment 3 cleanup scan is not configured", async () => {
     const { baseUrl } = await start();
 
     const live = await fetch(`${baseUrl}/health/live`);
@@ -46,9 +46,9 @@ describe("worker telemetry server", () => {
 
     expect(live.status).toBe(200);
     expect(await live.json()).toEqual({ status: "ok", service: "worker", ...revision });
-    expect(ready.status).toBe(200);
+    expect(ready.status).toBe(503);
     expect(await ready.json()).toEqual({
-      status: "ready",
+      status: "not_ready",
       initialized: true,
       poll: "up",
       refundScan: "up",

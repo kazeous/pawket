@@ -28,12 +28,14 @@ export type PublicMediaRetentionHoldPort = Readonly<{
 /**
  * Authoritative operational control for destructive public-media retention.
  *
- * The current accepted revision is deliberately read without passing the
- * caller's configured reference, so a caller cannot authorize itself by
- * echoing two values it supplied.
+ * Implementations must acquire an authoritative row/advisory lock using the
+ * supplied transaction and keep it until that transaction commits. The
+ * current accepted revision is deliberately read without passing the caller's
+ * configured reference, so a caller cannot authorize itself by echoing two
+ * values it supplied. Revocation uses the same authoritative lock.
  */
 export type PublicMediaRetentionAcceptancePort = Readonly<{
-  readCurrentAcceptedRevision(
-    db: PawketDatabase | PawketTransaction,
+  lockCurrentAcceptedRevision(
+    tx: PawketTransaction,
   ): Promise<Readonly<{ acceptedRevision: string }> | null>;
 }>;

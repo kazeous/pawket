@@ -18,6 +18,7 @@ import {
   type PawketDatabase,
   type PawketTransaction,
 } from "@pawket/database";
+import { createCatalogService } from "@pawket/catalog";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
@@ -26,6 +27,7 @@ import {
   runPublicMediaCleanup,
   type PublicMediaCleanupRule,
 } from "../src/media-cleanup.js";
+import { createPublicMediaService } from "../src/media-service.js";
 import type { HeadObjectResult, ObjectLocation, ObjectStoragePort } from "../src/object-storage-port.js";
 import type { PublicMediaRetentionAcceptancePort } from "../src/media-ports.js";
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
@@ -126,12 +128,13 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
       await migrate(connection.db, file);
     }
     await connection.db.execute(sql.raw("create table public_media_cleanup_test_holds (asset_id uuid primary key)"));
+    await connection.db.execute(sql.raw("create table public_media_cleanup_test_acceptance (singleton boolean primary key default true check (singleton), accepted_revision text not null, active boolean not null)"));
     await ensureVersionedBuckets(s3, [quarantineBucket, derivativeBucket]);
   });
 
   beforeEach(async () => {
     await connection.db.execute(sql.raw(
-      "truncate table public_media_cleanup_test_holds, public_media_processing_attempts, public_media_derivatives, public_media_upload_intents, public_media_assets, creator_discovery_projections, creator_publication_events, creator_publication_media, creator_publication_showcases, creator_publication_revisions, creator_showcase_draft_media, creator_showcase_drafts, creator_page_drafts, creator_handle_claims, creator_pages, identity_users cascade",
+      "truncate table public_media_cleanup_test_acceptance, public_media_cleanup_test_holds, public_media_processing_attempts, public_media_derivatives, public_media_upload_intents, public_media_assets, creator_discovery_projections, creator_publication_events, creator_publication_media, creator_publication_showcases, creator_publication_revisions, creator_showcase_draft_media, creator_showcase_drafts, creator_page_drafts, creator_handle_claims, creator_pages, identity_users cascade",
     ));
   });
 
@@ -280,6 +283,25 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     expect((await connection.db.select().from(publicMediaAssets).where(eq(publicMediaAssets.id, candidate.assetId)))[0]?.sourceDeletedAt).toBeNull();
   });
 
+  test("report-only scans candidates without storage, hold, or acceptance providers", async () => {
+    const seedStorage = new CleanupMemoryStorage();
+    const candidate = await seedRuleCandidate(connection.db, seedStorage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
+
+    const result = await runPublicMediaCleanup({
+      db: connection.db,
+      now: exactAt,
+      batchSize: 100,
+      mode: "report_only",
+      retentionMode: "report_only",
+      globalPause: true,
+    } as never);
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ assetId: candidate.assetId, disposition: "candidate" }),
+    ]);
+    expect((await connection.db.select().from(publicMediaAssets).where(eq(publicMediaAssets.id, candidate.assetId)))[0]?.sourceDeletedAt).toBeNull();
+  });
+
   test.each([
     [{ mode: "enforce", retentionMode: "report_only", globalPause: false, acceptanceReference: "accepted-revision-3844c65", acceptance: acceptedRevision("accepted-revision-3844c65") }, "global retention mode"],
     [{ mode: "enforce", retentionMode: "enforce", globalPause: false, acceptanceReference: undefined }, "acceptance"],
@@ -293,14 +315,161 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     expect(storage.deletes).toEqual([]);
   });
 
+  test("holds the authoritative acceptance lock through storage deletion so revocation waits", async () => {
+    const acceptanceReference = "accepted-revision-current";
+    await connection.db.execute(sql`insert into public_media_cleanup_test_acceptance (accepted_revision, active) values (${acceptanceReference}, true)`);
+    const storage = new CleanupMemoryStorage();
+    await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
+    const originalDelete = storage.deleteObject.bind(storage);
+    let deletionStarted!: () => void;
+    let releaseDeletion!: () => void;
+    const started = new Promise<void>((resolve) => { deletionStarted = resolve; });
+    const mayDelete = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+    let firstDelete = true;
+    storage.deleteObject = async (location) => {
+      if (firstDelete) {
+        firstDelete = false;
+        deletionStarted();
+        await mayDelete;
+      }
+      await originalDelete(location);
+    };
+
+    const cleanupPromise = cleanup(connection.db, storage, exactAt, {
+      ...enforceOptions(),
+      acceptanceReference,
+      acceptance: authoritativeAcceptance(),
+    });
+    await started;
+    const revoke = connection.db.execute(sql`update public_media_cleanup_test_acceptance set active = false where singleton = true`);
+    try {
+      expect(await settledWithin(revoke, 75)).toBe(false);
+    } finally {
+      releaseDeletion();
+    }
+    expect((await cleanupPromise).processedCount).toBe(1);
+    await revoke;
+    const rows = await connection.db.execute<{ active: boolean }>(sql`select active from public_media_cleanup_test_acceptance`);
+    expect(rows[0]?.active).toBe(false);
+  });
+
+  test("rejects before storage when acceptance revocation commits first", async () => {
+    const acceptanceReference = "accepted-revision-current";
+    await connection.db.execute(sql`insert into public_media_cleanup_test_acceptance (accepted_revision, active) values (${acceptanceReference}, false)`);
+    const storage = new CleanupMemoryStorage();
+    await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
+
+    await expect(cleanup(connection.db, storage, exactAt, {
+      ...enforceOptions(),
+      acceptanceReference,
+      acceptance: authoritativeAcceptance(),
+    })).rejects.toBeInstanceOf(PublicMediaCleanupConfigurationError);
+    expect(storage.deletes).toEqual([]);
+  });
+
+  test("maps a proxy acceptance failure to the fixed configuration error without traps", async () => {
+    let traps = 0;
+    const hostile = new Proxy(new PublicMediaCleanupConfigurationError(), {
+      getPrototypeOf() {
+        traps += 1;
+        throw new Error("acceptance prototype secret");
+      },
+      get() {
+        traps += 1;
+        throw new Error("acceptance getter secret");
+      },
+    });
+    const storage = new CleanupMemoryStorage();
+    await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
+    let caught: unknown;
+    try {
+      await cleanup(connection.db, storage, exactAt, {
+        ...enforceOptions(),
+        acceptance: { lockCurrentAcceptedRevision: async () => { throw hostile; } },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(traps).toBe(0);
+    expect(Object.getPrototypeOf(caught)).toBe(PublicMediaCleanupConfigurationError.prototype);
+    expect((caught as Error).message).toBe("PUBLIC_MEDIA_CLEANUP_CONFIGURATION_INVALID");
+    expect(storage.deletes).toEqual([]);
+  });
+
+  test.each(["saveDraft", "upsertShowcase"] as const)("actual Catalog %s wins writer-first and cleanup revalidation protects the bytes", async (commandName) => {
+    const purpose = commandName === "saveDraft" ? "avatar" : "showcase";
+    const storage = new CleanupMemoryStorage();
+    const readyAt = new Date(exactAt.getTime() - 40 * day);
+    const asset = await seedReadyAsset(connection.db, storage, readyAt, randomUUID(), new Date(readyAt.getTime() + day), purpose);
+    const { pageId } = await seedDraftAggregate(connection.db, asset.userId, readyAt);
+    let writerReady!: () => void;
+    let releaseWriter!: () => void;
+    const ready = new Promise<void>((resolve) => { writerReady = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const catalog = actualCatalog(connection.db, storage, async () => {
+      writerReady();
+      await release;
+    });
+    const writer = runCatalogReferenceCommand(catalog, commandName, asset.userId, pageId, asset.assetId);
+    await ready;
+    const cleanupPromise = cleanup(connection.db, storage, exactAt, enforceOptions());
+    try {
+      expect(await settledWithin(cleanupPromise, 75)).toBe(false);
+    } finally {
+      releaseWriter();
+    }
+    await expect(writer).resolves.toEqual({ pageId, draftVersion: 2 });
+    const result = await cleanupPromise;
+    expect(result.protectedCount).toBe(1);
+    expect(result.processedCount).toBe(0);
+    expect(storage.deletes).toEqual([]);
+  });
+
+  test.each(["saveDraft", "upsertShowcase"] as const)("cleanup-first makes actual Catalog %s revalidate ready ownership after waking", async (commandName) => {
+    const purpose = commandName === "saveDraft" ? "avatar" : "showcase";
+    const storage = new CleanupMemoryStorage();
+    const readyAt = new Date(exactAt.getTime() - 40 * day);
+    const asset = await seedReadyAsset(connection.db, storage, readyAt, randomUUID(), new Date(readyAt.getTime() + day), purpose);
+    const { pageId } = await seedDraftAggregate(connection.db, asset.userId, readyAt);
+    const catalog = actualCatalog(connection.db, storage);
+    const originalDelete = storage.deleteObject.bind(storage);
+    let deletionStarted!: () => void;
+    let releaseDeletion!: () => void;
+    const started = new Promise<void>((resolve) => { deletionStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+    let firstDelete = true;
+    storage.deleteObject = async (location) => {
+      if (firstDelete) {
+        firstDelete = false;
+        deletionStarted();
+        await release;
+      }
+      await originalDelete(location);
+    };
+    const cleanupPromise = cleanup(connection.db, storage, exactAt, enforceOptions());
+    await started;
+    const writer = runCatalogReferenceCommand(catalog, commandName, asset.userId, pageId, asset.assetId);
+    try {
+      expect(await settledWithin(writer, 75)).toBe(false);
+    } finally {
+      releaseDeletion();
+    }
+    expect((await cleanupPromise).processedCount).toBe(1);
+    await expect(writer).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
+    const draft = (await connection.db.select().from(creatorPageDrafts).where(eq(creatorPageDrafts.pageId, pageId)))[0]!;
+    expect(draft.avatarAssetId).toBeNull();
+    const showcases = await connection.db.select().from(creatorShowcaseDrafts).where(eq(creatorShowcaseDrafts.pageId, pageId));
+    expect(showcases).toEqual([]);
+  });
+
   test.each([
     ["mismatch", "accepted-revision-other", acceptedRevision("accepted-revision-current")],
     ["stale", "accepted-revision-previous", acceptedRevision("accepted-revision-current")],
-    ["missing", "accepted-revision-current", { readCurrentAcceptedRevision: async () => null }],
-    ["proxy grant", "accepted-revision-current", { readCurrentAcceptedRevision: async (): Promise<unknown> => new Proxy({ acceptedRevision: "accepted-revision-current" }, {}) }],
-    ["proxy verifier", "accepted-revision-current", new Proxy({ readCurrentAcceptedRevision: async () => ({ acceptedRevision: "accepted-revision-current" }) }, {})],
+    ["missing", "accepted-revision-current", { lockCurrentAcceptedRevision: async () => null }],
+    ["proxy grant", "accepted-revision-current", { lockCurrentAcceptedRevision: async (): Promise<unknown> => new Proxy({ acceptedRevision: "accepted-revision-current" }, {}) }],
+    ["proxy verifier", "accepted-revision-current", new Proxy({ lockCurrentAcceptedRevision: async () => ({ acceptedRevision: "accepted-revision-current" }) }, {})],
     ["accessor verifier", "accepted-revision-current", hostileAcceptanceAccessor()],
-    ["provider failure", "accepted-revision-current", { readCurrentAcceptedRevision: async (): Promise<never> => { throw new Error("acceptance-secret"); } }],
+    ["provider failure", "accepted-revision-current", { lockCurrentAcceptedRevision: async (): Promise<never> => { throw new Error("acceptance-secret"); } }],
   ] as const)("fails closed on %s authoritative acceptance evidence before storage", async (_scenario, acceptanceReference, acceptance) => {
     const storage = new CleanupMemoryStorage();
     await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
@@ -567,11 +736,25 @@ function enforceOptions() {
 }
 
 function acceptedRevision(acceptedRevision: string): PublicMediaRetentionAcceptancePort {
-  return { readCurrentAcceptedRevision: async () => ({ acceptedRevision }) };
+  return { lockCurrentAcceptedRevision: async () => ({ acceptedRevision }) };
+}
+
+function authoritativeAcceptance(): PublicMediaRetentionAcceptancePort {
+  return {
+    async lockCurrentAcceptedRevision(database) {
+      const rows = await database.execute<{ accepted_revision: string }>(sql`
+        select accepted_revision
+        from public_media_cleanup_test_acceptance
+        where singleton = true and active = true
+        for share
+      `);
+      return rows[0] ? { acceptedRevision: rows[0].accepted_revision } : null;
+    },
+  };
 }
 
 function hostileAcceptanceAccessor(): object {
-  return Object.defineProperty({}, "readCurrentAcceptedRevision", {
+  return Object.defineProperty({}, "lockCurrentAcceptedRevision", {
     enumerable: true,
     get() { throw new Error("acceptance-accessor-secret"); },
   });
@@ -601,6 +784,87 @@ function cleanup(
     globalPause: true,
     ...overrides,
   } as never);
+}
+
+function actualCatalog(
+  db: PawketDatabase,
+  storage: ObjectStoragePort,
+  beforeReadyReturn?: () => Promise<void>,
+) {
+  const media = createPublicMediaService({
+    db,
+    storage,
+    creator: { getActiveCreator: async (_database, userId) => ({ userId, state: "active" }) },
+    catalog: { ownsAsset: async () => true },
+    publishingMode: "general_audience",
+  });
+  return createCatalogService({
+    db,
+    creatorSeeds: {
+      async getCreatorSeed(_database, userId) {
+        return { userId, capabilityState: "active", capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Cleanup creator", introduction: "Cleanup creator" } as const;
+      },
+      async getCreatorSeeds(_database, userIds) {
+        return new Map(userIds.map((userId) => [userId, { userId, capabilityState: "active", capabilityVersion: 1, approvedRevisionId: randomUUID(), displayName: "Cleanup creator", introduction: "Cleanup creator" } as const]));
+      },
+    },
+    mediaCatalog: beforeReadyReturn
+      ? {
+          async resolveReadyAssets(database, ownerUserId, references) {
+            const resolved = await media.resolveReadyAssets(database, ownerUserId, references);
+            await beforeReadyReturn();
+            return resolved;
+          },
+          resolveReadyAssetsBatch: media.resolveReadyAssetsBatch,
+        }
+      : media,
+    publishingMode: "general_audience",
+    commandFingerprintKey: new Uint8Array(32).fill(17),
+    now: () => exactAt,
+  });
+}
+
+function runCatalogReferenceCommand(
+  catalog: ReturnType<typeof createCatalogService>,
+  commandName: "saveDraft" | "upsertShowcase",
+  userId: string,
+  pageId: string,
+  assetId: string,
+) {
+  const actor = { userId, sessionId: "cleanup-catalog-session", primaryAuthenticatedAt: exactAt };
+  if (commandName === "saveDraft") {
+    return catalog.saveDraft({
+      actor,
+      pageId,
+      expectedVersion: 1,
+      idempotencyKey: `cleanup-save-${assetId}`,
+      requestId: `cleanup-save-${assetId}`,
+      draft: {
+        displayName: "Cleanup creator",
+        introduction: "Cleanup creator",
+        primaryDiscipline: "illustration",
+        secondaryDisciplines: [],
+        avatarAssetId: assetId,
+        coverAssetId: null,
+      },
+    });
+  }
+  return catalog.upsertShowcase({
+    actor,
+    pageId,
+    expectedVersion: 1,
+    idempotencyKey: `cleanup-showcase-${assetId}`,
+    requestId: `cleanup-showcase-${assetId}`,
+    showcase: {
+      position: 0,
+      title: "Cleanup showcase",
+      description: "",
+      discipline: "illustration",
+      contentLabel: "general_audience",
+      externalUrl: null,
+      media: [{ assetId, alternativeText: "Cleanup image" }],
+    },
+  });
 }
 
 async function seedUser(db: PawketDatabase): Promise<string> {
@@ -669,6 +933,7 @@ async function seedReadyAsset(
   readyAt: Date,
   assetId = randomUUID(),
   sourceDeletedAt?: Date,
+  purpose: "avatar" | "cover" | "showcase" = "showcase",
 ) {
   const userId = await seedUser(db);
   const intentId = randomUUID();
@@ -677,7 +942,7 @@ async function seedReadyAsset(
   await db.insert(publicMediaAssets).values({
     id: assetId,
     ownerUserId: userId,
-    purpose: "showcase",
+    purpose,
     declaredSourceFormat: "png",
     state: "awaiting_upload",
     sourceAllocationBytes: 4,
@@ -690,7 +955,7 @@ async function seedReadyAsset(
     id: intentId,
     assetId,
     ownerUserId: userId,
-    purpose: "showcase",
+    purpose,
     declaredSourceFormat: "png",
     maxSourceBytes: 4,
     maxSourcePixels: 40_000_000,

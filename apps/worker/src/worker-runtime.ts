@@ -154,7 +154,7 @@ export type StartWorkerOptions = {
     storage: ObjectStoragePort;
     concurrency: number;
     cleanup?: {
-      holds: PublicMediaRetentionHoldPort;
+      holds?: PublicMediaRetentionHoldPort;
       mode: "report_only" | "enforce";
       retentionMode: "report_only" | "enforce";
       globalPause: boolean;
@@ -163,6 +163,17 @@ export type StartWorkerOptions = {
       batchSize: number;
       scanIntervalMs: number;
     };
+  };
+  publicMediaCleanup?: {
+    storage?: ObjectStoragePort;
+    holds?: PublicMediaRetentionHoldPort;
+    mode: "report_only" | "enforce";
+    retentionMode: "report_only" | "enforce";
+    globalPause: boolean;
+    acceptanceReference?: string;
+    acceptance?: PublicMediaRetentionAcceptancePort;
+    batchSize: number;
+    scanIntervalMs: number;
   };
   healthState?: WorkerHealthState;
   retention?: {
@@ -463,6 +474,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
+  const mediaCleanup = options.publicMediaCleanup ?? (options.publicMedia?.cleanup
+    ? { ...options.publicMedia.cleanup, storage: options.publicMedia.storage }
+    : undefined);
   let workerId: string;
   try {
     workerId = `${dependencies.hostname()}:${dependencies.randomUUID()}`;
@@ -556,9 +570,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (options.healthState) {
       options.healthState.initializedAt = Date.now();
       options.healthState.stopping = false;
-      options.healthState.publicMediaCleanupConfigured = options.publicMedia?.cleanup !== undefined;
-      options.healthState.publicMediaCleanupMaximumAgeMs = options.publicMedia?.cleanup
-        ? options.publicMedia.cleanup.scanIntervalMs + 300_000
+      options.healthState.publicMediaCleanupConfigured = mediaCleanup !== undefined;
+      options.healthState.publicMediaCleanupMaximumAgeMs = mediaCleanup
+        ? mediaCleanup.scanIntervalMs + 300_000
         : null;
       options.healthState.lastPublicMediaCleanupScanSucceededAt = null;
       options.healthState.oldestPublicMediaCleanupCandidateAt = null;
@@ -585,7 +599,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.retention) {
     setWorkerScanHealthMetric({ scan: "retention", healthy: false });
   }
-  if (options.publicMedia?.cleanup) {
+  if (mediaCleanup) {
     setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
   }
 
@@ -597,20 +611,20 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   ];
 
   const scanMediaCleanupIfDue = async (scanAt: number): Promise<void> => {
-    const cleanup = options.publicMedia?.cleanup;
+    const cleanup = mediaCleanup;
     if (!cleanup || scanAt - lastMediaCleanupScanAt < cleanup.scanIntervalMs) return;
     lastMediaCleanupScanAt = scanAt;
     setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
     try {
       const result = await dependencies.runMediaCleanup({
         db: database.db,
-        storage: options.publicMedia!.storage,
-        holds: cleanup.holds,
         now: new Date(scanAt),
         batchSize: cleanup.batchSize,
         mode: cleanup.mode,
         retentionMode: cleanup.retentionMode,
         globalPause: cleanup.globalPause,
+        ...(cleanup.storage === undefined ? {} : { storage: cleanup.storage }),
+        ...(cleanup.holds === undefined ? {} : { holds: cleanup.holds }),
         ...(cleanup.acceptanceReference === undefined
           ? {}
           : { acceptanceReference: cleanup.acceptanceReference }),

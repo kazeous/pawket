@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  acquirePublicMediaRetentionFences,
   beginIdempotentCommand,
   completeIdempotentCommand,
   creatorDiscoveryProjections,
@@ -284,6 +285,21 @@ export function createCatalogService(input: CatalogServiceInput) {
     return page;
   }
 
+  async function validateNewMediaReferences(
+    tx: PawketTransaction,
+    ownerUserId: string,
+    references: readonly MediaReference[],
+  ): Promise<void> {
+    if (references.length === 0) return;
+    if (!input.mediaCatalog) fail("POLICY_VIOLATION");
+    // Catalog mutation serialization is page-first. The shared advisory fence
+    // is intentionally acquired after that page row and before the consumer-
+    // owned readiness read; Catalog never takes a public-media asset row lock.
+    await acquirePublicMediaRetentionFences(tx, references.map((reference) => reference.assetId));
+    const resolved = await input.mediaCatalog.resolveReadyAssets(tx, ownerUserId, references);
+    exactReadyMap(references, resolved, ownerUserId);
+  }
+
   async function workspace(database: PawketDatabase | PawketTransaction, userId: string, pageId: string, version?: number): Promise<CatalogWorkspace> {
     policy(validUuid(pageId));
     const seed = await requireCreator(database, userId, false);
@@ -434,6 +450,16 @@ export function createCatalogService(input: CatalogServiceInput) {
     async saveDraft(command: VersionedCatalogCommand & { draft: DraftInput }) {
       const draft = normalizeDraft(command.draft);
       return mutate("catalog.page.save", command, { pageId: command.pageId, draft }, false, "creator.page_draft_saved.v1", async (tx, page, at) => {
+        const [current] = await tx.select({ avatarAssetId: creatorPageDrafts.avatarAssetId, coverAssetId: creatorPageDrafts.coverAssetId })
+          .from(creatorPageDrafts)
+          .where(eq(creatorPageDrafts.pageId, page.id))
+          .limit(1)
+          .for("update");
+        if (!current) fail("NOT_FOUND");
+        const references: MediaReference[] = [];
+        if (draft.avatarAssetId && draft.avatarAssetId !== current.avatarAssetId) references.push({ assetId: draft.avatarAssetId, purpose: "avatar", altText: null });
+        if (draft.coverAssetId && draft.coverAssetId !== current.coverAssetId) references.push({ assetId: draft.coverAssetId, purpose: "cover", altText: null });
+        await validateNewMediaReferences(tx, command.actor.userId, references);
         const updated = await tx.update(creatorPageDrafts).set({ displayName: draft.displayName, shortIntroduction: draft.introduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId, updatedAt: at }).where(eq(creatorPageDrafts.pageId, page.id)).returning({ pageId: creatorPageDrafts.pageId });
         if (updated.length !== 1) fail("NOT_FOUND");
       });
@@ -448,9 +474,19 @@ export function createCatalogService(input: CatalogServiceInput) {
         if (showcase.id) {
           const [existing] = await tx.select({ id: creatorShowcaseDrafts.id }).from(creatorShowcaseDrafts).where(and(eq(creatorShowcaseDrafts.id, showcase.id), eq(creatorShowcaseDrafts.pageId, page.id), isNull(creatorShowcaseDrafts.removedAt))).limit(1).for("update");
           if (!existing) fail("NOT_FOUND");
+          const existingMedia = await tx.select({ assetId: creatorShowcaseDraftMedia.assetId })
+            .from(creatorShowcaseDraftMedia)
+            .where(eq(creatorShowcaseDraftMedia.showcaseId, showcaseId))
+            .for("update");
+          const existingAssetIds = new Set(existingMedia.map((media) => media.assetId));
+          const references = showcase.media
+            .filter((media) => !existingAssetIds.has(media.assetId as string))
+            .map((media) => ({ assetId: media.assetId as string, purpose: "showcase" as const, altText: media.alternativeText }));
+          await validateNewMediaReferences(tx, command.actor.userId, references);
           await tx.update(creatorShowcaseDrafts).set({ position: showcase.position, title: showcase.title, description: showcase.description, discipline: showcase.discipline, contentLabel: showcase.contentLabel, externalUrl: showcase.externalUrl, updatedAt: at }).where(eq(creatorShowcaseDrafts.id, showcaseId));
           await tx.delete(creatorShowcaseDraftMedia).where(eq(creatorShowcaseDraftMedia.showcaseId, showcaseId));
         } else {
+          await validateNewMediaReferences(tx, command.actor.userId, showcase.media.map((media) => ({ assetId: media.assetId as string, purpose: "showcase", altText: media.alternativeText })));
           await tx.insert(creatorShowcaseDrafts).values({ id: showcaseId, pageId: page.id, position: showcase.position, title: showcase.title, description: showcase.description, discipline: showcase.discipline, contentLabel: showcase.contentLabel, externalUrl: showcase.externalUrl, removedAt: null, createdAt: at, updatedAt: at });
         }
         if (showcase.media.length) await tx.insert(creatorShowcaseDraftMedia).values(showcase.media.map((media, position) => ({ id: id(), showcaseId, assetId: media.assetId as string, position, alternativeText: media.alternativeText, createdAt: at, updatedAt: at })));

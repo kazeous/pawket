@@ -1302,8 +1302,6 @@ describe("worker shutdown", () => {
         oldestEligibleAt,
       };
     });
-    const storage = {} as never;
-    const holds = { protectedAssetIds: vi.fn(async () => new Set<string>()) };
     const dependencies = {
       ...doubles.dependencies,
       scanRefundWindows: vi.fn(async () => ({
@@ -1328,30 +1326,25 @@ describe("worker shutdown", () => {
       signalSource: doubles.signalSource,
       dependencies,
       healthState,
-      publicMedia: {
-        storage,
-        concurrency: 2,
-        cleanup: {
-          holds,
-          mode: "report_only",
-          retentionMode: "report_only",
-          globalPause: false,
-          batchSize: 25,
-          scanIntervalMs: 60_000,
-        },
+      publicMediaCleanup: {
+        mode: "report_only",
+        retentionMode: "report_only",
+        globalPause: false,
+        batchSize: 25,
+        scanIntervalMs: 60_000,
       },
     });
 
     await vi.advanceTimersByTimeAsync(0);
     expect(cleanupCalls).toHaveLength(1);
     expect(cleanupCalls[0]).toEqual(expect.objectContaining({
-      storage,
-      holds,
       mode: "report_only",
       retentionMode: "report_only",
       globalPause: false,
       batchSize: 25,
     }));
+    expect(cleanupCalls[0]).not.toHaveProperty("storage");
+    expect(cleanupCalls[0]).not.toHaveProperty("holds");
     expect(healthState.lastPublicMediaCleanupScanSucceededAt).toBe(Date.now());
     expect(healthState.oldestPublicMediaCleanupCandidateAt).toBe(oldestEligibleAt.getTime());
 

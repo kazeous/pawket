@@ -45,6 +45,25 @@ const COMMON_HEADERS = {
 const REQUEST_METHOD_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "method")?.get;
 const REQUEST_URL_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "url")?.get;
 const REQUEST_HEADERS_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "headers")?.get;
+const NATIVE_HEADERS = Headers;
+const HEADERS_ENTRIES = Headers.prototype.entries;
+const HEADERS_ITERATOR_NEXT = (() => {
+  try {
+    const iterator = Reflect.apply(HEADERS_ENTRIES, new NATIVE_HEADERS(), []) as object;
+    return Object.getPrototypeOf(iterator)?.next as unknown;
+  } catch {
+    return undefined;
+  }
+})();
+const PUBLIC_MEDIA_SERVICE_ERROR_PROTOTYPE = PublicMediaServiceError.prototype;
+const NATIVE_UINT8_ARRAY = Uint8Array;
+const UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
+const NATIVE_BUFFER_PROTOTYPE = Buffer.prototype;
+const NATIVE_ARRAY_BUFFER_PROTOTYPE = ArrayBuffer.prototype;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer")?.get;
+const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 
 function notFound(input: Input): Response {
   metric(input, "not_found");
@@ -87,7 +106,18 @@ function snapshotRequest(value: unknown): RequestSnapshot | null {
       !headers || typeof headers !== "object" || nodeTypes.isProxy(headers) ||
       Object.getPrototypeOf(headers) !== Headers.prototype
     ) return null;
-    return { method, url, headers: new Headers(headers) };
+    if (typeof HEADERS_ENTRIES !== "function" || typeof HEADERS_ITERATOR_NEXT !== "function") return null;
+    const pairs: Array<[string, string]> = [];
+    const iterator = Reflect.apply(HEADERS_ENTRIES, headers, []) as object;
+    while (true) {
+      const step = Reflect.apply(HEADERS_ITERATOR_NEXT, iterator, []) as unknown;
+      const record = readExactOwnRecord(step, ["value", "done"]);
+      if (!record || typeof record.done !== "boolean") return null;
+      if (record.done) break;
+      if (!Array.isArray(record.value) || record.value.length !== 2 || typeof record.value[0] !== "string" || typeof record.value[1] !== "string") return null;
+      pairs.push([record.value[0], record.value[1]]);
+    }
+    return { method, url, headers: new NATIVE_HEADERS(pairs) };
   } catch {
     return null;
   }
@@ -138,6 +168,44 @@ function exactHead(value: unknown, grant: DeliveryGrant): boolean {
   );
 }
 
+function knownServiceNotFoundCode(error: unknown): boolean {
+  if (!error || typeof error !== "object" || nodeTypes.isProxy(error)) return false;
+  try {
+    if (Object.getPrototypeOf(error) !== PUBLIC_MEDIA_SERVICE_ERROR_PROTOTYPE) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return false;
+    return descriptor.value === "MEDIA_NOT_FOUND" || descriptor.value === "MEDIA_NOT_READY" || descriptor.value === "INVALID_INPUT";
+  } catch {
+    return false;
+  }
+}
+
+function copyBoundedChunk(value: unknown, remaining: number): Uint8Array | null {
+  if (!value || typeof value !== "object" || nodeTypes.isProxy(value)) return null;
+  if (typeof TYPED_ARRAY_BYTE_LENGTH_GETTER !== "function" || typeof TYPED_ARRAY_BUFFER_GETTER !== "function") return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== UINT8_ARRAY_PROTOTYPE && prototype !== NATIVE_BUFFER_PROTOTYPE) return null;
+    const byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []);
+    const buffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []);
+    if (
+      typeof byteLength !== "number" ||
+      !Number.isSafeInteger(byteLength) ||
+      byteLength < 0 ||
+      byteLength > remaining ||
+      !buffer ||
+      typeof buffer !== "object" ||
+      nodeTypes.isProxy(buffer) ||
+      Object.getPrototypeOf(buffer) !== NATIVE_ARRAY_BUFFER_PROTOTYPE
+    ) return null;
+    const copy = new NATIVE_UINT8_ARRAY(byteLength);
+    Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
+    return copy;
+  } catch {
+    return null;
+  }
+}
+
 async function closeBody(body: Readable): Promise<void> {
   try {
     Reflect.apply(Readable.prototype.destroy, body, []);
@@ -184,16 +252,12 @@ function streamExactBody(input: Input, body: unknown, grant: DeliveryGrant): Rea
           controller.close();
           return;
         }
-        if (!(next.value instanceof Uint8Array) || nodeTypes.isProxy(next.value)) {
+        const chunk = copyBoundedChunk(next.value, grant.contentLength - total);
+        if (!chunk) {
           await fail(controller);
           return;
         }
-        const chunk = Uint8Array.from(next.value);
         total += chunk.byteLength;
-        if (total > grant.contentLength) {
-          await fail(controller);
-          return;
-        }
         digest.update(chunk);
         controller.enqueue(chunk);
       } catch {
@@ -237,7 +301,7 @@ export function createMediaHttpHandlers(input: Input): MediaHttpHandlers {
       if (!candidate) return unavailable(input, request.method === "HEAD");
       grant = candidate;
     } catch (error) {
-      if (error instanceof PublicMediaServiceError && (error.code === "MEDIA_NOT_FOUND" || error.code === "MEDIA_NOT_READY" || error.code === "INVALID_INPUT")) return notFound(input);
+      if (knownServiceNotFoundCode(error)) return notFound(input);
       return unavailable(input, request.method === "HEAD");
     }
 

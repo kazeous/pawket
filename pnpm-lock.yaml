@@ -256,6 +256,10 @@ importers:
         version: 3.4.9
 
   packages/public-media:
+    devDependencies:
+      '@pawket/catalog':
+        specifier: workspace:*
+        version: link:../catalog
     dependencies:
       '@aws-sdk/client-s3':
         specifier: 3.1121.0

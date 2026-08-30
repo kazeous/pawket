@@ -9,6 +9,7 @@ import { createS3ObjectStorage } from "@pawket/public-media";
 import nodemailer from "nodemailer";
 
 import { createSecurityEmailSenderFromEnv } from "./security-email.js";
+import { createWorkerPublicMediaConfiguration } from "./public-media-cleanup-config.js";
 import { startWorkerTelemetryServer } from "./telemetry-server.js";
 import { createWorkerHealthState } from "./worker-health.js";
 import { startWorker } from "./worker-runtime.js";
@@ -24,33 +25,30 @@ const keyring = createEncryptionKeyring({
     Object.entries(env.PII_KEYRING_JSON).map(([keyId, key]) => [keyId, Buffer.from(key, "base64")]),
   ),
 });
+const publicMediaStorage = env.PUBLIC_MEDIA_S3_ENDPOINT &&
+  env.PUBLIC_MEDIA_S3_REGION &&
+  env.PUBLIC_MEDIA_S3_ACCESS_KEY_ID &&
+  env.PUBLIC_MEDIA_S3_SECRET_ACCESS_KEY &&
+  env.PUBLIC_MEDIA_QUARANTINE_BUCKET &&
+  env.PUBLIC_MEDIA_DERIVATIVE_BUCKET
+  ? createS3ObjectStorage({
+      endpoint: env.PUBLIC_MEDIA_S3_ENDPOINT,
+      region: env.PUBLIC_MEDIA_S3_REGION,
+      accessKeyId: env.PUBLIC_MEDIA_S3_ACCESS_KEY_ID,
+      secretAccessKey: env.PUBLIC_MEDIA_S3_SECRET_ACCESS_KEY,
+      quarantineBucket: env.PUBLIC_MEDIA_QUARANTINE_BUCKET,
+      derivativeBucket: env.PUBLIC_MEDIA_DERIVATIVE_BUCKET,
+      forcePathStyle: env.PUBLIC_MEDIA_S3_FORCE_PATH_STYLE,
+    })
+  : undefined;
+const publicMediaConfiguration = createWorkerPublicMediaConfiguration(env, publicMediaStorage);
 const worker = await startWorker({
   databaseUrl: env.DATABASE_URL,
   valkeyUrl: env.VALKEY_URL,
   concurrency: env.WORKER_CONCURRENCY,
   batchSize: env.OUTBOX_BATCH_SIZE,
   leaseMs: env.OUTBOX_LEASE_MS,
-  ...(env.PUBLIC_MEDIA_S3_ENDPOINT &&
-  env.PUBLIC_MEDIA_S3_REGION &&
-  env.PUBLIC_MEDIA_S3_ACCESS_KEY_ID &&
-  env.PUBLIC_MEDIA_S3_SECRET_ACCESS_KEY &&
-  env.PUBLIC_MEDIA_QUARANTINE_BUCKET &&
-  env.PUBLIC_MEDIA_DERIVATIVE_BUCKET
-    ? {
-        publicMedia: {
-          storage: createS3ObjectStorage({
-            endpoint: env.PUBLIC_MEDIA_S3_ENDPOINT,
-            region: env.PUBLIC_MEDIA_S3_REGION,
-            accessKeyId: env.PUBLIC_MEDIA_S3_ACCESS_KEY_ID,
-            secretAccessKey: env.PUBLIC_MEDIA_S3_SECRET_ACCESS_KEY,
-            quarantineBucket: env.PUBLIC_MEDIA_QUARANTINE_BUCKET,
-            derivativeBucket: env.PUBLIC_MEDIA_DERIVATIVE_BUCKET,
-            forcePathStyle: env.PUBLIC_MEDIA_S3_FORCE_PATH_STYLE,
-          }),
-          concurrency: env.PUBLIC_MEDIA_PROCESSING_CONCURRENCY,
-        },
-      }
-    : {}),
+  ...publicMediaConfiguration,
   securityEmail: {
     keyring,
     sender: createSecurityEmailSenderFromEnv({
