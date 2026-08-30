@@ -41,6 +41,7 @@ export {
   type RetentionDatasetResult,
   type RetentionMode,
 } from "./retention-repository.js";
+export { acquirePublicMediaRetentionFences } from "./public-media-retention-fence.js";
 export {
   adminAuditEvents,
   identityAccounts,

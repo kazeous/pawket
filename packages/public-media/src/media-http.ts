@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import { types as nodeTypes } from "node:util";
 
 import type { PawketDatabase } from "@pawket/database";
@@ -21,8 +23,10 @@ type MediaDeliveryService = Readonly<{
 type MediaSession = Readonly<{ userId: string }>;
 
 export type MediaHttpHandlers = Readonly<{
-  deliver(request: Request, assetId: string, variant: string): Promise<Response>;
+  deliver(request: unknown, assetId: unknown, variant: unknown): Promise<Response>;
 }>;
+
+type RequestSnapshot = Readonly<{ method: string; url: string; headers: Headers }>;
 
 type Input = Readonly<{
   db: PawketDatabase;
@@ -38,6 +42,9 @@ const COMMON_HEADERS = {
   "x-content-type-options": "nosniff",
   "content-security-policy": "default-src 'none'; sandbox",
 };
+const REQUEST_METHOD_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "method")?.get;
+const REQUEST_URL_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "url")?.get;
+const REQUEST_HEADERS_GETTER = Object.getOwnPropertyDescriptor(Request.prototype, "headers")?.get;
 
 function notFound(input: Input): Response {
   metric(input, "not_found");
@@ -61,9 +68,34 @@ function isDeliverableVariant(value: unknown): value is DeliverableVariant {
   return typeof value === "string" && (DELIVERABLE_VARIANTS as readonly string[]).includes(value);
 }
 
-function previewRequested(request: Request): boolean {
+function snapshotRequest(value: unknown): RequestSnapshot | null {
+  if (!value || typeof value !== "object" || nodeTypes.isProxy(value)) return null;
   try {
-    const parameters = [...new URL(request.url).searchParams.entries()];
+    if (
+      Object.getPrototypeOf(value) !== Request.prototype ||
+      Reflect.ownKeys(value).some((key) => typeof key === "string") ||
+      typeof REQUEST_METHOD_GETTER !== "function" ||
+      typeof REQUEST_URL_GETTER !== "function" ||
+      typeof REQUEST_HEADERS_GETTER !== "function"
+    ) return null;
+    const method = Reflect.apply(REQUEST_METHOD_GETTER, value, []);
+    const url = Reflect.apply(REQUEST_URL_GETTER, value, []);
+    const headers = Reflect.apply(REQUEST_HEADERS_GETTER, value, []);
+    if (
+      typeof method !== "string" ||
+      typeof url !== "string" ||
+      !headers || typeof headers !== "object" || nodeTypes.isProxy(headers) ||
+      Object.getPrototypeOf(headers) !== Headers.prototype
+    ) return null;
+    return { method, url, headers: new Headers(headers) };
+  } catch {
+    return null;
+  }
+}
+
+function previewRequested(url: string): boolean {
+  try {
+    const parameters = [...new URL(url).searchParams.entries()];
     return parameters.length === 1 && parameters[0]![0] === "preview" && parameters[0]![1] === "1";
   } catch {
     return false;
@@ -106,13 +138,10 @@ function exactHead(value: unknown, grant: DeliveryGrant): boolean {
   );
 }
 
-async function closeBody(body: NodeJS.ReadableStream): Promise<void> {
+async function closeBody(body: Readable): Promise<void> {
   try {
-    const destroy = (body as unknown as { destroy?: unknown }).destroy;
-    if (typeof destroy === "function") {
-      Reflect.apply(destroy, body, []);
-      return;
-    }
+    Reflect.apply(Readable.prototype.destroy, body, []);
+    return;
   } catch { /* best effort */ }
   try {
     const iterator = (body as AsyncIterable<unknown>)[Symbol.asyncIterator]?.();
@@ -120,42 +149,79 @@ async function closeBody(body: NodeJS.ReadableStream): Promise<void> {
   } catch { /* best effort */ }
 }
 
-async function readExactBody(body: NodeJS.ReadableStream, expectedBytes: number): Promise<Uint8Array | null> {
-  if (!body || typeof body !== "object" || nodeTypes.isProxy(body)) return null;
-  const chunks: Uint8Array[] = [];
+function streamExactBody(input: Input, body: unknown, grant: DeliveryGrant): ReadableStream<Uint8Array> | null {
+  if (!body || typeof body !== "object" || nodeTypes.isProxy(body) || !(body instanceof Readable)) return null;
+  let reader: ReadableStreamDefaultReader<unknown>;
+  try { reader = Readable.toWeb(body).getReader() as ReadableStreamDefaultReader<unknown>; }
+  catch { void closeBody(body); return null; }
   let total = 0;
-  try {
-    for await (const rawChunk of body as AsyncIterable<unknown>) {
-      if (!(rawChunk instanceof Uint8Array) || nodeTypes.isProxy(rawChunk)) throw new Error("invalid storage body");
-      const chunk = Uint8Array.from(rawChunk);
-      total += chunk.byteLength;
-      if (total > expectedBytes) throw new Error("oversized storage body");
-      chunks.push(chunk);
-    }
-    if (total !== expectedBytes) throw new Error("truncated storage body");
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    return bytes;
-  } catch {
-    return null;
-  } finally {
+  let settled = false;
+  const digest = createHash("sha256");
+  const finish = (outcome: "succeeded" | "storage_unavailable"): void => {
+    if (settled) return;
+    settled = true;
+    metric(input, outcome);
+  };
+  const fail = async (controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> => {
+    finish("storage_unavailable");
     await closeBody(body);
-  }
+    try { await reader.cancel(); } catch { /* source may already be errored */ }
+    controller.error(new Error("MEDIA_STREAM_UNAVAILABLE"));
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          if (
+            total !== grant.contentLength ||
+            `sha256:v1:${digest.digest("base64url")}` !== grant.contentHash
+          ) {
+            await fail(controller);
+            return;
+          }
+          finish("succeeded");
+          controller.close();
+          return;
+        }
+        if (!(next.value instanceof Uint8Array) || nodeTypes.isProxy(next.value)) {
+          await fail(controller);
+          return;
+        }
+        const chunk = Uint8Array.from(next.value);
+        total += chunk.byteLength;
+        if (total > grant.contentLength) {
+          await fail(controller);
+          return;
+        }
+        digest.update(chunk);
+        controller.enqueue(chunk);
+      } catch {
+        await fail(controller);
+      }
+    },
+    async cancel() {
+      finish("storage_unavailable");
+      await closeBody(body);
+      try { await reader.cancel(); } catch { /* best effort */ }
+    },
+  });
 }
 
 export function createMediaHttpHandlers(input: Input): MediaHttpHandlers {
-  async function deliver(request: Request, assetId: string, variant: string): Promise<Response> {
-    if (!(request instanceof Request) || (request.method !== "GET" && request.method !== "HEAD")) {
-      if (request instanceof Request && request.method !== "GET" && request.method !== "HEAD") {
-        return new Response(null, { status: 405, headers: { ...COMMON_HEADERS, allow: "GET, HEAD" } });
-      }
-      return notFound(input);
+  async function deliver(requestValue: unknown, assetIdValue: unknown, variantValue: unknown): Promise<Response> {
+    const request = snapshotRequest(requestValue);
+    if (!request) return notFound(input);
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response(null, { status: 405, headers: { ...COMMON_HEADERS, allow: "GET, HEAD" } });
     }
+    if (typeof assetIdValue !== "string" || typeof variantValue !== "string") return notFound(input);
+    const assetId = assetIdValue;
+    const variant = variantValue;
     if (!UUID.test(assetId) || !isDeliverableVariant(variant)) return notFound(input);
 
     try {
-      if (previewRequested(request)) {
+      if (previewRequested(request.url)) {
         const session = exactSession(await input.authenticate(request.headers));
         if (!session || await input.catalog.isDerivativePreviewable(input.db, session.userId, assetId, variant) !== true) return notFound(input);
       } else if (await input.catalog.isDerivativePublic(input.db, assetId, variant) !== true) {
@@ -187,10 +253,9 @@ export function createMediaHttpHandlers(input: Input): MediaHttpHandlers {
         return new Response(null, { status: 200, headers });
       }
       const body = await input.storage.getObject(grant.location);
-      const safeBytes = await readExactBody(body, grant.contentLength);
-      if (!safeBytes) return unavailable(input);
-      metric(input, "succeeded");
-      return new Response(safeBytes, { status: 200, headers });
+      const safeBody = streamExactBody(input, body, grant);
+      if (!safeBody) return unavailable(input);
+      return new Response(safeBody, { status: 200, headers });
     } catch {
       return unavailable(input, request.method === "HEAD");
     }

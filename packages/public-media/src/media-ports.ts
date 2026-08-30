@@ -24,3 +24,16 @@ export type CatalogMediaOwnershipPort = Readonly<{
 export type PublicMediaRetentionHoldPort = Readonly<{
   protectedAssetIds(db: PawketDatabase | PawketTransaction, assetIds: readonly string[]): Promise<ReadonlySet<string>>;
 }>;
+
+/**
+ * Authoritative operational control for destructive public-media retention.
+ *
+ * The current accepted revision is deliberately read without passing the
+ * caller's configured reference, so a caller cannot authorize itself by
+ * echoing two values it supplied.
+ */
+export type PublicMediaRetentionAcceptancePort = Readonly<{
+  readCurrentAcceptedRevision(
+    db: PawketDatabase | PawketTransaction,
+  ): Promise<Readonly<{ acceptedRevision: string }> | null>;
+}>;

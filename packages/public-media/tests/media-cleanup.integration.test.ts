@@ -3,16 +3,20 @@ import { readdir, readFile } from "node:fs/promises";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import {
+  acquirePublicMediaRetentionFences,
   createDatabase,
   creatorPageDrafts,
   creatorPages,
   creatorPublicationEvents,
   creatorPublicationRevisions,
+  creatorShowcaseDraftMedia,
+  creatorShowcaseDrafts,
   identityUsers,
   publicMediaAssets,
   publicMediaDerivatives,
   publicMediaUploadIntents,
   type PawketDatabase,
+  type PawketTransaction,
 } from "@pawket/database";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -23,6 +27,7 @@ import {
   type PublicMediaCleanupRule,
 } from "../src/media-cleanup.js";
 import type { HeadObjectResult, ObjectLocation, ObjectStoragePort } from "../src/object-storage-port.js";
+import type { PublicMediaRetentionAcceptancePort } from "../src/media-ports.js";
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
 import { deleteEveryS3ObjectVersion, ensureVersionedBuckets } from "./s3-test-helpers.js";
 
@@ -120,12 +125,13 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     for (const file of (await readdir(migrationsDirectory)).filter((name) => name.endsWith(".sql")).sort()) {
       await migrate(connection.db, file);
     }
+    await connection.db.execute(sql.raw("create table public_media_cleanup_test_holds (asset_id uuid primary key)"));
     await ensureVersionedBuckets(s3, [quarantineBucket, derivativeBucket]);
   });
 
   beforeEach(async () => {
     await connection.db.execute(sql.raw(
-      "truncate table public_media_processing_attempts, public_media_derivatives, public_media_upload_intents, public_media_assets, creator_discovery_projections, creator_publication_events, creator_publication_media, creator_publication_showcases, creator_publication_revisions, creator_showcase_draft_media, creator_showcase_drafts, creator_page_drafts, creator_handle_claims, creator_pages, identity_users cascade",
+      "truncate table public_media_cleanup_test_holds, public_media_processing_attempts, public_media_derivatives, public_media_upload_intents, public_media_assets, creator_discovery_projections, creator_publication_events, creator_publication_media, creator_publication_showcases, creator_publication_revisions, creator_showcase_draft_media, creator_showcase_drafts, creator_page_drafts, creator_handle_claims, creator_pages, identity_users cascade",
     ));
   });
 
@@ -158,6 +164,60 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     expect(storage.deletes).toEqual([]);
   });
 
+  test.each(["avatar", "cover"] as const)("starts ready-unreferenced age at the exact %s loss transition", async (slot) => {
+    const storage = new CleanupMemoryStorage();
+    const transitionAt = new Date(exactAt.getTime() - 30 * day);
+    const asset = await seedReadyAsset(connection.db, storage, new Date(transitionAt.getTime() - 10 * day), randomUUID(), new Date(transitionAt.getTime() - 9 * day));
+    const { pageId } = await seedDraftAggregate(connection.db, asset.userId, new Date(transitionAt.getTime() - 10 * day));
+    await connection.db.update(creatorPageDrafts).set({
+      ...(slot === "avatar" ? { avatarAssetId: asset.assetId } : { coverAssetId: asset.assetId }),
+      updatedAt: new Date(transitionAt.getTime() - 1),
+    }).where(eq(creatorPageDrafts.pageId, pageId));
+    await connection.db.update(creatorPageDrafts).set({
+      ...(slot === "avatar" ? { avatarAssetId: null } : { coverAssetId: null }),
+      updatedAt: transitionAt,
+    }).where(eq(creatorPageDrafts.pageId, pageId));
+    await connection.db.update(creatorPages).set({ updatedAt: transitionAt }).where(eq(creatorPages.id, pageId));
+
+    expect((await cleanup(connection.db, storage, new Date(exactAt.getTime() - 1))).results).toEqual([]);
+    expect((await cleanup(connection.db, storage, exactAt)).results).toEqual([
+      expect.objectContaining({ assetId: asset.assetId, rule: "ready_unreferenced", eligibleAt: exactAt }),
+    ]);
+  });
+
+  test("treats media in a removed showcase as unreferenced and starts age at removedAt", async () => {
+    const storage = new CleanupMemoryStorage();
+    const transitionAt = new Date(exactAt.getTime() - 30 * day);
+    const asset = await seedReadyAsset(connection.db, storage, new Date(transitionAt.getTime() - 10 * day), randomUUID(), new Date(transitionAt.getTime() - 9 * day));
+    const { pageId } = await seedDraftAggregate(connection.db, asset.userId, new Date(transitionAt.getTime() - 10 * day));
+    const showcaseId = randomUUID();
+    await connection.db.insert(creatorShowcaseDrafts).values({
+      id: showcaseId, pageId, position: 0, title: "Removed", description: "", discipline: "other",
+      contentLabel: "general_audience", externalUrl: null, removedAt: transitionAt,
+      createdAt: new Date(transitionAt.getTime() - day), updatedAt: transitionAt,
+    });
+    await connection.db.insert(creatorShowcaseDraftMedia).values({
+      id: randomUUID(), showcaseId, assetId: asset.assetId, position: 0, alternativeText: "Removed image",
+      createdAt: new Date(transitionAt.getTime() - day), updatedAt: new Date(transitionAt.getTime() - day),
+    });
+
+    expect((await cleanup(connection.db, storage, new Date(exactAt.getTime() - 1))).results).toEqual([]);
+    expect((await cleanup(connection.db, storage, exactAt)).results).toEqual([
+      expect.objectContaining({ assetId: asset.assetId, rule: "ready_unreferenced", eligibleAt: exactAt }),
+    ]);
+  });
+
+  test("delays ready-unreferenced cleanup when an owning page has no draft aggregate clock", async () => {
+    const storage = new CleanupMemoryStorage();
+    const readyAt = new Date(exactAt.getTime() - 90 * day);
+    const asset = await seedReadyAsset(connection.db, storage, readyAt, randomUUID(), new Date(readyAt.getTime() + day));
+    await connection.db.insert(creatorPages).values({
+      id: randomUUID(), userId: asset.userId, draftVersion: 1, publishedRevisionId: null,
+      initializedFromRevisionId: randomUUID(), createdAt: readyAt, updatedAt: readyAt,
+    });
+    expect((await cleanup(connection.db, storage, exactAt)).results).toEqual([]);
+  });
+
   test("uses stable eligibleAt, assetId, objectKeyHash ordering and a bounded batch", async () => {
     const storage = new CleanupMemoryStorage();
     const eligibleAt = new Date(exactAt.getTime() - 7 * day);
@@ -180,13 +240,19 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     const storage = new CleanupMemoryStorage();
     const source = await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
     const derivative = await seedRuleCandidate(connection.db, storage, "ready_unreferenced", new Date(exactAt.getTime() - 30 * day));
-    const protectedIds = new Set([source.assetId, derivative.assetId]);
+    const protectedIds = new Set<string>([source.assetId, derivative.assetId]);
     const result = await cleanup(connection.db, storage, exactAt, {
       mode: "enforce",
       retentionMode: "enforce",
       globalPause: false,
       acceptanceReference: "accepted-revision-3844c65",
-      holds: { protectedAssetIds: async () => protectedIds },
+      acceptance: acceptedRevision("accepted-revision-3844c65"),
+      holds: {
+        protectedAssetIds: async (
+          _db: PawketDatabase | PawketTransaction,
+          assetIds: readonly string[],
+        ) => new Set(assetIds.filter((assetId: string) => protectedIds.has(assetId))),
+      },
     });
     expect(result.results.map((value) => value.disposition)).toEqual(["protected", "protected"]);
     expect(result.protectedCount).toBe(2);
@@ -207,6 +273,7 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
       retentionMode: "enforce",
       globalPause: true,
       acceptanceReference: "accepted-revision-3844c65",
+      acceptance: acceptedRevision("accepted-revision-3844c65"),
     });
     expect(paused.results).toEqual([expect.objectContaining({ assetId: candidate.assetId, disposition: "candidate" })]);
     expect(storage.deletes).toEqual([]);
@@ -214,14 +281,36 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
   });
 
   test.each([
-    [{ mode: "enforce", retentionMode: "report_only", globalPause: false, acceptanceReference: "accepted-revision-3844c65" }, "global retention mode"],
+    [{ mode: "enforce", retentionMode: "report_only", globalPause: false, acceptanceReference: "accepted-revision-3844c65", acceptance: acceptedRevision("accepted-revision-3844c65") }, "global retention mode"],
     [{ mode: "enforce", retentionMode: "enforce", globalPause: false, acceptanceReference: undefined }, "acceptance"],
     [{ mode: "enforce", retentionMode: "enforce", globalPause: false, acceptanceReference: " padded " }, "acceptance"],
+    [{ mode: "enforce", retentionMode: "enforce", globalPause: false, acceptanceReference: "accepted-revision-3844c65" }, "authoritative verifier"],
   ] as const)("rejects enforce when the %s gate is closed", async (gate, _label) => {
     void _label;
     const storage = new CleanupMemoryStorage();
     await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
     await expect(cleanup(connection.db, storage, exactAt, gate)).rejects.toBeInstanceOf(PublicMediaCleanupConfigurationError);
+    expect(storage.deletes).toEqual([]);
+  });
+
+  test.each([
+    ["mismatch", "accepted-revision-other", acceptedRevision("accepted-revision-current")],
+    ["stale", "accepted-revision-previous", acceptedRevision("accepted-revision-current")],
+    ["missing", "accepted-revision-current", { readCurrentAcceptedRevision: async () => null }],
+    ["proxy grant", "accepted-revision-current", { readCurrentAcceptedRevision: async (): Promise<unknown> => new Proxy({ acceptedRevision: "accepted-revision-current" }, {}) }],
+    ["proxy verifier", "accepted-revision-current", new Proxy({ readCurrentAcceptedRevision: async () => ({ acceptedRevision: "accepted-revision-current" }) }, {})],
+    ["accessor verifier", "accepted-revision-current", hostileAcceptanceAccessor()],
+    ["provider failure", "accepted-revision-current", { readCurrentAcceptedRevision: async (): Promise<never> => { throw new Error("acceptance-secret"); } }],
+  ] as const)("fails closed on %s authoritative acceptance evidence before storage", async (_scenario, acceptanceReference, acceptance) => {
+    const storage = new CleanupMemoryStorage();
+    await seedRuleCandidate(connection.db, storage, "processed_source", new Date(exactAt.getTime() - 24 * hour));
+    await expect(cleanup(connection.db, storage, exactAt, {
+      mode: "enforce",
+      retentionMode: "enforce",
+      globalPause: false,
+      acceptanceReference,
+      acceptance,
+    })).rejects.toBeInstanceOf(PublicMediaCleanupConfigurationError);
     expect(storage.deletes).toEqual([]);
   });
 
@@ -387,6 +476,69 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
     }
   });
 
+  test("waits for the owning page fence and lets a late draft reference win before deletion", async () => {
+    const storage = new CleanupMemoryStorage();
+    const readyAt = new Date(exactAt.getTime() - 40 * day);
+    const asset = await seedReadyAsset(connection.db, storage, readyAt, randomUUID(), new Date(readyAt.getTime() + day));
+    const { pageId } = await seedDraftAggregate(connection.db, asset.userId, readyAt);
+    let release!: () => void;
+    let acquired!: () => void;
+    const canCommit = new Promise<void>((resolve) => { release = resolve; });
+    const referenceWritten = new Promise<void>((resolve) => { acquired = resolve; });
+    const writer = connection.db.transaction(async (tx) => {
+      await tx.execute(sql`select id from creator_pages where id = ${pageId} for update`);
+      await tx.update(creatorPageDrafts).set({ avatarAssetId: asset.assetId, updatedAt: exactAt }).where(eq(creatorPageDrafts.pageId, pageId));
+      acquired();
+      await canCommit;
+    });
+    await referenceWritten;
+    const cleanupPromise = cleanup(connection.db, storage, exactAt, enforceOptions());
+    try {
+      expect(await settledWithin(cleanupPromise, 75)).toBe(false);
+    } finally {
+      release();
+      await writer;
+    }
+    const result = await cleanupPromise;
+    expect(result.results).toEqual([expect.objectContaining({ assetId: asset.assetId, disposition: "protected" })]);
+    expect(storage.deletes).toEqual([]);
+  });
+
+  test("shares an asset retention fence with hold writers and revalidates the hold after they commit", async () => {
+    const storage = new CleanupMemoryStorage();
+    const asset = await seedRuleCandidate(connection.db, storage, "ready_unreferenced", new Date(exactAt.getTime() - 30 * day));
+    let release!: () => void;
+    let acquired!: () => void;
+    const canCommit = new Promise<void>((resolve) => { release = resolve; });
+    const holdWritten = new Promise<void>((resolve) => { acquired = resolve; });
+    const writer = connection.db.transaction(async (tx) => {
+      await acquirePublicMediaRetentionFences(tx, [asset.assetId]);
+      await tx.execute(sql`insert into public_media_cleanup_test_holds (asset_id) values (${asset.assetId})`);
+      acquired();
+      await canCommit;
+    });
+    await holdWritten;
+    const cleanupPromise = cleanup(connection.db, storage, exactAt, {
+      ...enforceOptions(),
+      holds: {
+        protectedAssetIds: async (db: PawketDatabase | PawketTransaction, _assetIds: readonly string[]) => {
+          void _assetIds;
+          const rows = await db.execute<{ asset_id: string }>(sql`select asset_id from public_media_cleanup_test_holds`);
+          return new Set(rows.map((row) => row.asset_id));
+        },
+      },
+    });
+    try {
+      expect(await settledWithin(cleanupPromise, 75)).toBe(false);
+    } finally {
+      release();
+      await writer;
+    }
+    const result = await cleanupPromise;
+    expect(result.results).toEqual([expect.objectContaining({ assetId: asset.assetId, disposition: "protected" })]);
+    expect(storage.deletes).toEqual([]);
+  });
+
   test.each([0, 501, 1.5, Number.NaN])("rejects invalid batch limit %s before database or ports", async (batchSize) => {
     const db = new Proxy({}, { get() { throw new Error("database must not be read"); } });
     const storage = new Proxy({}, { get() { throw new Error("storage must not be read"); } });
@@ -404,12 +556,32 @@ describe.skipIf(!databaseUrl)("deterministic public media cleanup", () => {
 });
 
 function enforceOptions() {
+  const acceptanceReference = "accepted-revision-3844c65";
   return {
     mode: "enforce" as const,
     retentionMode: "enforce" as const,
     globalPause: false,
-    acceptanceReference: "accepted-revision-3844c65",
+    acceptanceReference,
+    acceptance: acceptedRevision(acceptanceReference),
   };
+}
+
+function acceptedRevision(acceptedRevision: string): PublicMediaRetentionAcceptancePort {
+  return { readCurrentAcceptedRevision: async () => ({ acceptedRevision }) };
+}
+
+function hostileAcceptanceAccessor(): object {
+  return Object.defineProperty({}, "readCurrentAcceptedRevision", {
+    enumerable: true,
+    get() { throw new Error("acceptance-accessor-secret"); },
+  });
+}
+
+async function settledWithin(promise: Promise<unknown>, milliseconds: number): Promise<boolean> {
+  return Promise.race([
+    promise.then(() => true, () => true),
+    new Promise<false>((resolve) => { setTimeout(() => resolve(false), milliseconds); }),
+  ]);
 }
 
 function cleanup(
@@ -443,6 +615,21 @@ async function seedUser(db: PawketDatabase): Promise<string> {
     updatedAt: new Date("2025-01-01T00:00:00.000Z"),
   });
   return userId;
+}
+
+async function seedDraftAggregate(db: PawketDatabase, userId: string, updatedAt: Date) {
+  const pageId = randomUUID();
+  const createdAt = new Date(updatedAt.getTime() - 40 * day);
+  await db.insert(creatorPages).values({
+    id: pageId, userId, draftVersion: 1, publishedRevisionId: null,
+    initializedFromRevisionId: randomUUID(), createdAt, updatedAt,
+  });
+  await db.insert(creatorPageDrafts).values({
+    pageId, displayName: "Cleanup", shortIntroduction: "Cleanup",
+    primaryDiscipline: "illustration", secondaryDisciplines: [],
+    avatarAssetId: null, coverAssetId: null, createdAt, updatedAt,
+  });
+  return { pageId };
 }
 
 async function seedFailedAsset(

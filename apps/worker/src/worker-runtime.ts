@@ -38,6 +38,7 @@ import {
   runPublicMediaCleanup,
   type ObjectStoragePort,
   type PublicMediaCleanupRule,
+  type PublicMediaRetentionAcceptancePort,
   type PublicMediaRetentionHoldPort,
 } from "@pawket/public-media";
 import {
@@ -158,6 +159,7 @@ export type StartWorkerOptions = {
       retentionMode: "report_only" | "enforce";
       globalPause: boolean;
       acceptanceReference?: string;
+      acceptance?: PublicMediaRetentionAcceptancePort;
       batchSize: number;
       scanIntervalMs: number;
     };
@@ -612,6 +614,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         ...(cleanup.acceptanceReference === undefined
           ? {}
           : { acceptanceReference: cleanup.acceptanceReference }),
+        ...(cleanup.acceptance === undefined ? {} : { acceptance: cleanup.acceptance }),
       });
       for (const rule of cleanupRules) {
         for (const disposition of ["candidate", "protected", "processed", "failed"] as const) {

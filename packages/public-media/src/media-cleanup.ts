@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 
 import {
+  acquirePublicMediaRetentionFences,
   publicMediaAssets,
   publicMediaDerivatives,
   type PawketDatabase,
@@ -10,7 +11,10 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { isOpaqueVersionId, isRawStorageEtag } from "./media-policy.js";
-import type { PublicMediaRetentionHoldPort } from "./media-ports.js";
+import type {
+  PublicMediaRetentionAcceptancePort,
+  PublicMediaRetentionHoldPort,
+} from "./media-ports.js";
 import type { HeadObjectResult, ObjectStoragePort } from "./object-storage-port.js";
 import { readExactNativeArray, readExactOwnRecord } from "./runtime-boundary.js";
 
@@ -49,6 +53,7 @@ type Input = Readonly<{
   retentionMode: "report_only" | "enforce";
   globalPause: boolean;
   acceptanceReference?: string;
+  acceptance?: PublicMediaRetentionAcceptancePort;
 }>;
 
 type Candidate = Readonly<{
@@ -94,7 +99,7 @@ function snapshotInput(value: unknown): Input {
   const input = readExactOwnRecord(
     value,
     ["db", "storage", "holds", "now", "batchSize", "mode", "retentionMode", "globalPause"],
-    ["acceptanceReference"],
+    ["acceptanceReference", "acceptance"],
   );
   if (
     !input ||
@@ -112,12 +117,20 @@ function snapshotInput(value: unknown): Input {
     (
       input.retentionMode !== "enforce" ||
       typeof input.acceptanceReference !== "string" ||
-      !ACCEPTANCE_REFERENCE.test(input.acceptanceReference)
+      !ACCEPTANCE_REFERENCE.test(input.acceptanceReference) ||
+      !input.acceptance || typeof input.acceptance !== "object" || nodeTypes.isProxy(input.acceptance)
     )
   ) configurationError();
   const storage = input.storage as Partial<Input["storage"]>;
   const holds = input.holds as Partial<PublicMediaRetentionHoldPort>;
+  const acceptanceRecord = input.acceptance === undefined
+    ? undefined
+    : readExactOwnRecord(input.acceptance, ["readCurrentAcceptedRevision"]);
   if (typeof storage.headObject !== "function" || typeof storage.listObjectVersions !== "function" || typeof storage.deleteObject !== "function" || typeof holds.protectedAssetIds !== "function") configurationError();
+  if (acceptanceRecord !== undefined && (!acceptanceRecord || typeof acceptanceRecord.readCurrentAcceptedRevision !== "function")) configurationError();
+  const acceptance = acceptanceRecord === undefined
+    ? undefined
+    : { readCurrentAcceptedRevision: acceptanceRecord.readCurrentAcceptedRevision as PublicMediaRetentionAcceptancePort["readCurrentAcceptedRevision"] };
   return {
     db: input.db as PawketDatabase,
     storage: storage as Input["storage"],
@@ -128,7 +141,27 @@ function snapshotInput(value: unknown): Input {
     retentionMode: input.retentionMode,
     globalPause: input.globalPause,
     ...(input.acceptanceReference === undefined ? {} : { acceptanceReference: input.acceptanceReference as string }),
+    ...(acceptance === undefined ? {} : { acceptance: acceptance as PublicMediaRetentionAcceptancePort }),
   };
+}
+
+async function authorizeEnforcement(input: Input): Promise<void> {
+  if (input.mode !== "enforce") return;
+  try {
+    const grant = readExactOwnRecord(
+      await input.acceptance!.readCurrentAcceptedRevision(input.db),
+      ["acceptedRevision"],
+    );
+    if (
+      !grant ||
+      typeof grant.acceptedRevision !== "string" ||
+      !ACCEPTANCE_REFERENCE.test(grant.acceptedRevision) ||
+      grant.acceptedRevision !== input.acceptanceReference
+    ) configurationError();
+  } catch (error) {
+    if (error instanceof PublicMediaCleanupConfigurationError) throw error;
+    configurationError();
+  }
 }
 
 function emptyCounts(): Record<PublicMediaCleanupRule, Record<PublicMediaCleanupDisposition, number>> {
@@ -162,7 +195,11 @@ async function claimCandidates(tx: PawketTransaction, now: Date, batchSize: numb
     with draft_refs(asset_id) as (
       select avatar_asset_id from creator_page_drafts where avatar_asset_id is not null
       union select cover_asset_id from creator_page_drafts where cover_asset_id is not null
-      union select asset_id from creator_showcase_draft_media
+      union
+        select media.asset_id
+        from creator_showcase_draft_media media
+        join creator_showcase_drafts showcase on showcase.id = media.showcase_id
+        where showcase.removed_at is null
     ),
     revision_refs(asset_id, page_id, published_at) as (
       select avatar_asset_id, page_id, published_at from creator_publication_revisions where avatar_asset_id is not null
@@ -200,6 +237,27 @@ async function claimCandidates(tx: PawketTransaction, now: Date, batchSize: numb
     derivative_key as (
       select asset_id, min(object_key) as object_key from public_media_derivatives group by asset_id
     ),
+    unreferenced_clock as (
+      select a.id as asset_id,
+        case
+          when page.id is null then a.ready_at
+          when draft.page_id is null then null
+          else greatest(
+            a.ready_at,
+            page.updated_at,
+            draft.updated_at,
+            coalesce(showcases.last_changed_at, a.ready_at)
+          )
+        end as unreferenced_at
+      from public_media_assets a
+      left join creator_pages page on page.user_id = a.owner_user_id
+      left join creator_page_drafts draft on draft.page_id = page.id
+      left join lateral (
+        select max(greatest(showcase.updated_at, coalesce(showcase.removed_at, showcase.updated_at))) as last_changed_at
+        from creator_showcase_drafts showcase
+        where showcase.page_id = page.id
+      ) showcases on true
+    ),
     candidate_rules as (
       select a.id as asset_id, 'processed_source'::text as rule,
         a.ready_at + interval '24 hours' as eligible_at, a.source_object_key as target_key
@@ -212,10 +270,12 @@ async function claimCandidates(tx: PawketTransaction, now: Date, batchSize: numb
       where a.state = 'failed' and a.source_deleted_at is null
       union all
       select a.id, 'ready_unreferenced'::text,
-        a.ready_at + interval '30 days', keys.object_key
+        clocks.unreferenced_at + interval '30 days', keys.object_key
       from public_media_assets a
       join derivative_key keys on keys.asset_id = a.id
+      join unreferenced_clock clocks on clocks.asset_id = a.id
       where a.state = 'ready' and a.ready_at is not null
+        and clocks.unreferenced_at is not null
         and not exists (select 1 from draft_refs refs where refs.asset_id = a.id)
         and not exists (select 1 from revision_refs refs where refs.asset_id = a.id)
       union all
@@ -337,34 +397,151 @@ async function deleteDerivatives(input: Input, tx: PawketTransaction, candidate:
   return bytesDeleted;
 }
 
+async function lockOwningCreatorPages(tx: PawketTransaction, assetId: string): Promise<void> {
+  await tx.execute(sql`
+    select page.id
+    from creator_pages page
+    join public_media_assets asset on asset.owner_user_id = page.user_id
+    where asset.id = ${assetId}
+    order by page.id
+    for update of page
+  `);
+}
+
+async function candidateStillEligible(
+  tx: PawketTransaction,
+  candidate: Candidate,
+  now: Date,
+): Promise<boolean> {
+  const result = await tx.execute(sql`
+    with active_draft_refs(asset_id) as (
+      select avatar_asset_id from creator_page_drafts where avatar_asset_id is not null
+      union select cover_asset_id from creator_page_drafts where cover_asset_id is not null
+      union
+        select media.asset_id
+        from creator_showcase_draft_media media
+        join creator_showcase_drafts showcase on showcase.id = media.showcase_id
+        where showcase.removed_at is null
+    ),
+    revision_refs(asset_id, page_id, published_at) as (
+      select avatar_asset_id, page_id, published_at from creator_publication_revisions where avatar_asset_id is not null
+      union all select cover_asset_id, page_id, published_at from creator_publication_revisions where cover_asset_id is not null
+      union all
+        select media.asset_id, revision.page_id, revision.published_at
+        from creator_publication_media media
+        join creator_publication_showcases showcase on showcase.id = media.publication_showcase_id
+        join creator_publication_revisions revision on revision.id = showcase.revision_id
+    ),
+    live_refs(asset_id) as (
+      select revision.avatar_asset_id
+      from creator_pages page join creator_publication_revisions revision on revision.id = page.published_revision_id
+      where revision.avatar_asset_id is not null
+      union select revision.cover_asset_id
+      from creator_pages page join creator_publication_revisions revision on revision.id = page.published_revision_id
+      where revision.cover_asset_id is not null
+      union
+        select media.asset_id
+        from creator_pages page
+        join creator_publication_showcases showcase on showcase.revision_id = page.published_revision_id
+        join creator_publication_media media on media.publication_showcase_id = showcase.id
+    ),
+    last_revision_ref as (
+      select asset_id, page_id, max(published_at) as last_published_at
+      from revision_refs group by asset_id, page_id
+    ),
+    left_live as (
+      select refs.asset_id, min(events.occurred_at) as left_live_at
+      from last_revision_ref refs
+      join creator_publication_events events
+        on events.page_id = refs.page_id and events.occurred_at > refs.last_published_at
+      group by refs.asset_id
+    ),
+    state as (
+      select asset.*,
+        case
+          when page.id is null then asset.ready_at
+          when draft.page_id is null then null
+          else greatest(
+            asset.ready_at,
+            page.updated_at,
+            draft.updated_at,
+            coalesce(showcases.last_changed_at, asset.ready_at)
+          )
+        end as unreferenced_at
+      from public_media_assets asset
+      left join creator_pages page on page.user_id = asset.owner_user_id
+      left join creator_page_drafts draft on draft.page_id = page.id
+      left join lateral (
+        select max(greatest(showcase.updated_at, coalesce(showcase.removed_at, showcase.updated_at))) as last_changed_at
+        from creator_showcase_drafts showcase
+        where showcase.page_id = page.id
+      ) showcases on true
+      where asset.id = ${candidate.assetId}
+    )
+    select exists (
+      select 1 from state asset
+      where
+        (${candidate.rule} = 'processed_source' and asset.state = 'ready' and asset.source_deleted_at is null and asset.ready_at + interval '24 hours' <= ${now.toISOString()}::timestamptz)
+        or (${candidate.rule} = 'failed_quarantine' and asset.state = 'failed' and asset.source_deleted_at is null and asset.updated_at + interval '7 days' <= ${now.toISOString()}::timestamptz)
+        or (${candidate.rule} = 'ready_unreferenced' and asset.state = 'ready' and asset.unreferenced_at is not null and asset.unreferenced_at + interval '30 days' <= ${now.toISOString()}::timestamptz
+          and not exists (select 1 from active_draft_refs refs where refs.asset_id = asset.id)
+          and not exists (select 1 from revision_refs refs where refs.asset_id = asset.id))
+        or (${candidate.rule} = 'superseded_derivative' and asset.state = 'ready'
+          and exists (select 1 from left_live where left_live.asset_id = asset.id and left_live.left_live_at + interval '180 days' <= ${now.toISOString()}::timestamptz)
+          and not exists (select 1 from active_draft_refs refs where refs.asset_id = asset.id)
+          and not exists (select 1 from live_refs refs where refs.asset_id = asset.id)
+          and exists (select 1 from revision_refs refs where refs.asset_id = asset.id))
+    ) as eligible
+  `);
+  const row = readExactOwnRecord(result[0], ["eligible"]);
+  if (!row || typeof row.eligible !== "boolean") throw new Error("PUBLIC_MEDIA_CLEANUP_QUERY_INVALID");
+  return row.eligible;
+}
+
 export async function runPublicMediaCleanup(value: Input): Promise<PublicMediaCleanupResult> {
   const input = snapshotInput(value);
+  await authorizeEnforcement(input);
   return input.db.transaction(async (tx) => {
     const candidates = await claimCandidates(tx, input.now, input.batchSize);
     const expectedIds = new Set(candidates.map((candidate) => candidate.assetId));
     let protectedIds: ReadonlySet<string> | null = null;
-    try {
-      protectedIds = exactProtectedIds(await input.holds.protectedAssetIds(tx, [...expectedIds]), expectedIds);
-    } catch {
-      protectedIds = null;
+    if (input.mode === "report_only" || input.globalPause) {
+      try {
+        protectedIds = exactProtectedIds(await input.holds.protectedAssetIds(tx, [...expectedIds]), expectedIds);
+      } catch {
+        protectedIds = null;
+      }
     }
     const counts = emptyCounts();
     const results: Array<{ assetId: string; rule: PublicMediaCleanupRule; eligibleAt: Date; objectKeyHash: string; disposition: PublicMediaCleanupDisposition; bytesDeleted: number }> = [];
     for (const candidate of candidates) {
       let disposition: PublicMediaCleanupDisposition;
       let bytesDeleted = 0;
-      if (!protectedIds) {
-        disposition = "failed";
-      } else if (protectedIds.has(candidate.assetId)) {
-        disposition = "protected";
-      } else if (input.mode === "report_only" || input.globalPause) {
-        disposition = "candidate";
+      if (input.mode === "report_only" || input.globalPause) {
+        if (!protectedIds) disposition = "failed";
+        else if (protectedIds.has(candidate.assetId)) disposition = "protected";
+        else disposition = "candidate";
       } else {
         try {
-          bytesDeleted = candidate.rule === "processed_source" || candidate.rule === "failed_quarantine"
-            ? await deleteSource(input, tx, candidate)
-            : await deleteDerivatives(input, tx, candidate);
-          disposition = "processed";
+          await lockOwningCreatorPages(tx, candidate.assetId);
+          await acquirePublicMediaRetentionFences(tx, [candidate.assetId]);
+          if (!await candidateStillEligible(tx, candidate, input.now)) {
+            disposition = "protected";
+          } else {
+            const exactHolds = exactProtectedIds(
+              await input.holds.protectedAssetIds(tx, [candidate.assetId]),
+              new Set([candidate.assetId]),
+            );
+            if (!exactHolds) throw new Error("PUBLIC_MEDIA_CLEANUP_HOLD_INVALID");
+            if (exactHolds.has(candidate.assetId)) {
+              disposition = "protected";
+            } else {
+              bytesDeleted = candidate.rule === "processed_source" || candidate.rule === "failed_quarantine"
+                ? await deleteSource(input, tx, candidate)
+                : await deleteDerivatives(input, tx, candidate);
+              disposition = "processed";
+            }
+          }
         } catch {
           disposition = "failed";
           bytesDeleted = 0;
