@@ -1,11 +1,11 @@
 import {
   CreateBucketCommand,
+  DeleteObjectCommand,
   HeadBucketCommand,
+  ListObjectVersionsCommand,
   PutBucketVersioningCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
-
-import type { ObjectLocation, ObjectStoragePort } from "../src/object-storage-port.js";
 
 function isMissingBucket(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -25,11 +25,47 @@ export async function ensureVersionedBuckets(client: S3Client, buckets: readonly
   }
 }
 
-export async function deleteEveryObjectVersion(
-  storage: ObjectStoragePort,
-  location: Omit<ObjectLocation, "versionId">,
+export async function deleteEveryS3ObjectVersion(
+  client: S3Client,
+  bucket: string,
+  key: string,
 ): Promise<void> {
-  for (const version of await storage.listObjectVersions(location)) {
-    await storage.deleteObject({ ...location, versionId: version.versionId });
+  let keyMarker: string | undefined;
+  let versionIdMarker: string | undefined;
+  for (let page = 0; page < 1000; page += 1) {
+    const result = await client.send(new ListObjectVersionsCommand({
+      Bucket: bucket,
+      Prefix: key,
+      KeyMarker: keyMarker,
+      VersionIdMarker: versionIdMarker,
+    }));
+    const entries = [...(result.Versions ?? []), ...(result.DeleteMarkers ?? [])];
+    for (const entry of entries) {
+      if (entry.Key === key && typeof entry.VersionId === "string" && entry.VersionId.length > 0) {
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key, VersionId: entry.VersionId }));
+      }
+    }
+    if (result.IsTruncated !== true) return;
+    if (typeof result.NextKeyMarker !== "string" || typeof result.NextVersionIdMarker !== "string") {
+      throw new Error("S3 cleanup pagination was truncated without exact markers");
+    }
+    keyMarker = result.NextKeyMarker;
+    versionIdMarker = result.NextVersionIdMarker;
   }
+  throw new Error("S3 cleanup pagination exceeded its safety bound");
+}
+
+export async function runCleanupSteps(
+  preservePrimaryFailure: boolean,
+  steps: readonly (() => Promise<void>)[],
+): Promise<void> {
+  let firstCleanupFailure: unknown;
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      firstCleanupFailure ??= error;
+    }
+  }
+  if (!preservePrimaryFailure && firstCleanupFailure !== undefined) throw firstCleanupFailure;
 }

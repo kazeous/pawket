@@ -20,8 +20,11 @@ describe("public media policy", () => {
 
   test("accepts only the three static image media types", () => {
     expect(sourceFormatForContentType("image/jpeg")).toBe("jpeg");
-    expect(sourceFormatForContentType("image/png; charset=binary")).toBe("png");
+    expect(sourceFormatForContentType("image/png")).toBe("png");
     expect(sourceFormatForContentType("image/webp")).toBe("webp");
+    expect(sourceFormatForContentType(" image/png ")).toBeNull();
+    expect(sourceFormatForContentType("IMAGE/PNG")).toBeNull();
+    expect(sourceFormatForContentType("image/png; charset=binary")).toBeNull();
     expect(sourceFormatForContentType("image/gif")).toBeNull();
     expect(sourceFormatForContentType("image/svg+xml")).toBeNull();
   });
@@ -29,13 +32,17 @@ describe("public media policy", () => {
   test.each([
     ["version/with+opaque=_-~", true],
     ["/+=._~-", true],
+    ["opaque:percent%@bang!(parentheses)-作品", true],
     [" null ", false],
     ["NULL", false],
     ["version with space", false],
+    [`version${String.fromCharCode(0xa0)}space`, false],
     ["version\nnewline", false],
     [`version${String.fromCharCode(0x85)}control`, false],
-    ["x".repeat(512), true],
-    ["x".repeat(513), false],
+    [`version${String.fromCharCode(0x202e)}bidi`, false],
+    [`version${String.fromCharCode(0xfdd0)}noncharacter`, false],
+    ["🎨".repeat(512), true],
+    ["🎨".repeat(513), false],
     [null, false],
   ])("validates provider version IDs (%s)", (value, expected) => {
     expect(isOpaqueVersionId(value)).toBe(expected);

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, beforeAll, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { S3Client } from "@aws-sdk/client-s3";
 
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
-import { deleteEveryObjectVersion, ensureVersionedBuckets } from "./s3-test-helpers.js";
+import { deleteEveryS3ObjectVersion, ensureVersionedBuckets, runCleanupSteps } from "./s3-test-helpers.js";
 
 const endpoint = process.env.PUBLIC_MEDIA_S3_ENDPOINT ?? "http://localhost:9090";
 const region = process.env.PUBLIC_MEDIA_S3_REGION ?? "us-east-1";
@@ -25,10 +25,12 @@ describe("private S3 object storage", () => {
   beforeAll(async () => {
     await ensureVersionedBuckets(client, [quarantineBucket, derivativeBucket]);
   });
+  afterAll(() => client.destroy());
 
   test("presigns, PUTs, HEADs, GETs, lists, overwrites, and deletes exact versions", async () => {
     const key = `quarantine/${randomUUID()}/${randomUUID()}`;
     const bytes = new Uint8Array([1, 2, 3]);
+    let primaryFailed = false;
     try {
       const grant = await storage.presignPut({ key, contentType: "image/png", contentLength: bytes.byteLength, expiresInSeconds: 900 });
       expect(grant.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(900_000);
@@ -49,16 +51,19 @@ describe("private S3 object storage", () => {
       expect(await storage.listObjectVersions({ area: "quarantine", key })).toEqual(expect.arrayContaining([{ versionId: first!.versionId, isDeleteMarker: false }, { versionId: second!.versionId, isDeleteMarker: false }]));
       await storage.deleteObject({ area: "quarantine", key, versionId: first!.versionId! });
       expect((await storage.listObjectVersions({ area: "quarantine", key })).map((version) => version.versionId)).not.toContain(first!.versionId);
+    } catch (error) {
+      primaryFailed = true;
+      throw error;
     } finally {
-      await deleteEveryObjectVersion(storage, { area: "quarantine", key });
+      await runCleanupSteps(primaryFailed, [() => deleteEveryS3ObjectVersion(client, quarantineBucket, key)]);
     }
-    expect(await storage.listObjectVersions({ area: "quarantine", key })).toEqual([]);
   });
 
   test("stores private derivative SHA metadata and maps invalid/missing objects safely", async () => {
     const assetId = randomUUID();
     const key = `derivatives/${assetId}/display/${randomUUID()}.webp`;
     const hash = "sha256:v1:" + "a".repeat(43);
+    let primaryFailed = false;
     try {
       await storage.putObject({ area: "derivative", key, contentType: "image/webp", body: new Uint8Array([8, 9]), sha256: hash });
       expect(await storage.headObject({ area: "derivative", key })).toMatchObject({ contentLength: 2, contentType: "image/webp", sha256: hash, versionId: expect.any(String) });
@@ -68,9 +73,11 @@ describe("private S3 object storage", () => {
       }
       await expect(storage.presignPut({ key: "quarantine/nope", contentType: "image/gif", contentLength: 1, expiresInSeconds: 900 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
       expect(await storage.headObject({ area: "quarantine", key: `quarantine/${randomUUID()}/${randomUUID()}` })).toBeNull();
+    } catch (error) {
+      primaryFailed = true;
+      throw error;
     } finally {
-      await deleteEveryObjectVersion(storage, { area: "derivative", key });
+      await runCleanupSteps(primaryFailed, [() => deleteEveryS3ObjectVersion(client, derivativeBucket, key)]);
     }
-    expect(await storage.listObjectVersions({ area: "derivative", key })).toEqual([]);
   });
 });

@@ -52,17 +52,37 @@ export function isMediaVariant(value: unknown): value is MediaVariant {
 }
 
 export function sourceFormatForContentType(contentType: string): SourceFormat | null {
-  const normalized = contentType.trim().toLowerCase().split(";", 1)[0];
-  if (normalized === "image/jpeg") return "jpeg";
-  if (normalized === "image/png") return "png";
-  if (normalized === "image/webp") return "webp";
+  if (contentType === "image/jpeg") return "jpeg";
+  if (contentType === "image/png") return "png";
+  if (contentType === "image/webp") return "webp";
   return null;
 }
 
-/**
- * Version IDs are provider-owned opaque values. Keep them printable and
- * bounded at this boundary while allowing URL/base64-safe punctuation.
- */
+const UNICODE_WHITESPACE = /\p{White_Space}/u;
+const UNICODE_CONTROL = /\p{Cc}/u;
+const BIDI_CONTROL = /\p{Bidi_Control}/u;
+
+function isNoncharacter(codePoint: number): boolean {
+  return (codePoint >= 0xfdd0 && codePoint <= 0xfdef) || (codePoint & 0xffff) >= 0xfffe;
+}
+
+function hasUnsafeUnicode(value: string, rejectWhitespace: boolean): boolean {
+  if ((rejectWhitespace && UNICODE_WHITESPACE.test(value)) || UNICODE_CONTROL.test(value) || BIDI_CONTROL.test(value)) return true;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if ((codePoint >= 0xd800 && codePoint <= 0xdfff) || isNoncharacter(codePoint)) return true;
+  }
+  return false;
+}
+
 export function isOpaqueVersionId(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 1 && value.length <= 512 && value === value.trim() && value.toLowerCase() !== "null" && /^[A-Za-z0-9/_+=.~\-]+$/u.test(value);
+  if (typeof value !== "string" || value !== value.trim() || value.toLowerCase() === "null" || hasUnsafeUnicode(value, true)) return false;
+  const length = [...value].length;
+  return length >= 1 && length <= 512;
+}
+
+export function isRawStorageEtag(value: unknown): value is string {
+  if (typeof value !== "string" || value !== value.trim() || hasUnsafeUnicode(value, false)) return false;
+  const length = [...value].length;
+  return length >= 1 && length <= 512;
 }
