@@ -91,7 +91,7 @@ export const publicMediaAssets = pgTable(
     ),
     check(
       "public_media_assets_master_version_check",
-      sql`${table.normalizedMasterObjectVersionId} is null or char_length(${table.normalizedMasterObjectVersionId}) between 1 and 512`,
+      sql`${table.normalizedMasterObjectVersionId} is null or public_media_opaque_storage_marker_is_valid(${table.normalizedMasterObjectVersionId})`,
     ),
     check(
       "public_media_assets_source_version_check",
@@ -101,7 +101,7 @@ export const publicMediaAssets = pgTable(
     check(
       "public_media_assets_source_identity_check",
       sql`(${table.sourceObjectVersionId} is null and ${table.sourceObjectEtag} is null)
-        or (char_length(${table.sourceObjectVersionId}) between 1 and 512 and char_length(${table.sourceObjectEtag}) between 1 and 512)`,
+        or (public_media_opaque_storage_marker_is_valid(${table.sourceObjectVersionId}) and public_media_opaque_storage_marker_is_valid(${table.sourceObjectEtag}))`,
     ),
     check(
       "public_media_assets_source_pinning_check",
@@ -230,6 +230,10 @@ export const publicMediaDerivatives = pgTable(
     check(
       "public_media_derivatives_hash_check",
       sql`${table.contentHash} ~ '^sha256:v1:[A-Za-z0-9_-]{43}$'`,
+    ),
+    check(
+      "public_media_derivatives_object_version_check",
+      sql`public_media_opaque_storage_marker_is_valid(${table.objectVersionId})`,
     ),
     check("public_media_derivatives_timestamps_check", sql`${table.updatedAt} >= ${table.createdAt}`),
   ],

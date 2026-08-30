@@ -1,3 +1,36 @@
+CREATE OR REPLACE FUNCTION public_media_opaque_storage_marker_is_valid(marker_value text) RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+DECLARE
+  marker_character text;
+  marker_code_point integer;
+BEGIN
+  IF char_length(marker_value) NOT BETWEEN 1 AND 512 OR lower(marker_value) = 'null' THEN
+    RETURN false;
+  END IF;
+  FOREACH marker_character IN ARRAY regexp_split_to_array(marker_value, '') LOOP
+    marker_code_point := ascii(marker_character);
+    IF marker_code_point BETWEEN 0 AND 31
+      OR marker_code_point BETWEEN 127 AND 159
+      OR marker_code_point IN (32, 160, 5760, 65279)
+      OR marker_code_point BETWEEN 8192 AND 8202
+      OR marker_code_point IN (8232, 8233, 8239, 8287, 12288)
+      OR marker_code_point IN (1564, 8206, 8207)
+      OR marker_code_point BETWEEN 8234 AND 8238
+      OR marker_code_point BETWEEN 8294 AND 8297
+      OR marker_code_point BETWEEN 64976 AND 65007
+      OR marker_code_point % 65536 IN (65534, 65535)
+    THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END;
+$$;
+--> statement-breakpoint
 CREATE TABLE "public_media_assets" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
@@ -27,9 +60,9 @@ CREATE TABLE "public_media_assets" (
 	CONSTRAINT "public_media_assets_dimensions_check" CHECK (("width" is null and "height" is null) or ("width" between 1 and 4096 and "height" between 1 and 4096 and "width" * "height" <= 40000000)),
 	CONSTRAINT "public_media_assets_master_identity_check" CHECK (("normalized_master_object_key" is null and "normalized_master_object_version_id" is null) or ("normalized_master_object_key" is not null and "normalized_master_object_version_id" is not null)),
 	CONSTRAINT "public_media_assets_master_key_check" CHECK ("normalized_master_object_key" is null or "normalized_master_object_key" ~ '^derivatives/[0-9a-f-]{36}/master/[A-Za-z0-9_-]+[.]webp$'),
-	CONSTRAINT "public_media_assets_master_version_check" CHECK ("normalized_master_object_version_id" is null or char_length("normalized_master_object_version_id") between 1 and 512),
+	CONSTRAINT "public_media_assets_master_version_check" CHECK ("normalized_master_object_version_id" is null or public_media_opaque_storage_marker_is_valid("normalized_master_object_version_id")),
 	CONSTRAINT "public_media_assets_source_version_check" CHECK (("source_object_version_id" is null and "source_object_etag" is null) or ("source_object_version_id" is not null and "source_object_etag" is not null)),
-	CONSTRAINT "public_media_assets_source_identity_check" CHECK (("source_object_version_id" is null and "source_object_etag" is null) or (char_length("source_object_version_id") between 1 and 512 and char_length("source_object_etag") between 1 and 512)),
+	CONSTRAINT "public_media_assets_source_identity_check" CHECK (("source_object_version_id" is null and "source_object_etag" is null) or (public_media_opaque_storage_marker_is_valid("source_object_version_id") and public_media_opaque_storage_marker_is_valid("source_object_etag"))),
 	CONSTRAINT "public_media_assets_source_pinning_check" CHECK (("state" in ('pending','processing','ready','deleted') and "source_object_version_id" is not null and "source_object_etag" is not null and "actual_source_bytes" is not null) or ("state" in ('awaiting_upload','failed') and "source_object_version_id" is null and "source_object_etag" is null and "actual_source_bytes" is null) or ("state" = 'failed' and "source_object_version_id" is not null and "source_object_etag" is not null and "actual_source_bytes" is not null)),
 	CONSTRAINT "public_media_assets_failure_check" CHECK (("failure_code" is null and "state" <> 'failed') or ("failure_code" is not null and "state" = 'failed')),
 	CONSTRAINT "public_media_assets_failure_code_check" CHECK ("failure_code" is null or "failure_code" in ('failed_validation','unsupported_format','malformed_image','dimensions_exceeded','output_too_large','storage_error','processing_error','derivative_key_conflict')),
@@ -108,7 +141,7 @@ CREATE TABLE "public_media_derivatives" (
 	CONSTRAINT "public_media_derivatives_bytes_check" CHECK (("variant" = 'master' and "byte_size" between 1 and 10485760) or ("variant" = 'thumb' and "byte_size" between 1 and 524288) or ("variant" = 'display' and "byte_size" between 1 and 3145728) or ("variant" = 'large' and "byte_size" between 1 and 6291456)),
 	CONSTRAINT "public_media_derivatives_hash_check" CHECK ("content_hash" ~ '^sha256:v1:[A-Za-z0-9_-]{43}$'),
 	CONSTRAINT "public_media_derivatives_object_key_check" CHECK ("object_key" ~ '^derivatives/[0-9a-f-]{36}/(master|thumb|display|large)/[A-Za-z0-9_-]+[.]webp$'),
-	CONSTRAINT "public_media_derivatives_object_version_check" CHECK (char_length("object_version_id") between 1 and 512),
+	CONSTRAINT "public_media_derivatives_object_version_check" CHECK (public_media_opaque_storage_marker_is_valid("object_version_id")),
 	CONSTRAINT "public_media_derivatives_timestamps_check" CHECK ("updated_at" >= "created_at")
  );
 --> statement-breakpoint

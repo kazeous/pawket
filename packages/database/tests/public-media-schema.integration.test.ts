@@ -77,6 +77,7 @@ async function insertDerivative(
   assetId: string,
   variant: "master" | "thumb" | "display" | "large",
   byteSize = 100,
+  objectVersionId = `version-${variant}`,
 ) {
   await db.insert(publicMediaDerivatives).values({
     id: randomUUID(),
@@ -88,11 +89,20 @@ async function insertDerivative(
     byteSize,
     contentHash: `sha256:v1:${"a".repeat(43)}`,
     objectKey: `derivatives/${assetId}/${variant}/hash.webp`,
-    objectVersionId: `version-${variant}`,
+    objectVersionId,
     verifiedAt: new Date(at),
     createdAt: new Date(at),
     updatedAt: new Date(at),
   });
+}
+
+async function insertDerivativeWithVersion(assetId: string, objectVersionId: string) {
+  return client`insert into public_media_derivatives
+    (id, asset_id, variant, format, width, height, byte_size, content_hash, object_key,
+     object_version_id, verified_at, created_at, updated_at)
+    values (${randomUUID()}, ${assetId}, 'thumb', 'webp', 384, 300, 100,
+      ${`sha256:v1:${"a".repeat(43)}`}, ${`derivatives/${assetId}/thumb/hash.webp`},
+      ${objectVersionId}, ${at}, ${at}, ${at})`;
 }
 
 async function expectSqlState(
@@ -107,7 +117,7 @@ async function expectSqlState(
     error = caught;
   }
   expect(error).toBeDefined();
-  expect((error as { code?: string }).code).toBe(code);
+  expect(error).toMatchObject({ code });
   expect(String(error)).toMatch(reason);
 }
 
@@ -166,6 +176,80 @@ describe("public media persistence", () => {
     await expect(client.unsafe(`update public_media_derivatives set variant = 'original' where asset_id = '${f.assetId}'`)).rejects.toThrow();
     await expect(client.unsafe(`update public_media_derivatives set format = 'png' where asset_id = '${f.assetId}'`)).rejects.toThrow();
     await expect(client.unsafe(`update public_media_derivatives set byte_size = 0 where asset_id = '${f.assetId}'`)).rejects.toThrow();
+  });
+
+  test("enforces the provider-neutral opaque storage marker policy on every persisted identity", async () => {
+    const invalidMarkers = [
+      "",
+      " padded-ascii ",
+      `unicode${String.fromCodePoint(0x00a0)}space`,
+      `control${String.fromCodePoint(0x0001)}marker`,
+      `bidi${String.fromCodePoint(0x202e)}marker`,
+      `noncharacter${String.fromCodePoint(0xfdd0)}marker`,
+      "null",
+      "NuLl",
+      "🎨".repeat(513),
+    ] as const;
+
+    for (const invalidMarker of invalidMarkers) {
+      const sourceVersion = await fixture();
+      await completeIntent(sourceVersion);
+      await expectSqlState(
+        client`update public_media_assets
+          set state = 'pending', source_object_version_id = ${invalidMarker}, source_object_etag = 'etag-valid', actual_source_bytes = 512
+          where id = ${sourceVersion.assetId}`,
+        "23514",
+        /source|identity|version|marker/i,
+      );
+
+      const sourceEtag = await fixture();
+      await completeIntent(sourceEtag);
+      await expectSqlState(
+        client`update public_media_assets
+          set state = 'pending', source_object_version_id = 'version-valid', source_object_etag = ${invalidMarker}, actual_source_bytes = 512
+          where id = ${sourceEtag.assetId}`,
+        "23514",
+        /source|identity|etag|marker/i,
+      );
+
+      const master = await fixture();
+      await expectSqlState(
+        client`update public_media_assets
+          set normalized_master_object_key = ${`derivatives/${master.assetId}/master/hash.webp`},
+              normalized_master_object_version_id = ${invalidMarker}
+          where id = ${master.assetId}`,
+        "23514",
+        /master|version|marker/i,
+      );
+
+      const derivative = await fixture();
+      await expectSqlState(
+        insertDerivativeWithVersion(derivative.assetId, invalidMarker),
+        "23514",
+        /derivative|version|marker/i,
+      );
+    }
+
+    const accepted = "opaque:percent%@bang!(parentheses)/+=._~-作品🎨";
+    const acceptedEtag = '"etag:opaque%作品🎨"';
+    const source = await fixture();
+    await completeIntent(source);
+    await client`update public_media_assets
+      set state = 'pending', source_object_version_id = ${accepted}, source_object_etag = ${acceptedEtag}, actual_source_bytes = 512
+      where id = ${source.assetId}`;
+
+    const master = await fixture();
+    await client`update public_media_assets
+      set normalized_master_object_key = ${`derivatives/${master.assetId}/master/hash.webp`},
+          normalized_master_object_version_id = ${accepted}
+      where id = ${master.assetId}`;
+
+    const derivative = await fixture();
+    await insertDerivativeWithVersion(derivative.assetId, accepted);
+
+    const maxCodePoints = "🎨".repeat(512);
+    const maxLengthDerivative = await fixture();
+    await insertDerivativeWithVersion(maxLengthDerivative.assetId, maxCodePoints);
   });
 
   test("prevents terminal attempt mutation and asset terminal escape", async () => {

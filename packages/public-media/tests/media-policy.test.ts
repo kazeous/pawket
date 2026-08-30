@@ -6,6 +6,7 @@ import {
   MEDIA_VARIANTS,
   UPLOAD_INTENT_LIFETIME_MS,
   isOpaqueVersionId,
+  isRawStorageEtag,
   sourceFormatForContentType,
 } from "../src/media-policy.js";
 
@@ -41,10 +42,22 @@ describe("public media policy", () => {
     [`version${String.fromCharCode(0x85)}control`, false],
     [`version${String.fromCharCode(0x202e)}bidi`, false],
     [`version${String.fromCharCode(0xfdd0)}noncharacter`, false],
+    [`version${String.fromCharCode(0xfeff)}bom`, false],
     ["🎨".repeat(512), true],
     ["🎨".repeat(513), false],
     [null, false],
   ])("validates provider version IDs (%s)", (value, expected) => {
     expect(isOpaqueVersionId(value)).toBe(expected);
+  });
+
+  test.each([
+    ['"etag:opaque%作品🎨"', true],
+    ["etag with space", false],
+    ["NULL", false],
+    [`etag${String.fromCodePoint(0x202e)}bidi`, false],
+    ["🎨".repeat(512), true],
+    ["🎨".repeat(513), false],
+  ])("validates persisted storage ETags with the shared opaque marker policy (%s)", (value, expected) => {
+    expect(isRawStorageEtag(value)).toBe(expected);
   });
 });

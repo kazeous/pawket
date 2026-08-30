@@ -61,13 +61,14 @@ export function sourceFormatForContentType(contentType: string): SourceFormat | 
 const UNICODE_WHITESPACE = /\p{White_Space}/u;
 const UNICODE_CONTROL = /\p{Cc}/u;
 const BIDI_CONTROL = /\p{Bidi_Control}/u;
+const BYTE_ORDER_MARK = "\ufeff";
 
 function isNoncharacter(codePoint: number): boolean {
   return (codePoint >= 0xfdd0 && codePoint <= 0xfdef) || (codePoint & 0xffff) >= 0xfffe;
 }
 
 function hasUnsafeUnicode(value: string, rejectWhitespace: boolean): boolean {
-  if ((rejectWhitespace && UNICODE_WHITESPACE.test(value)) || UNICODE_CONTROL.test(value) || BIDI_CONTROL.test(value)) return true;
+  if ((rejectWhitespace && (UNICODE_WHITESPACE.test(value) || value.includes(BYTE_ORDER_MARK))) || UNICODE_CONTROL.test(value) || BIDI_CONTROL.test(value)) return true;
   for (const character of value) {
     const codePoint = character.codePointAt(0)!;
     if ((codePoint >= 0xd800 && codePoint <= 0xdfff) || isNoncharacter(codePoint)) return true;
@@ -82,7 +83,5 @@ export function isOpaqueVersionId(value: unknown): value is string {
 }
 
 export function isRawStorageEtag(value: unknown): value is string {
-  if (typeof value !== "string" || value !== value.trim() || hasUnsafeUnicode(value, false)) return false;
-  const length = [...value].length;
-  return length >= 1 && length <= 512;
+  return isOpaqueVersionId(value);
 }

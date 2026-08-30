@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { S3Client } from "@aws-sdk/client-s3";
+import { NoSuchKey, NotFound, S3Client, S3ServiceException } from "@aws-sdk/client-s3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createS3ObjectStorage } from "../src/s3-object-storage.js";
@@ -104,5 +104,165 @@ describe("S3 response runtime boundary", () => {
     await expect(storage.listObjectVersions({ area: "quarantine", key })).rejects.toMatchObject({
       code: "STORAGE_UNAVAILABLE",
     });
+  });
+
+  test("rejects an alternating pagination-marker cycle before issuing a fourth request", async () => {
+    const key = quarantineKey();
+    const send = vi.spyOn(S3Client.prototype, "send")
+      .mockResolvedValueOnce({
+        IsTruncated: true,
+        Versions: [{ Key: key, VersionId: "version-1" }],
+        DeleteMarkers: [],
+        NextKeyMarker: key,
+        NextVersionIdMarker: "marker-a",
+      } as never)
+      .mockResolvedValueOnce({
+        IsTruncated: true,
+        Versions: [{ Key: key, VersionId: "version-2" }],
+        DeleteMarkers: [],
+        NextKeyMarker: key,
+        NextVersionIdMarker: "marker-b",
+      } as never)
+      .mockResolvedValueOnce({
+        IsTruncated: true,
+        Versions: [{ Key: key, VersionId: "version-3" }],
+        DeleteMarkers: [],
+        NextKeyMarker: key,
+        NextVersionIdMarker: "marker-a",
+      } as never);
+    const storage = createS3ObjectStorage(options);
+
+    await expect(storage.listObjectVersions({ area: "quarantine", key })).rejects.toMatchObject({
+      code: "STORAGE_UNAVAILABLE",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  test("returns an exact complete result across ordinary version pages", async () => {
+    const key = quarantineKey();
+    const send = vi.spyOn(S3Client.prototype, "send")
+      .mockResolvedValueOnce({
+        IsTruncated: true,
+        Versions: [{ Key: key, VersionId: "version-1" }],
+        DeleteMarkers: [],
+        NextKeyMarker: key,
+        NextVersionIdMarker: "marker-1",
+      } as never)
+      .mockResolvedValueOnce({
+        IsTruncated: false,
+        Versions: [{ Key: key, VersionId: "version-2" }],
+        DeleteMarkers: [{ Key: key, VersionId: "delete-marker-1" }],
+      } as never);
+    const storage = createS3ObjectStorage(options);
+
+    await expect(storage.listObjectVersions({ area: "quarantine", key })).resolves.toEqual([
+      { versionId: "version-1", isDeleteMarker: false },
+      { versionId: "version-2", isDeleteMarker: false },
+      { versionId: "delete-marker-1", isDeleteMarker: true },
+    ]);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    new NoSuchKey({ $metadata: { httpStatusCode: 404 }, message: "missing key" }),
+    new NotFound({ $metadata: { httpStatusCode: 404 }, message: "missing object" }),
+  ])("maps realistic AWS 404 errors to absence without inspecting prototype getters", async (providerError) => {
+    vi.spyOn(S3Client.prototype, "send").mockRejectedValue(providerError);
+    const storage = createS3ObjectStorage(options);
+
+    await expect(storage.headObject({ area: "quarantine", key: quarantineKey() })).resolves.toBeNull();
+  });
+
+  test("maps a safely wrapped AWS NoSuchVersion error to not found", async () => {
+    const providerError = new S3ServiceException({
+      $fault: "client",
+      $metadata: { httpStatusCode: 404 },
+      message: "missing version",
+      name: "NoSuchVersion",
+    });
+    Object.defineProperty(providerError, "name", {
+      configurable: true,
+      enumerable: true,
+      value: "NoSuchVersion",
+      writable: true,
+    });
+    vi.spyOn(S3Client.prototype, "send").mockRejectedValue(new Error("wrapped", { cause: providerError }));
+    const storage = createS3ObjectStorage(options);
+
+    await expect(storage.getObject({
+      area: "quarantine",
+      key: quarantineKey(),
+      versionId: "version-1",
+    })).rejects.toMatchObject({ code: "MEDIA_NOT_FOUND" });
+  });
+
+  test.each(["proxy", "accessor", "prototype-proxy"] as const)(
+    "maps hostile %s provider errors to unavailable without invoking traps",
+    async (shape) => {
+      let trapCalls = 0;
+      const providerError = shape === "proxy"
+        ? new Proxy({ name: "NoSuchKey", $metadata: { httpStatusCode: 404 } }, {
+            get() {
+              trapCalls += 1;
+              throw new Error("provider trap must not run");
+            },
+            getOwnPropertyDescriptor() {
+              trapCalls += 1;
+              throw new Error("provider trap must not run");
+            },
+          })
+        : shape === "accessor"
+          ? Object.defineProperties({}, {
+            name: {
+              configurable: true,
+              enumerable: true,
+              get() {
+                trapCalls += 1;
+                return "NoSuchKey";
+              },
+            },
+            $metadata: {
+              configurable: true,
+              enumerable: true,
+              value: { httpStatusCode: 404 },
+            },
+          })
+          : Object.assign(
+              Object.create(new Proxy({}, {
+                getPrototypeOf() {
+                  trapCalls += 1;
+                  throw new Error("provider prototype trap must not run");
+                },
+              })) as Record<string, unknown>,
+              { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } },
+            );
+      vi.spyOn(S3Client.prototype, "send").mockRejectedValue(providerError);
+      const storage = createS3ObjectStorage(options);
+
+      await expect(storage.headObject({ area: "quarantine", key: quarantineKey() })).rejects.toMatchObject({
+        code: "STORAGE_UNAVAILABLE",
+      });
+      expect(trapCalls).toBe(0);
+    },
+  );
+
+  test("rejects an otherwise plausible provider record containing any untrusted accessor", async () => {
+    let trapCalls = 0;
+    const providerError = { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } } as Record<string, unknown>;
+    Object.defineProperty(providerError, "untrusted", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        trapCalls += 1;
+        return "must not run";
+      },
+    });
+    vi.spyOn(S3Client.prototype, "send").mockRejectedValue(providerError);
+    const storage = createS3ObjectStorage(options);
+
+    await expect(storage.headObject({ area: "quarantine", key: quarantineKey() })).rejects.toMatchObject({
+      code: "STORAGE_UNAVAILABLE",
+    });
+    expect(trapCalls).toBe(0);
   });
 });
