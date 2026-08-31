@@ -162,6 +162,13 @@
       "when": 1788109226886,
       "tag": "0022_increment_3_public_trust",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788186826786,
+      "tag": "0023_increment_3_immutability_and_retention",
+      "breakpoints": true
     }
   ]
 }

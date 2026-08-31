@@ -36,6 +36,9 @@ const keyring = createEncryptionKeyring({
   activeKeyId: "test-v1",
   keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
 });
+const noCatalogCapabilityTransition = {
+  async apply() { return { pageId: null, previousPublishedRevisionId: null }; },
+};
 
 async function executeMigration(filename: string): Promise<void> {
   const migration = await readFile(new URL(filename, migrationsDirectory), "utf8");
@@ -192,7 +195,7 @@ describe("owner creator review", () => {
   test("rejects stale claims and permits a different owner to reclaim only after the 15-minute lease expires", async () => {
     type QueueItem = { state: string; version: number; claimedByCurrentOwner: boolean };
     type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number; leaseExpiresAt: Date }>; listSubmitted(ownerUserId?: string, at?: Date): Promise<QueueItem[]> } };
-    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition });
     await expect(service.listSubmitted("review-owner", now)).resolves.toEqual([
       expect.objectContaining({ state: "submitted", version: 2, claimedByCurrentOwner: false }),
     ]);
@@ -215,7 +218,7 @@ describe("owner creator review", () => {
 
   test("rejects approval without side effects when authoritative proof, account, or applicant state changes", async () => {
     type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<unknown> } };
-    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition });
     const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "proof-claim" });
     await client`update payments_receiving_account_onboarding set proof_verified_at = ${(new Date(now.getTime() + 1)).toISOString()} where id = ${accountVersionId}`;
     await expect(service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claim.version, idempotencyKey: "future-proof-approval", requestId: "future-proof", action: "approve", reasonCode: "other", applicantExplanation: "Approved." })).rejects.toMatchObject({ code: "proof_expired" });
@@ -233,7 +236,7 @@ describe("owner creator review", () => {
 
   test("serializes conflicting decisions and reopens rejected history as a compensating action", async () => {
     type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<{ state: string }> } };
-    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition });
     const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "concurrent-claim" });
     const command = { ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, revisionId, expectedVersion: claim.version, action: "reject" as const, reasonCode: "other", applicantExplanation: "Not approved." };
     const results = await Promise.allSettled([service.decide({ ...command, stepUpProofId: proofId, idempotencyKey: "concurrent-one", requestId: "concurrent-one" }), service.decide({ ...command, stepUpProofId: "10000000-0000-4000-8000-000000000098", idempotencyKey: "concurrent-two", requestId: "concurrent-two" })]);
@@ -267,7 +270,7 @@ describe("owner creator review", () => {
   test("rejects a creator decision action outside the closed enum before writing review evidence", async () => {
     // Break caught: an unbounded runtime action entering command scope, audit, decision, or outbox data.
     type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number }>; decide(input: Record<string, unknown>): Promise<{ state: string }> } };
-    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true });
+    const service = (admin as unknown as Factory).createCreatorReviewService({ db, keyring, commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition });
     const claim = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "invalid-action-claim" });
 
     await expect(service.decide({
@@ -311,6 +314,7 @@ describe("owner creator review", () => {
       now: () => now,
       consumeStepUpProof: async (_tx: unknown, proof: { actionClass: string; proofId: string }) =>
         proof.actionClass === "owner.creator_application_detail" && proof.proofId === proofId,
+      catalogCapabilityTransition: noCatalogCapabilityTransition,
     });
     expect(typeof service.getDetail).toBe("function");
     await expect(service.getDetail({
@@ -368,6 +372,7 @@ describe("owner creator review", () => {
       commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
       now: () => now,
       consumeStepUpProof: async () => true,
+      catalogCapabilityTransition: noCatalogCapabilityTransition,
     });
     await client`
       insert into identity_sessions (id, expires_at, token_hash, created_at, updated_at, user_id, assurance_state, primary_authenticated_at, last_used_at, absolute_expires_at, idle_expires_at, authorization_version)
@@ -446,6 +451,7 @@ describe("owner creator review", () => {
       commandFingerprintKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
       now: () => now,
       consumeStepUpProof: async () => true,
+      catalogCapabilityTransition: noCatalogCapabilityTransition,
     });
     const claimed = await service.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: "claim-suspend-request" });
     await service.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claimed.version, idempotencyKey: "approve-before-suspend", requestId: "approve-before-suspend-request", action: "approve", reasonCode: "other", applicantExplanation: "Approved." });

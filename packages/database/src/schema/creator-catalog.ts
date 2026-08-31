@@ -176,7 +176,7 @@ export const creatorPublicationEvents = pgTable("creator_publication_events", {
   occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }).notNull(),
 }, (table) => [
   index("creator_publication_events_page_idx").on(table.pageId, table.occurredAt),
-  check("creator_publication_events_type_check", sql`${table.type} in ('published','unpublished')`),
+  check("creator_publication_events_type_check", sql`${table.type} in ('published','unpublished','suspension_unpublish')`),
   check("creator_publication_events_expected_draft_version_check", sql`${table.expectedDraftVersion} > 0`),
 ]);
 

@@ -707,7 +707,7 @@ export function createCatalogService(input: CatalogServiceInput) {
       await tx.update(creatorPages).set({ publishedRevisionId: null, updatedAt: transition.occurredAt }).where(eq(creatorPages.id, page.id));
       const projection = await tx.update(creatorDiscoveryProjections).set({ enabled: false }).where(and(eq(creatorDiscoveryProjections.pageId, page.id), eq(creatorDiscoveryProjections.revisionId, previousPublishedRevisionId))).returning({ pageId: creatorDiscoveryProjections.pageId });
       if (projection.length !== 1) fail("POLICY_VIOLATION");
-      await tx.insert(creatorPublicationEvents).values({ id: id(), pageId: page.id, revisionId: previousPublishedRevisionId, type: "unpublished", actorUserId: transition.actorUserId, actorSessionId: transition.actorSessionId, expectedDraftVersion: page.draftVersion, requestId: transition.requestId, occurredAt: transition.occurredAt });
+      await tx.insert(creatorPublicationEvents).values({ id: id(), pageId: page.id, revisionId: previousPublishedRevisionId, type: "suspension_unpublish", actorUserId: transition.actorUserId, actorSessionId: transition.actorSessionId, expectedDraftVersion: page.draftVersion, requestId: transition.requestId, occurredAt: transition.occurredAt });
       await insertOutboxEvent(tx, { eventType: "creator.page_unpublished.v1", eventVersion: 1, aggregateType: "creator_page", aggregateId: page.id, payload: { pageId: page.id, revisionId: previousPublishedRevisionId, draftVersion: page.draftVersion, correlationId: transition.requestId, actorUserId: transition.actorUserId, reasonCode: transition.reasonCode }, occurredAt: transition.occurredAt });
       return { pageId: page.id, previousPublishedRevisionId };
     },

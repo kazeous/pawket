@@ -35,6 +35,7 @@ export {
   readOperationalBacklogMetrics,
 } from "./operational-email-repository.js";
 export {
+  INCREMENT_THREE_RETENTION_DATASETS,
   RETENTION_DATASETS,
   runRetentionSweep,
   type RetentionDataset,

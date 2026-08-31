@@ -197,7 +197,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(23);
+  expect(journal?.count).toBe(24);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -290,7 +290,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(23);
+      expect(after?.count).toBe(24);
     } finally {
       await client.end();
       await rm(through0019, { recursive: true, force: true });
@@ -318,7 +318,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(23);
+      expect(after?.count).toBe(24);
     } finally {
       await client.end();
       await rm(through0020, { recursive: true, force: true });
@@ -345,10 +345,60 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(23);
+      expect(after?.count).toBe(24);
     } finally {
       await client.end();
       await rm(through0021, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 22 to final guard index 23", async () => {
+    // Break caught: migration 0023 works on a blank database but is skipped or conflicts when upgrading deployed 0022.
+    const { client, schemaName, journalSchema } = await createIsolatedClient("guard-upgrade");
+    const through0022 = await createMigrationsThrough(22);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0022, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(23);
+      await expect(
+        client<{ present: boolean }[]>`
+          select exists (
+            select 1 from pg_trigger
+            where tgrelid = ${`${schemaName}.public_media_assets`}::regclass
+              and tgname = 'public_media_cleanup_hold_guard'
+              and not tgisinternal
+          ) as present`,
+      ).resolves.toEqual([{ present: false }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      const triggers = await client<{ tgname: string; count: number }[]>`
+        select tgname, count(*)::int as count from pg_trigger
+        where not tgisinternal and tgrelid in (
+          ${`${schemaName}.creator_publication_showcases`}::regclass,
+          ${`${schemaName}.creator_publication_media`}::regclass,
+          ${`${schemaName}.public_media_processing_attempts`}::regclass,
+          ${`${schemaName}.public_media_assets`}::regclass
+        ) and tgname in (
+          'creator_publication_showcases_append_only',
+          'creator_publication_media_append_only',
+          'public_media_attempts_one_way_close',
+          'public_media_cleanup_hold_guard'
+        ) group by tgname order by tgname`;
+      expect(triggers).toEqual([
+        { tgname: "creator_publication_media_append_only", count: 1 },
+        { tgname: "creator_publication_showcases_append_only", count: 1 },
+        { tgname: "public_media_attempts_one_way_close", count: 1 },
+        { tgname: "public_media_cleanup_hold_guard", count: 1 },
+      ]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(24);
+    } finally {
+      await client.end();
+      await rm(through0022, { recursive: true, force: true });
     }
   });
 

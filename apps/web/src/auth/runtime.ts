@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
+import { createCatalogCapabilityTransitionPort, createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
+import { createCatalogService } from "@pawket/catalog";
 import { loadServerEnv } from "@pawket/config";
 import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
+  createIdentityCreatorSeedPort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
   createIdentityService,
@@ -196,11 +198,18 @@ export function getIdentityRuntime(): WebIdentityRuntime {
       db: database.db,
     }),
   });
+  const catalogService = createCatalogService({
+    db: database.db,
+    creatorSeeds: createIdentityCreatorSeedPort(),
+    publishingMode: env.CREATOR_PUBLISHING_MODE,
+    commandFingerprintKey: lookupHmacKey,
+  });
   const creatorReview = createCreatorReviewService({
     db: database.db,
     keyring,
     commandFingerprintKey: lookupHmacKey,
     consumeStepUpProof,
+    catalogCapabilityTransition: createCatalogCapabilityTransitionPort(catalogService),
   });
   const receivingAccounts = createReceivingAccountService({
     db: database.db,

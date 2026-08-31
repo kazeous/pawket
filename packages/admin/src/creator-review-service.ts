@@ -26,6 +26,8 @@ import {
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
 import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 
+import type { CatalogCapabilityTransitionPort } from "./creator-publication-port.js";
+
 const CLAIM_LEASE_MS = 15 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
 const requiredAttestations = new Map(
@@ -64,6 +66,7 @@ type ServiceInput = {
   keyring: EncryptionKeyring;
   commandFingerprintKey: Uint8Array;
   consumeStepUpProof: (tx: PawketTransaction, input: StepUpInput) => Promise<boolean>;
+  catalogCapabilityTransition: CatalogCapabilityTransitionPort;
   idFactory?: () => string;
   now?: () => Date;
 };
@@ -285,10 +288,19 @@ export function createCreatorReviewService(input: ServiceInput) {
         const nextState = command.action === "suspend" ? "suspended" : "active";
         const [updated] = await tx.update(identityCreatorCapabilities).set({ state: nextState, version: capability.version + 1, suspendedAt: command.action === "suspend" ? at : null, updatedAt: at }).where(and(eq(identityCreatorCapabilities.id, capability.id), eq(identityCreatorCapabilities.version, capability.version))).returning();
         policy(updated, "stale_version");
+        const publication = await input.catalogCapabilityTransition.apply(tx, {
+          creatorUserId: command.userId,
+          action: command.action,
+          actorUserId: command.ownerUserId,
+          actorSessionId: command.ownerSessionId,
+          reasonCode,
+          requestId: command.requestId,
+          occurredAt: at,
+        });
         await tx.insert(identityCreatorCapabilityEvents).values({ id: id(), capabilityId: capability.id, action: command.action === "suspend" ? "suspended" : "reinstated", state: nextState, version: updated.version, actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, stepUpProofId: command.stepUpProofId, reasonCode, requestId: command.requestId, createdAt: at });
         await tx.update(identityUsers).set({ authorizationVersion: sql`${identityUsers.authorizationVersion} + 1`, updatedAt: at }).where(eq(identityUsers.id, command.userId));
         await tx.update(identitySessions).set({ revokedAt: at, revocationReason: "creator_capability_changed", updatedAt: at }).where(and(eq(identitySessions.userId, command.userId), isNull(identitySessions.revokedAt)));
-        await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_capability", subjectId: capability.id, action: `creator.capability.${command.action}`, outcome: "succeeded", reasonCode, beforeState: { state: capability.state, version: capability.version }, afterState: { state: nextState, version: updated.version }, assurance: { method: "totp", actionClass: `owner.creator_capability_${command.action}` }, applicationRevision: capability.approvedRevisionId, requestId: command.requestId, occurredAt: at });
+        await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_capability", subjectId: capability.id, action: `creator.capability.${command.action}`, outcome: "succeeded", reasonCode, beforeState: { state: capability.state, version: capability.version, pageId: publication.pageId, publishedRevisionId: publication.previousPublishedRevisionId }, afterState: { state: nextState, version: updated.version, pageId: publication.pageId, publishedRevisionId: null }, assurance: { method: "totp", actionClass: `owner.creator_capability_${command.action}` }, applicationRevision: capability.approvedRevisionId, requestId: command.requestId, occurredAt: at });
         await insertOutboxEvent(tx, { eventType: command.action === "suspend" ? "creator.capability_suspended.v1" : "creator.capability_reinstated.v1", eventVersion: 1, aggregateType: "creator_capability", aggregateId: capability.id, payload: { userId: command.userId, capabilityId: capability.id, state: nextState, correlationId: command.requestId }, occurredAt: at });
         await insertOutboxEvent(tx, { eventType: "creator.capability_outcome_email.v1", eventVersion: 1, aggregateType: "creator_capability", aggregateId: capability.id, payload: { userId: command.userId, capabilityId: capability.id, state: nextState, correlationId: command.requestId }, occurredAt: at });
         policy(await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `creator-capability-v1:${nextState}`, completedAt: at }), "idempotency_failed");

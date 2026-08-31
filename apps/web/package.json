@@ -12,6 +12,7 @@
     "@fontsource/chivo": "5.3.0",
     "@node-rs/argon2": "2.1.0",
     "@pawket/admin": "workspace:*",
+    "@pawket/catalog": "workspace:*",
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/identity": "workspace:*",
