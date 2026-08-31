@@ -8,6 +8,35 @@ const target = {
   targetId: "10000000-0000-4000-8000-000000000001",
   publicationRevisionId: "20000000-0000-4000-8000-000000000002",
 };
+const privateCreatorSentinel = "private-creator-sentinel";
+const privateMediaSentinel = "90000000-0000-4000-8000-000000000009";
+const queueProjection = {
+  reportId: "30000000-0000-4000-8000-000000000003",
+  target,
+  reason: "other" as const,
+  detail: "Contextual report.",
+  state: "open" as const,
+  version: 3,
+  authenticatedReporter: true,
+  snapshot: {
+    target,
+    pageId: target.targetId,
+    creatorUserId: privateCreatorSentinel,
+    canonicalHandle: "safe-artist",
+    displayName: "Safe Artist",
+    showcaseTitle: null,
+    mediaAssetIds: [privateMediaSentinel],
+  },
+  activeHold: null,
+  priorActions: [{
+    action: "dismiss" as const,
+    reason: "Earlier review was incomplete.",
+    beforeState: "open" as const,
+    afterState: "dismissed" as const,
+    resultingReportVersion: 2,
+    occurredAt: "2026-08-31T11:00:00.000Z",
+  }],
+};
 
 function fixture(options: { authenticated?: boolean; owner?: boolean } = {}) {
   const report = {
@@ -19,7 +48,7 @@ function fixture(options: { authenticated?: boolean; owner?: boolean } = {}) {
     submitReport: vi.fn(async () => ({ accepted: true as const, reportReference: "report:v1:safe" })),
   };
   const triage = {
-    listQueue: vi.fn(async () => [{ reportId: target.targetId }]),
+    listQueue: vi.fn(async () => [queueProjection]),
     dismiss: vi.fn(async (command: unknown) => command),
     hide: vi.fn(async (command: unknown) => command),
     restore: vi.fn(async (command: unknown) => command),
@@ -249,6 +278,45 @@ describe("Trust HTTP boundary", () => {
       idempotencyKey: "hide-report-001",
       requestId: "triage-request",
     });
+  });
+
+  test("authorized owner queue returns only the exact safe moderation projection", async () => {
+    // Catches verbatim domain serialization exposing reporter, creator identity, or media facts.
+    const { handlers } = fixture({ authenticated: true, owner: true });
+
+    const response = await handlers.queue(new Request(`${origin}/api/v1/admin/content-reports`));
+
+    expect(response.status).toBe(200);
+    const serialized = await response.clone().text();
+    expect(await response.json()).toEqual({
+      reports: [{
+        reportId: queueProjection.reportId,
+        target,
+        reason: "other",
+        detail: "Contextual report.",
+        state: "open",
+        version: 3,
+        snapshot: {
+          target,
+          pageId: target.targetId,
+          canonicalHandle: "safe-artist",
+          displayName: "Safe Artist",
+          showcaseTitle: null,
+        },
+        activeHold: null,
+        priorActions: [{
+          action: "dismiss",
+          reason: "Earlier review was incomplete.",
+          beforeState: "open",
+          afterState: "dismissed",
+          resultingReportVersion: 2,
+          occurredAt: "2026-08-31T11:00:00.000Z",
+        }],
+      }],
+    });
+    expect(serialized).not.toContain("authenticatedReporter");
+    expect(serialized).not.toContain(privateCreatorSentinel);
+    expect(serialized).not.toContain(privateMediaSentinel);
   });
 
   test.each([

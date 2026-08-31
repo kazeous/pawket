@@ -3,12 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { createCatalogCapabilityTransitionPort, createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
 import {
   createCatalogHttpHandlers,
+  createCatalogMediaOwnershipPort,
   createCatalogService,
   createPublicCatalogQuery,
   type VisibilityReadPort,
 } from "@pawket/catalog";
 import { loadServerEnv } from "@pawket/config";
-import { createDatabase, creatorPages } from "@pawket/database";
+import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
   createIdentityCreatorSeedPort,
@@ -47,7 +48,6 @@ import {
   createTriageService,
   createTrustHttpHandlers,
 } from "@pawket/trust";
-import { eq } from "drizzle-orm";
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
 
@@ -275,15 +275,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
         return seed?.capabilityState === "active" ? { userId, state: "active" } : null;
       },
     },
-    catalog: {
-      async ownsAsset(db, ownerUserId) {
-        const [page] = await db.select({ id: creatorPages.id })
-          .from(creatorPages)
-          .where(eq(creatorPages.userId, ownerUserId))
-          .limit(1);
-        return Boolean(page);
-      },
-    },
+    catalog: createCatalogMediaOwnershipPort(),
     publishingMode: env.CREATOR_PUBLISHING_MODE,
     commandFingerprintKey: lookupHmacKey,
   });

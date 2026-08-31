@@ -11,7 +11,11 @@ import {
   validUuid,
 } from "./report-policy.js";
 import { PublicReportError, type SubmitReportCommand } from "./report-service.js";
-import { TriageServiceError, type OwnerTriageCommand } from "./triage-service.js";
+import {
+  TriageServiceError,
+  type OwnerReportProjection,
+  type OwnerTriageCommand,
+} from "./triage-service.js";
 
 const MAX_BODY_BYTES = 32 * 1024;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,200}$/u;
@@ -38,7 +42,7 @@ type ReportService = Readonly<{
 }>;
 
 type TriageService = Readonly<{
-  listQueue(): Promise<unknown>;
+  listQueue(): Promise<readonly OwnerReportProjection[]>;
   dismiss(command: OwnerTriageCommand): Promise<unknown>;
   hide(command: OwnerTriageCommand): Promise<unknown>;
   restore(command: OwnerTriageCommand & Readonly<{ holdId: string }>): Promise<unknown>;
@@ -260,6 +264,44 @@ function triageFailure(error: unknown): Response {
   return json(503, { code: "TRIAGE_UNAVAILABLE" });
 }
 
+function ownerQueueReport(report: OwnerReportProjection) {
+  const target = {
+    targetType: report.target.targetType,
+    targetId: report.target.targetId,
+    publicationRevisionId: report.target.publicationRevisionId,
+  };
+  return {
+    reportId: report.reportId,
+    target,
+    reason: report.reason,
+    detail: report.detail,
+    state: report.state,
+    version: report.version,
+    snapshot: {
+      target: {
+        targetType: report.snapshot.target.targetType,
+        targetId: report.snapshot.target.targetId,
+        publicationRevisionId: report.snapshot.target.publicationRevisionId,
+      },
+      pageId: report.snapshot.pageId,
+      canonicalHandle: report.snapshot.canonicalHandle,
+      displayName: report.snapshot.displayName,
+      showcaseTitle: report.snapshot.showcaseTitle,
+    },
+    activeHold: report.activeHold === null
+      ? null
+      : { holdId: report.activeHold.holdId, targetType: report.activeHold.targetType },
+    priorActions: report.priorActions.map((fact) => ({
+      action: fact.action,
+      reason: fact.reason,
+      beforeState: fact.beforeState,
+      afterState: fact.afterState,
+      resultingReportVersion: fact.resultingReportVersion,
+      occurredAt: fact.occurredAt,
+    })),
+  };
+}
+
 export function createTrustHttpHandlers(input: Input): TrustHttpHandlers {
   const appOrigin = new URL(input.appBaseUrl).origin;
   const now = input.now ?? (() => new Date());
@@ -323,7 +365,7 @@ export function createTrustHttpHandlers(input: Input): TrustHttpHandlers {
       if (request.method !== "GET") return json(405, { code: "METHOD_NOT_ALLOWED" });
       const actor = await owner(request);
       if (actor instanceof Response) return actor;
-      try { return json(200, { reports: await input.triage.listQueue() }); }
+      try { return json(200, { reports: (await input.triage.listQueue()).map(ownerQueueReport) }); }
       catch (error) { return triageFailure(error); }
     },
 
