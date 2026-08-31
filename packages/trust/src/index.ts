@@ -13,6 +13,14 @@ export {
   type ReportChallenge,
   type SubmitReportCommand,
 } from "./report-service.js";
+export {
+  createTriageService,
+  TriageServiceError,
+  type CreatorEnforcementProjection,
+  type OwnerReportProjection,
+  type OwnerTriageCommand,
+  type TriageResult,
+} from "./triage-service.js";
 export type {
   CatalogModerationSnapshotPort,
   ModerationTargetSnapshot,
