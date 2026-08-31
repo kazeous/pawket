@@ -401,7 +401,7 @@ describe("creator catalog HTTP exact schemas and command routing", () => {
     // Break caught: malformed showcase data reaching a creator-owned mutation.
     const { handlers, service } = fixture();
     const response = await handlers.showcases(
-      mutationRequest({ body: { pageId, action: "upsert", showcase: invalidShowcase } }),
+      mutationRequest({ body: { pageId, action: "create", showcase: invalidShowcase } }),
     );
     expect(response.status).toBe(400);
     expect(service.upsertShowcase).not.toHaveBeenCalled();
@@ -443,11 +443,23 @@ describe("creator catalog HTTP exact schemas and command routing", () => {
     });
 
     await handlers.showcases(
-      mutationRequest({ body: { pageId, action: "upsert", showcase }, requestId: "upsert-request" }),
+      mutationRequest({ body: { pageId, action: "create", showcase }, requestId: "create-request" }),
     );
     expect(service.upsertShowcase).toHaveBeenCalledWith({
       actor: session, pageId, expectedVersion: 3, idempotencyKey: "catalog-command-one",
-      requestId: "upsert-request", showcase,
+      requestId: "create-request", showcase,
+    });
+
+    await handlers.showcases(
+      mutationRequest({ body: { pageId, action: "update", showcase: { id: showcaseId, ...showcase } }, requestId: "update-request" }),
+    );
+    expect(service.upsertShowcase).toHaveBeenLastCalledWith({
+      actor: session,
+      pageId,
+      expectedVersion: 3,
+      idempotencyKey: "catalog-command-one",
+      requestId: "update-request",
+      showcase: { id: showcaseId, ...showcase },
     });
 
     await handlers.showcases(

@@ -81,12 +81,21 @@ importers:
       '@pawket/payments':
         specifier: workspace:*
         version: link:../../packages/payments
+      '@pawket/public-media':
+        specifier: workspace:*
+        version: link:../../packages/public-media
       '@pawket/queue':
         specifier: workspace:*
         version: link:../../packages/queue
       '@pawket/security':
         specifier: workspace:*
         version: link:../../packages/security
+      '@pawket/trust':
+        specifier: workspace:*
+        version: link:../../packages/trust
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
       next:
         specifier: 16.3.2
         version: 16.3.2(@babel/core@7.29.7(supports-color@7.2.0))(@opentelemetry/api@1.9.1)(@playwright/test@1.62.1)(@types/node@24.13.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -170,6 +179,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
+      ipaddr.js:
+        specifier: 2.2.0
+        version: 2.2.0
       zod:
         specifier: 4.4.3
         version: 4.4.3

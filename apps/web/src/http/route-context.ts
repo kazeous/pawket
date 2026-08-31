@@ -13,6 +13,15 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const MAX_REQUEST_ID_LENGTH = 128;
 const MAX_BUSINESS_METRIC_BODY_BYTES = 8_192;
 
+type DynamicRouteParameters<Path extends string> =
+  Path extends `${string}[${infer Parameter}]${infer Rest}`
+    ? Record<Parameter, string> & DynamicRouteParameters<Rest>
+    : Record<never, never>;
+
+export type RouteContext<Path extends string> = Readonly<{
+  params: Promise<DynamicRouteParameters<Path>>;
+}>;
+
 export function trustedRequestId(incomingRequestId: string | null): string {
   if (
     incomingRequestId !== null &&
@@ -25,9 +34,24 @@ export function trustedRequestId(incomingRequestId: string | null): string {
   return randomUUID();
 }
 
-function boundedRoute(pathname: string): string {
+const uploadCompletionRoute = /^\/api\/v1\/creator-page\/media\/uploads\/[^/]+\/complete$/u;
+const reportTriageRoute = /^\/api\/v1\/admin\/content-reports\/[^/]+$/u;
+const mediaDeliveryRoute = /^\/media\/[^/]+\/[^/]+$/u;
+
+export function boundedRoute(pathname: string): string {
   if (pathname === "/" || pathname === "/api/metrics") return pathname;
   if (pathname === "/api/health/live" || pathname === "/api/health/ready") return pathname;
+  if (pathname === "/api/v1/creator-page") return pathname;
+  if (pathname === "/api/v1/creator-page/handle") return pathname;
+  if (pathname === "/api/v1/creator-page/showcases") return pathname;
+  if (pathname === "/api/v1/creator-page/publish") return pathname;
+  if (pathname === "/api/v1/creator-page/unpublish") return pathname;
+  if (pathname === "/api/v1/creator-page/media/uploads") return pathname;
+  if (uploadCompletionRoute.test(pathname)) return "/api/v1/creator-page/media/uploads/[intentId]/complete";
+  if (pathname === "/api/v1/content-reports" || pathname === "/api/v1/content-reports/challenge") return pathname;
+  if (pathname === "/api/v1/admin/content-reports") return pathname;
+  if (reportTriageRoute.test(pathname)) return "/api/v1/admin/content-reports/[reportId]";
+  if (mediaDeliveryRoute.test(pathname)) return "/media/[assetId]/[variant]";
   if (pathname.startsWith("/api/auth/")) return "/api/auth";
   if (pathname.startsWith("/api/v1/admin/")) return "/api/v1/admin";
   if (pathname.startsWith("/api/v1/auth/")) return "/api/v1/auth";

@@ -163,10 +163,14 @@ function validShowcase(value: unknown): value is Record<string, unknown> {
   });
 }
 
-function validMediaActionBody(value: unknown, action: "upsert" | "remove" | "reorder"): Record<string, unknown> | null {
-  if (action === "upsert") {
+function validMediaActionBody(value: unknown, action: "create" | "update" | "remove" | "reorder"): Record<string, unknown> | null {
+  if (action === "create" || action === "update") {
     const body = exactRecord(value, ["pageId", "action", "showcase"]);
-    return body && body.action === action && uuid(body.pageId) && validShowcase(body.showcase) ? body : null;
+    if (!body || body.action !== action || !uuid(body.pageId) || !validShowcase(body.showcase)) return null;
+    const showcase = body.showcase as Record<string, unknown>;
+    if (action === "create" && Object.prototype.hasOwnProperty.call(showcase, "id")) return null;
+    if (action === "update" && !Object.prototype.hasOwnProperty.call(showcase, "id")) return null;
+    return body;
   }
   if (action === "remove") {
     const body = exactRecord(value, ["pageId", "action", "showcaseId"]);
@@ -403,12 +407,12 @@ export function createCatalogHttpHandlers(input: Input): CatalogHttpHandlers {
     if (body.kind !== "ok") return invalid(input, operation);
     if (!body.value || typeof body.value !== "object") return invalid(input, operation);
     const action = (body.value as Record<string, unknown>).action;
-    if (action !== "upsert" && action !== "remove" && action !== "reorder") return invalid(input, operation);
+    if (action !== "create" && action !== "update" && action !== "remove" && action !== "reorder") return invalid(input, operation);
     const value = validMediaActionBody(body.value, action);
     if (!value) return invalid(input, operation);
     try {
       const command = baseCommand(controls, value.pageId as string);
-      const result = action === "upsert"
+      const result = action === "create" || action === "update"
         ? await input.service.upsertShowcase({ ...command, showcase: value.showcase })
         : action === "remove"
           ? await input.service.removeShowcase({ ...command, showcaseId: value.showcaseId })
