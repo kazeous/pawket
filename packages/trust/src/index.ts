@@ -19,6 +19,7 @@ export {
   type CreatorEnforcementProjection,
   type OwnerReportProjection,
   type OwnerTriageCommand,
+  type OwnerTriageFactProjection,
   type TriageResult,
 } from "./triage-service.js";
 export type {

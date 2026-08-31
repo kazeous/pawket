@@ -47,6 +47,15 @@ export type OwnerTriageCommand = Readonly<{
   requestId: string;
 }>;
 
+export type OwnerTriageFactProjection = Readonly<{
+  action: "dismiss" | "hide" | "restore";
+  reason: string;
+  beforeState: "open" | "held";
+  afterState: "dismissed" | "held" | "closed";
+  resultingReportVersion: number;
+  occurredAt: string;
+}>;
+
 export type OwnerReportProjection = Readonly<{
   reportId: string;
   target: ReportTarget;
@@ -57,6 +66,7 @@ export type OwnerReportProjection = Readonly<{
   authenticatedReporter: boolean;
   snapshot: ModerationTargetSnapshot;
   activeHold: { holdId: string; targetType: "page" | "showcase" } | null;
+  priorActions: readonly OwnerTriageFactProjection[];
 }>;
 
 export type CreatorEnforcementProjection = Readonly<{
@@ -499,6 +509,15 @@ export function createTriageService(value: FactoryInput) {
       eq(publicVisibilityHolds.reportId, report.id),
       isNull(publicVisibilityHolds.releasedAt),
     )).limit(1);
+    const priorActions = await input.db.select({
+      action: publicContentTriageEvents.action,
+      reason: publicContentTriageEvents.reason,
+      beforeState: publicContentTriageEvents.beforeState,
+      afterState: publicContentTriageEvents.afterState,
+      resultingReportVersion: publicContentTriageEvents.resultingReportVersion,
+      occurredAt: publicContentTriageEvents.occurredAt,
+    }).from(publicContentTriageEvents).where(eq(publicContentTriageEvents.reportId, report.id))
+      .orderBy(asc(publicContentTriageEvents.occurredAt), asc(publicContentTriageEvents.id)).limit(50);
     return {
       reportId: report.id,
       target,
@@ -509,6 +528,14 @@ export function createTriageService(value: FactoryInput) {
       authenticatedReporter: report.reporterUserId !== null,
       snapshot,
       activeHold: hold ? { holdId: hold.id, targetType: hold.targetType as "page" | "showcase" } : null,
+      priorActions: priorActions.map((fact) => ({
+        action: fact.action as OwnerTriageFactProjection["action"],
+        reason: fact.reason,
+        beforeState: fact.beforeState as OwnerTriageFactProjection["beforeState"],
+        afterState: fact.afterState as OwnerTriageFactProjection["afterState"],
+        resultingReportVersion: fact.resultingReportVersion,
+        occurredAt: fact.occurredAt.toISOString(),
+      })),
     };
   }
 

@@ -205,6 +205,63 @@ describe("owner public-report triage", () => {
     expect(JSON.stringify(outbox)).not.toContain(reporterUserId);
   });
 
+  test("owner projections include bounded privacy-safe dismiss, hide, and restore history", async () => {
+    // Break caught: owner triage loses prior action context or leaks actor/session/request identifiers in that history.
+    const dismissedReportId = await seedReport({ reporter: null });
+    await service().dismiss(command(dismissedReportId, "dismiss"));
+    const dismissed = await service().getDetail(dismissedReportId);
+    expect(dismissed.priorActions).toEqual([{
+      action: "dismiss",
+      reason: "Reviewed by the Pawket owner.",
+      beforeState: "open",
+      afterState: "dismissed",
+      resultingReportVersion: 2,
+      occurredAt: baseTime.toISOString(),
+    }]);
+
+    currentTime = new Date(baseTime.getTime() + 1);
+    const heldReportId = await seedReport();
+    const hidden = await service().hide(command(heldReportId, "hide"));
+    expect((await service().listQueue()).find((item) => item.reportId === heldReportId)?.priorActions).toEqual([{
+      action: "hide",
+      reason: "Reviewed by the Pawket owner.",
+      beforeState: "open",
+      afterState: "held",
+      resultingReportVersion: 2,
+      occurredAt: currentTime.toISOString(),
+    }]);
+
+    if (!hidden.holdId) throw new Error("hide did not create a hold");
+    currentTime = new Date(baseTime.getTime() + 2);
+    await service().restore({
+      ...command(heldReportId, "restore"),
+      holdId: hidden.holdId,
+      expectedVersion: hidden.reportVersion,
+    });
+    const restored = await service().getDetail(heldReportId);
+    expect(restored.priorActions).toEqual([
+      {
+        action: "hide",
+        reason: "Reviewed by the Pawket owner.",
+        beforeState: "open",
+        afterState: "held",
+        resultingReportVersion: 2,
+        occurredAt: new Date(baseTime.getTime() + 1).toISOString(),
+      },
+      {
+        action: "restore",
+        reason: "Reviewed by the Pawket owner.",
+        beforeState: "held",
+        afterState: "closed",
+        resultingReportVersion: 3,
+        occurredAt: currentTime.toISOString(),
+      },
+    ]);
+    expect(JSON.stringify(restored.priorActions)).not.toContain(ownerUserId);
+    expect(JSON.stringify(restored.priorActions)).not.toContain("owner-session");
+    expect(JSON.stringify(restored.priorActions)).not.toContain("request-");
+  });
+
   test("owner and creator projections expose only their bounded audiences", async () => {
     // Break caught: the owner queue leaks network data or the creator receives report detail/reporter identity.
     const reportId = await seedReport();
@@ -224,7 +281,7 @@ describe("owner public-report triage", () => {
       authenticatedReporter: true,
       activeHold: { holdId: hidden.holdId, targetType: "page" },
     });
-    expect(Reflect.ownKeys(detail).sort()).toEqual(["activeHold", "authenticatedReporter", "detail", "reason", "reportId", "snapshot", "state", "target", "version"]);
+    expect(Reflect.ownKeys(detail).sort()).toEqual(["activeHold", "authenticatedReporter", "detail", "priorActions", "reason", "reportId", "snapshot", "state", "target", "version"]);
     expect(creator).toEqual([{
       targetType: "page",
       targetId: pageId,
