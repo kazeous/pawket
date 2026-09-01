@@ -57,6 +57,17 @@ const workspace: CatalogWorkspace = {
       media: [{ ...showcase.media[0]!, position: 0 }],
     },
   ],
+  media: [{
+    assetId,
+    ownerUserId: userId,
+    purpose: "avatar",
+    state: "ready",
+    derivatives: {
+      thumb: { derivativeId: revisionId, width: 384, height: 384 },
+      display: { derivativeId: pageId, width: 1280, height: 900 },
+      large: { derivativeId: showcaseId, width: 2400, height: 1600 },
+    },
+  }],
   capabilityState: "suspended",
   enforcement: {
     pageHeld: true,
@@ -562,6 +573,7 @@ describe("creator catalog HTTP failures and safe projections", () => {
         renameAvailableAt: "2026-09-30T02:00:00.000Z",
         draft,
         showcases: workspace.showcases,
+        media: workspace.media.map((item) => ({ assetId: item.assetId, purpose: item.purpose, state: item.state, derivatives: item.derivatives })),
         status: {
           capabilityState: "suspended",
           publishingMode: "disabled",

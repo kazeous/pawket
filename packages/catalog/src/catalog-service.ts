@@ -31,7 +31,7 @@ import {
   TAXONOMY_VERSION,
   type Discipline,
 } from "./catalog-policy.js";
-import type { CreatorSeed, IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
+import type { CreatorSeed, IdentityCreatorSeedPort, MediaCatalogPort, MediaReference, OwnedMedia, ReadyMedia, VisibilityReadPort } from "./catalog-ports.js";
 import { readExactNativeMap, readExactNativeStringSet, readExactOwnRecord } from "./runtime-boundary.js";
 
 export const HANDLE_RECENT_AUTH_MS = 15 * 60_000;
@@ -64,6 +64,7 @@ export type CatalogWorkspace = Readonly<{
     externalUrl: string | null;
     media: readonly Readonly<{ assetId: string; alternativeText: string; position: number }>[];
   }>[];
+  media: readonly OwnedMedia[];
   capabilityState: "active" | "suspended";
   enforcement: Readonly<{ pageHeld: boolean; heldShowcaseIds: readonly string[] }>;
 }>;
@@ -204,6 +205,46 @@ function exactReadyMap(references: readonly MediaReference[], resolved: unknown,
   return result;
 }
 
+function assertOwnedReference(reference: MediaReference, resolved: OwnedMedia | undefined, ownerUserId: string): OwnedMedia {
+  const media = readExactOwnRecord(resolved, ["assetId", "ownerUserId", "purpose", "state", "derivatives"]);
+  if (
+    !media ||
+    media.assetId !== reference.assetId ||
+    media.ownerUserId !== ownerUserId ||
+    media.purpose !== reference.purpose ||
+    (media.state !== "awaiting_upload" && media.state !== "pending" && media.state !== "processing" && media.state !== "ready" && media.state !== "failed")
+  ) fail("POLICY_VIOLATION");
+  if (!media.derivatives || typeof media.derivatives !== "object") fail("POLICY_VIOLATION");
+  let derivativeKeys: string[];
+  try {
+    if (Object.getPrototypeOf(media.derivatives) !== Object.prototype) fail("POLICY_VIOLATION");
+    const ownKeys = Reflect.ownKeys(media.derivatives);
+    if (ownKeys.some((key) => typeof key !== "string" || (key !== "thumb" && key !== "display" && key !== "large"))) fail("POLICY_VIOLATION");
+    derivativeKeys = ownKeys as string[];
+  } catch {
+    fail("POLICY_VIOLATION");
+  }
+  if (media.state === "ready" && !(["thumb", "display", "large"] as const).every((variant) => derivativeKeys.includes(variant))) fail("POLICY_VIOLATION");
+  const derivativeRecord = readExactOwnRecord(media.derivatives, derivativeKeys);
+  if (!derivativeRecord) fail("POLICY_VIOLATION");
+  const derivatives: Partial<Record<"thumb" | "display" | "large", ReadyMedia["derivatives"]["thumb"]>> = {};
+  for (const variant of derivativeKeys as Array<"thumb" | "display" | "large">) {
+    const candidate = readExactOwnRecord(derivativeRecord[variant], ["derivativeId", "width", "height"]);
+    if (!candidate || !validUuid(candidate.derivativeId) || !Number.isInteger(candidate.width) || (candidate.width as number) <= 0 || !Number.isInteger(candidate.height) || (candidate.height as number) <= 0) fail("POLICY_VIOLATION");
+    derivatives[variant] = { derivativeId: candidate.derivativeId, width: candidate.width as number, height: candidate.height as number };
+  }
+  return { assetId: reference.assetId, ownerUserId, purpose: reference.purpose, state: media.state, derivatives };
+}
+
+function exactOwnedMap(references: readonly MediaReference[], resolved: unknown, ownerUserId: string): ReadonlyMap<string, OwnedMedia> {
+  const expectedIds = [...new Set(references.map((reference) => reference.assetId))];
+  const safe = readExactNativeMap(resolved, expectedIds);
+  if (!safe) fail("POLICY_VIOLATION");
+  const result = new Map<string, OwnedMedia>();
+  for (const reference of references) result.set(reference.assetId, assertOwnedReference(reference, safe.get(reference.assetId) as OwnedMedia | undefined, ownerUserId));
+  return result;
+}
+
 function exactCreatorSeed(value: unknown, userId: string): CreatorSeed | null {
   const seed = readExactOwnRecord(value, ["userId", "capabilityState", "capabilityVersion", "approvedRevisionId", "displayName", "introduction"]);
   if (!seed || seed.userId !== userId || (seed.capabilityState !== "active" && seed.capabilityState !== "suspended")
@@ -296,8 +337,10 @@ export function createCatalogService(input: CatalogServiceInput) {
     // is intentionally acquired after that page row and before the consumer-
     // owned readiness read; Catalog never takes a public-media asset row lock.
     await acquirePublicMediaRetentionFences(tx, references.map((reference) => reference.assetId));
-    const resolved = await input.mediaCatalog.resolveReadyAssets(tx, ownerUserId, references);
-    exactReadyMap(references, resolved, ownerUserId);
+    const resolved = input.mediaCatalog.resolveOwnedAssets
+      ? exactOwnedMap(references, await input.mediaCatalog.resolveOwnedAssets(tx, ownerUserId, references), ownerUserId)
+      : new Map([...exactReadyMap(references, await input.mediaCatalog.resolveReadyAssets(tx, ownerUserId, references), ownerUserId)].map(([assetId, item]) => [assetId, { ...item, state: "ready" as const }]));
+    if ([...resolved.values()].some((item) => item.state === "failed")) fail("POLICY_VIOLATION");
   }
 
   async function workspace(database: PawketDatabase | PawketTransaction, userId: string, pageId: string, version?: number): Promise<CatalogWorkspace> {
@@ -331,10 +374,22 @@ export function createCatalogService(input: CatalogServiceInput) {
         heldShowcaseIds: showcaseIds.filter((showcaseId) => holds.heldShowcaseIds.has(showcaseId)),
       };
     }
+    const mediaReferences: MediaReference[] = [];
+    if (draft.avatarAssetId) mediaReferences.push({ assetId: draft.avatarAssetId, purpose: "avatar", altText: null });
+    if (draft.coverAssetId) mediaReferences.push({ assetId: draft.coverAssetId, purpose: "cover", altText: null });
+    for (const showcase of showcaseRows) for (const media of showcase.media) mediaReferences.push({ assetId: media.assetId, purpose: "showcase", altText: media.alternativeText });
+    let media: OwnedMedia[] = [];
+    if (mediaReferences.length > 0 && input.mediaCatalog) {
+      if (input.mediaCatalog.resolveOwnedAssets) {
+        media = [...exactOwnedMap(mediaReferences, await input.mediaCatalog.resolveOwnedAssets(database, userId, mediaReferences), userId).values()];
+      } else {
+        media = [...(await input.mediaCatalog.resolveReadyAssets(database, userId, mediaReferences)).values()].map((asset) => ({ ...asset, state: "ready" as const }));
+      }
+    }
     return {
       pageId: page.id, draftVersion: version ?? page.draftVersion, publishedRevisionId: page.publishedRevisionId, canonicalHandle: canonical,
       aliases: handles.filter((handle) => handle.kind === "alias").map((handle) => handle.normalizedHandle), renameAvailableAt: page.renameAvailableAt,
-      draft: { displayName: draft.displayName, introduction: draft.shortIntroduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId }, showcases: showcaseRows,
+      draft: { displayName: draft.displayName, introduction: draft.shortIntroduction, primaryDiscipline: draft.primaryDiscipline, secondaryDisciplines: draft.secondaryDisciplines, avatarAssetId: draft.avatarAssetId, coverAssetId: draft.coverAssetId }, showcases: showcaseRows, media,
       capabilityState: seed.capabilityState,
       enforcement,
     };

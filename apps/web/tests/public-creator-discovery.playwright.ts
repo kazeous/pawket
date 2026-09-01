@@ -26,6 +26,9 @@ test("directory validates filters and remains responsive and accessible", async 
 
 test("alias redirects to canonical metadata without exposing hidden state", async ({ page }) => {
   // Break caught: aliases render duplicate pages or metadata points at a non-canonical handle.
+  const redirect = await page.request.get("/creators/former-name", { maxRedirects: 0 });
+  expect(redirect.status()).toBe(308);
+  expect(redirect.headers().location).toBe("/creators/artist-one");
   await page.goto("/creators/former-name");
   await expect(page).toHaveURL(/\/creators\/artist-one$/u);
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", /\/creators\/artist-one$/u);

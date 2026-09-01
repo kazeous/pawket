@@ -16,11 +16,15 @@ export default async function CreatorPreviewPage() {
   if (!session) redirect("/sign-in");
   if (await platform.authorizeCreator(requestHeaders) !== "authorized" || loadServerEnv().CREATOR_PUBLISHING_MODE !== "general_audience") notFound();
   const workspace = await platform.catalog.initialize({ userId: session.userId, requestId: requestHeaders.get("x-request-id") ?? randomUUID() });
+  const media = new Map(workspace.media.map((item) => [item.assetId, item]));
+  const display = (assetId: string | null) => assetId ? media.get(assetId)?.derivatives.display : undefined;
+  const avatarDisplay = display(workspace.draft.avatarAssetId);
+  const coverDisplay = display(workspace.draft.coverAssetId);
 
   return <AppShell context="Bản xem trước" action={{ href: "/creator", label: "Quay lại chỉnh sửa" }}>
     <article className="creator-publication publication-preview stack">
-      <header className="creator-publication__header"><p className="eyebrow">Bản nháp riêng tư</p><h1>{workspace.draft.displayName}</h1><p className="lede">{workspace.draft.introduction}</p><p className="muted">Chỉ tài khoản creator sở hữu trang này có thể xem dữ liệu và media nháp.</p></header>
-      {workspace.showcases.map((showcase) => <section className="creator-showcase stack" key={showcase.id}><div><p className="eyebrow">{showcase.discipline}</p><h2>{showcase.title}</h2><p>{showcase.description}</p></div><div className="creator-showcase__media">{showcase.media.map((media) => <img key={media.assetId} src={`/media/${media.assetId}/display?preview=1`} width={800} height={600} alt={media.alternativeText} />)}</div>{showcase.externalUrl ? <a className="text-link" href={showcase.externalUrl} target="_blank" rel="noopener noreferrer external" referrerPolicy="no-referrer">Mở tác phẩm ngoài Pawket</a> : null}</section>)}
+      <header className="creator-publication__header">{coverDisplay && workspace.draft.coverAssetId ? <img className="creator-cover" src={`/media/${workspace.draft.coverAssetId}/display?preview=1`} width={coverDisplay.width} height={coverDisplay.height} alt="" /> : null}{avatarDisplay && workspace.draft.avatarAssetId ? <img className="creator-avatar" src={`/media/${workspace.draft.avatarAssetId}/display?preview=1`} width={avatarDisplay.width} height={avatarDisplay.height} alt={`Ảnh đại diện của ${workspace.draft.displayName}`} /> : null}<p className="eyebrow">Bản nháp riêng tư</p><h1>{workspace.draft.displayName}</h1><p className="lede">{workspace.draft.introduction}</p><p className="muted">Chỉ tài khoản creator sở hữu trang này có thể xem dữ liệu và media nháp.</p></header>
+      {workspace.showcases.map((showcase) => <section className="creator-showcase stack" key={showcase.id}><div><p className="eyebrow">{showcase.discipline}</p><h2>{showcase.title}</h2><p>{showcase.description}</p></div><div className="creator-showcase__media">{showcase.media.map((item) => { const dimensions = media.get(item.assetId)?.derivatives.display; return dimensions ? <img key={item.assetId} src={`/media/${item.assetId}/display?preview=1`} width={dimensions.width} height={dimensions.height} alt={item.alternativeText} /> : null; })}</div>{showcase.externalUrl ? <a className="text-link" href={showcase.externalUrl} target="_blank" rel="noopener noreferrer external" referrerPolicy="no-referrer">Mở tác phẩm ngoài Pawket</a> : null}</section>)}
     </article>
   </AppShell>;
 }

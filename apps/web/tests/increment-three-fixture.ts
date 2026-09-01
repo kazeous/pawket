@@ -7,6 +7,9 @@ import { eq } from "drizzle-orm";
 
 export const creatorSessionToken = "task15-creator-session-token-00000000000000000000";
 export const ownerSessionToken = "task15-owner-session-token-0000000000000000000000";
+export const browserDatabaseUrl = "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_task15_browser";
+export const seededAvatarAssetId = "15000000-0000-4000-8000-000000000010";
+export const syntheticPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAgAAAAGCAIAAABxZ0isAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWPQqLiDFTEMpAQAv8JHQTwGDCgAAAAASUVORK5CYII=", "base64");
 const authSecret = "playwright-only-better-auth-secret-000000000000";
 const ownerTotpSecret = "3132333435363738393031323334353637383930";
 
@@ -28,7 +31,7 @@ async function setSession(page: Page, token: string) {
 }
 
 export async function signInAsCreator(page: Page) {
-  const database = createDatabase("postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_dev");
+  const database = createDatabase(browserDatabaseUrl);
   const now = new Date();
   try {
     const [user] = await database.db.select({ authorizationVersion: identityUsers.authorizationVersion }).from(identityUsers).where(eq(identityUsers.id, "task15-creator"));

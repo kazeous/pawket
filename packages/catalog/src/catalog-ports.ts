@@ -38,8 +38,20 @@ export type ReadyMedia = Readonly<{
   purpose: MediaReference["purpose"];
   derivatives: Readonly<Record<"thumb" | "display" | "large", ReadyMediaDerivative>>;
 }>;
+export type OwnedMedia = Readonly<{
+  assetId: string;
+  ownerUserId: string;
+  purpose: MediaReference["purpose"];
+  state: "awaiting_upload" | "pending" | "processing" | "ready" | "failed";
+  derivatives: Partial<ReadyMedia["derivatives"]>;
+}>;
 
 export type MediaCatalogPort = {
+  resolveOwnedAssets?(
+    db: PawketDatabase | PawketTransaction,
+    ownerUserId: string,
+    references: readonly MediaReference[],
+  ): Promise<ReadonlyMap<string, OwnedMedia>>;
   resolveReadyAssets(
     db: PawketDatabase | PawketTransaction,
     ownerUserId: string,

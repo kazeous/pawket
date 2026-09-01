@@ -1,6 +1,9 @@
 import { defineConfig } from "@playwright/test";
 
 import base from "./playwright.config";
+import { prepareIncrementThreeDatabase } from "./tests/increment-three-database";
+
+await prepareIncrementThreeDatabase();
 
 const directBinaries = process.env.PAWKET_DIRECT_BROWSER_BINARIES === "1";
 
@@ -27,7 +30,7 @@ export default defineConfig({
       url: "http://127.0.0.1:4175/creators",
       env: {
       ...(base.webServer && !Array.isArray(base.webServer) ? base.webServer.env : {}),
-      DATABASE_URL: "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_dev",
+      DATABASE_URL: "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_task15_browser",
       APP_BASE_URL: "http://127.0.0.1:4175",
       AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:4175",
       CREATOR_PUBLISHING_MODE: "general_audience",
@@ -50,7 +53,7 @@ export default defineConfig({
       port: 9464,
       env: {
         ...(base.webServer && !Array.isArray(base.webServer) ? base.webServer.env : {}),
-        DATABASE_URL: "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_dev",
+        DATABASE_URL: "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_task15_browser",
         APP_BASE_URL: "http://127.0.0.1:4175",
         AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:4175",
         CREATOR_PUBLISHING_MODE: "general_audience",

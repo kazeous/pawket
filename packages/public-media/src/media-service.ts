@@ -31,6 +31,8 @@ import type { CatalogMediaOwnershipPort, CreatorCapabilityPort } from "./media-p
 import type { ObjectStoragePort } from "./object-storage-port.js";
 import { readExactNativeArray, readExactOwnRecord } from "./runtime-boundary.js";
 
+const MAX_PRESIGN_CLOCK_DRIFT_MS = 1_000;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ID_KEY = /^[A-Za-z0-9._-]{8,200}$/u;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -44,6 +46,7 @@ export type UploadIntentResult = Readonly<{ assetId: string; intentId: string; e
 export type CompletedUploadResult = Readonly<{ assetId: string; intentId: string; state: "pending"; sourceObjectVersionId: string; actualSourceBytes: number }>;
 export type DeliveryGrant = Readonly<{ location: { area: "derivative"; key: string; versionId: string }; contentLength: number; contentType: "image/webp"; contentHash: string }>;
 export type ReadyMediaProjection = Readonly<{ assetId: string; ownerUserId: string; purpose: MediaPurpose; derivatives: Readonly<Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }>> }>;
+export type OwnedMediaProjection = Readonly<{ assetId: string; ownerUserId: string; purpose: MediaPurpose; state: "awaiting_upload" | "pending" | "processing" | "ready" | "failed"; derivatives: Partial<ReadyMediaProjection["derivatives"]> }>;
 type ReadyMediaRecord = { assetId: string; ownerUserId: string; purpose: MediaPurpose; derivatives: Partial<Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }>> };
 
 type ServiceInput = Readonly<{
@@ -163,9 +166,9 @@ function snapshotResolveBatchRequest(value: unknown): { ownerUserId: string; ref
   const references = snapshotResolveReferences(request.references);
   return references ? { ownerUserId: request.ownerUserId, references } : null;
 }
-function exactActiveCreator(value: unknown, userId: string): boolean {
+function exactEligibleCreator(value: unknown, userId: string): boolean {
   const creator = readExactOwnRecord(value, ["userId", "state"]);
-  return Boolean(creator && creator.userId === userId && creator.state === "active");
+  return Boolean(creator && creator.userId === userId && (creator.state === "active" || creator.state === "suspended"));
 }
 function mapStorageError(error: unknown): never {
   if (error instanceof PublicMediaServiceError) throw error;
@@ -186,12 +189,12 @@ export function createPublicMediaService(input: ServiceInput) {
   const now = input.now ?? (() => new Date());
   const id = input.idFactory ?? randomUUID;
   const fingerprintKey = input.commandFingerprintKey ?? new Uint8Array(32).fill(71);
-  const activePort = input.creator;
+  const capabilityPort = input.creator;
 
-  async function requireActiveCreator(db: PawketDatabase | PawketTransaction, userId: string): Promise<void> {
-    if (!activePort) fail("MEDIA_NOT_OWNER");
-    const result = await activePort.getActiveCreator(db, userId);
-    if (!exactActiveCreator(result, userId)) fail("MEDIA_NOT_OWNER");
+  async function requireEligibleCreator(db: PawketDatabase | PawketTransaction, userId: string): Promise<void> {
+    if (!capabilityPort) fail("MEDIA_NOT_OWNER");
+    const result = await capabilityPort.getCreatorCapability(db, userId);
+    if (!exactEligibleCreator(result, userId)) fail("MEDIA_NOT_OWNER");
   }
 
   async function requireOwnedCatalogAsset(db: PawketDatabase | PawketTransaction, userId: string, assetId: string, purpose: MediaPurpose): Promise<void> {
@@ -217,7 +220,7 @@ export function createPublicMediaService(input: ServiceInput) {
     const objectKey = `quarantine/${assetId}/${intentId}`;
     try {
       return await input.db.transaction(async (tx) => {
-        await requireActiveCreator(tx, safeCommand.actor.userId);
+        await requireEligibleCreator(tx, safeCommand.actor.userId);
         const expiresAt = new Date(at.getTime() + UPLOAD_INTENT_LIFETIME_MS);
         let idempotencyRecordId: string | undefined;
         if (safeCommand.idempotencyKey) {
@@ -243,7 +246,7 @@ export function createPublicMediaService(input: ServiceInput) {
         await tx.insert(publicMediaAssets).values({ id: assetId, ownerUserId: safeCommand.actor.userId, purpose: safeCommand.purpose, declaredSourceFormat: format, state: "awaiting_upload", sourceAllocationBytes: safeDeclaredBytes, sourceObjectKey: objectKey, sourceObjectVersionId: null, sourceObjectEtag: null, normalizedMasterObjectKey: null, normalizedMasterObjectVersionId: null, actualSourceBytes: null, sourceDeletedAt: null, width: null, height: null, failureCode: null, readyAt: null, deletionReviewedAt: null, createdAt: at, updatedAt: at });
         await tx.insert(publicMediaUploadIntents).values({ id: intentId, assetId, ownerUserId: safeCommand.actor.userId, purpose: safeCommand.purpose, declaredSourceFormat: format, maxSourceBytes: safeDeclaredBytes, maxSourcePixels: MAX_SOURCE_PIXELS, objectKey, state: "issued", expiresAt, completedAt: null, createdAt: at, updatedAt: at });
         const storageGrant = await input.storage.presignPut({ key: objectKey, contentType, contentLength: safeDeclaredBytes, expiresInSeconds: 900 });
-        if (!storageGrant.expiresAt || storageGrant.expiresAt.getTime() !== expiresAt.getTime()) fail("STORAGE_ERROR");
+        if (!(storageGrant.expiresAt instanceof Date) || !Number.isFinite(storageGrant.expiresAt.getTime()) || storageGrant.expiresAt.getTime() <= at.getTime() || storageGrant.expiresAt.getTime() > expiresAt.getTime() + MAX_PRESIGN_CLOCK_DRIFT_MS) fail("STORAGE_ERROR");
         if (idempotencyRecordId) {
           if (!await completeIdempotentCommand(tx, { recordId: idempotencyRecordId, resultReference: `media-upload-v1:${assetId}:${intentId}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
         }
@@ -265,7 +268,7 @@ export function createPublicMediaService(input: ServiceInput) {
         // Capability and consumer-owned Catalog authorization are required before
         // consulting idempotency, including completed replays while publishing is
         // disabled.  This keeps replay from becoming an authorization bypass.
-        await requireActiveCreator(tx, safeCommand.actor.userId);
+        await requireEligibleCreator(tx, safeCommand.actor.userId);
         await requireOwnedCatalogAsset(tx, safeCommand.actor.userId, asset.id, asset.purpose as MediaPurpose);
         let idempotencyRecordId: string | undefined;
         if (safeCommand.idempotencyKey) {
@@ -322,6 +325,25 @@ export function createPublicMediaService(input: ServiceInput) {
     return result;
   }
 
+  async function resolveOwnedAssets(db: PawketDatabase | PawketTransaction, ownerUserId: string, references: readonly ResolveReference[]): Promise<ReadonlyMap<string, OwnedMediaProjection>> {
+    if (typeof ownerUserId !== "string" || !ID_KEY.test(ownerUserId)) return new Map();
+    const resolvedReferences = snapshotResolveReferences(references);
+    if (!resolvedReferences || resolvedReferences.length === 0) return new Map();
+    const ids = [...new Set(resolvedReferences.map((reference) => reference.assetId))];
+    const assets = await db.select({ assetId: publicMediaAssets.id, ownerUserId: publicMediaAssets.ownerUserId, purpose: publicMediaAssets.purpose, state: publicMediaAssets.state }).from(publicMediaAssets).where(and(inArray(publicMediaAssets.id, ids), eq(publicMediaAssets.ownerUserId, ownerUserId), inArray(publicMediaAssets.state, ["awaiting_upload", "pending", "processing", "ready", "failed"])));
+    const derivativeRows = await db.select({ assetId: publicMediaDerivatives.assetId, derivativeId: publicMediaDerivatives.id, variant: publicMediaDerivatives.variant, width: publicMediaDerivatives.width, height: publicMediaDerivatives.height }).from(publicMediaDerivatives).where(and(inArray(publicMediaDerivatives.assetId, ids), inArray(publicMediaDerivatives.variant, ["thumb", "display", "large"])));
+    const result = new Map<string, OwnedMediaProjection>();
+    for (const asset of assets) {
+      if (!isMediaPurpose(asset.purpose) || !["awaiting_upload", "pending", "processing", "ready", "failed"].includes(asset.state)) continue;
+      const derivatives: Partial<Record<"thumb" | "display" | "large", { derivativeId: string; width: number; height: number }>> = {};
+      for (const row of derivativeRows.filter((item) => item.assetId === asset.assetId)) {
+        if (row.variant === "thumb" || row.variant === "display" || row.variant === "large") derivatives[row.variant] = { derivativeId: row.derivativeId, width: row.width, height: row.height };
+      }
+      result.set(asset.assetId, { assetId: asset.assetId, ownerUserId: asset.ownerUserId, purpose: asset.purpose, state: asset.state as OwnedMediaProjection["state"], derivatives });
+    }
+    return result;
+  }
+
   async function resolveReadyAssetsBatch(db: PawketDatabase | PawketTransaction, requests: readonly Readonly<{ ownerUserId: string; references: readonly ResolveReference[] }>[]): Promise<ReadonlyMap<string, ReadonlyMap<string, ReadyMediaProjection>>> {
     const result = new Map<string, Map<string, ReadyMediaProjection>>();
     const requestValues = readExactNativeArray(requests);
@@ -365,5 +387,5 @@ export function createPublicMediaService(input: ServiceInput) {
     return { location: { area: "derivative", key: row.objectKey, versionId: row.objectVersionId }, contentLength: row.byteSize, contentType: "image/webp", contentHash: row.contentHash };
   }
 
-  return { createUploadIntent, completeUpload, resolveReadyAssets, resolveReadyAssetsBatch, getDeliveryGrant };
+  return { createUploadIntent, completeUpload, resolveOwnedAssets, resolveReadyAssets, resolveReadyAssetsBatch, getDeliveryGrant };
 }

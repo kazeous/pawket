@@ -327,6 +327,7 @@ function projectWorkspace(workspace: CatalogWorkspace, publishingMode: Input["pu
     };
   });
   const renameAvailableAt = workspace.renameAvailableAt?.toISOString() ?? null;
+  const safeMedia = workspace.media.slice(0, 50).map((item) => ({ assetId: item.assetId, purpose: item.purpose, state: item.state, derivatives: item.derivatives }));
   return {
     pageId: workspace.pageId,
     draftVersion: workspace.draftVersion,
@@ -336,6 +337,7 @@ function projectWorkspace(workspace: CatalogWorkspace, publishingMode: Input["pu
     renameAvailableAt,
     draft: safeDraft,
     showcases: safeShowcases,
+    media: safeMedia,
     status: {
       capabilityState: workspace.capabilityState,
       publishingMode,

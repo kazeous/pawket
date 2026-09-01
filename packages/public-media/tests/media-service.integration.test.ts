@@ -50,7 +50,7 @@ describe("public media service", () => {
     const service = createPublicMediaService({
       db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never,
       storage: {} as never,
-      creator: { getActiveCreator: async () => ({ userId: "creator-1", state: "active" }) },
+      creator: { getCreatorCapability: async () => ({ userId: "creator-1", state: "active" }) },
       catalog: { ownsAsset: async () => true },
       publishingMode: "disabled",
     });
@@ -59,7 +59,7 @@ describe("public media service", () => {
 
   test("does not call storage for a disabled mutation", async () => {
     const presign = vi.fn();
-    const service = createPublicMediaService({ db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never, storage: { presignPut: presign } as never, creator: { getActiveCreator: async () => ({ userId: "creator-1", state: "active" }) }, catalog: { ownsAsset: async () => true }, publishingMode: "disabled" });
+    const service = createPublicMediaService({ db: { transaction: async (callback: (tx: never) => unknown) => callback({} as never) } as never, storage: { presignPut: presign } as never, creator: { getCreatorCapability: async () => ({ userId: "creator-1", state: "active" }) }, catalog: { ownsAsset: async () => true }, publishingMode: "disabled" });
     await expect(service.createUploadIntent({ actor: { userId: "creator-1" }, purpose: "avatar", declaredSourceFormat: "jpeg", contentType: "image/jpeg", declaredBytes: 12, idempotencyKey: "disabled-key-2", requestId: "disabled-request-2" })).rejects.toMatchObject({ code: "PUBLISHING_DISABLED" });
     expect(presign).not.toHaveBeenCalled();
   });
@@ -83,12 +83,12 @@ describe("public media service", () => {
   test("rejects proxy, prototype, symbol, non-enumerable, and accessor command shapes before ports", async () => {
     const transaction = vi.fn(async () => { throw new Error("database must not be called"); });
     const presignPut = vi.fn();
-    const getActiveCreator = vi.fn();
+    const getCreatorCapability = vi.fn();
     const ownsAsset = vi.fn();
     const service = createPublicMediaService({
       db: { transaction } as never,
       storage: { presignPut } as never,
-      creator: { getActiveCreator },
+      creator: { getCreatorCapability },
       catalog: { ownsAsset },
       publishingMode: "general_audience",
     });
@@ -138,7 +138,7 @@ describe("public media service", () => {
     expect(getterCalls).toBe(0);
     expect(transaction).not.toHaveBeenCalled();
     expect(presignPut).not.toHaveBeenCalled();
-    expect(getActiveCreator).not.toHaveBeenCalled();
+    expect(getCreatorCapability).not.toHaveBeenCalled();
     expect(ownsAsset).not.toHaveBeenCalled();
   });
 
@@ -213,7 +213,7 @@ describe("public media service", () => {
     expect(select).not.toHaveBeenCalled();
   });
 
-  test.skipIf(!databaseUrl)("creates and completes an owned upload in one PostgreSQL transaction", async () => {
+  test.skipIf(!databaseUrl)("creates and completes an owned upload for a suspended creator in one PostgreSQL transaction", async () => {
     const schemaName = `public_media_${process.pid}_${Date.now()}`;
     let connection: { db: PawketDatabase; close: () => Promise<void> } | undefined;
     let primaryFailed = false;
@@ -227,7 +227,7 @@ describe("public media service", () => {
     const ids = [randomUUID(), randomUUID()];
     const presignInputs: unknown[] = [];
     const storage = {
-      async presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: 900 }) { presignInputs.push({ ...input }); return { url: "https://upload.invalid/signed", requiredHeaders: { "content-type": input.contentType, "content-length": String(input.contentLength) }, expiresAt: new Date(at.getTime() + input.expiresInSeconds * 1000) }; },
+      async presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: 900 }) { presignInputs.push({ ...input }); return { url: "https://upload.invalid/signed", requiredHeaders: { "content-type": input.contentType, "content-length": String(input.contentLength) }, expiresAt: new Date(at.getTime() + input.expiresInSeconds * 1000 + 250) }; },
       async headObject() { return { contentLength: 3, contentType: "image/png", etag: "\"etag-v1\"", versionId: opaqueVersionId, sha256: null }; },
     };
     let mutateDuringCapabilityRead: (() => void) | undefined;
@@ -236,7 +236,7 @@ describe("public media service", () => {
       db,
       storage: storage as never,
       publishingMode: "general_audience",
-      creator: { getActiveCreator: async (_database, requestedUserId) => { const result = { userId: requestedUserId, state: "active" as const }; mutateDuringCapabilityRead?.(); mutateDuringCapabilityRead = undefined; return result; } },
+      creator: { getCreatorCapability: async (_database, requestedUserId) => { const result = { userId: requestedUserId, state: "suspended" as const }; mutateDuringCapabilityRead?.(); mutateDuringCapabilityRead = undefined; return result; } },
       catalog: { ownsAsset: async (_database, ownerUserId) => { catalogOwnerCalls.push(ownerUserId); return ownerUserId === userId; } },
       commandFingerprintKey: new Uint8Array(32).fill(7),
       now: () => at,
@@ -330,7 +330,7 @@ describe("public media service", () => {
     const userId = `quota-${randomUUID()}`;
     await db.insert(identityUsers).values({ id: userId, name: "Quota creator", email: `${userId}@example.test`, canonicalEmail: `${userId}@example.test`, emailVerified: false, createdAt: at, updatedAt: at });
     const storage = { async presignPut(input: { expiresInSeconds: number; contentType: string; contentLength: number; key: string }) { return { url: "https://upload.invalid/signed", requiredHeaders: { "content-type": input.contentType, "content-length": String(input.contentLength) }, expiresAt: new Date(at.getTime() + input.expiresInSeconds * 1000) }; } };
-    const service = createPublicMediaService({ db, storage: storage as never, publishingMode: "general_audience", creator: { getActiveCreator: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, now: () => at });
+    const service = createPublicMediaService({ db, storage: storage as never, publishingMode: "general_audience", creator: { getCreatorCapability: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, now: () => at });
     const results = await Promise.allSettled(Array.from({ length: 51 }, (_, index) => service.createUploadIntent({ actor: { userId }, purpose: "showcase", declaredSourceFormat: "png", contentType: "image/png", declaredBytes: 10 * 1024 * 1024, idempotencyKey: `quota-key-${index.toString().padStart(2, "0")}`, requestId: `quota-request-${index.toString().padStart(2, "0")}` })));
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(50);
     } catch (error) {
@@ -362,7 +362,7 @@ describe("public media service", () => {
       connection = await createSchemaDatabase(schemaName);
       const db = connection.db;
       const storage = createS3ObjectStorage({ endpoint, region, accessKeyId, secretAccessKey, quarantineBucket, derivativeBucket, forcePathStyle: true, now: () => sharedNow });
-      const service = createPublicMediaService({ db, storage, publishingMode: "general_audience", creator: { getActiveCreator: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, now: () => sharedNow });
+      const service = createPublicMediaService({ db, storage, publishingMode: "general_audience", creator: { getCreatorCapability: async () => ({ userId, state: "active" }) }, catalog: { ownsAsset: async () => true }, now: () => sharedNow });
       await ensureVersionedBuckets(s3Client, [quarantineBucket, derivativeBucket]);
       for (const file of (await readdir(migrationsDirectory)).filter((name) => name.endsWith(".sql")).sort()) await migrate(db, file);
       await db.insert(identityUsers).values({ id: userId, name: "S3 E2E creator", email: `${userId}@example.test`, canonicalEmail: `${userId}@example.test`, emailVerified: false, createdAt: at, updatedAt: at });

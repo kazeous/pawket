@@ -794,7 +794,7 @@ function actualCatalog(
   const media = createPublicMediaService({
     db,
     storage,
-    creator: { getActiveCreator: async (_database, userId) => ({ userId, state: "active" }) },
+    creator: { getCreatorCapability: async (_database, userId) => ({ userId, state: "active" }) },
     catalog: { ownsAsset: async () => true },
     publishingMode: "general_audience",
   });

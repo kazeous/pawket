@@ -44,7 +44,11 @@ async function approvedCreator(label: string): Promise<string> {
   return userId;
 }
 
-function service(capabilityState: "active" | "suspended" | null = "active", publishingMode: "disabled" | "general_audience" = "general_audience") {
+function service(
+  capabilityState: "active" | "suspended" | null = "active",
+  publishingMode: "disabled" | "general_audience" = "general_audience",
+  ownedMediaState: "awaiting_upload" | "pending" | "processing" | "ready" | "failed" = "pending",
+) {
   return createCatalogService({
     db,
     creatorSeeds: {
@@ -57,6 +61,19 @@ function service(capabilityState: "active" | "suspended" | null = "active", publ
       },
     },
     mediaCatalog: {
+      async resolveOwnedAssets(_database, ownerUserId, references) {
+        return new Map(references.map((reference) => [reference.assetId, {
+          assetId: reference.assetId,
+          ownerUserId,
+          purpose: reference.purpose,
+          state: ownedMediaState,
+          derivatives: ownedMediaState === "ready" ? {
+            thumb: { derivativeId: randomUUID(), width: 384, height: 384 },
+            display: { derivativeId: randomUUID(), width: 1280, height: 900 },
+            large: { derivativeId: randomUUID(), width: 2400, height: 1600 },
+          } : {},
+        }]));
+      },
       async resolveReadyAssets(_database, ownerUserId, references) {
         return new Map(references.map((reference) => [reference.assetId, {
           assetId: reference.assetId,
@@ -385,6 +402,26 @@ describe("catalog authoring service", () => {
     });
     await expect(service("suspended").saveDraft({ actor: actor(userId), pageId: page.pageId, expectedVersion: 1, idempotencyKey: "suspended-key-0001", requestId: "request-suspended-draft", draft: { displayName: "Remediation", introduction: "Private changes", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: null, coverAssetId: null } })).resolves.toEqual({ pageId: page.pageId, draftVersion: 2 });
     await expect(service("suspended").claimHandle({ actor: actor(userId), pageId: page.pageId, expectedVersion: 2, idempotencyKey: "suspended-key-0002", requestId: "request-suspended-handle", handle: "blocked-handle" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  test("accepts owned in-flight draft media but rejects a failed new reference", async () => {
+    const pendingUserId = await approvedCreator("pending-media");
+    const pending = service();
+    const pendingPage = await pending.initialize({ userId: pendingUserId, requestId: "request-pending-media-init" });
+    const pendingAssetId = randomUUID();
+    await expect(pending.saveDraft({
+      actor: actor(pendingUserId), pageId: pendingPage.pageId, expectedVersion: 1, idempotencyKey: "pending-media-save", requestId: "request-pending-media-save",
+      draft: { displayName: "Pending", introduction: "Pending media", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: pendingAssetId, coverAssetId: null },
+    })).resolves.toEqual({ pageId: pendingPage.pageId, draftVersion: 2 });
+    await expect(pending.getWorkspace({ actorUserId: pendingUserId, pageId: pendingPage.pageId })).resolves.toMatchObject({ media: [{ assetId: pendingAssetId, state: "pending" }] });
+
+    const failedUserId = await approvedCreator("failed-media");
+    const failed = service("active", "general_audience", "failed");
+    const failedPage = await failed.initialize({ userId: failedUserId, requestId: "request-failed-media-init" });
+    await expect(failed.saveDraft({
+      actor: actor(failedUserId), pageId: failedPage.pageId, expectedVersion: 1, idempotencyKey: "failed-media-save", requestId: "request-failed-media-save",
+      draft: { displayName: "Failed", introduction: "Failed media", primaryDiscipline: "other", secondaryDisciplines: [], avatarAssetId: randomUUID(), coverAssetId: null },
+    })).rejects.toMatchObject({ code: "POLICY_VIOLATION" });
   });
 
   test("disabled mode rejects every fresh catalog mutation without authoritative drift", async () => {

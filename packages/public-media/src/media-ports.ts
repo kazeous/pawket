@@ -1,9 +1,9 @@
 import type { PawketDatabase, PawketTransaction } from "@pawket/database";
 
 /** Consumer-owned identity capability used to authorize creator mutations. */
-export type CreatorCapability = Readonly<{ userId: string; state: "active" }>;
+export type CreatorCapability = Readonly<{ userId: string; state: "active" | "suspended" }>;
 export type CreatorCapabilityPort = Readonly<{
-  getActiveCreator(db: PawketDatabase | PawketTransaction, userId: string): Promise<CreatorCapability | null>;
+  getCreatorCapability(db: PawketDatabase | PawketTransaction, userId: string): Promise<CreatorCapability | null>;
 }>;
 
 export type CatalogMediaVisibilityPort = Readonly<{

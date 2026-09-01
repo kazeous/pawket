@@ -270,9 +270,9 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     db: database.db,
     storage: configuredStorage,
     creator: {
-      async getActiveCreator(db, userId) {
+      async getCreatorCapability(db, userId) {
         const seed = await identityCreatorSeeds.getCreatorSeed(db, userId);
-        return seed?.capabilityState === "active" ? { userId, state: "active" } : null;
+        return seed ? { userId, state: seed.capabilityState } : null;
       },
     },
     catalog: createCatalogMediaOwnershipPort(),
@@ -535,8 +535,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
       const session = await authenticate(headers);
       if (!session) return "unauthenticated";
       const capability = await database.db.query.identityCreatorCapabilities.findFirst({
-        where: (capabilities, { and, eq }) =>
-          and(eq(capabilities.userId, session.userId), eq(capabilities.state, "active")),
+        where: (capabilities, { eq }) => eq(capabilities.userId, session.userId),
       });
       return capability ? "authorized" : "forbidden";
     },
