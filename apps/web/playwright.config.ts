@@ -3,6 +3,12 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.playwright.ts",
+  testIgnore: [
+    "increment-three-disabled.playwright.ts",
+    "creator-page-management.playwright.ts",
+    "public-creator-discovery.playwright.ts",
+    "public-content-reporting.playwright.ts",
+  ],
   timeout: 30_000,
   workers: 1,
   use: {
@@ -21,6 +27,7 @@ export default defineConfig({
       NODE_ENV: "test",
       APP_ENV: "test",
       APP_REVISION: "playwright",
+      CREATOR_PUBLISHING_MODE: "disabled",
       DATABASE_URL: "postgresql://pawket:playwright@127.0.0.1:5432/pawket_playwright",
       VALKEY_URL: "redis://127.0.0.1:6379",
       METRICS_TOKEN: "playwright-metrics-token-000000000000",

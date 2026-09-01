@@ -382,7 +382,10 @@ describe("effective public catalog query", () => {
     const handle = (await db.select().from(creatorHandleClaims).where(eq(creatorHandleClaims.pageId, creator.pageId)))[0]!.normalizedHandle;
     const { query } = composition();
     const sitemap = await query.listSitemapCreators();
-    expect(sitemap).toContain(handle);
+    expect(sitemap).toContainEqual({
+      canonicalHandle: handle,
+      publishedAt: expect.any(Date),
+    });
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(true);
     for (const asset of [creator.avatar, creator.cover, creator.showcaseAssets[0]!]) {
       for (const variant of ["thumb", "display", "large"] as const) expect(await query.isDerivativePreviewable(db, creator.userId, asset.assetId, variant)).toBe(true);
@@ -410,7 +413,9 @@ describe("effective public catalog query", () => {
     expect(await query.readRevisionTarget(db, { targetType: "page", targetId: creator.pageId, publicationRevisionId: "malformed" })).toBeNull();
     expect(await query.readRevisionTarget(db, { targetType: "invalid", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as never)).toBeNull();
     pageHoldIds.add(creator.pageId);
-    expect(await query.listSitemapCreators()).not.toContain(handle);
+    expect(await query.listSitemapCreators()).not.toContainEqual(
+      expect.objectContaining({ canonicalHandle: handle }),
+    );
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(false);
     expect(await query.resolveVisibleReportTarget(db, pageTarget)).toBeNull();
   });
@@ -485,7 +490,9 @@ describe("effective public catalog query", () => {
     const target = { targetType: "page", targetId: creator.pageId, publicationRevisionId: creator.revisionId } as const;
     expect(await query.resolvePublicCreator(handle)).toEqual({ kind: "not_found" });
     expect((await query.listPublicCreators({ discipline: null, handlePrefix: handle, cursor: null, limit: 24 })).items).toEqual([]);
-    expect(await query.listSitemapCreators()).not.toContain(handle);
+    expect(await query.listSitemapCreators()).not.toContainEqual(
+      expect.objectContaining({ canonicalHandle: handle }),
+    );
     expect(await query.isDerivativePublic(db, creator.avatar.assetId, "thumb")).toBe(false);
     expect(await query.resolveVisibleReportTarget(db, target)).toBeNull();
   });

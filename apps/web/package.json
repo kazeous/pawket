@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

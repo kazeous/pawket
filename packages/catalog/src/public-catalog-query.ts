@@ -17,6 +17,7 @@ export type PublicCreatorResolution = { kind: "not_found" } | { kind: "redirect"
 export type DirectoryQuery = Readonly<{ discipline: Discipline | null; handlePrefix: string; cursor: string | null; limit: 24 }>;
 export type PublicCreatorDirectoryItem = Readonly<{ pageId: string; canonicalHandle: string; displayName: string; introduction: string; disciplines: readonly Discipline[]; avatarThumbDerivativeId: string | null }>;
 export type PublicCreatorDirectoryPage = Readonly<{ items: readonly PublicCreatorDirectoryItem[]; nextCursor: string | null }>;
+export type PublicCreatorSitemapEntry = Readonly<{ canonicalHandle: string; publishedAt: Date }>;
 export type ReportTarget = Readonly<{ targetType: "page" | "showcase"; targetId: string; publicationRevisionId: string }>;
 export type ModerationTargetSnapshot = Readonly<{ target: ReportTarget; pageId: string; creatorUserId: string; canonicalHandle: string; displayName: string; showcaseTitle: string | null; mediaAssetIds: readonly string[] }>;
 
@@ -231,11 +232,11 @@ export function createPublicCatalogQuery(input: Input) {
         : !exhausted && scanned >= PUBLIC_DIRECTORY_CANDIDATE_SCAN_BUDGET ? scan : null;
       return { items, nextCursor: continuation ? encodeCursor(continuation.handle, continuation.pageId) : null };
     },
-    async listSitemapCreators(): Promise<readonly string[]> {
+    async listSitemapCreators(): Promise<readonly PublicCreatorSitemapEntry[]> {
       if (input.publishingMode !== "general_audience") return [];
-      let scan: { handle: string; pageId: string } | null = null; const handles: string[] = [];
-      for (;;) { const batch = await candidates(input.db, { after: scan }); if (batch.length === 0) break; const evaluated = await loadEffectiveBatch(input.db, batch.map((item) => item.pageId)); for (const item of batch) { const page = evaluated.get(item.pageId)?.page; if (page) handles.push(page.canonicalHandle); } const last = batch.at(-1)!; scan = { handle: last.canonicalHandle, pageId: last.pageId }; if (batch.length < PUBLIC_CATALOG_QUERY_BATCH_SIZE) break; }
-      return handles;
+      let scan: { handle: string; pageId: string } | null = null; const entries: PublicCreatorSitemapEntry[] = [];
+      for (;;) { const batch = await candidates(input.db, { after: scan }); if (batch.length === 0) break; const evaluated = await loadEffectiveBatch(input.db, batch.map((item) => item.pageId)); for (const item of batch) { const page = evaluated.get(item.pageId)?.page; if (page) entries.push({ canonicalHandle: page.canonicalHandle, publishedAt: page.publishedAt }); } const last = batch.at(-1)!; scan = { handle: last.canonicalHandle, pageId: last.pageId }; if (batch.length < PUBLIC_CATALOG_QUERY_BATCH_SIZE) break; }
+      return entries;
     },
     async isDerivativePublic(database: Database, assetId: string, variant: Variant): Promise<boolean> {
       if (!isUuid(assetId) || !isVariant(variant) || input.publishingMode !== "general_audience") return false;
