@@ -8,10 +8,13 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
+  identityEmailHandoffs,
+  insertOutboxEvent,
   publicMediaAssets,
   publicMediaDerivatives,
   publicMediaProcessingAttempts,
   publicMediaUploadIntents,
+  readOperationalBacklogMetrics,
 } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_dev";
@@ -54,6 +57,17 @@ async function fixture(withIntent = true) {
 
 async function completeIntent(f: { assetId: string; intentId: string }) {
   await client.unsafe(`update public_media_upload_intents set state = 'completed', completed_at = '${later}' where id = '${f.intentId}'`);
+}
+
+async function pendingFixture() {
+  const pending = await fixture();
+  await completeIntent(pending);
+  await client`
+    update public_media_assets
+    set state = 'pending', source_object_version_id = 'source-v1',
+        source_object_etag = 'etag-v1', actual_source_bytes = 512
+    where id = ${pending.assetId}`;
+  return pending;
 }
 
 async function insertIntent(assetId: string, ownerUserId: string, intentId = randomUUID()) {
@@ -138,6 +152,54 @@ describe("public media persistence", () => {
     await admin.unsafe(`drop schema if exists "${schemaName}" cascade`);
     await admin.end();
   });
+
+  test("operational backlog query reports the oldest pending media age", async () => {
+    await pendingFixture();
+    const metrics = await readOperationalBacklogMetrics(
+      db as never,
+      new Date(new Date(at).getTime() + 901_000),
+    );
+    expect(metrics.publicMedia).toEqual({ oldestPendingSeconds: 901 });
+  });
+
+  test.each(["outbox", "email"] as const)(
+    "operational backlog query still samples public queues with a nonempty %s backlog",
+    async (kind) => {
+      const asset = await pendingFixture();
+      let outboxId: string | undefined;
+      if (kind === "outbox") {
+        outboxId = await insertOutboxEvent(db as never, {
+          eventType: "media.public_upload_completed.v1",
+          eventVersion: 1,
+          aggregateType: "public_media_asset",
+          aggregateId: randomUUID(),
+          payload: {},
+          occurredAt: new Date(at),
+        });
+      } else {
+        await db.insert(identityEmailHandoffs).values({
+          userId: asset.userId,
+          purpose: "email_verification",
+          destinationEnvelope: {} as never,
+          status: "pending",
+          createdAt: new Date(at),
+          updatedAt: new Date(at),
+        });
+      }
+      try {
+        const metrics = await readOperationalBacklogMetrics(
+          db as never,
+          new Date(new Date(at).getTime() + 901_000),
+        );
+        expect(metrics[kind].oldestAgeSeconds).toBe(901);
+        expect(metrics.publicMedia).toEqual({ oldestPendingSeconds: 901 });
+      } finally {
+        if (outboxId !== undefined) {
+          await client`update system_outbox set published_at = ${later} where id = ${outboxId}`;
+        }
+      }
+    },
+  );
 
   test("exports all authoritative media tables and enforces one intent per asset and variant", async () => {
     const f = await fixture();

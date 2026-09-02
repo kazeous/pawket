@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 
 import { getPlatformRuntime } from "../../../platform/runtime";
+import { resolvePublicCreatorWithMetric } from "../../../platform/public-creator-resolution";
 import { AppShell } from "../../../ui/app-shell";
 import { ReportForm } from "./report-form";
 
@@ -11,14 +12,21 @@ export const dynamic = "force-dynamic";
 export async function generateMetadata({ params }: Readonly<{ params: Promise<{ handle: string }> }>): Promise<Metadata> {
   if (loadServerEnv().CREATOR_PUBLISHING_MODE !== "general_audience") return { robots: { index: false, follow: false } };
   const { handle } = await params;
-  const result = await getPlatformRuntime().publicCatalog.resolvePublicCreator(handle);
+  const result = await resolvePublicCreatorWithMetric(
+    getPlatformRuntime().publicCatalog,
+    handle,
+  );
   if (result.kind !== "visible") return { robots: { index: false, follow: false } };
   return { title: `${result.page.displayName} · Pawket`, description: result.page.introduction, alternates: { canonical: `/creators/${result.page.canonicalHandle}` } };
 }
 
 export default async function PublicCreatorPage({ params }: Readonly<{ params: Promise<{ handle: string }> }>) {
   if (loadServerEnv().CREATOR_PUBLISHING_MODE !== "general_audience") notFound();
-  const { handle } = await params; const result = await getPlatformRuntime().publicCatalog.resolvePublicCreator(handle);
+  const { handle } = await params;
+  const result = await resolvePublicCreatorWithMetric(
+    getPlatformRuntime().publicCatalog,
+    handle,
+  );
   if (result.kind === "redirect") permanentRedirect(`/creators/${result.canonicalHandle}`);
   if (result.kind !== "visible") notFound();
   const page = result.page;

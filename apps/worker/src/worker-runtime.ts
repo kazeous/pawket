@@ -20,12 +20,15 @@ import type {
 import type { EncryptionKeyring } from "@pawket/security";
 import {
   recordRefundOperation,
+  recordPublicMediaOperation,
   recordWorkerJobMetrics,
   recordSecurityEmailMetrics,
   recordRetentionMetrics,
   setOutboxMetrics,
+  setPublicContentReportBacklogMetric,
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,
+  setPublicMediaProcessingBacklogMetric,
   setPublicMediaCleanupOldestEligibleMetric,
   setWorkerLastSuccessMetric,
   setWorkerScanHealthMetric,
@@ -55,6 +58,7 @@ import {
   dispatchOutboxBatch,
   enqueueMediaAsset,
   parsePublicMediaCompletedPayload,
+  writePublicMediaWorkerHealth,
   type MediaAssetJob,
   type MediaQueuePublisher,
   type SystemOutboxJob,
@@ -132,6 +136,7 @@ export type WorkerRuntimeDependencies = {
   readBacklogMetrics: typeof readOperationalBacklogMetrics;
   runRetention: typeof runRetentionSweep;
   runMediaCleanup: typeof runPublicMediaCleanup;
+  writePublicMediaWorkerHealth: typeof writePublicMediaWorkerHealth;
   hostname(): string;
   randomUUID(): string;
 };
@@ -139,6 +144,7 @@ export type WorkerRuntimeDependencies = {
 export type StartWorkerOptions = {
   databaseUrl: string;
   valkeyUrl: string;
+  revision?: string;
   concurrency: number;
   batchSize: number;
   leaseMs: number;
@@ -225,6 +231,7 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   readBacklogMetrics: readOperationalBacklogMetrics,
   runRetention: runRetentionSweep,
   runMediaCleanup: runPublicMediaCleanup,
+  writePublicMediaWorkerHealth,
   hostname,
   randomUUID,
 };
@@ -427,13 +434,20 @@ export function createMediaJobProcessor(input: {
     return withRequestContext(
       { requestId: job.id, jobId: job.id },
       async () => {
+        let metricOutcome: "succeeded" | "rejected" | "retryable_failure" | "attention_required" =
+          "retryable_failure";
         try {
-          await (input.processAsset ?? processPublicMediaAsset)(
+          const result = await (input.processAsset ?? processPublicMediaAsset)(
             input.database,
             input.storage,
             data.assetId,
             { workerId: input.workerId },
           );
+          metricOutcome = result.state === "ready"
+            ? "succeeded"
+            : result.state === "failed"
+              ? "attention_required"
+              : "rejected";
         } catch (error) {
           if (
             error instanceof PublicMediaWorkerRetryableError &&
@@ -464,6 +478,11 @@ export function createMediaJobProcessor(input: {
             "Public media worker job failed",
           );
           throw new Error("Public media worker processing failed");
+        } finally {
+          recordPublicMediaOperation({
+            operation: "process",
+            outcome: metricOutcome,
+          });
         }
       },
     );
@@ -588,6 +607,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
   let lastMediaCleanupScanAt = 0;
+  let lastMediaCleanupScanSucceededAt: number | null = null;
+  let lastPublicMediaWorkerHealthPublishedAt = 0;
   let stopPromise: Promise<void> | undefined;
   let resolveStopped!: () => void;
   const whenStopped = new Promise<void>((resolve) => {
@@ -669,6 +690,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (options.healthState) {
         options.healthState.lastPublicMediaCleanupScanSucceededAt = scanAt;
       }
+      lastMediaCleanupScanSucceededAt = scanAt;
       logger.info(
         {
           workerId,
@@ -686,6 +708,29 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       logger.error(
         { category: "public_media_cleanup_scan_failed", workerId, mode: cleanup.mode },
         "Public media cleanup scan failed",
+      );
+    }
+  };
+
+  const publishPublicMediaWorkerHealthIfDue = async (publishAt: number): Promise<void> => {
+    if (
+      !mediaCleanup ||
+      !options.revision ||
+      lastMediaCleanupScanSucceededAt === null ||
+      publishAt - lastPublicMediaWorkerHealthPublishedAt < 60_000
+    ) {
+      return;
+    }
+    try {
+      await dependencies.writePublicMediaWorkerHealth(producerConnection, {
+        revision: options.revision,
+        scanSucceededAtMs: lastMediaCleanupScanSucceededAt,
+      });
+      lastPublicMediaWorkerHealthPublishedAt = publishAt;
+    } catch {
+      logger.error(
+        { category: "public_media_worker_health_publish_failed" },
+        "Public media worker health publish failed",
       );
     }
   };
@@ -815,6 +860,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       const backlog = await dependencies.readBacklogMetrics(database.db, new Date(pollSucceededAt));
       setOutboxMetrics(backlog.outbox);
       setSecurityEmailBacklogMetrics(backlog.email);
+      setPublicMediaProcessingBacklogMetric(backlog.publicMedia);
+      setPublicContentReportBacklogMetric(backlog.publicContentReports);
       if (result.failed > 0) {
         setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
         logger.error(
@@ -838,6 +885,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     } finally {
       await scanMediaCleanupIfDue(Date.now());
       await scanRetentionIfDue(Date.now());
+      await publishPublicMediaWorkerHealthIfDue(Date.now());
       currentDispatch = undefined;
       if (running) {
         pollTimer = setTimeout(runPoll, POLL_INTERVAL_MS);

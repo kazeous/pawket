@@ -14,6 +14,7 @@ import {
 const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const validatorPath = "scripts/validate-increment-three-release.mjs";
 const revision = "9f6ac0e1b2d34567890abcdef1234567890abcde";
+const staleRevision = "1111111111111111111111111111111111111111";
 
 const accepted = (reference: string) => ({ accepted: true, reference });
 
@@ -111,11 +112,39 @@ describe("Increment 3 release gate", () => {
   test("accepts enabled publishing only with a complete activation packet", async () => {
     const result = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       acceptanceFile: await writePacket(completePacket()),
     });
 
     expect(result.failures).toEqual([]);
     expect(result.ok).toBe(true);
+  });
+
+  test("rejects a complete activation packet for a different release candidate", async () => {
+    // Catches a packet for an older valid commit authorizing the current candidate.
+    const packet = completePacket();
+    packet.sourceRevision = staleRevision;
+    packet.buildRevision = staleRevision;
+
+    const result = await validate({
+      CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
+      acceptanceFile: await writePacket(packet),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain("source_revision_mismatch");
+  });
+
+  test("requires an exact release candidate when publishing is enabled", async () => {
+    // Catches an arbitrary internally-consistent packet passing without a candidate binding.
+    const result = await validate({
+      CREATOR_PUBLISHING_MODE: "general_audience",
+      acceptanceFile: await writePacket(completePacket()),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain("source_revision_mismatch");
   });
 
   test("lists every unaccepted row of an incomplete packet", async () => {
@@ -130,6 +159,7 @@ describe("Increment 3 release gate", () => {
 
     const result = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       acceptanceFile: await writePacket(packet),
     });
 
@@ -172,6 +202,7 @@ describe("Increment 3 release gate", () => {
   test("keeps media retention report-only unless its activation rows are accepted", async () => {
     const withoutRetentionAcceptance = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       PUBLIC_MEDIA_RETENTION_MODE: "enforce",
       RETENTION_MODE: "enforce",
       RETENTION_ENFORCEMENT_PAUSED: "false",
@@ -182,6 +213,7 @@ describe("Increment 3 release gate", () => {
     activated.mediaRetentionActivation = accepted("media-retention-activation-2026-09-02");
     const withRetentionAcceptance = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       PUBLIC_MEDIA_RETENTION_MODE: "enforce",
       RETENTION_MODE: "enforce",
       RETENTION_ENFORCEMENT_PAUSED: "false",
@@ -199,6 +231,7 @@ describe("Increment 3 release gate", () => {
 
     const paused = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       PUBLIC_MEDIA_RETENTION_MODE: "enforce",
       RETENTION_MODE: "enforce",
       RETENTION_ENFORCEMENT_PAUSED: "true",
@@ -227,6 +260,7 @@ describe("Increment 3 release gate", () => {
     });
     const enabled = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       acceptanceFile: await writePacket(completePacket()),
     });
 
@@ -270,6 +304,7 @@ describe("Increment 3 release gate", () => {
 
     const result = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       acceptanceFile: await writePacket(packet),
     });
 
@@ -292,6 +327,7 @@ describe("Increment 3 release gate", () => {
 
     const result = await validate({
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
       acceptanceFile,
     });
 
@@ -315,6 +351,9 @@ describe("Increment 3 release gate", () => {
     const flagged = await run([validatorPath, "--acceptance", await writePacket(completePacket())], {
       ...process.env,
       CREATOR_PUBLISHING_MODE: "general_audience",
+      SOURCE_COMMIT: revision,
+      APP_REVISION: revision,
+      APP_BUILD_REVISION: revision,
       INCREMENT_THREE_ACCEPTANCE_FILE: "",
     });
     const unknownArgument = await run([validatorPath, "compose.prod.yaml"], {

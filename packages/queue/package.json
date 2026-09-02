@@ -5,7 +5,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./connection": "./src/connection.ts"
+    "./connection": "./src/connection.ts",
+    "./public-media-worker-health": "./src/public-media-worker-health.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

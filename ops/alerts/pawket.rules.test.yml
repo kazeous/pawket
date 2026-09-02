@@ -308,18 +308,54 @@ tests:
               summary: The public content report queue has an open report older than six hours
               runbook: ops/runbooks/public-content-report-triage.md
 
-  - name: cleanup last-success age detects a hung scan with a stale healthy gauge
+  - name: worker scan alerts after five minutes before its first success
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="public_media_cleanup"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: critical
+            exp_annotations:
+              summary: Worker public media cleanup scan has stopped completing
+              runbook: ops/runbooks/creator-publication.md
+
+  - name: missing worker telemetry alerts after five minutes
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: critical
+            exp_annotations:
+              summary: Worker public media cleanup scan has stopped completing
+              runbook: ops/runbooks/creator-publication.md
+
+  - name: stale success cannot leave a hung scan healthy beyond one interval plus five minutes
     interval: 5m
     input_series:
       - series: 'pawket_worker_scan_healthy{scan="public_media_cleanup"}'
-        values: '1x76'
+        values: '1x75'
       - series: 'pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"}'
-        values: '0x76'
+        values: '0x75'
     alert_rule_test:
-      - eval_time: 6h10m
+      - eval_time: 6h
         alertname: PawketIncrementThreeWorkerScanUnhealthy
         exp_alerts: []
-      - eval_time: 6h15m
+      - eval_time: 6h5m
         alertname: PawketIncrementThreeWorkerScanUnhealthy
         exp_alerts:
           - exp_labels:

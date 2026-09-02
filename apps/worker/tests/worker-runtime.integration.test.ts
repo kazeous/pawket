@@ -1314,6 +1314,8 @@ describe("worker shutdown", () => {
       readBacklogMetrics: vi.fn(async () => ({
         outbox: { pending: 0, oldestAgeSeconds: 0 },
         email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        publicMedia: { oldestPendingSeconds: 0 },
+        publicContentReports: { oldestOpenSeconds: 0 },
       })),
       runMediaCleanup,
     } as Partial<WorkerRuntimeDependencies>;
@@ -1381,6 +1383,8 @@ describe("worker shutdown", () => {
         readBacklogMetrics: vi.fn(async () => ({
           outbox: { pending: 0, oldestAgeSeconds: 0 },
           email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          publicMedia: { oldestPendingSeconds: 0 },
+          publicContentReports: { oldestOpenSeconds: 0 },
         })),
         runMediaCleanup: vi.fn(async () => {
           throw new Error("dummy-secret-source-key-version");

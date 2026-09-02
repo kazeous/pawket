@@ -13,6 +13,7 @@ import {
   publicReportChallenges,
   publicReportSecurityEvents,
   publicVisibilityHolds,
+  readOperationalBacklogMetrics,
 } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "postgresql://pawket:pawket_dev_only@127.0.0.1:5432/pawket_dev";
@@ -87,6 +88,15 @@ describe("public trust persistence", () => {
 
   test("exports all five authoritative trust tables", () => {
     expect([publicContentReports, publicReportChallenges, publicReportSecurityEvents, publicVisibilityHolds, publicContentTriageEvents]).toHaveLength(5);
+  });
+
+  test("operational backlog query reports the oldest open report age", async () => {
+    await insertReport();
+    const metrics = await readOperationalBacklogMetrics(
+      db as never,
+      new Date(now.getTime() + 21_601_000),
+    );
+    expect(metrics.publicContentReports).toEqual({ oldestOpenSeconds: 21_601 });
   });
 
   test("report binds to an exact revision and closed reason", async () => {

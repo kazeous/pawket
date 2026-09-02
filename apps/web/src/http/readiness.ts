@@ -10,6 +10,7 @@ export type ReadinessResult = RevisionAttestation & {
   database: DependencyStatus;
   valkey: DependencyStatus;
   publicMediaStorage: OptionalDependencyStatus;
+  publicMediaWorkerScan: OptionalDependencyStatus;
 };
 
 export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
@@ -19,6 +20,7 @@ export type ReadinessDependencies = {
   checkValkey: ReadinessCheck;
   publishingMode?: "disabled" | "general_audience";
   checkPublicMediaStorage?: ReadinessCheck;
+  checkPublicMediaWorkerScan?: ReadinessCheck;
   revision: RevisionAttestation;
 };
 
@@ -63,28 +65,33 @@ export function createReadinessProbe(
   dependencies: ReadinessDependencies,
 ): () => Promise<ReadinessResult> {
   return async () => {
-    const [database, valkey, publicMediaStorage] = await Promise.all([
+    const [database, valkey, publicMediaStorage, publicMediaWorkerScan] = await Promise.all([
       dependencyStatus(dependencies.checkDatabase),
       dependencyStatus(dependencies.checkValkey),
       dependencies.checkPublicMediaStorage === undefined
         ? Promise.resolve("not_configured" as const)
         : dependencyStatus(dependencies.checkPublicMediaStorage),
+      dependencies.checkPublicMediaWorkerScan === undefined
+        ? Promise.resolve("not_configured" as const)
+        : dependencyStatus(dependencies.checkPublicMediaWorkerScan),
     ]);
 
-    const storageReady =
-      dependencies.publishingMode !== "general_audience" || publicMediaStorage === "up";
+    const incrementThreeReady =
+      dependencies.publishingMode !== "general_audience" ||
+      (publicMediaStorage === "up" && publicMediaWorkerScan === "up");
 
     return {
       status:
         database === "up" &&
         valkey === "up" &&
-        storageReady &&
+        incrementThreeReady &&
         dependencies.revision.revisionMatch
           ? "ready"
           : "not_ready",
       database,
       valkey,
       publicMediaStorage,
+      publicMediaWorkerScan,
       ...dependencies.revision,
     };
   };

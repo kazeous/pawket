@@ -76,6 +76,8 @@ function parseAlertBlocks(source: string) {
     .slice(1)
     .map((block) => ({
       name: /^      - alert: ([A-Za-z][A-Za-z0-9]+)$/mu.exec(block)?.[1] ?? null,
+      expression: /^        expr: (.+)$/mu.exec(block)?.[1] ?? null,
+      duration: /^        for: (\S+)$/mu.exec(block)?.[1] ?? null,
       severity: /^          severity: (\S+)$/mu.exec(block)?.[1] ?? null,
       runbook: /^          runbook: (\S+)$/mu.exec(block)?.[1] ?? null,
     }));
@@ -120,6 +122,27 @@ describe("Pawket alert rules", () => {
         access(new URL(`../../../${alert?.runbook ?? "missing"}`, import.meta.url)),
       ).resolves.toBeUndefined();
     }
+  });
+
+  test("separates five-minute worker availability from cleanup scan freshness", async () => {
+    // Catches the critical alert waiting a full cleanup interval or depending on a
+    // last-success series that does not exist before the first successful scan.
+    const alerts = parseAlertBlocks(await readFile(rulesUrl, "utf8"));
+    const worker = alerts.find(
+      (alert) => alert.name === "PawketIncrementThreeWorkerScanUnhealthy",
+    );
+    const cleanup = alerts.find(
+      (alert) => alert.name === "PawketPublicMediaCleanupFailures",
+    );
+
+    expect(worker).toMatchObject({
+      expression: 'pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0 or absent(pawket_worker_scan_healthy{scan="public_media_cleanup"}) or (time() - pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} >= 21600)',
+      duration: "5m",
+    });
+    expect(cleanup).toMatchObject({
+      expression: 'pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0',
+      duration: "6h5m",
+    });
   });
 
   test("validates rules and fixtures through the pinned promtool image in order", async () => {

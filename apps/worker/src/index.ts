@@ -45,6 +45,7 @@ const publicMediaConfiguration = createWorkerPublicMediaConfiguration(env, publi
 const worker = await startWorker({
   databaseUrl: env.DATABASE_URL,
   valkeyUrl: env.VALKEY_URL,
+  revision: env.APP_REVISION,
   concurrency: env.WORKER_CONCURRENCY,
   batchSize: env.OUTBOX_BATCH_SIZE,
   leaseMs: env.OUTBOX_LEASE_MS,

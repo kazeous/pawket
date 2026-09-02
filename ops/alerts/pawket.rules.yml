@@ -167,7 +167,7 @@ groups:
           summary: The public content report queue has an open report older than six hours
           runbook: ops/runbooks/public-content-report-triage.md
       - alert: PawketIncrementThreeWorkerScanUnhealthy
-        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} > 21900
+        expr: pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0 or absent(pawket_worker_scan_healthy{scan="public_media_cleanup"}) or (time() - pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} >= 21600)
         for: 5m
         labels:
           severity: critical

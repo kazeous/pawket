@@ -599,6 +599,8 @@ describe("worker scan health", () => {
           readBacklogMetrics: vi.fn(async () => ({
             outbox: { pending: 1, oldestAgeSeconds: 1 },
             email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+            publicMedia: { oldestPendingSeconds: 0 },
+            publicContentReports: { oldestOpenSeconds: 0 },
           })) as never,
           runRetention: vi.fn() as never,
           hostname: () => "test-worker",
@@ -662,6 +664,8 @@ describe("worker scan health", () => {
           : vi.fn(async () => ({
               outbox: { pending: 0, oldestAgeSeconds: 0 },
               email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+              publicMedia: { oldestPendingSeconds: 0 },
+              publicContentReports: { oldestOpenSeconds: 0 },
             }));
       const runRetention = vi.fn(async () => []);
       const handle = await workerRuntime.startWorker({
@@ -776,6 +780,8 @@ describe("worker scan health", () => {
         readBacklogMetrics: vi.fn(async () => ({
           outbox: { pending: 0, oldestAgeSeconds: 0 },
           email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          publicMedia: { oldestPendingSeconds: 0 },
+          publicContentReports: { oldestOpenSeconds: 0 },
         })) as never,
         runRetention: runRetention as never,
         hostname: () => "test-worker",
@@ -877,6 +883,8 @@ describe("worker scan health", () => {
         readBacklogMetrics: vi.fn(async () => ({
           outbox: { pending: 0, oldestAgeSeconds: 0 },
           email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          publicMedia: { oldestPendingSeconds: 0 },
+          publicContentReports: { oldestOpenSeconds: 0 },
         })) as never,
         runRetention: runRetention as never,
         hostname: () => "test-worker",

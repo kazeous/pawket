@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import {
   recordAuthOperation,
+  recordCatalogOperation,
+  recordContentReportOperation,
   recordCreatorOperation,
   recordHttpRequestMetrics,
+  recordPublicMediaOperation,
   recordReceivingProofOperation,
   recordRefundOperation,
 } from "@pawket/observability/metrics";
@@ -64,7 +67,27 @@ type BusinessOperation =
   | { domain: "auth"; operation: "registration" | "verification" | "login" | "oauth_callback" | "reset" | "mfa" | "session" | "security_change" }
   | { domain: "creator"; operation: "draft" | "submit" | "withdraw" | "changes_requested" | "approve" | "reject" | "reopen" | "suspend" | "reinstate" }
   | { domain: "receiving_proof"; operation: "challenge" | "report" | "matched" | "unmatched" }
-  | { domain: "refund"; operation: "window" | "sent" | "attention_required" };
+  | { domain: "refund"; operation: "window" | "sent" | "attention_required" }
+  | { domain: "catalog"; operation: "draft" | "publish" | "unpublish" | "handle_claim" | "handle_rename" }
+  | {
+      domain: "public_media";
+      operation: "upload" | "delivery";
+      purpose?: "avatar" | "cover" | "showcase";
+      variant?: "master" | "thumb" | "display" | "large";
+    }
+  | {
+      domain: "content_report";
+      operation: "submit" | "challenge" | "dismiss" | "hide" | "restore";
+      reason?:
+        | "impersonation"
+        | "prohibited_or_age_restricted_content"
+        | "harassment_or_hate"
+        | "violence_or_self_harm"
+        | "privacy"
+        | "intellectual_property"
+        | "spam_or_scam"
+        | "other";
+    };
 
 type BusinessOutcome = "succeeded" | "rejected" | "retryable_failure" | "attention_required";
 
@@ -78,26 +101,43 @@ export function recordBusinessOperationOutcome(
   input: BusinessOperation,
   outcome: BusinessOutcome,
 ): void {
-  const metric = { operation: input.operation, outcome };
   switch (input.domain) {
     case "auth":
-      recordAuthOperation(metric);
+      recordAuthOperation({ operation: input.operation, outcome });
       break;
     case "creator":
-      recordCreatorOperation(metric);
+      recordCreatorOperation({ operation: input.operation, outcome });
       break;
     case "receiving_proof":
-      recordReceivingProofOperation(metric);
+      recordReceivingProofOperation({ operation: input.operation, outcome });
       break;
     case "refund":
-      recordRefundOperation(metric);
+      recordRefundOperation({ operation: input.operation, outcome });
+      break;
+    case "catalog":
+      recordCatalogOperation({ operation: input.operation, outcome });
+      break;
+    case "public_media":
+      recordPublicMediaOperation({
+        operation: input.operation,
+        outcome,
+        ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+        ...(input.variant === undefined ? {} : { variant: input.variant }),
+      });
+      break;
+    case "content_report":
+      recordContentReportOperation({
+        operation: input.operation,
+        outcome,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      });
       break;
   }
 }
 
 export async function readBusinessMetricField(
   request: Request,
-  field: "action" | "outcome",
+  field: "action" | "outcome" | "purpose" | "reason",
 ): Promise<unknown> {
   const clone = request.clone();
   if (!clone.body) return undefined;

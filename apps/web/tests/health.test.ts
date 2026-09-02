@@ -11,6 +11,7 @@ import {
 } from "../src/http/readiness.js";
 import {
   createObjectStorageReadinessCheck,
+  createPublicMediaWorkerScanReadinessCheck,
   createValkeyReadinessCheck,
 } from "../src/http/readiness-checks.js";
 
@@ -53,6 +54,7 @@ describe("health probes", () => {
       database: "up",
       valkey: "up",
       publicMediaStorage: "not_configured",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -77,6 +79,7 @@ describe("health probes", () => {
       database: "down",
       valkey: "up",
       publicMediaStorage: "not_configured",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -101,6 +104,7 @@ describe("health probes", () => {
       database: "up",
       valkey: "down",
       publicMediaStorage: "not_configured",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -166,6 +170,7 @@ describe("health probes", () => {
       database: "down",
       valkey: "up",
       publicMediaStorage: "not_configured",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -192,6 +197,7 @@ describe("health probes", () => {
       database: "up",
       valkey: "up",
       publicMediaStorage: "not_configured",
+      publicMediaWorkerScan: "not_configured",
       revision: "runtime-revision",
       buildRevision: "build-revision",
       revisionMatch: false,
@@ -299,6 +305,7 @@ describe("health probes", () => {
       database: "up",
       valkey: "up",
       publicMediaStorage: "down",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -325,10 +332,122 @@ describe("health probes", () => {
       database: "up",
       valkey: "up",
       publicMediaStorage: "down",
+      publicMediaWorkerScan: "not_configured",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
     });
+  });
+
+  it("reports worker scan health diagnostically without gating disabled mode", async () => {
+    // Catches Increment 3 diagnostics accidentally taking down the disabled Increment 2 surface.
+    const probe = createReadinessProbe({
+      checkDatabase: async () => undefined,
+      checkValkey: async () => undefined,
+      publishingMode: "disabled",
+      checkPublicMediaWorkerScan: async () => {
+        throw new Error("no fresh worker scan");
+      },
+      revision,
+    });
+
+    const response = await createReadinessResponse(probe);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "ready",
+      publicMediaWorkerScan: "down",
+    });
+  });
+
+  it("requires a fresh worker scan when publishing is general audience", async () => {
+    // Catches web readiness serving a general audience while worker scan health is stale or absent.
+    const probe = createReadinessProbe({
+      checkDatabase: async () => undefined,
+      checkValkey: async () => undefined,
+      publishingMode: "general_audience",
+      checkPublicMediaStorage: async () => undefined,
+      checkPublicMediaWorkerScan: async () => {
+        throw new Error("stale worker scan");
+      },
+      revision,
+    });
+
+    const response = await createReadinessResponse(probe);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      status: "not_ready",
+      publicMediaStorage: "up",
+      publicMediaWorkerScan: "down",
+    });
+  });
+
+  it("accepts only a fresh worker scan for the exact web revision", async () => {
+    const now = new Date("2026-09-02T00:10:00.000Z").getTime();
+    const expectedRevision = "9f6ac0e1b2d34567890abcdef1234567890abcde";
+    const closeConnection = vi.fn(async () => undefined);
+    const createConnection = vi.fn(() => ({
+      connect: vi.fn(async () => undefined),
+      get: vi.fn(async () => JSON.stringify({
+        revision: expectedRevision,
+        scanSucceededAtMs: now - 60_000,
+      })),
+    }));
+    const check = createPublicMediaWorkerScanReadinessCheck(
+      "redis://localhost:6379",
+      {
+        expectedRevision,
+        maximumScanAgeMs: 6 * 60 * 60_000 + 300_000,
+        now: () => now,
+        createConnection,
+        closeConnection,
+      },
+    );
+
+    await expect(check(new AbortController().signal)).resolves.toBeUndefined();
+
+    expect(createConnection).toHaveBeenCalledWith("redis://localhost:6379");
+    expect(closeConnection).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["missing", null],
+    [
+      "stale",
+      JSON.stringify({
+        revision: "9f6ac0e1b2d34567890abcdef1234567890abcde",
+        scanSucceededAtMs: new Date("2026-09-01T17:59:59.999Z").getTime(),
+      }),
+    ],
+    [
+      "different revision",
+      JSON.stringify({
+        revision: "1111111111111111111111111111111111111111",
+        scanSucceededAtMs: new Date("2026-09-02T00:09:00.000Z").getTime(),
+      }),
+    ],
+  ] as const)("rejects a %s worker heartbeat without leaking its value", async (_case, value) => {
+    const now = new Date("2026-09-02T00:10:00.000Z").getTime();
+    const closeConnection = vi.fn(async () => undefined);
+    const check = createPublicMediaWorkerScanReadinessCheck(
+      "redis://localhost:6379",
+      {
+        expectedRevision: "9f6ac0e1b2d34567890abcdef1234567890abcde",
+        maximumScanAgeMs: 6 * 60 * 60_000 + 300_000,
+        now: () => now,
+        createConnection: () => ({
+          connect: vi.fn(async () => undefined),
+          get: vi.fn(async () => value),
+        }),
+        closeConnection,
+      },
+    );
+
+    await expect(check(new AbortController().signal)).rejects.toThrow(
+      "Public media worker scan is unavailable",
+    );
+    expect(closeConnection).toHaveBeenCalledOnce();
   });
 
   it("probes both public media areas and publishes only closed area labels", async () => {

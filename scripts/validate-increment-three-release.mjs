@@ -195,11 +195,30 @@ function requireAcceptance(packet, failures, path, code) {
   if (!accepted(nested(packet, ...path))) addFailure(failures, code);
 }
 
-function verifyActivationPacket(packet, failures) {
+function resolveExpectedRevision(input) {
+  const candidates = [
+    input.expectedRevision,
+    input.SOURCE_COMMIT,
+    input.APP_REVISION,
+    input.APP_BUILD_REVISION,
+  ].filter((value) => typeof value === "string" && value.trim() !== "");
   if (
+    candidates.length === 0 ||
+    candidates.some((value) => !exactRevision.test(value)) ||
+    new Set(candidates).size !== 1
+  ) {
+    return null;
+  }
+  return candidates[0];
+}
+
+function verifyActivationPacket(packet, failures, expectedRevision) {
+  if (
+    expectedRevision === null ||
     !exactRevision.test(packet.sourceRevision ?? "") ||
     !exactRevision.test(packet.buildRevision ?? "") ||
-    packet.sourceRevision !== packet.buildRevision
+    packet.sourceRevision !== packet.buildRevision ||
+    packet.sourceRevision !== expectedRevision
   ) {
     addFailure(failures, "source_revision_mismatch");
   }
@@ -239,7 +258,7 @@ export async function validate(input = {}) {
     acceptance = await readAcceptancePacket(input.acceptanceFile);
     if (acceptance.status === "missing") addFailure(failures, "acceptance_packet_missing");
     if (acceptance.status === "malformed") addFailure(failures, "acceptance_packet_malformed");
-    verifyActivationPacket(acceptance.packet, failures);
+    verifyActivationPacket(acceptance.packet, failures, resolveExpectedRevision(input));
   }
 
   if (publicMediaRetentionMode !== "report_only") {

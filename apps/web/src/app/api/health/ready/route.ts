@@ -8,6 +8,7 @@ import {
 } from "../../../../http/readiness";
 import {
   createObjectStorageReadinessCheck,
+  createPublicMediaWorkerScanReadinessCheck,
   createValkeyReadinessCheck,
 } from "../../../../http/readiness-checks";
 import { withRouteContext } from "../../../../http/route-context";
@@ -60,11 +61,19 @@ export function GET(request: Request): Promise<Response> {
   return withRouteContext(request, async () => {
     const environment = loadServerEnv();
     const checkPublicMediaStorage = storageReadinessCheck(environment);
+    const checkPublicMediaWorkerScan = createPublicMediaWorkerScanReadinessCheck(
+      environment.VALKEY_URL,
+      {
+        expectedRevision: environment.APP_REVISION,
+        maximumScanAgeMs: environment.PUBLIC_MEDIA_CLEANUP_SCAN_INTERVAL_MS + 300_000,
+      },
+    );
     const probe = createReadinessProbe({
       checkDatabase: (signal) => checkDatabaseReadiness(environment.DATABASE_URL, signal),
       checkValkey: createValkeyReadinessCheck(environment.VALKEY_URL),
       publishingMode: environment.CREATOR_PUBLISHING_MODE,
       ...(checkPublicMediaStorage === undefined ? {} : { checkPublicMediaStorage }),
+      checkPublicMediaWorkerScan,
       revision: resolveRevisionAttestation(
         environment.APP_REVISION,
         environment.APP_BUILD_REVISION,

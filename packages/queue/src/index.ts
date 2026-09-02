@@ -32,3 +32,10 @@ export {
   type MediaQueuePublisher,
   type PublicMediaCompletedPayload,
 } from "./media-queue.js";
+export {
+  PUBLIC_MEDIA_WORKER_HEALTH_KEY,
+  PUBLIC_MEDIA_WORKER_HEALTH_TTL_MS,
+  readPublicMediaWorkerHealth,
+  writePublicMediaWorkerHealth,
+  type PublicMediaWorkerHealth,
+} from "./public-media-worker-health.js";

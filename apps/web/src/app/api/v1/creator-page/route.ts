@@ -1,4 +1,4 @@
-import { withRouteContext } from "../../../../http/route-context";
+import { withBusinessOperation, withRouteContext } from "../../../../http/route-context";
 import { getPlatformRuntime } from "../../../../platform/runtime";
 
 export const runtime = "nodejs";
@@ -8,5 +8,10 @@ export function GET(request: Request) {
 }
 
 export function POST(request: Request) {
-  return withRouteContext(request, () => getPlatformRuntime().catalogHandlers.saveDraft(request));
+  return withRouteContext(request, () =>
+    withBusinessOperation(
+      { domain: "catalog", operation: "draft" },
+      () => getPlatformRuntime().catalogHandlers.saveDraft(request),
+    ),
+  );
 }

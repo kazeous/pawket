@@ -75,16 +75,23 @@ describe("operational route wiring", () => {
   });
 
   it("wires the ready route through both dependency checks", async () => {
+    const revision = "9f6ac0e1b2d34567890abcdef1234567890abcde";
     routeDependencies.loadServerEnv.mockReturnValue({
-      APP_REVISION: "ready-revision",
-      APP_BUILD_REVISION: "ready-revision",
+      APP_REVISION: revision,
+      APP_BUILD_REVISION: revision,
       DATABASE_URL: "postgresql://localhost/pawket",
       VALKEY_URL: "redis://localhost:6379",
+      CREATOR_PUBLISHING_MODE: "disabled",
+      PUBLIC_MEDIA_CLEANUP_SCAN_INTERVAL_MS: 21_600_000,
     });
     routeDependencies.checkDatabaseReadiness.mockResolvedValue(undefined);
     routeDependencies.createReadinessConnection.mockReturnValue({
       connect: vi.fn().mockResolvedValue(undefined),
       ping: vi.fn().mockResolvedValue("PONG"),
+      get: vi.fn().mockResolvedValue(JSON.stringify({
+        revision,
+        scanSucceededAtMs: Date.now(),
+      })),
       disconnect: vi.fn(),
     });
     routeDependencies.closeReadinessConnection.mockResolvedValue(undefined);
@@ -98,14 +105,16 @@ describe("operational route wiring", () => {
       database: "up",
       valkey: "up",
       publicMediaStorage: "not_configured",
-      revision: "ready-revision",
-      buildRevision: "ready-revision",
+      publicMediaWorkerScan: "up",
+      revision,
+      buildRevision: revision,
       revisionMatch: true,
     });
     expect(routeDependencies.checkDatabaseReadiness).toHaveBeenCalledWith(
       "postgresql://localhost/pawket",
       expect.any(AbortSignal),
     );
+    expect(routeDependencies.createReadinessConnection).toHaveBeenCalledTimes(2);
     expect(routeDependencies.createReadinessConnection).toHaveBeenCalledWith("redis://localhost:6379");
   });
 
