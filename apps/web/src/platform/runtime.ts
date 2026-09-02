@@ -84,6 +84,7 @@ function unavailableMediaStorage(): ObjectStoragePort {
   const unavailable = async (): Promise<never> => { throw new Error("Public media storage unavailable"); };
   return {
     presignPut: unavailable,
+    headBucket: unavailable,
     headObject: unavailable,
     listObjectVersions: unavailable,
     getObject: unavailable,

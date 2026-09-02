@@ -2,6 +2,35 @@ import {
   closeReadinessConnection,
   createReadinessConnection,
 } from "@pawket/queue/connection";
+import { setPublicMediaStorageAvailabilityMetric } from "@pawket/observability";
+
+type PublicMediaStorageArea = "quarantine" | "derivative";
+
+type PublicMediaStorageProbe = {
+  headBucket(area: PublicMediaStorageArea, signal?: AbortSignal): Promise<void>;
+};
+
+export function createObjectStorageReadinessCheck(
+  storage: PublicMediaStorageProbe,
+): (signal: AbortSignal) => Promise<void> {
+  return async (signal) => {
+    const areas = ["quarantine", "derivative"] as const;
+    const results = await Promise.allSettled(
+      areas.map((area) => storage.headBucket(area, signal)),
+    );
+
+    for (const [index, area] of areas.entries()) {
+      setPublicMediaStorageAvailabilityMetric({
+        area,
+        available: results[index]?.status === "fulfilled",
+      });
+    }
+
+    if (results.some((result) => result.status === "rejected")) {
+      throw new Error("Public media storage is unavailable");
+    }
+  };
+}
 
 type ValkeyConnection = {
   connect(): PromiseLike<unknown>;

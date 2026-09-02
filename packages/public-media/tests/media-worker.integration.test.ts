@@ -107,6 +107,8 @@ class VersionedMemoryStorage implements ObjectStoragePort {
     throw new Error("not used by media worker");
   }
 
+  async headBucket(): Promise<void> {}
+
   async headObject(location: ObjectLocation): Promise<HeadObjectResult | null> {
     if (location.area === "quarantine" && this.genericSourceHeadError) {
       throw this.genericSourceHeadError;

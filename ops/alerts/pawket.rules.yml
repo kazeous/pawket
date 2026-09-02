@@ -127,3 +127,50 @@ groups:
         annotations:
           summary: Runtime and embedded source revisions do not match
           runbook: ops/runbooks/release-attestation.md
+      - alert: PawketPublicMediaProcessingStuck
+        expr: pawket_public_media_oldest_pending_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Public media processing has fallen behind by fifteen minutes
+          runbook: ops/runbooks/public-media-processing.md
+      - alert: PawketPublicMediaTerminalFailures
+        expr: increase(pawket_public_media_operations_total{operation="process",outcome="attention_required"}[24h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Public media processing has a terminal failure awaiting review
+          runbook: ops/runbooks/public-media-processing.md
+      - alert: PawketPublicMediaStorageUnavailable
+        expr: pawket_public_media_storage_available == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A public media storage area is unavailable
+          runbook: ops/runbooks/public-media-backup-restore.md
+      - alert: PawketPublicMediaCleanupFailures
+        expr: pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0
+        for: 6h5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker public media cleanup scan has remained unhealthy for one scan interval
+          runbook: ops/runbooks/public-media-processing.md
+      - alert: PawketPublicContentReportQueueOld
+        expr: pawket_public_content_report_oldest_open_seconds > 21600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The public content report queue has an open report older than six hours
+          runbook: ops/runbooks/public-content-report-triage.md
+      - alert: PawketIncrementThreeWorkerScanUnhealthy
+        expr: time() - pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} > 21900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker public media cleanup scan has stopped completing
+          runbook: ops/runbooks/creator-publication.md

@@ -28,6 +28,14 @@ describe("private S3 object storage", () => {
   });
   afterAll(() => client.destroy());
 
+  test("probes both private bucket areas without exposing bucket names", async () => {
+    await expect(storage.headBucket("quarantine")).resolves.toBeUndefined();
+    await expect(storage.headBucket("derivative")).resolves.toBeUndefined();
+    await expect(storage.headBucket("backup" as never)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    });
+  });
+
   test("presigns, PUTs, HEADs, GETs, lists, overwrites, and deletes exact versions", async () => {
     const key = `quarantine/${randomUUID()}/${randomUUID()}`;
     const bytes = new Uint8Array([1, 2, 3]);

@@ -71,6 +71,7 @@ class CleanupMemoryStorage implements ObjectStoragePort {
     this.derivativeVersions.set(key, { versionId, bytes, sha256 });
   }
 
+  async headBucket(): Promise<void> {}
   async presignPut(): Promise<never> { throw new Error("not used by cleanup"); }
   async getObject(): Promise<never> { throw new Error("not used by cleanup"); }
   async putObject(): Promise<never> { throw new Error("not used by cleanup"); }

@@ -12,12 +12,17 @@ RUN corepack enable && corepack prepare pnpm@11.22.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
+COPY packages/admin/package.json packages/admin/package.json
+COPY packages/catalog/package.json packages/catalog/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/identity/package.json packages/identity/package.json
 COPY packages/observability/package.json packages/observability/package.json
+COPY packages/payments/package.json packages/payments/package.json
+COPY packages/public-media/package.json packages/public-media/package.json
 COPY packages/queue/package.json packages/queue/package.json
 COPY packages/security/package.json packages/security/package.json
+COPY packages/trust/package.json packages/trust/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY . .

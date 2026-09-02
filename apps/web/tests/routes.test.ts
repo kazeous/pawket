@@ -97,6 +97,7 @@ describe("operational route wiring", () => {
       status: "ready",
       database: "up",
       valkey: "up",
+      publicMediaStorage: "not_configured",
       revision: "ready-revision",
       buildRevision: "ready-revision",
       revisionMatch: true,

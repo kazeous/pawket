@@ -3,11 +3,13 @@ import type { RevisionAttestation } from "@pawket/config";
 const READINESS_TIMEOUT_MS = 2_000;
 
 export type DependencyStatus = "up" | "down";
+export type OptionalDependencyStatus = DependencyStatus | "not_configured";
 
 export type ReadinessResult = RevisionAttestation & {
   status: "ready" | "not_ready";
   database: DependencyStatus;
   valkey: DependencyStatus;
+  publicMediaStorage: OptionalDependencyStatus;
 };
 
 export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
@@ -15,6 +17,8 @@ export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
 export type ReadinessDependencies = {
   checkDatabase: ReadinessCheck;
   checkValkey: ReadinessCheck;
+  publishingMode?: "disabled" | "general_audience";
+  checkPublicMediaStorage?: ReadinessCheck;
   revision: RevisionAttestation;
 };
 
@@ -59,18 +63,28 @@ export function createReadinessProbe(
   dependencies: ReadinessDependencies,
 ): () => Promise<ReadinessResult> {
   return async () => {
-    const [database, valkey] = await Promise.all([
+    const [database, valkey, publicMediaStorage] = await Promise.all([
       dependencyStatus(dependencies.checkDatabase),
       dependencyStatus(dependencies.checkValkey),
+      dependencies.checkPublicMediaStorage === undefined
+        ? Promise.resolve("not_configured" as const)
+        : dependencyStatus(dependencies.checkPublicMediaStorage),
     ]);
+
+    const storageReady =
+      dependencies.publishingMode !== "general_audience" || publicMediaStorage === "up";
 
     return {
       status:
-        database === "up" && valkey === "up" && dependencies.revision.revisionMatch
+        database === "up" &&
+        valkey === "up" &&
+        storageReady &&
+        dependencies.revision.revisionMatch
           ? "ready"
           : "not_ready",
       database,
       valkey,
+      publicMediaStorage,
       ...dependencies.revision,
     };
   };

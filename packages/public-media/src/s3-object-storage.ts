@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   ListObjectVersionsCommand,
   PutObjectCommand,
@@ -120,6 +121,17 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
       try {
         const url = await getSignedUrl(client, command, { expiresIn: expiresInSeconds, unsignableHeaders: new Set(), signableHeaders: new Set(["content-type", "content-length"]), unhoistableHeaders: new Set(["content-type", "content-length"]) });
         return { url, requiredHeaders: { "content-type": contentType, "content-length": String(contentLength) }, expiresAt };
+      } catch {
+        throw new MediaPolicyError("STORAGE_UNAVAILABLE");
+      }
+    },
+
+    async headBucket(area, signal) {
+      if (area !== "quarantine" && area !== "derivative") throw new MediaPolicyError("INVALID_INPUT");
+      try {
+        const command = new HeadBucketCommand({ Bucket: bucketFor(safeOptions, area) });
+        if (signal === undefined) await client.send(command);
+        else await client.send(command, { abortSignal: signal });
       } catch {
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }

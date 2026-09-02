@@ -23,6 +23,8 @@ export class ObjectStorageConflictError extends Error {
 
 export type ObjectStoragePort = Readonly<{
   presignPut(input: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
+  /** Availability probe for one bounded storage area. Requires an `s3:ListBucket` grant. */
+  headBucket(area: ObjectLocation["area"], signal?: AbortSignal): Promise<void>;
   headObject(location: ObjectLocation): Promise<HeadObjectResult | null>;
   listObjectVersions(location: Omit<ObjectLocation, "versionId">): Promise<readonly { versionId: string; isDeleteMarker: boolean }[]>;
   getObject(location: ObjectLocation): Promise<NodeJS.ReadableStream>;
