@@ -598,13 +598,15 @@ test("Increment 3 synthetic creator journey remains nonfinancial", async ({
   // Break caught: the full creator lifecycle skips a real boundary, leaks closed content, or mutates financial state.
   test.setTimeout(600_000);
   const journeyStartedAt = Date.now();
-  await test.step("reset state and prove the empty seed", async () => {
+  await test.step("reset state", async () => {
     await resetIncrementThreeState();
-    await initializeAndVerifySeed(page);
   });
   const before = await test.step("snapshot every financial table", async () =>
     readFinancialTableCounts(),
   );
+  await test.step("initialize and prove the empty seed", async () => {
+    await initializeAndVerifySeed(page);
+  });
   await test.step("claim, rename, and rate-limit the creator handle", async () => {
     await claimRenameAndVerifyAlias(page);
   });
