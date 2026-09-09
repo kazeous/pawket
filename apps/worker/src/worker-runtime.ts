@@ -94,6 +94,19 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "creator.application_reopened.v1",
   "creator.capability_suspended.v1",
   "creator.capability_reinstated.v1",
+  "creator.page_initialized.v1",
+  "creator.handle_claimed.v1",
+  "creator.handle_renamed.v1",
+  "creator.page_draft_saved.v1",
+  "creator.showcase_upserted.v1",
+  "creator.showcase_removed.v1",
+  "creator.showcase_reordered.v1",
+  "creator.page_published.v1",
+  "creator.page_unpublished.v1",
+  "media.public_asset_ready.v1",
+  "media.public_asset_failed.v1",
+  "trust.public_content_reported.v1",
+  "trust.public_report_triaged.v1",
 ]);
 
 type RuntimeLogger = {

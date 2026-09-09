@@ -48,6 +48,22 @@ import { createWorkerHealthState } from "../src/worker-health.js";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const valkeyUrl = process.env.TEST_VALKEY_URL;
 
+const incrementThreeTerminalEvents = [
+  "creator.page_initialized.v1",
+  "creator.handle_claimed.v1",
+  "creator.handle_renamed.v1",
+  "creator.page_draft_saved.v1",
+  "creator.showcase_upserted.v1",
+  "creator.showcase_removed.v1",
+  "creator.showcase_reordered.v1",
+  "creator.page_published.v1",
+  "creator.page_unpublished.v1",
+  "media.public_asset_ready.v1",
+  "media.public_asset_failed.v1",
+  "trust.public_content_reported.v1",
+  "trust.public_report_triaged.v1",
+] as const;
+
 if (!databaseUrl) {
   throw new Error("TEST_DATABASE_URL is required for worker integration tests");
 }
@@ -293,6 +309,79 @@ describe("public media runtime handoff", () => {
       if (failureMode === "missing_token") expect(moveToDelayed).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("Increment 3 terminal outbox events", () => {
+  test.each(incrementThreeTerminalEvents)(
+    "acknowledges %s exactly once without dispatching email or media work",
+    async (eventType) => {
+      // Break caught: a terminal catalog/media/trust event remains pending or accidentally fans out.
+      const acknowledge = vi.fn(async () => true);
+      const mediaQueue = { add: vi.fn() };
+      const deliver = vi.fn();
+      const materialize = vi.fn();
+      const outboxEventId = randomUUID();
+      const processor = createWorkerJobProcessor({
+        logger: { info: vi.fn(), error: vi.fn() },
+        database: {} as never,
+        acknowledge,
+        mediaQueue,
+        securityEmail: {
+          keyring: {} as never,
+          sender: {} as never,
+          deliver,
+          materialize,
+        },
+      });
+      const data: SystemOutboxJob = {
+        outboxEventId,
+        eventType,
+        eventVersion: 1,
+        aggregateType: "increment_three_acceptance",
+        aggregateId: randomUUID(),
+        payload: {},
+        occurredAt: new Date("2026-09-03T00:00:00.000Z").toISOString(),
+      };
+
+      await processor({ id: outboxEventId, name: OUTBOX_JOB, data } as never);
+
+      expect(acknowledge).toHaveBeenCalledTimes(1);
+      expect(acknowledge).toHaveBeenCalledWith(expect.anything(), {
+        eventId: outboxEventId,
+      });
+      expect(mediaQueue.add).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(materialize).not.toHaveBeenCalled();
+    },
+  );
+
+  test("rejects a catalog-prefixed unknown without acknowledging or dispatching", async () => {
+    // Break caught: a prefix match silently acknowledges a future event without an explicit review.
+    const acknowledge = vi.fn(async () => true);
+    const mediaQueue = { add: vi.fn() };
+    const processor = createWorkerJobProcessor({
+      logger: { info: vi.fn(), error: vi.fn() },
+      database: {} as never,
+      acknowledge,
+      mediaQueue,
+    });
+    const outboxEventId = randomUUID();
+    const data: SystemOutboxJob = {
+      outboxEventId,
+      eventType: "creator.catalog_unknown.v1",
+      eventVersion: 1,
+      aggregateType: "creator_page",
+      aggregateId: randomUUID(),
+      payload: {},
+      occurredAt: new Date("2026-09-03T00:00:00.000Z").toISOString(),
+    };
+
+    await expect(
+      processor({ id: outboxEventId, name: OUTBOX_JOB, data } as never),
+    ).rejects.toThrow("Unsupported outbox event type");
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(mediaQueue.add).not.toHaveBeenCalled();
+  });
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {

@@ -6,20 +6,43 @@ import { createCatalogMediaOwnershipPort, createCatalogService } from "@pawket/c
 import { createDatabase, creatorApplications, creatorApplicationRevisions, creatorPages, identityCreatorCapabilities, identityRoleGrants, identitySessions, identityTotpAuthenticators, identityUsers } from "@pawket/database";
 import { createIdentityCreatorSeedPort, hashSessionToken } from "@pawket/identity";
 import { createPublicMediaService, createS3ObjectStorage, processPublicMediaAsset } from "@pawket/public-media";
+import { connectQueueProducer, createQueueConnection } from "@pawket/queue";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 import { eq, sql } from "drizzle-orm";
 
-import { browserDatabaseUrl, creatorSessionToken, ownerSessionToken, seededAvatarAssetId, syntheticPng } from "./increment-three-fixture";
+import {
+  assertIncrementThreeBrowserDatabaseName,
+  browserDatabaseUrl,
+  prepareIncrementThreeDatabase,
+} from "./increment-three-database";
+import {
+  acceptanceCreatorApprovedRevisionId,
+  acceptanceCreatorSessionId,
+  acceptanceCreatorUserId,
+  creatorSessionToken,
+  ownerSessionToken,
+  seededAvatarAssetId,
+  syntheticPng,
+} from "./increment-three-fixture";
+import {
+  clearIncrementThreeWorkerHealth,
+  resolveIncrementThreeBrowserValkeyUrl,
+  resolveIncrementThreeStorageFixture,
+} from "./increment-three-environment";
 
 const creatorUserId = "task15-creator";
 const applicationId = "15000000-0000-4000-8000-000000000001";
 const revisionId = "15000000-0000-4000-8000-000000000002";
 const capabilityId = "15000000-0000-4000-8000-000000000003";
-const mediaBuckets = ["pawket-media-quarantine", "pawket-media-derivatives"] as const;
+const storageFixture = resolveIncrementThreeStorageFixture(process.env);
+const mediaBuckets = [
+  storageFixture.quarantineBucket,
+  storageFixture.derivativeBucket,
+] as const;
 
 async function prepareMediaBuckets() {
   for (const bucket of mediaBuckets) {
-    const url = `http://127.0.0.1:9090/${bucket}`;
+    const url = `${storageFixture.endpoint}/${bucket}`;
     if ((await fetch(url, { method: "HEAD" })).status === 404) {
       const created = await fetch(url, { method: "PUT" });
       if (!created.ok) throw new Error(`Task 15 could not create S3Mock bucket ${bucket}: ${created.status}`);
@@ -31,7 +54,7 @@ async function prepareMediaBuckets() {
     });
     if (!versioning.ok) throw new Error(`Task 15 could not enable S3Mock versioning for ${bucket}: ${versioning.status}`);
   }
-  const preflight = await fetch("http://127.0.0.1:9090/pawket-media-quarantine/task15-preflight", {
+  const preflight = await fetch(`${storageFixture.endpoint}/${storageFixture.quarantineBucket}/task17-preflight`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.0.0.1:4175",
@@ -40,7 +63,19 @@ async function prepareMediaBuckets() {
     },
   });
   if (!preflight.ok || preflight.headers.get("access-control-allow-origin") !== "http://127.0.0.1:4175") {
-    throw new Error("Task 15 S3Mock browser upload CORS is unavailable");
+    throw new Error("Task 17 S3Mock browser upload CORS is unavailable");
+  }
+}
+
+async function resetWorkerHealth() {
+  const connection = createQueueConnection(
+    resolveIncrementThreeBrowserValkeyUrl(process.env),
+  );
+  try {
+    await connectQueueProducer(connection);
+    await clearIncrementThreeWorkerHealth(connection);
+  } finally {
+    connection.disconnect(false);
   }
 }
 
@@ -53,9 +88,12 @@ async function encryptBetterAuthSecret(data: string) {
 }
 
 export async function resetIncrementThreeState() {
+  await resetWorkerHealth();
   await prepareMediaBuckets();
   const database = createDatabase(browserDatabaseUrl); const { db } = database; const now = new Date();
   try {
+    const [connected] = await db.execute<{ current_database: string }>(sql`select current_database() as current_database`);
+    assertIncrementThreeBrowserDatabaseName(connected?.current_database);
     const tables = await db.execute<{ tablename: string }>(sql`select tablename from pg_tables where schemaname = 'public' order by tablename`);
     const names = [...tables].map((row) => row.tablename).filter((name) => /^[a-z_]+$/u.test(name));
     if (names.length > 0) await db.execute(sql.raw(`truncate table ${names.map((name) => `"${name}"`).join(", ")} restart identity cascade`));
@@ -71,7 +109,7 @@ export async function resetIncrementThreeState() {
 
     const [existingPage] = await db.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, creatorUserId)).limit(1);
     const seedPort = createIdentityCreatorSeedPort();
-    const storage = createS3ObjectStorage({ endpoint: "http://127.0.0.1:9090", region: "us-east-1", accessKeyId: "local-media-access-key", secretAccessKey: "local-media-secret-key", quarantineBucket: "pawket-media-quarantine", derivativeBucket: "pawket-media-derivatives", forcePathStyle: true, now: () => now });
+    const storage = createS3ObjectStorage({ ...storageFixture, now: () => now });
     const mediaIds = ["15000000-0000-4000-8000-000000000009", seededAvatarAssetId];
     const mediaService = createPublicMediaService({ db, storage, creator: { async getCreatorCapability(_database, userId) { return userId === creatorUserId ? { userId, state: "active" as const } : null; } }, catalog: createCatalogMediaOwnershipPort(), publishingMode: "general_audience", commandFingerprintKey: new Uint8Array(32).fill(2), now: () => now, idFactory: () => mediaIds.shift()! });
     const service = createCatalogService({ db, creatorSeeds: seedPort, mediaCatalog: mediaService, visibility: { async readHolds() { return { pageHeld: false, heldShowcaseIds: new Set<string>() }; }, async readHoldsBatch(_database, requests) { return new Map(requests.map((request) => [request.pageId, { pageHeld: false, heldShowcaseIds: new Set<string>() }])); } }, publishingMode: "general_audience", commandFingerprintKey: new Uint8Array(32).fill(2), now: () => now });
@@ -96,6 +134,16 @@ export async function resetIncrementThreeState() {
     }
     await service.saveDraft({ actor, pageId: workspace.pageId, expectedVersion: version, idempotencyKey: randomUUID(), requestId: randomUUID(), draft: { displayName: "Draft name", introduction: "Private draft introduction.", primaryDiscipline: "illustration", secondaryDisciplines: [], avatarAssetId: seededAvatarAssetId, coverAssetId: null } });
 
+    const acceptanceApplicationId = "17000000-0000-4000-8000-000000000001";
+    await db.insert(identityUsers).values({ id: acceptanceCreatorUserId, name: "Task 17 Creator", email: "task17-creator@example.test", canonicalEmail: "task17-creator@example.test", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", accessStatus: "active", authorizationVersion: 1, createdAt: now, updatedAt: now });
+    await db.insert(creatorApplications).values({ id: acceptanceApplicationId, userId: acceptanceCreatorUserId, state: "approved", version: 1, currentRevisionId: null, createdAt: now, updatedAt: now });
+    await db.insert(creatorApplicationRevisions).values({ id: acceptanceCreatorApprovedRevisionId, applicationId: acceptanceApplicationId, revisionNumber: 1, artistDisplayName: "Task 17 Creator", shortIntroduction: "Synthetic approved creator with no catalog page.", createdAt: now, updatedAt: now });
+    await db.update(creatorApplications).set({ currentRevisionId: acceptanceCreatorApprovedRevisionId, updatedAt: now }).where(eq(creatorApplications.id, acceptanceApplicationId));
+    await db.insert(identityCreatorCapabilities).values({ id: "17000000-0000-4000-8000-000000000003", userId: acceptanceCreatorUserId, state: "active", version: 1, approvedApplicationId: acceptanceApplicationId, approvedRevisionId: acceptanceCreatorApprovedRevisionId, suspendedAt: null, createdAt: now, updatedAt: now });
+    await db.delete(identitySessions).where(eq(identitySessions.id, acceptanceCreatorSessionId));
+    const [unexpectedAcceptancePage] = await db.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, acceptanceCreatorUserId)).limit(1);
+    if (unexpectedAcceptancePage) throw new Error("Task 17 acceptance creator must start without a creator page");
+
     const ownerUserId = "task15-owner";
     await db.insert(identityUsers).values({ id: ownerUserId, name: "Task 15 Owner", email: "task15-owner@example.test", canonicalEmail: "task15-owner@example.test", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", twoFactorEnabled: true, accessStatus: "active", authorizationVersion: 1, createdAt: now, updatedAt: now }).onConflictDoNothing();
     await db.insert(identityRoleGrants).values({ id: "15000000-0000-4000-8000-000000000004", userId: ownerUserId, role: "owner", state: "active", grantSource: "bootstrap_cli", version: 1, grantedAt: now, createdAt: now, updatedAt: now }).onConflictDoNothing();
@@ -113,4 +161,21 @@ export async function resetIncrementThreeState() {
   } finally { await database.close(); }
 }
 
-export default resetIncrementThreeState;
+type IncrementThreeGlobalSetupDependencies = Readonly<{
+  prepareDatabase(): Promise<void>;
+  resetState(): Promise<void>;
+}>;
+
+export async function prepareAndResetIncrementThreeState(
+  dependencies: IncrementThreeGlobalSetupDependencies = {
+    prepareDatabase: prepareIncrementThreeDatabase,
+    resetState: resetIncrementThreeState,
+  },
+) {
+  await dependencies.prepareDatabase();
+  await dependencies.resetState();
+}
+
+export default async function incrementThreeGlobalSetup() {
+  await prepareAndResetIncrementThreeState();
+}

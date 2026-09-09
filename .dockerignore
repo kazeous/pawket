@@ -12,6 +12,8 @@ docs/**
 .superpowers/**
 **/.superpowers
 **/.superpowers/**
+apps/web/.playwright-artifacts
+apps/web/.playwright-artifacts/**
 
 .env
 .env.*

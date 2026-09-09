@@ -15,6 +15,22 @@ async function createIndependentAuthenticatedReport(page: import("@playwright/te
 
 test("public creator page offers contextual reporting without reporter identity", async ({ page }) => {
   // Break caught: reporting is absent, detached from the publication revision, or requests identity.
+  let challengedSubmissions = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      request.method() === "POST"
+      && url.pathname === "/api/v1/content-reports"
+      && request.postData()?.includes('"challenge"')
+    ) {
+      challengedSubmissions += 1;
+    }
+  });
+  await page.route("**/api/v1/content-reports/challenge", async (route) => {
+    const response = await route.fetch();
+    const challenge = await response.json() as Record<string, unknown>;
+    await route.fulfill({ response, json: { ...challenge, difficulty: 36 } });
+  }, { times: 1 });
   await page.goto("/creators/artist-one");
   await expect(page.getByRole("button", { name: "Báo cáo trang này" })).toBeVisible();
   await page.getByRole("button", { name: "Báo cáo trang này" }).click();
@@ -26,11 +42,14 @@ test("public creator page offers contextual reporting without reporter identity"
   const cancel = page.getByRole("button", { name: "Hủy tạo bằng chứng" });
   await expect(cancel).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Đã thử" })).toBeVisible();
+  expect(challengedSubmissions).toBe(0);
   await cancel.click();
   await expect(page.getByRole("button", { name: "Gửi báo cáo" })).toBeEnabled();
+  expect(challengedSubmissions).toBe(0);
 
   await page.getByRole("button", { name: "Gửi báo cáo" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Đã nhận báo cáo" })).toBeVisible({ timeout: 120_000 });
+  expect(challengedSubmissions).toBe(1);
 
   await page.goto("/creators/artist-one");
   await expect(page.getByRole("heading", { name: "Artist One" })).toBeVisible();

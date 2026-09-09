@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { NextRequest } from "next/server";
 
 import { metricsRegistry } from "@pawket/observability";
 
@@ -15,7 +16,11 @@ const platform = vi.hoisted(() => ({
     completeUpload: vi.fn(async () => Response.json({ result: {} })),
   },
   mediaHandlers: {
-    deliver: vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 })),
+    deliver: vi.fn(async (
+      _request: unknown,
+      _assetId: unknown,
+      _variant: unknown,
+    ) => new Response(new Uint8Array([1]), { status: 200 })),
   },
   trustHandlers: {
     challenge: vi.fn(async () => Response.json({ token: "bounded" })),
@@ -107,14 +112,21 @@ describe("Increment 3 production route metrics", () => {
     expect(await metricsRegistry.metrics()).not.toContain(assetId);
   });
 
-  test("records delivery with a closed variant", async () => {
+  test("normalizes the framework delivery request while recording a closed variant", async () => {
     const route = await import("../src/app/media/[assetId]/[variant]/route.js");
 
     await route.GET(
-      new Request(`${origin}/media/${assetId}/display`),
+      new NextRequest(`${origin}/media/${assetId}/display?preview=1`, {
+        headers: { cookie: "pawket.session=synthetic" },
+      }),
       { params: Promise.resolve({ assetId, variant: "display" }) },
     );
 
+    const [forwarded] = platform.mediaHandlers.deliver.mock.calls[0]!;
+    expect(Object.getPrototypeOf(forwarded) === Request.prototype).toBe(true);
+    expect((forwarded as Request).headers.get("cookie")).toBe(
+      "pawket.session=synthetic",
+    );
     await expectSeries(
       'pawket_public_media_operations_total{operation="delivery",outcome="succeeded",purpose="none",variant="display"}',
     );

@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  incrementThreeStorageEnvironment,
+  resolveIncrementThreeStorageFixture,
+} from "../../../apps/web/tests/increment-three-environment";
+
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const workflow = readFileSync(path.join(repositoryRoot, ".github/workflows/verify.yml"), "utf8");
 const gitleaksIgnore = readFileSync(path.join(repositoryRoot, ".gitleaksignore"), "utf8")
@@ -14,6 +19,22 @@ function indexOfRequired(text: string): number {
   const index = workflow.indexOf(text);
   expect(index, `missing release-gate contract: ${text}`).toBeGreaterThanOrEqual(0);
   return index;
+}
+
+function releaseGateEnvironment(): Record<string, string> {
+  const block = workflow.match(/\n    env:\r?\n(?<body>(?:      [A-Z0-9_]+:.*\r?\n)+)    services:/u)
+    ?.groups?.body;
+  expect(block, "release-gate environment block is missing").toBeDefined();
+  return Object.fromEntries(
+    block!
+      .trimEnd()
+      .split(/\r?\n/u)
+      .map((line) => {
+        const match = line.match(/^\s{6}([A-Z0-9_]+):\s*(.*)$/u);
+        if (!match) throw new Error("Release-gate environment entry is malformed");
+        return [match[1]!, match[2]!.replace(/^(['"])(.*)\1$/u, "$2")];
+      }),
+  );
 }
 
 describe("release-gate workflow contract", () => {
@@ -30,6 +51,27 @@ describe("release-gate workflow contract", () => {
 
     expect(chromiumInstall).toBeLessThan(browserTests);
     expect(dockerContext).toBeLessThan(browserTests);
+  });
+
+  it("uses one synthetic S3Mock fixture and exact candidate revision for browser and ARM64 gates", () => {
+    // Catches CI setup/runtime bucket divergence, skipped S3Mock, or artifact builds detached from the candidate SHA.
+    const environment = releaseGateEnvironment();
+    const storage = resolveIncrementThreeStorageFixture(environment);
+    expect(incrementThreeStorageEnvironment(storage)).toEqual({
+      PUBLIC_MEDIA_S3_ENDPOINT: "http://127.0.0.1:9090",
+      PUBLIC_MEDIA_S3_REGION: "us-east-1",
+      PUBLIC_MEDIA_S3_ACCESS_KEY_ID: "ci-media-access-key",
+      PUBLIC_MEDIA_S3_SECRET_ACCESS_KEY: "ci-media-secret-key",
+      PUBLIC_MEDIA_QUARANTINE_BUCKET: "pawket-ci-media-quarantine",
+      PUBLIC_MEDIA_DERIVATIVE_BUCKET: "pawket-ci-media-derivatives",
+      PUBLIC_MEDIA_S3_FORCE_PATH_STYLE: "true",
+    });
+    expect(environment.PAWKET_BROWSER_APP_REVISION).toBe("${{ github.sha }}");
+    expect(environment.CREATOR_PUBLISHING_MODE).toBe("disabled");
+    expect(environment.PUBLIC_MEDIA_RETENTION_MODE).toBe("report_only");
+    indexOfRequired("image: adobe/s3mock:5.2.0");
+    indexOfRequired("run: corepack pnpm increment-three:validate");
+    expect(workflow.match(/--build-arg SOURCE_COMMIT=\$\{\{ github\.sha \}\}/gu)).toHaveLength(3);
   });
 
   it("runs the pinned advisory, license-metadata, and full-history secret gates", () => {
