@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsup",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -13,10 +14,12 @@
     "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/payments": "workspace:*",
+    "@pawket/public-media": "workspace:*",
     "@pawket/queue": "workspace:*",
     "@pawket/security": "workspace:*",
     "bullmq": "6.2.0",
-    "nodemailer": "9.0.5"
+    "nodemailer": "9.1.1",
+    "sharp": "0.35.4"
   },
   "devDependencies": {
     "@types/nodemailer": "8.0.1"

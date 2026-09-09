@@ -82,6 +82,21 @@ describe("HTTP hardening", () => {
     expect(response.headers.get("x-request-id")).not.toBe(oversizedRequestId);
   });
 
+  it.each([
+    ["/creator", "private, no-store"],
+    ["/creator/preview", "private, no-store"],
+    ["/admin/content-reports", "private, no-store"],
+    ["/creators", "public, no-store"],
+    ["/creators/artist-handle", "public, no-store"],
+    ["/media/10000000-0000-4000-8000-000000000001/thumb", "public, no-store"],
+    ["/sitemap.xml", "public, no-store"],
+  ])("sets the visibility-sensitive edge cache policy for %s", (path, cacheControl) => {
+    // Catches a private or effective-visibility surface becoming cacheable at the edge.
+    const response = proxy(new NextRequest(`http://localhost${path}`));
+
+    expect(response.headers.get("cache-control")).toBe(cacheControl);
+  });
+
   it("uses an immutable, sanitized request context for route handlers", async () => {
     let receivedRequestId: string | undefined;
     const response = await withRouteContext(

@@ -127,6 +127,12 @@ const workerScanHealthy = new Gauge({
   registers: [metricsRegistry],
 });
 
+const publicMediaCleanupOldestEligibleTimestampSeconds = new Gauge({
+  name: "pawket_public_media_cleanup_oldest_eligible_timestamp_seconds",
+  help: "Unix timestamp of the oldest public-media cleanup candidate, or zero when none are eligible.",
+  registers: [metricsRegistry],
+});
+
 const retentionRecordsTotal = new Counter({
   name: "pawket_retention_records_total",
   help: "Retention scan results by closed dataset, mode, and disposition.",
@@ -148,6 +154,53 @@ const revisionMatch = new Gauge({
   registers: [metricsRegistry],
 });
 
+const catalogOperationsTotal = new Counter({
+  name: "pawket_catalog_operations_total",
+  help: "Creator catalog page operations by closed operation and outcome.",
+  labelNames: ["operation", "outcome"],
+  registers: [metricsRegistry],
+});
+
+const publicMediaOperationsTotal = new Counter({
+  name: "pawket_public_media_operations_total",
+  help: "Bounded public media operations by closed operation, outcome, purpose, and variant.",
+  labelNames: ["operation", "outcome", "purpose", "variant"],
+  registers: [metricsRegistry],
+});
+
+const creatorDirectoryResolutionsTotal = new Counter({
+  name: "pawket_creator_directory_resolutions_total",
+  help: "Creator handle directory resolutions by closed source and outcome.",
+  labelNames: ["source", "outcome"],
+  registers: [metricsRegistry],
+});
+
+const publicContentReportOperationsTotal = new Counter({
+  name: "pawket_public_content_report_operations_total",
+  help: "Public content report operations by closed operation, outcome, and reason.",
+  labelNames: ["operation", "outcome", "reason"],
+  registers: [metricsRegistry],
+});
+
+const publicMediaOldestPendingSeconds = new Gauge({
+  name: "pawket_public_media_oldest_pending_seconds",
+  help: "Age of the oldest pending public media processing job in seconds.",
+  registers: [metricsRegistry],
+});
+
+const publicContentReportOldestOpenSeconds = new Gauge({
+  name: "pawket_public_content_report_oldest_open_seconds",
+  help: "Age of the oldest open public content report in seconds.",
+  registers: [metricsRegistry],
+});
+
+const publicMediaStorageAvailable = new Gauge({
+  name: "pawket_public_media_storage_available",
+  help: "Whether a public media storage area is currently reachable.",
+  labelNames: ["area"],
+  registers: [metricsRegistry],
+});
+
 const allowedHttpMethods = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const allowedHttpRoutes = new Set([
   "/",
@@ -156,9 +209,21 @@ const allowedHttpRoutes = new Set([
   "/api/metrics",
   "/api/auth",
   "/api/v1/admin",
+  "/api/v1/admin/content-reports",
+  "/api/v1/admin/content-reports/[reportId]",
   "/api/v1/auth",
+  "/api/v1/content-reports",
+  "/api/v1/content-reports/challenge",
   "/api/v1/creator",
+  "/api/v1/creator-page",
+  "/api/v1/creator-page/handle",
+  "/api/v1/creator-page/media/uploads",
+  "/api/v1/creator-page/media/uploads/[intentId]/complete",
+  "/api/v1/creator-page/publish",
+  "/api/v1/creator-page/showcases",
+  "/api/v1/creator-page/unpublish",
   "/api/v1/me",
+  "/media/[assetId]/[variant]",
   "unmatched",
 ]);
 const allowedWorkerJobNames = new Set(["system.outbox-event", "unsupported"]);
@@ -231,19 +296,58 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "refund", "retention"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention"]);
 const allowedRetentionDatasets = new Set([
   "application_content",
+  "failed_quarantine",
+  "processed_source",
   "provisional_accounts",
+  "ready_unreferenced",
   "receiving_accounts",
   "security_throttles",
   "sessions",
+  "superseded_derivative",
   "verifications",
 ]);
 const allowedRetentionModes = new Set(["enforce", "report_only"]);
 const allowedRetentionDispositions = new Set(["candidate", "failed", "processed", "protected"]);
 const allowedAuthAbuseControls = new Set(["password_sign_in"]);
 const allowedServices = new Set(["web", "worker"]);
+const allowedCatalogOperations = new Set([
+  "draft",
+  "publish",
+  "unpublish",
+  "handle_claim",
+  "handle_rename",
+]);
+const allowedPublicMediaOperations = new Set(["upload", "process", "delivery"]);
+const allowedPublicMediaPurposes = new Set(["avatar", "cover", "showcase"]);
+const allowedPublicMediaVariants = new Set(["master", "thumb", "display", "large", "none"]);
+const allowedPublicMediaOutcomesByOperation = new Map<string, ReadonlySet<string>>([
+  ["upload", allowedStandardOperationOutcomes],
+  ["process", allowedSharedOutcomes],
+  ["delivery", allowedStandardOperationOutcomes],
+]);
+const allowedCreatorDirectorySources = new Set(["canonical", "alias", "unknown"]);
+const allowedPublicContentReportOperations = new Set([
+  "submit",
+  "challenge",
+  "dismiss",
+  "hide",
+  "restore",
+]);
+const allowedPublicReportReasons = new Set([
+  "impersonation",
+  "prohibited_or_age_restricted_content",
+  "harassment_or_hate",
+  "violence_or_self_harm",
+  "privacy",
+  "intellectual_property",
+  "spam_or_scam",
+  "other",
+  "none",
+]);
+const allowedPublicMediaStorageAreas = new Set(["quarantine", "derivative"]);
 
 function rejectUnsafeMetric(): never {
   throw new UnsafeStructuredDataError("metric");
@@ -449,6 +553,19 @@ export function setWorkerScanHealthMetric(input: {
   workerScanHealthy.set({ scan: input.scan }, input.healthy ? 1 : 0);
 }
 
+export function setPublicMediaCleanupOldestEligibleMetric(input: {
+  timestampSeconds: number | null;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    input.timestampSeconds !== null &&
+    (!Number.isFinite(input.timestampSeconds) || input.timestampSeconds < 0)
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicMediaCleanupOldestEligibleTimestampSeconds.set(input.timestampSeconds ?? 0);
+}
+
 export function recordRetentionMetrics(input: {
   dataset: string;
   mode: string;
@@ -504,4 +621,118 @@ export function recordWorkerJobMetrics(input: {
   const labels = { queue: "pawket.system", name: input.name, outcome: input.outcome };
   workerJobsTotal.inc(labels);
   workerJobDurationSeconds.observe(labels, input.durationSeconds);
+}
+
+export function recordCatalogOperation(input: {
+  operation: string;
+  outcome: string;
+}): void {
+  recordClosedOperation(
+    catalogOperationsTotal,
+    input,
+    allowedCatalogOperations,
+    allowedStandardOperationOutcomes,
+  );
+}
+
+export function recordPublicMediaOperation(input: {
+  operation: string;
+  outcome: string;
+  purpose?: string;
+  variant?: string;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  const purpose = input.purpose ?? "none";
+  const variant = input.variant ?? "none";
+  const allowedOutcomes =
+    allowedPublicMediaOutcomesByOperation.get(input.operation) ?? new Set<string>();
+  if (
+    !allowedPublicMediaOperations.has(input.operation) ||
+    !allowedSharedOutcomes.has(input.outcome) ||
+    !allowedOutcomes.has(input.outcome) ||
+    (input.purpose !== undefined && !allowedPublicMediaPurposes.has(input.purpose)) ||
+    (input.variant !== undefined && !allowedPublicMediaVariants.has(input.variant))
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicMediaOperationsTotal.inc({
+    operation: input.operation,
+    outcome: input.outcome,
+    purpose,
+    variant,
+  });
+}
+
+export function recordCreatorDirectoryResolution(input: {
+  source: string;
+  outcome: string;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    !allowedCreatorDirectorySources.has(input.source) ||
+    !allowedSharedOutcomes.has(input.outcome) ||
+    !allowedStandardOperationOutcomes.has(input.outcome)
+  ) {
+    rejectUnsafeMetric();
+  }
+  creatorDirectoryResolutionsTotal.inc({ source: input.source, outcome: input.outcome });
+}
+
+export function recordContentReportOperation(input: {
+  operation: string;
+  outcome: string;
+  reason?: string;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  const reason = input.reason ?? "none";
+  if (
+    !allowedPublicContentReportOperations.has(input.operation) ||
+    !allowedSharedOutcomes.has(input.outcome) ||
+    !allowedStandardOperationOutcomes.has(input.outcome) ||
+    !allowedPublicReportReasons.has(reason)
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicContentReportOperationsTotal.inc({
+    operation: input.operation,
+    outcome: input.outcome,
+    reason,
+  });
+}
+
+export function setPublicMediaProcessingBacklogMetric(input: {
+  oldestPendingSeconds: number;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    !Number.isFinite(input.oldestPendingSeconds) ||
+    input.oldestPendingSeconds < 0
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicMediaOldestPendingSeconds.set(input.oldestPendingSeconds);
+}
+
+export function setPublicContentReportBacklogMetric(input: {
+  oldestOpenSeconds: number;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (
+    !Number.isFinite(input.oldestOpenSeconds) ||
+    input.oldestOpenSeconds < 0
+  ) {
+    rejectUnsafeMetric();
+  }
+  publicContentReportOldestOpenSeconds.set(input.oldestOpenSeconds);
+}
+
+export function setPublicMediaStorageAvailabilityMetric(input: {
+  area: string;
+  available: boolean;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  if (!allowedPublicMediaStorageAreas.has(input.area) || typeof input.available !== "boolean") {
+    rejectUnsafeMetric();
+  }
+  publicMediaStorageAvailable.set({ area: input.area }, input.available ? 1 : 0);
 }

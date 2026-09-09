@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer, type Socket } from "node:net";
 
-import { Queue } from "bullmq";
+import { DelayedError, Queue } from "bullmq";
 
 import {
   afterAll,
@@ -25,22 +25,44 @@ import {
   metricsRegistry,
   type RequestContext,
 } from "@pawket/observability";
+import { PublicMediaWorkerRetryableError } from "@pawket/public-media";
 import {
   createQueueConnection,
+  createMediaQueue,
   createSystemQueue,
   dispatchOutboxBatch,
+  MEDIA_PROCESS_JOB,
   OUTBOX_JOB,
   SYSTEM_QUEUE,
   type SystemOutboxJob,
 } from "@pawket/queue";
 
 import {
+  createMediaJobProcessor,
+  createWorkerJobProcessor,
   startWorker,
   type WorkerRuntimeDependencies,
 } from "../src/worker-runtime.js";
+import { createWorkerHealthState } from "../src/worker-health.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const valkeyUrl = process.env.TEST_VALKEY_URL;
+
+const incrementThreeTerminalEvents = [
+  "creator.page_initialized.v1",
+  "creator.handle_claimed.v1",
+  "creator.handle_renamed.v1",
+  "creator.page_draft_saved.v1",
+  "creator.showcase_upserted.v1",
+  "creator.showcase_removed.v1",
+  "creator.showcase_reordered.v1",
+  "creator.page_published.v1",
+  "creator.page_unpublished.v1",
+  "media.public_asset_ready.v1",
+  "media.public_asset_failed.v1",
+  "trust.public_content_reported.v1",
+  "trust.public_report_triaged.v1",
+] as const;
 
 if (!databaseUrl) {
   throw new Error("TEST_DATABASE_URL is required for worker integration tests");
@@ -98,6 +120,270 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+describe("public media runtime handoff", () => {
+  const logger = { info: vi.fn(), error: vi.fn() };
+
+  function completionJob(assetId = randomUUID()): SystemOutboxJob {
+    return {
+      outboxEventId: randomUUID(),
+      eventType: "media.public_upload_completed.v1",
+      eventVersion: 1,
+      aggregateType: "public_media_asset",
+      aggregateId: assetId,
+      payload: {
+        assetId,
+        ownerUserId: "creator-media-runtime-001",
+        purpose: "showcase",
+      },
+      occurredAt: new Date("2026-08-30T08:00:00.000Z").toISOString(),
+    };
+  }
+
+  test("enqueues the stable media job before acknowledging upload completion", async () => {
+    const calls: string[] = [];
+    const data = completionJob();
+    const mediaQueue = {
+      async add(name: string, jobData: { assetId: string }, options: { jobId: string }) {
+        calls.push("enqueue");
+        expect(name).toBe(MEDIA_PROCESS_JOB);
+        expect(jobData).toEqual({ assetId: data.aggregateId });
+        expect(options.jobId).toBe(data.aggregateId);
+        return { id: options.jobId, data: jobData };
+      },
+    };
+    const acknowledge = vi.fn(async () => {
+      calls.push("acknowledge");
+      return true;
+    });
+    const processor = createWorkerJobProcessor({
+      logger,
+      database: {} as never,
+      acknowledge,
+      mediaQueue,
+    });
+
+    await processor({ id: data.outboxEventId, name: OUTBOX_JOB, data } as never);
+
+    expect(calls).toEqual(["enqueue", "acknowledge"]);
+    expect(acknowledge).toHaveBeenCalledWith(expect.anything(), {
+      eventId: data.outboxEventId,
+    });
+  });
+
+  test("enqueue-before-ack replay uses the same harmless media identity", async () => {
+    const data = completionJob();
+    const jobIds: string[] = [];
+    const mediaQueue = {
+      async add(_name: string, jobData: { assetId: string }, options: { jobId: string }) {
+        jobIds.push(options.jobId);
+        return { id: options.jobId, data: jobData };
+      },
+    };
+    const acknowledge = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("simulated crash before acknowledgement"))
+      .mockResolvedValueOnce(true);
+    const processor = createWorkerJobProcessor({
+      logger,
+      database: {} as never,
+      acknowledge,
+      mediaQueue,
+    });
+    const job = { id: data.outboxEventId, name: OUTBOX_JOB, data } as never;
+
+    await expect(processor(job)).rejects.toThrow("Worker job processing failed");
+    await expect(processor(job)).resolves.toBeUndefined();
+
+    expect(jobIds).toEqual([data.aggregateId, data.aggregateId]);
+    expect(acknowledge).toHaveBeenCalledTimes(2);
+  });
+
+  test("rejects unsafe media completion payloads without enqueue or acknowledgement", async () => {
+    const data = completionJob();
+    data.payload = { ...data.payload, objectKey: "quarantine/private" };
+    const mediaQueue = { add: vi.fn() };
+    const acknowledge = vi.fn();
+    const processor = createWorkerJobProcessor({
+      logger,
+      database: {} as never,
+      acknowledge,
+      mediaQueue,
+    });
+
+    await expect(
+      processor({ id: data.outboxEventId, name: OUTBOX_JOB, data } as never),
+    ).rejects.toThrow("Worker job processing failed");
+    expect(mediaQueue.add).not.toHaveBeenCalled();
+    expect(acknowledge).not.toHaveBeenCalled();
+  });
+
+  test("media job runtime accepts only the exact stable job contract", async () => {
+    const assetId = randomUUID();
+    const processAsset = vi.fn(async () => ({ assetId, state: "ready" as const }));
+    const processor = createMediaJobProcessor({
+      logger,
+      database: {} as never,
+      storage: {} as never,
+      workerId: "runtime-worker:host-one:process-one",
+      processAsset,
+    });
+
+    await processor({
+      id: assetId,
+      name: MEDIA_PROCESS_JOB,
+      data: { assetId },
+    } as never);
+    expect(processAsset).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      assetId,
+      expect.objectContaining({ workerId: "runtime-worker:host-one:process-one" }),
+    );
+
+    await expect(
+      processor({
+        id: randomUUID(),
+        name: MEDIA_PROCESS_JOB,
+        data: { assetId },
+      } as never),
+    ).rejects.toThrow("Invalid public media worker job");
+    expect(processAsset).toHaveBeenCalledTimes(1);
+  });
+
+  test("an active PostgreSQL lease moves the BullMQ job to its exact retry timestamp", async () => {
+    const assetId = randomUUID();
+    const retryAt = new Date("2026-08-30T08:10:00.000Z");
+    const moveToDelayed = vi.fn(async () => undefined);
+    const processor = createMediaJobProcessor({
+      logger,
+      database: {} as never,
+      storage: {} as never,
+      workerId: "runtime-worker:lease-delay",
+      processAsset: vi.fn(async () => {
+        throw new PublicMediaWorkerRetryableError("processing_lease_active", retryAt);
+      }),
+    });
+
+    await expect(
+      processor({
+        id: assetId,
+        name: MEDIA_PROCESS_JOB,
+        data: { assetId },
+        token: "active-lock-token",
+        moveToDelayed,
+      } as never),
+    ).rejects.toBeInstanceOf(DelayedError);
+    expect(moveToDelayed).toHaveBeenCalledOnce();
+    expect(moveToDelayed).toHaveBeenCalledWith(retryAt.getTime(), "active-lock-token");
+  });
+
+  test.each(["missing_token", "lost_lock"] as const)(
+    "lease delay fails closed on %s without reporting completion",
+    async (failureMode) => {
+      const assetId = randomUUID();
+      const moveToDelayed = vi.fn(async () => {
+        if (failureMode === "lost_lock") throw new Error("dummy-secret-lock-error");
+      });
+      const processor = createMediaJobProcessor({
+        logger,
+        database: {} as never,
+        storage: {} as never,
+        workerId: "runtime-worker:lease-delay-failure",
+        processAsset: vi.fn(async () => {
+          throw new PublicMediaWorkerRetryableError(
+            "processing_lease_active",
+            new Date("2026-08-30T08:10:00.000Z"),
+          );
+        }),
+      });
+
+      await expect(
+        processor({
+          id: assetId,
+          name: MEDIA_PROCESS_JOB,
+          data: { assetId },
+          ...(failureMode === "missing_token" ? {} : { token: "expired-lock-token" }),
+          moveToDelayed,
+        } as never),
+      ).rejects.toThrow("Public media worker delay failed");
+      if (failureMode === "missing_token") expect(moveToDelayed).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("Increment 3 terminal outbox events", () => {
+  test.each(incrementThreeTerminalEvents)(
+    "acknowledges %s exactly once without dispatching email or media work",
+    async (eventType) => {
+      // Break caught: a terminal catalog/media/trust event remains pending or accidentally fans out.
+      const acknowledge = vi.fn(async () => true);
+      const mediaQueue = { add: vi.fn() };
+      const deliver = vi.fn();
+      const materialize = vi.fn();
+      const outboxEventId = randomUUID();
+      const processor = createWorkerJobProcessor({
+        logger: { info: vi.fn(), error: vi.fn() },
+        database: {} as never,
+        acknowledge,
+        mediaQueue,
+        securityEmail: {
+          keyring: {} as never,
+          sender: {} as never,
+          deliver,
+          materialize,
+        },
+      });
+      const data: SystemOutboxJob = {
+        outboxEventId,
+        eventType,
+        eventVersion: 1,
+        aggregateType: "increment_three_acceptance",
+        aggregateId: randomUUID(),
+        payload: {},
+        occurredAt: new Date("2026-09-03T00:00:00.000Z").toISOString(),
+      };
+
+      await processor({ id: outboxEventId, name: OUTBOX_JOB, data } as never);
+
+      expect(acknowledge).toHaveBeenCalledTimes(1);
+      expect(acknowledge).toHaveBeenCalledWith(expect.anything(), {
+        eventId: outboxEventId,
+      });
+      expect(mediaQueue.add).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(materialize).not.toHaveBeenCalled();
+    },
+  );
+
+  test("rejects a catalog-prefixed unknown without acknowledging or dispatching", async () => {
+    // Break caught: a prefix match silently acknowledges a future event without an explicit review.
+    const acknowledge = vi.fn(async () => true);
+    const mediaQueue = { add: vi.fn() };
+    const processor = createWorkerJobProcessor({
+      logger: { info: vi.fn(), error: vi.fn() },
+      database: {} as never,
+      acknowledge,
+      mediaQueue,
+    });
+    const outboxEventId = randomUUID();
+    const data: SystemOutboxJob = {
+      outboxEventId,
+      eventType: "creator.catalog_unknown.v1",
+      eventVersion: 1,
+      aggregateType: "creator_page",
+      aggregateId: randomUUID(),
+      payload: {},
+      occurredAt: new Date("2026-09-03T00:00:00.000Z").toISOString(),
+    };
+
+    await expect(
+      processor({ id: outboxEventId, name: OUTBOX_JOB, data } as never),
+    ).rejects.toThrow("Unsupported outbox event type");
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(mediaQueue.add).not.toHaveBeenCalled();
+  });
+});
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (!predicate()) {
@@ -109,7 +395,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 }
 
 async function waitForJobState(
-  queue: ReturnType<typeof createSystemQueue>,
+  queue: ReturnType<typeof createSystemQueue> | ReturnType<typeof createMediaQueue>,
   jobId: string,
   expectedState: string,
 ): Promise<void> {
@@ -393,6 +679,7 @@ describe("worker runtime integration", () => {
   const runtimeUrl = isolatedValkeyUrl(valkeyUrl, 12);
   const inspectionConnection = createQueueConnection(runtimeUrl);
   const inspectionQueue = createSystemQueue(inspectionConnection);
+  const inspectionMediaQueue = createMediaQueue(inspectionConnection);
   const handles: Array<{ stop(): Promise<void> }> = [];
 
   beforeAll(async () => {
@@ -403,10 +690,12 @@ describe("worker runtime integration", () => {
     await Promise.all(handles.splice(0).map((handle) => handle.stop()));
     await db.delete(systemOutbox);
     await inspectionQueue.obliterate({ force: true });
+    await inspectionMediaQueue.obliterate({ force: true });
   });
 
   afterAll(async () => {
     await inspectionQueue.close();
+    await inspectionMediaQueue.close();
     await inspectionConnection.quit();
     await database.close();
   });
@@ -473,6 +762,56 @@ describe("worker runtime integration", () => {
     const metricsAfter = await workerMetricSnapshot("completed");
     expect(metricsAfter.jobs - metricsBefore.jobs).toBe(1);
     expect(metricsAfter.durations - metricsBefore.durations).toBe(1);
+  });
+
+  test("the eighth caught media failure completes in BullMQ without a ninth call", async () => {
+    const assetId = randomUUID();
+    const observedWorkerIds: string[] = [];
+    const processMediaAsset = vi.fn<WorkerRuntimeDependencies["processMediaAsset"]>(
+      async (_database, _storage, observedAssetId, processOptions) => {
+        expect(observedAssetId).toBe(assetId);
+        observedWorkerIds.push(processOptions.workerId ?? "");
+        if (observedWorkerIds.length < 8) throw new Error("simulated caught media failure");
+        return { assetId, state: "failed", failureCode: "processing_error" };
+      },
+    );
+    const workerUuid = "11111111-1111-4111-8111-111111111111";
+    const handle = await startWorker({
+      databaseUrl,
+      valkeyUrl: runtimeUrl,
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: new EventEmitter(),
+      publicMedia: { storage: {} as never, concurrency: 1 },
+      dependencies: {
+        processMediaAsset,
+        hostname: () => "media-runtime-host",
+        randomUUID: () => workerUuid,
+      },
+      logger: { info() {}, error() {} },
+    });
+    handles.push(handle);
+    await inspectionMediaQueue.add(
+      MEDIA_PROCESS_JOB,
+      { assetId },
+      {
+        jobId: assetId,
+        attempts: 8,
+        backoff: { type: "fixed", delay: 1 },
+        removeOnComplete: false,
+        removeOnFail: false,
+      },
+    );
+
+    await waitForJobState(inspectionMediaQueue, assetId, "completed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(processMediaAsset).toHaveBeenCalledTimes(8);
+    expect(new Set(observedWorkerIds)).toEqual(
+      new Set([`media-runtime-host:${workerUuid}`]),
+    );
+    expect((await inspectionMediaQueue.getJob(assetId))?.attemptsMade).toBe(8);
   });
 
   test("a lost Valkey job is redispatched after lease expiry and acknowledged after handling", async () => {
@@ -945,6 +1284,17 @@ describe("worker shutdown", () => {
               }),
           };
         },
+        createMediaQueue: () => {
+          acquisitions.push("media-queue");
+          return {
+            close: async () => {
+              calls.push("media-queue");
+            },
+            disconnect: async () => {
+              calls.push("media-queue-force");
+            },
+          };
+        },
         createWorker: () => {
           if (options.throwAt === "worker") {
             throw new Error("dummy-secret-worker-factory");
@@ -963,12 +1313,201 @@ describe("worker shutdown", () => {
               }),
           };
         },
+        createMediaWorker: () => {
+          acquisitions.push("media-worker");
+          return {
+            close: async () => {
+              calls.push("media-worker");
+            },
+            disconnect: async () => {
+              calls.push("media-worker-force");
+            },
+          };
+        },
+        processMediaAsset: vi.fn(),
         hostname: options.hostname ?? (() => "test-worker-host"),
         randomUUID: options.randomUUID ?? (() => randomUUID()),
         dispatch,
       } as unknown as Partial<WorkerRuntimeDependencies>,
     };
   }
+
+  test("public-media runtime acquires and closes its worker before shared resources", async () => {
+    const doubles = runtimeDoubles();
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: doubles.signalSource,
+      dependencies: doubles.dependencies,
+      publicMedia: { storage: {} as never, concurrency: 2 },
+    });
+
+    await handle.stop();
+
+    expect(doubles.acquisitions).toEqual([
+      "postgres",
+      "producer-valkey",
+      "worker-valkey",
+      "queue",
+      "media-queue",
+      "worker",
+      "media-worker",
+    ]);
+    expect(doubles.calls).toEqual([
+      "media-worker",
+      "worker",
+      "media-queue",
+      "queue",
+      "producer-valkey",
+      "worker-valkey",
+      "postgres",
+    ]);
+  });
+
+  test("runs bounded public-media cleanup scans periodically and records freshness", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const doubles = runtimeDoubles();
+    const healthState = createWorkerHealthState();
+    const oldestEligibleAt = new Date("2026-08-20T00:00:00.000Z");
+    const cleanupCalls: unknown[] = [];
+    const runMediaCleanup = vi.fn(async (input: unknown) => {
+      cleanupCalls.push(input);
+      return {
+        results: [],
+        counts: {
+          processed_source: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+          failed_quarantine: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+          ready_unreferenced: { candidate: 1, protected: 1, processed: 0, failed: 0 },
+          superseded_derivative: { candidate: 0, protected: 0, processed: 0, failed: 0 },
+        },
+        candidateCount: 1,
+        protectedCount: 1,
+        processedCount: 0,
+        failedCount: 0,
+        oldestEligibleAt,
+      };
+    });
+    const dependencies = {
+      ...doubles.dependencies,
+      scanRefundWindows: vi.fn(async () => ({
+        dueSoon: 0,
+        dueToday: 0,
+        overdue: 0,
+        attention: 0,
+        outstandingAmountVnd: 0,
+      })),
+      readBacklogMetrics: vi.fn(async () => ({
+        outbox: { pending: 0, oldestAgeSeconds: 0 },
+        email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+        publicMedia: { oldestPendingSeconds: 0 },
+        publicContentReports: { oldestOpenSeconds: 0 },
+      })),
+      runMediaCleanup,
+    } as Partial<WorkerRuntimeDependencies>;
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: doubles.signalSource,
+      dependencies,
+      healthState,
+      publicMediaCleanup: {
+        mode: "report_only",
+        retentionMode: "report_only",
+        globalPause: false,
+        batchSize: 25,
+        scanIntervalMs: 60_000,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls[0]).toEqual(expect.objectContaining({
+      mode: "report_only",
+      retentionMode: "report_only",
+      globalPause: false,
+      batchSize: 25,
+    }));
+    expect(cleanupCalls[0]).not.toHaveProperty("storage");
+    expect(cleanupCalls[0]).not.toHaveProperty("holds");
+    expect(healthState.lastPublicMediaCleanupScanSucceededAt).toBe(Date.now());
+    expect(healthState.oldestPublicMediaCleanupCandidateAt).toBe(oldestEligibleAt.getTime());
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(cleanupCalls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cleanupCalls).toHaveLength(2);
+
+    await handle.stop();
+  });
+
+  test("marks public-media cleanup failure unhealthy without logging provider secrets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const doubles = runtimeDoubles();
+    const healthState = createWorkerHealthState();
+    const logOutput: string[] = [];
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1,
+      batchSize: 10,
+      leaseMs: 30_000,
+      signalSource: doubles.signalSource,
+      dependencies: {
+        ...doubles.dependencies,
+        scanRefundWindows: vi.fn(async () => ({
+          dueSoon: 0,
+          dueToday: 0,
+          overdue: 0,
+          attention: 0,
+          outstandingAmountVnd: 0,
+        })),
+        readBacklogMetrics: vi.fn(async () => ({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          publicMedia: { oldestPendingSeconds: 0 },
+          publicContentReports: { oldestOpenSeconds: 0 },
+        })),
+        runMediaCleanup: vi.fn(async () => {
+          throw new Error("dummy-secret-source-key-version");
+        }),
+      } as Partial<WorkerRuntimeDependencies>,
+      healthState,
+      logger: {
+        info() {},
+        error(data, message) {
+          logOutput.push(JSON.stringify({ data, message }));
+        },
+      },
+      publicMedia: {
+        storage: {} as never,
+        concurrency: 2,
+        cleanup: {
+          holds: { protectedAssetIds: vi.fn(async () => new Set<string>()) },
+          mode: "report_only",
+          retentionMode: "report_only",
+          globalPause: false,
+          batchSize: 25,
+          scanIntervalMs: 60_000,
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await handle.stop();
+
+    expect(healthState.publicMediaCleanupConfigured).toBe(true);
+    expect(healthState.lastPublicMediaCleanupScanSucceededAt).toBeNull();
+    expect(logOutput.join("\n")).toContain("public_media_cleanup_scan_failed");
+    expect(logOutput.join("\n")).not.toContain("dummy-secret-source-key-version");
+  });
 
   test("SIGTERM stops polling and closes BullMQ before Valkey and PostgreSQL", async () => {
     vi.useFakeTimers();

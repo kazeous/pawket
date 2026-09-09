@@ -1,10 +1,12 @@
-import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, min, ne, sql } from "drizzle-orm";
 
 import type { PawketDatabase, PawketTransaction } from "./client.js";
 import {
   identityEmailHandoffs,
   identityUsers,
   paymentsVerificationDepositRefundObligations,
+  publicContentReports,
+  publicMediaAssets,
   systemOutbox,
 } from "./schema.js";
 
@@ -18,18 +20,20 @@ export async function readOperationalBacklogMetrics(
 ): Promise<{
   outbox: { pending: number; oldestAgeSeconds: number };
   email: { pending: number; oldestAgeSeconds: number; attention: number };
+  publicMedia: { oldestPendingSeconds: number };
+  publicContentReports: { oldestOpenSeconds: number };
 }> {
   const [outbox] = await db
     .select({
       pending: sql<number>`count(*)::int`,
-      oldest: sql<Date | null>`min(${systemOutbox.occurredAt})`,
+      oldest: min(systemOutbox.occurredAt),
     })
     .from(systemOutbox)
     .where(isNull(systemOutbox.publishedAt));
   const [email] = await db
     .select({
       pending: sql<number>`count(*) filter (where ${identityEmailHandoffs.sentAt} is null and ${identityEmailHandoffs.status} <> 'attention_required')::int`,
-      oldest: sql<Date | null>`min(${identityEmailHandoffs.createdAt}) filter (where ${identityEmailHandoffs.sentAt} is null and ${identityEmailHandoffs.status} <> 'attention_required')`,
+      oldest: sql<Date | null>`min(${identityEmailHandoffs.createdAt}) filter (where ${identityEmailHandoffs.sentAt} is null and ${identityEmailHandoffs.status} <> 'attention_required')`.mapWith(identityEmailHandoffs.createdAt),
       attention: sql<number>`count(*) filter (where ${identityEmailHandoffs.status} = 'attention_required')::int`,
     })
     .from(identityEmailHandoffs)
@@ -39,6 +43,14 @@ export async function readOperationalBacklogMetrics(
         ne(identityEmailHandoffs.status, "sent"),
       ),
     );
+  const [publicMedia] = await db
+    .select({ oldest: min(publicMediaAssets.createdAt) })
+    .from(publicMediaAssets)
+    .where(inArray(publicMediaAssets.state, ["pending", "processing"]));
+  const [publicReports] = await db
+    .select({ oldest: min(publicContentReports.createdAt) })
+    .from(publicContentReports)
+    .where(eq(publicContentReports.state, "open"));
 
   return {
     outbox: {
@@ -49,6 +61,12 @@ export async function readOperationalBacklogMetrics(
       pending: email?.pending ?? 0,
       oldestAgeSeconds: ageSeconds(now, email?.oldest ?? null),
       attention: email?.attention ?? 0,
+    },
+    publicMedia: {
+      oldestPendingSeconds: ageSeconds(now, publicMedia?.oldest ?? null),
+    },
+    publicContentReports: {
+      oldestOpenSeconds: ageSeconds(now, publicReports?.oldest ?? null),
     },
   };
 }

@@ -11,5 +11,6 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   target: "node24",
-  noExternal: [/.*/],
+  external: ["sharp"],
+  noExternal: [/^(?!sharp(?:\/|$)).*/u],
 });

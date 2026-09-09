@@ -12,6 +12,13 @@ export const RETENTION_DATASETS = [
   "security_throttles",
 ] as const;
 
+export const INCREMENT_THREE_RETENTION_DATASETS = [
+  { name: "public_media_processed_source", defaultMode: "report_only", ageHours: 24 },
+  { name: "public_media_failed_quarantine", defaultMode: "report_only", ageHours: 168 },
+  { name: "public_media_ready_unreferenced", defaultMode: "report_only", ageHours: 720 },
+  { name: "public_media_superseded_derivative", defaultMode: "report_only", ageHours: 4_320 },
+] as const;
+
 export type RetentionDataset = (typeof RETENTION_DATASETS)[number];
 export type RetentionMode = "report_only" | "enforce";
 

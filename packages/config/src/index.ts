@@ -6,6 +6,12 @@ import {
   resolveIncrementTwoEnv,
   type IncrementTwoServerEnv,
 } from "@pawket/config/increment-two";
+import {
+  incrementThreeEnvShape,
+  IncrementThreeConfigError,
+  resolveIncrementThreeEnv,
+  type IncrementThreeServerEnv,
+} from "@pawket/config/increment-three";
 
 const operationalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 
@@ -72,14 +78,15 @@ const serverEnvSchema = z.object({
   OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: optionalBoundedReference,
   OWNER_MFA_RECOVERY_REHEARSED_AT: optionalOffsetTimestamp,
   ...incrementTwoEnvShape,
+  ...incrementThreeEnvShape,
 });
 
 type ParsedServerEnv = z.infer<typeof serverEnvSchema>;
 export type ServerEnv = Omit<
   ParsedServerEnv,
-  keyof IncrementTwoServerEnv | "APP_BUILD_REVISION"
+  keyof IncrementTwoServerEnv | keyof IncrementThreeServerEnv | "APP_BUILD_REVISION"
 > &
-  IncrementTwoServerEnv & { APP_BUILD_REVISION: string };
+  IncrementTwoServerEnv & IncrementThreeServerEnv & { APP_BUILD_REVISION: string };
 
 const exactSourceRevision = /^[0-9a-f]{40}$/u;
 
@@ -143,6 +150,7 @@ export function parseServerEnv(
 
   try {
     const incrementTwo = resolveIncrementTwoEnv(parsed.data, parsed.data.APP_ENV);
+    const incrementThree = resolveIncrementThreeEnv(parsed.data, parsed.data.APP_ENV);
     if (
       (parsed.data.APP_ENV === "production" || parsed.data.APP_ENV === "staging") &&
       parsed.data.NODE_ENV !== "production"
@@ -218,10 +226,11 @@ export function parseServerEnv(
     return {
       ...parsed.data,
       ...incrementTwo,
+      ...incrementThree,
       APP_BUILD_REVISION: buildRevision,
     } as ServerEnv;
   } catch (error) {
-    if (error instanceof IncrementTwoConfigError) {
+    if (error instanceof IncrementTwoConfigError || error instanceof IncrementThreeConfigError) {
       throw new Error(`Invalid server environment: ${error.message}`);
     }
     throw error;

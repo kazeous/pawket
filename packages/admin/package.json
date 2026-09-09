@@ -17,6 +17,7 @@
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
+    "@pawket/catalog": "workspace:*",
     "postgres": "3.4.9"
   }
 }

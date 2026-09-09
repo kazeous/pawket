@@ -61,6 +61,28 @@ async function fakeDocker() {
   return { directory, log, nodeOptions };
 }
 
+const REQUIRED_INCREMENT_THREE_ALERTS = [
+  "PawketPublicMediaProcessingStuck",
+  "PawketPublicMediaTerminalFailures",
+  "PawketPublicMediaStorageUnavailable",
+  "PawketPublicMediaCleanupFailures",
+  "PawketPublicContentReportQueueOld",
+  "PawketIncrementThreeWorkerScanUnhealthy",
+] as const;
+
+function parseAlertBlocks(source: string) {
+  return source
+    .split(/(?=^      - alert: )/mu)
+    .slice(1)
+    .map((block) => ({
+      name: /^      - alert: ([A-Za-z][A-Za-z0-9]+)$/mu.exec(block)?.[1] ?? null,
+      expression: /^        expr: (.+)$/mu.exec(block)?.[1] ?? null,
+      duration: /^        for: (\S+)$/mu.exec(block)?.[1] ?? null,
+      severity: /^          severity: (\S+)$/mu.exec(block)?.[1] ?? null,
+      runbook: /^          runbook: (\S+)$/mu.exec(block)?.[1] ?? null,
+    }));
+}
+
 describe("Pawket alert rules", () => {
   test("use safe labels and link existing runbooks", async () => {
     const source = await readFile(rulesUrl, "utf8");
@@ -68,7 +90,7 @@ describe("Pawket alert rules", () => {
     const expressions = [...source.matchAll(/^        expr: (.+)$/gmu)];
     const severities = [...source.matchAll(/^          severity: (warning|critical)$/gmu)];
     const runbooks = [...source.matchAll(/^          runbook: (ops\/runbooks\/[a-z0-9-]+[.]md)$/gmu)];
-    expect(alerts.length).toBeGreaterThanOrEqual(13);
+    expect(alerts.length).toBeGreaterThanOrEqual(23);
     expect(expressions).toHaveLength(alerts.length);
     expect(severities).toHaveLength(alerts.length);
     expect(runbooks).toHaveLength(alerts.length);
@@ -82,6 +104,45 @@ describe("Pawket alert rules", () => {
         access(new URL(`../../../${runbook}`, import.meta.url)),
       ).resolves.toBeUndefined();
     }
+  });
+
+  test("required Increment 3 alerts and runbook annotations exist", async () => {
+    // Catches shipping Increment 3 without the approved media, storage, cleanup, report, and worker alerts.
+    const source = await readFile(rulesUrl, "utf8");
+    const alerts = parseAlertBlocks(source);
+    const alertNames = alerts.map((alert) => alert.name);
+
+    expect(alertNames).toEqual(expect.arrayContaining([...REQUIRED_INCREMENT_THREE_ALERTS]));
+
+    for (const required of REQUIRED_INCREMENT_THREE_ALERTS) {
+      const alert = alerts.find((candidate) => candidate.name === required);
+      expect(alert?.severity, required).toMatch(/^(?:warning|critical)$/u);
+      expect(alert?.runbook, required).toMatch(/^ops\/runbooks\/[a-z0-9-]+[.]md$/u);
+      await expect(
+        access(new URL(`../../../${alert?.runbook ?? "missing"}`, import.meta.url)),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  test("separates five-minute worker availability from cleanup scan freshness", async () => {
+    // Catches the critical alert waiting a full cleanup interval or depending on a
+    // last-success series that does not exist before the first successful scan.
+    const alerts = parseAlertBlocks(await readFile(rulesUrl, "utf8"));
+    const worker = alerts.find(
+      (alert) => alert.name === "PawketIncrementThreeWorkerScanUnhealthy",
+    );
+    const cleanup = alerts.find(
+      (alert) => alert.name === "PawketPublicMediaCleanupFailures",
+    );
+
+    expect(worker).toMatchObject({
+      expression: 'pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0 or absent(pawket_worker_scan_healthy{scan="public_media_cleanup"}) or (time() - pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} >= 21600)',
+      duration: "5m",
+    });
+    expect(cleanup).toMatchObject({
+      expression: 'pawket_worker_scan_healthy{scan="public_media_cleanup"} == 0',
+      duration: "6h5m",
+    });
   });
 
   test("validates rules and fixtures through the pinned promtool image in order", async () => {

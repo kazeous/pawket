@@ -37,6 +37,12 @@ async function expectCreatorHead(
 ): Promise<void> {
   const [tables] = await client<{
     applications: string | null;
+    catalogPages: string | null;
+    catalogRevisions: string | null;
+    mediaAssets: string | null;
+    mediaIntents: string | null;
+    mediaDerivatives: string | null;
+    mediaAttempts: string | null;
     revisions: string | null;
     attestations: string | null;
     decisions: string | null;
@@ -44,6 +50,12 @@ async function expectCreatorHead(
   }[]>`
     select
       to_regclass('creator_applications')::text as applications,
+      to_regclass('creator_pages')::text as "catalogPages",
+      to_regclass('creator_publication_revisions')::text as "catalogRevisions",
+      to_regclass('public_media_assets')::text as "mediaAssets",
+      to_regclass('public_media_upload_intents')::text as "mediaIntents",
+      to_regclass('public_media_derivatives')::text as "mediaDerivatives",
+      to_regclass('public_media_processing_attempts')::text as "mediaAttempts",
       to_regclass('creator_application_revisions')::text as revisions,
       to_regclass('creator_application_attestations')::text as attestations,
       to_regclass('creator_application_decisions')::text as decisions,
@@ -51,6 +63,12 @@ async function expectCreatorHead(
   `;
   expect(tables).toEqual({
     applications: "creator_applications",
+    catalogPages: "creator_pages",
+    catalogRevisions: "creator_publication_revisions",
+    mediaAssets: "public_media_assets",
+    mediaIntents: "public_media_upload_intents",
+    mediaDerivatives: "public_media_derivatives",
+    mediaAttempts: "public_media_processing_attempts",
     revisions: "creator_application_revisions",
     attestations: "creator_application_attestations",
     decisions: "creator_application_decisions",
@@ -179,7 +197,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(20);
+  expect(journal?.count).toBe(24);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -248,6 +266,139 @@ describe("configured Drizzle creator migrator", () => {
     } finally {
       await client.end();
       await rm(through0006, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 19 to creator catalog index 20", async () => {
+    // Break caught: a catalog migration runs in a blank database but is skipped after a deployed 0019 database.
+    const { client, schemaName, journalSchema } = await createIsolatedClient("catalog-upgrade");
+    const through0019 = await createMigrationsThrough(19);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0019, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(20);
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass(${`${schemaName}.creator_pages`})::text as name`,
+      ).resolves.toEqual([{ name: null }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ name: string | null }[]>`select to_regclass('creator_pages')::text as name`,
+      ).resolves.toEqual([{ name: "creator_pages" }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(24);
+    } finally {
+      await client.end();
+      await rm(through0019, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 20 to public media index 21", async () => {
+    // Break caught: the media migration exists on disk but is skipped after a deployed catalog head.
+    const { client, schemaName, journalSchema } = await createIsolatedClient("media-upgrade");
+    const through0020 = await createMigrationsThrough(20);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0020, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(21);
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_media_assets`}) is not null as present`,
+      ).resolves.toEqual([{ present: false }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_media_assets`}) is not null as present`,
+      ).resolves.toEqual([{ present: true }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(24);
+    } finally {
+      await client.end();
+      await rm(through0020, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 21 to public trust index 22", async () => {
+    const { client, schemaName, journalSchema } = await createIsolatedClient("trust-upgrade");
+    const through0021 = await createMigrationsThrough(21);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0021, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(22);
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_content_reports`}) is not null as present`,
+      ).resolves.toEqual([{ present: false }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      await expect(
+        client<{ present: boolean }[]>`select to_regclass(${`${schemaName}.public_content_reports`}) is not null as present`,
+      ).resolves.toEqual([{ present: true }]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(24);
+    } finally {
+      await client.end();
+      await rm(through0021, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades the configured journal from index 22 to final guard index 23", async () => {
+    // Break caught: migration 0023 works on a blank database but is skipped or conflicts when upgrading deployed 0022.
+    const { client, schemaName, journalSchema } = await createIsolatedClient("guard-upgrade");
+    const through0022 = await createMigrationsThrough(22);
+    try {
+      await migrate(drizzle(client), { migrationsFolder: through0022, migrationsSchema: journalSchema });
+      const [before] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(before?.count).toBe(23);
+      await expect(
+        client<{ present: boolean }[]>`
+          select exists (
+            select 1 from pg_trigger
+            where tgrelid = ${`${schemaName}.public_media_assets`}::regclass
+              and tgname = 'public_media_cleanup_hold_guard'
+              and not tgisinternal
+          ) as present`,
+      ).resolves.toEqual([{ present: false }]);
+
+      await migrate(drizzle(client), { migrationsFolder, migrationsSchema: journalSchema });
+      const triggers = await client<{ tgname: string; count: number }[]>`
+        select tgname, count(*)::int as count from pg_trigger
+        where not tgisinternal and tgrelid in (
+          ${`${schemaName}.creator_publication_showcases`}::regclass,
+          ${`${schemaName}.creator_publication_media`}::regclass,
+          ${`${schemaName}.public_media_processing_attempts`}::regclass,
+          ${`${schemaName}.public_media_assets`}::regclass
+        ) and tgname in (
+          'creator_publication_showcases_append_only',
+          'creator_publication_media_append_only',
+          'public_media_attempts_one_way_close',
+          'public_media_cleanup_hold_guard'
+        ) group by tgname order by tgname`;
+      expect(triggers).toEqual([
+        { tgname: "creator_publication_media_append_only", count: 1 },
+        { tgname: "creator_publication_showcases_append_only", count: 1 },
+        { tgname: "public_media_attempts_one_way_close", count: 1 },
+        { tgname: "public_media_cleanup_hold_guard", count: 1 },
+      ]);
+      const [after] = await client.unsafe<{ count: number }[]>(
+        `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
+      );
+      expect(after?.count).toBe(24);
+    } finally {
+      await client.end();
+      await rm(through0022, { recursive: true, force: true });
     }
   });
 

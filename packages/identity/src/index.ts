@@ -2,6 +2,7 @@ export const identityConformanceCandidate = "better-auth@1.7.1";
 
 export * from "./core-identity-policy.js";
 export * from "./creator-application-policy.js";
+export * from "./creator-catalog-port.js";
 export * from "./creator-receiving-account-reference.js";
 export * from "./creator-application-service.js";
 export * from "./creator-application-http.js";

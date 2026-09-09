@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -12,14 +13,18 @@
     "@fontsource/chivo": "5.3.0",
     "@node-rs/argon2": "2.1.0",
     "@pawket/admin": "workspace:*",
+    "@pawket/catalog": "workspace:*",
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/identity": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/payments": "workspace:*",
+    "@pawket/public-media": "workspace:*",
     "@pawket/queue": "workspace:*",
     "@pawket/security": "workspace:*",
-    "next": "16.3.2",
+    "@pawket/trust": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "next": "16.3.3",
     "qrcode.react": "4.2.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

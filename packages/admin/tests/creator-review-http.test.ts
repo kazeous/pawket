@@ -101,6 +101,8 @@ describe("creator review HTTP boundary", () => {
 
     const allowed = await handlers.setCapability(new Request(`${origin}/capability`, { method: "POST", headers: { origin, "content-type": "application/json", "idempotency-key": "suspend-one" }, body: capabilityBody }), "review-artist");
     expect(allowed.status).toBe(200);
+    // Compatibility guard: publication-transition internals must not change the legacy Admin HTTP payload.
+    await expect(allowed.json()).resolves.toEqual({ capability: { state: "suspended" } });
     expect(issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass: "owner.creator_capability_suspend" }));
     expect(review.setCreatorCapability).toHaveBeenCalledWith(expect.objectContaining({ userId: "review-artist", action: "suspend", stepUpProofId: "server-proof:owner.creator_capability_suspend" }));
   });

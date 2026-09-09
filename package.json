@@ -11,6 +11,7 @@
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
     "recover:owner-mfa": "tsx scripts/recover-owner-mfa.ts",
     "docker:context:validate": "node scripts/validate-docker-context.mjs",
+    "increment-three:validate": "node scripts/validate-increment-three-release.mjs",
     "licenses:validate": "pnpm licenses list --prod --json | node scripts/validate-production-license-inventory.mjs",
     "dev": "pnpm --parallel --filter @pawket/web --filter @pawket/worker dev",
     "build": "pnpm -r --if-present build && pnpm build:ops",
@@ -19,7 +20,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:browser": "playwright test --config apps/web/playwright.config.ts",
+    "test:browser": "pnpm --filter @pawket/web build && pnpm --filter @pawket/worker build && playwright test --config apps/web/playwright.config.ts && playwright test --config apps/web/playwright.increment-three-disabled.config.ts && playwright test --config apps/web/playwright.increment-three.config.ts",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
   "devDependencies": {
@@ -31,7 +32,7 @@
     "@types/react-dom": "19.2.4",
     "@vitest/coverage-v8": "4.1.11",
     "eslint": "10.9.0",
-    "eslint-config-next": "16.3.2",
+    "eslint-config-next": "16.3.3",
     "tsup": "8.5.1",
     "tsx": "4.23.12",
     "typescript": "5.9.3",

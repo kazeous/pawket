@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import {
   recordAuthOperation,
+  recordCatalogOperation,
+  recordContentReportOperation,
   recordCreatorOperation,
   recordHttpRequestMetrics,
+  recordPublicMediaOperation,
   recordReceivingProofOperation,
   recordRefundOperation,
 } from "@pawket/observability/metrics";
@@ -12,6 +15,15 @@ import { withRequestContext } from "@pawket/observability/request-context";
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const MAX_REQUEST_ID_LENGTH = 128;
 const MAX_BUSINESS_METRIC_BODY_BYTES = 8_192;
+
+type DynamicRouteParameters<Path extends string> =
+  Path extends `${string}[${infer Parameter}]${infer Rest}`
+    ? Record<Parameter, string> & DynamicRouteParameters<Rest>
+    : Record<never, never>;
+
+export type RouteContext<Path extends string> = Readonly<{
+  params: Promise<DynamicRouteParameters<Path>>;
+}>;
 
 export function trustedRequestId(incomingRequestId: string | null): string {
   if (
@@ -25,9 +37,24 @@ export function trustedRequestId(incomingRequestId: string | null): string {
   return randomUUID();
 }
 
-function boundedRoute(pathname: string): string {
+const uploadCompletionRoute = /^\/api\/v1\/creator-page\/media\/uploads\/[^/]+\/complete$/u;
+const reportTriageRoute = /^\/api\/v1\/admin\/content-reports\/[^/]+$/u;
+const mediaDeliveryRoute = /^\/media\/[^/]+\/[^/]+$/u;
+
+export function boundedRoute(pathname: string): string {
   if (pathname === "/" || pathname === "/api/metrics") return pathname;
   if (pathname === "/api/health/live" || pathname === "/api/health/ready") return pathname;
+  if (pathname === "/api/v1/creator-page") return pathname;
+  if (pathname === "/api/v1/creator-page/handle") return pathname;
+  if (pathname === "/api/v1/creator-page/showcases") return pathname;
+  if (pathname === "/api/v1/creator-page/publish") return pathname;
+  if (pathname === "/api/v1/creator-page/unpublish") return pathname;
+  if (pathname === "/api/v1/creator-page/media/uploads") return pathname;
+  if (uploadCompletionRoute.test(pathname)) return "/api/v1/creator-page/media/uploads/[intentId]/complete";
+  if (pathname === "/api/v1/content-reports" || pathname === "/api/v1/content-reports/challenge") return pathname;
+  if (pathname === "/api/v1/admin/content-reports") return pathname;
+  if (reportTriageRoute.test(pathname)) return "/api/v1/admin/content-reports/[reportId]";
+  if (mediaDeliveryRoute.test(pathname)) return "/media/[assetId]/[variant]";
   if (pathname.startsWith("/api/auth/")) return "/api/auth";
   if (pathname.startsWith("/api/v1/admin/")) return "/api/v1/admin";
   if (pathname.startsWith("/api/v1/auth/")) return "/api/v1/auth";
@@ -40,7 +67,27 @@ type BusinessOperation =
   | { domain: "auth"; operation: "registration" | "verification" | "login" | "oauth_callback" | "reset" | "mfa" | "session" | "security_change" }
   | { domain: "creator"; operation: "draft" | "submit" | "withdraw" | "changes_requested" | "approve" | "reject" | "reopen" | "suspend" | "reinstate" }
   | { domain: "receiving_proof"; operation: "challenge" | "report" | "matched" | "unmatched" }
-  | { domain: "refund"; operation: "window" | "sent" | "attention_required" };
+  | { domain: "refund"; operation: "window" | "sent" | "attention_required" }
+  | { domain: "catalog"; operation: "draft" | "publish" | "unpublish" | "handle_claim" | "handle_rename" }
+  | {
+      domain: "public_media";
+      operation: "upload" | "delivery";
+      purpose?: "avatar" | "cover" | "showcase";
+      variant?: "master" | "thumb" | "display" | "large";
+    }
+  | {
+      domain: "content_report";
+      operation: "submit" | "challenge" | "dismiss" | "hide" | "restore";
+      reason?:
+        | "impersonation"
+        | "prohibited_or_age_restricted_content"
+        | "harassment_or_hate"
+        | "violence_or_self_harm"
+        | "privacy"
+        | "intellectual_property"
+        | "spam_or_scam"
+        | "other";
+    };
 
 type BusinessOutcome = "succeeded" | "rejected" | "retryable_failure" | "attention_required";
 
@@ -54,26 +101,43 @@ export function recordBusinessOperationOutcome(
   input: BusinessOperation,
   outcome: BusinessOutcome,
 ): void {
-  const metric = { operation: input.operation, outcome };
   switch (input.domain) {
     case "auth":
-      recordAuthOperation(metric);
+      recordAuthOperation({ operation: input.operation, outcome });
       break;
     case "creator":
-      recordCreatorOperation(metric);
+      recordCreatorOperation({ operation: input.operation, outcome });
       break;
     case "receiving_proof":
-      recordReceivingProofOperation(metric);
+      recordReceivingProofOperation({ operation: input.operation, outcome });
       break;
     case "refund":
-      recordRefundOperation(metric);
+      recordRefundOperation({ operation: input.operation, outcome });
+      break;
+    case "catalog":
+      recordCatalogOperation({ operation: input.operation, outcome });
+      break;
+    case "public_media":
+      recordPublicMediaOperation({
+        operation: input.operation,
+        outcome,
+        ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+        ...(input.variant === undefined ? {} : { variant: input.variant }),
+      });
+      break;
+    case "content_report":
+      recordContentReportOperation({
+        operation: input.operation,
+        outcome,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      });
       break;
   }
 }
 
 export async function readBusinessMetricField(
   request: Request,
-  field: "action" | "outcome",
+  field: "action" | "outcome" | "purpose" | "reason",
 ): Promise<unknown> {
   const clone = request.clone();
   if (!clone.body) return undefined;

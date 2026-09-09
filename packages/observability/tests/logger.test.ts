@@ -14,6 +14,7 @@ import {
   setRevisionAttestationMetric,
   setRefundLiabilityMetrics,
   setSecurityEmailBacklogMetrics,
+  setPublicMediaCleanupOldestEligibleMetric,
   setWorkerLastSuccessMetric,
   withRequestContext,
 } from "../src/index.js";
@@ -267,11 +268,20 @@ describe("operational metrics", () => {
     setSecurityEmailBacklogMetrics({ pending: 4, oldestAgeSeconds: 90, attention: 1 });
     setWorkerLastSuccessMetric({ scan: "retention", timestampSeconds: 1_787_671_200 });
     domainMetrics.setWorkerScanHealthMetric?.({ scan: "retention", healthy: false });
+    setWorkerLastSuccessMetric({ scan: "public_media_cleanup", timestampSeconds: 1_787_671_201 });
+    domainMetrics.setWorkerScanHealthMetric?.({ scan: "public_media_cleanup", healthy: true });
+    setPublicMediaCleanupOldestEligibleMetric({ timestampSeconds: 1_786_000_000 });
     recordRetentionMetrics({
       dataset: "application_content",
       mode: "report_only",
       disposition: "protected",
       count: 2,
+    });
+    recordRetentionMetrics({
+      dataset: "processed_source",
+      mode: "report_only",
+      disposition: "candidate",
+      count: 3,
     });
     recordAuthAbuseControl("password_sign_in");
     setRevisionAttestationMetric({ service: "worker", revisionMatch: true });
@@ -318,7 +328,19 @@ describe("operational metrics", () => {
       'pawket_worker_scan_healthy{scan="retention"} 0',
     );
     expect(serializedMetrics).toContain(
+      'pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"} 1787671201',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_worker_scan_healthy{scan="public_media_cleanup"} 1',
+    );
+    expect(serializedMetrics).toContain(
+      "pawket_public_media_cleanup_oldest_eligible_timestamp_seconds 1786000000",
+    );
+    expect(serializedMetrics).toContain(
       'pawket_retention_records_total{dataset="application_content",mode="report_only",disposition="protected"} 2',
+    );
+    expect(serializedMetrics).toContain(
+      'pawket_retention_records_total{dataset="processed_source",mode="report_only",disposition="candidate"} 3',
     );
     expect(serializedMetrics).toContain(
       'pawket_auth_abuse_controls_total{control="password_sign_in"} 1',

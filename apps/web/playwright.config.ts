@@ -1,8 +1,22 @@
+import path from "node:path";
+
 import { defineConfig } from "@playwright/test";
+
+import { browserDatabaseUrl } from "./tests/increment-three-database";
+import {
+  INCREMENT_THREE_DISABLED_TEST,
+  INCREMENT_THREE_ENABLED_TESTS,
+} from "./tests/increment-three-environment";
 
 export default defineConfig({
   testDir: "./tests",
+  globalSetup: "./tests/increment-three-database-global-setup.ts",
+  outputDir: path.resolve(import.meta.dirname, ".playwright-artifacts", "legacy"),
   testMatch: "**/*.playwright.ts",
+  testIgnore: [
+    INCREMENT_THREE_DISABLED_TEST,
+    ...INCREMENT_THREE_ENABLED_TESTS,
+  ],
   timeout: 30_000,
   workers: 1,
   use: {
@@ -21,7 +35,8 @@ export default defineConfig({
       NODE_ENV: "test",
       APP_ENV: "test",
       APP_REVISION: "playwright",
-      DATABASE_URL: "postgresql://pawket:playwright@127.0.0.1:5432/pawket_playwright",
+      CREATOR_PUBLISHING_MODE: "disabled",
+      DATABASE_URL: browserDatabaseUrl,
       VALKEY_URL: "redis://127.0.0.1:6379",
       METRICS_TOKEN: "playwright-metrics-token-000000000000",
       APP_BASE_URL: "http://127.0.0.1:4173",

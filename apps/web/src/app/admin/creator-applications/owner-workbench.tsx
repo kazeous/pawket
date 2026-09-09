@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { EmptyState, LoadingState, RetryState } from "../../../ui/async-state";
@@ -150,6 +151,7 @@ export function OwnerWorkbench() {
   if (loadError) return <RetryState title="Chưa tải được owner workspace" onRetry={() => void load()}><p>Không có thao tác nào được thực hiện.</p></RetryState>;
 
   return <div className="owner-workspace">
+    <div className="button-row"><Link className="button-link secondary" href="/admin/content-reports">Mở hàng đợi báo cáo nội dung</Link></div>
     <div className="owner-tabs" role="navigation" aria-label="Owner workspace">{(["queue", "refunds", "capabilities", "reconcile"] as const).map((value) => <button key={value} type="button" className={tab === value ? "secondary active" : "quiet"} aria-pressed={tab === value} onClick={() => { setTab(value); setDetail(null); setDestination(null); setIssuedChallenge(null); }}>{value === "queue" ? `Hàng đợi (${queue.length})` : value === "refunds" ? `Hoàn trả (${obligations.length})` : value === "capabilities" ? `Quyền creator (${capabilities.length})` : "Đối soát"}</button>)}</div>
     {notice ? <StatusBanner tone={notice.tone}><p>{notice.text}</p></StatusBanner> : null}
     {issuedChallenge ? <StatusBanner tone="warning" title="Hướng dẫn thử thách chỉ hiển thị một lần"><p>Mã tham chiếu: <code className="mono">{issuedChallenge.reference}</code></p><p>Chuyển đúng {issuedChallenge.amountVnd.toLocaleString("vi-VN")} VND đến {issuedChallenge.operatingAccount.bankName} · {issuedChallenge.operatingAccount.accountNumber} · {issuedChallenge.operatingAccount.accountHolderLabel}. Hết hạn {new Date(issuedChallenge.expiresAt).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}.</p><p>Sao chép hướng dẫn này cho creator qua kênh đã xác minh trước khi đóng hồ sơ. Pawket chỉ lưu hash và không thể hiển thị lại mã.</p></StatusBanner> : null}

@@ -141,6 +141,34 @@
       "when": 1787687133650,
       "tag": "0019_task9_retention_hold_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788020308010,
+      "tag": "0020_increment_3_creator_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1788040471734,
+      "tag": "0021_increment_3_public_media",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1788109226886,
+      "tag": "0022_increment_3_public_trust",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788186826786,
+      "tag": "0023_increment_3_immutability_and_retention",
+      "breakpoints": true
     }
   ]
 }

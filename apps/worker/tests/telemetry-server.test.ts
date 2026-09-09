@@ -38,7 +38,7 @@ describe("worker telemetry server", () => {
     return { state, baseUrl: `http://127.0.0.1:${handle.port}` };
   }
 
-  test("serves liveness and fresh readiness with exact revision attestation", async () => {
+  test("serves liveness but rejects readiness when the Increment 3 cleanup scan is not configured", async () => {
     const { baseUrl } = await start();
 
     const live = await fetch(`${baseUrl}/health/live`);
@@ -46,14 +46,48 @@ describe("worker telemetry server", () => {
 
     expect(live.status).toBe(200);
     expect(await live.json()).toEqual({ status: "ok", service: "worker", ...revision });
-    expect(ready.status).toBe(200);
+    expect(ready.status).toBe(503);
     expect(await ready.json()).toEqual({
-      status: "ready",
+      status: "not_ready",
       initialized: true,
       poll: "up",
       refundScan: "up",
+      publicMediaCleanupScan: "not_configured",
       ...revision,
     });
+  });
+
+  test("includes configured public-media cleanup freshness in readiness", () => {
+    const state = createWorkerHealthState();
+    state.initializedAt = 1_000;
+    state.lastPollSucceededAt = 1_000;
+    state.lastRefundScanSucceededAt = 1_000;
+    state.publicMediaCleanupConfigured = true;
+    state.lastPublicMediaCleanupScanSucceededAt = 1_000;
+    state.oldestPublicMediaCleanupCandidateAt = 500;
+    state.publicMediaCleanupMaximumAgeMs = 1_000;
+
+    expect(
+      workerReadiness({
+        state,
+        revision,
+        now: 1_500,
+      }),
+    ).toEqual(expect.objectContaining({
+      status: "ready",
+      publicMediaCleanupScan: "up",
+    }));
+
+    expect(
+      workerReadiness({
+        state,
+        revision,
+        now: 2_001,
+      }),
+    ).toEqual(expect.objectContaining({
+      status: "not_ready",
+      publicMediaCleanupScan: "down",
+    }));
   });
 
   test("protects metrics with the shared bearer-token boundary", async () => {

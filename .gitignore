@@ -56,6 +56,7 @@ coverage/
 .turbo/
 *.tsbuildinfo
 /apps/web/next-env.d.ts
+/apps/web/.playwright-artifacts/
 
 # Editor and operating-system artifacts
 .idea/

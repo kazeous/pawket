@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-const publicRoutes = ["/", "/register", "/sign-in", "/forgot-password", "/verify-email/resend"];
+const publicRoutes = ["/", "/register", "/sign-in", "/forgot-password", "/verify-email/resend", "/creators"];
 
 for (const width of [320, 375, 414, 768]) {
   test(`public UI has no horizontal overflow at ${width}px`, async ({ page }) => {

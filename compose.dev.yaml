@@ -29,6 +29,14 @@ services:
       retries: 15
       start_period: 5s
 
+  media-object-store:
+    image: adobe/s3mock:5.2.0
+    environment:
+      initialBuckets: pawket-media-quarantine,pawket-media-derivatives
+      retainFilesOnExit: "false"
+    ports:
+      - "9090:9090"
+
 volumes:
   pawket_postgres_data:
   pawket_valkey_data:

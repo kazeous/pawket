@@ -14,7 +14,7 @@ const securityHeaders = {
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(configDirectory, "../.."),
-  serverExternalPackages: ["@node-rs/argon2"],
+  serverExternalPackages: ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "@node-rs/argon2"],
   webpack(config) {
     config.resolve.extensionAlias = {
       ...config.resolve.extensionAlias,

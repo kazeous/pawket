@@ -211,3 +211,156 @@ tests:
             exp_annotations:
               summary: Verification-deposit refund requires owner attention
               runbook: ops/runbooks/overdue-refunds.md
+
+  - name: public media processing backlog waits five minutes past fifteen
+    interval: 1m
+    input_series:
+      - series: pawket_public_media_oldest_pending_seconds
+        values: '901x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketPublicMediaProcessingStuck
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketPublicMediaProcessingStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Public media processing has fallen behind by fifteen minutes
+              runbook: ops/runbooks/public-media-processing.md
+
+  - name: terminal media failures surface within the review day
+    interval: 1h
+    input_series:
+      - series: 'pawket_public_media_operations_total{operation="process",outcome="attention_required",purpose="showcase",variant="none"}'
+        values: '0 0 1x24'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: PawketPublicMediaTerminalFailures
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: PawketPublicMediaTerminalFailures
+        exp_alerts:
+          - exp_labels:
+              operation: process
+              outcome: attention_required
+              purpose: showcase
+              variant: none
+              severity: warning
+            exp_annotations:
+              summary: Public media processing has a terminal failure awaiting review
+              runbook: ops/runbooks/public-media-processing.md
+
+  - name: an unavailable storage area alerts after five minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_public_media_storage_available{area="derivative"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketPublicMediaStorageUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketPublicMediaStorageUnavailable
+        exp_alerts:
+          - exp_labels:
+              area: derivative
+              severity: critical
+            exp_annotations:
+              summary: A public media storage area is unavailable
+              runbook: ops/runbooks/public-media-backup-restore.md
+
+  - name: cleanup health tolerates one scan interval plus five minutes
+    interval: 5m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="public_media_cleanup"}'
+        values: '0x76'
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: PawketPublicMediaCleanupFailures
+        exp_alerts: []
+      - eval_time: 6h5m
+        alertname: PawketPublicMediaCleanupFailures
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: warning
+            exp_annotations:
+              summary: Worker public media cleanup scan has remained unhealthy for one scan interval
+              runbook: ops/runbooks/public-media-processing.md
+
+  - name: the open report queue alerts past six hours
+    interval: 1m
+    input_series:
+      - series: pawket_public_content_report_oldest_open_seconds
+        values: '21601x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketPublicContentReportQueueOld
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketPublicContentReportQueueOld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The public content report queue has an open report older than six hours
+              runbook: ops/runbooks/public-content-report-triage.md
+
+  - name: worker scan alerts after five minutes before its first success
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="public_media_cleanup"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: critical
+            exp_annotations:
+              summary: Worker public media cleanup scan has stopped completing
+              runbook: ops/runbooks/creator-publication.md
+
+  - name: missing worker telemetry alerts after five minutes
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: critical
+            exp_annotations:
+              summary: Worker public media cleanup scan has stopped completing
+              runbook: ops/runbooks/creator-publication.md
+
+  - name: stale success cannot leave a hung scan healthy beyond one interval plus five minutes
+    interval: 5m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{scan="public_media_cleanup"}'
+        values: '1x75'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="public_media_cleanup"}'
+        values: '0x75'
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts: []
+      - eval_time: 6h5m
+        alertname: PawketIncrementThreeWorkerScanUnhealthy
+        exp_alerts:
+          - exp_labels:
+              scan: public_media_cleanup
+              severity: critical
+            exp_annotations:
+              summary: Worker public media cleanup scan has stopped completing
+              runbook: ops/runbooks/creator-publication.md
