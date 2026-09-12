@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { paymentGuestCapabilities, paymentIntents, type PawketTransaction } from "@pawket/database";
-import { createLookupHmac, decryptSensitiveField, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
+import { paymentGuestCapabilities, paymentIntents, paymentTransferClaims, type PawketTransaction } from "@pawket/database";
+import { createLookupHmac, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import { and, count, eq, gt, sql } from "drizzle-orm";
 
-import { TipPaymentError, requireIntegerVnd, type GuestTipCapability, type IntegerVnd, type TipInstructionProjection } from "./tip-contracts.js";
+import { TipPaymentError, type GuestTipCapability, type IntegerVnd, type TipInstructionProjection } from "./tip-contracts.js";
+import { tipInstructionProjection as projection, readTipIntentSnapshot, type Snapshot } from "./tip-snapshot.js";
 import { lockTipReceivingDestination } from "./tip-receiving-account.js";
-import { createVietQrTransferInstruction, isVietQrDestinationSupported, VIETQR_RECEIVING_BANKS } from "./vietqr.js";
+import { createVietQrTransferInstruction } from "./vietqr.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const hmacPattern = /^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u;
@@ -20,7 +21,6 @@ type Input = Readonly<{
   intentTtlMs: number; guestReceiptTtlMs: number; openIpLimit: number; openCreatorLimit: number;
   idFactory?: () => string; referenceFactory?: () => string;
 }>;
-type Snapshot = { version: 1; bankBin: string; bankName: string; accountNumber: string; accountName: string; creator: { displayName: string; handle: string } };
 
 export function createTipPaymentIntentPort(input: Input) {
   if (!Number.isSafeInteger(input.intentTtlMs) || input.intentTtlMs < 300_000 || input.intentTtlMs > 604_800_000 ||
@@ -34,29 +34,6 @@ export function createTipPaymentIntentPort(input: Input) {
   function receiptSecret(intentId: string, context: string) {
     if (!valid(context, secretPattern)) fail("not_authorized");
     return digest("tip-guest-receipt-secret", JSON.stringify([intentId, context])).slice("hmac-sha256:v1:".length);
-  }
-  function projection(row: typeof paymentIntents.$inferSelect, snapshot: Snapshot, transferReference: string): TipInstructionProjection {
-    const amountVnd = requireIntegerVnd(row.amountVnd);
-    const qr = createVietQrTransferInstruction({ bankBin: snapshot.bankBin, accountNumber: snapshot.accountNumber, amountVnd, transferReference });
-    return Object.freeze({ reference: transferReference, creator: Object.freeze({ ...snapshot.creator }), amountVnd, currency: "VND",
-      state: "awaiting_transfer", expiresAt: row.expiresAt.toISOString(), confirmedAt: null, transferClaimedAt: null,
-      destination: Object.freeze({ bankBin: snapshot.bankBin, bankName: snapshot.bankName, accountNumber: snapshot.accountNumber, accountName: snapshot.accountName }), qrPayload: qr.payload });
-  }
-  function readSnapshot(row: typeof paymentIntents.$inferSelect): { snapshot: Snapshot; transferReference: string } {
-    try {
-      const snapshot = JSON.parse(decryptSensitiveField({ keyring: input.keyring, envelope: row.destinationEnvelope,
-        binding: { recordType: "payment_intents", recordId: row.id, fieldName: "destination" } })) as Snapshot;
-      const transferReference = decryptSensitiveField({ keyring: input.keyring, envelope: row.referenceEnvelope,
-        binding: { recordType: "payment_intents", recordId: row.id, fieldName: "transfer_reference" } });
-      if (!snapshot || snapshot.version !== 1 || Object.keys(snapshot).sort().join() !== "accountName,accountNumber,bankBin,bankName,creator,version" ||
-        !isVietQrDestinationSupported(snapshot) || snapshot.bankName !== VIETQR_RECEIVING_BANKS[snapshot.bankBin] ||
-        typeof snapshot.accountName !== "string" || snapshot.accountName.trim() !== snapshot.accountName || Array.from(snapshot.accountName).length < 2 || Array.from(snapshot.accountName).length > 100 ||
-        !snapshot.creator || Object.keys(snapshot.creator).sort().join() !== "displayName,handle" ||
-        typeof snapshot.creator.displayName !== "string" || Array.from(snapshot.creator.displayName).length < 1 || Array.from(snapshot.creator.displayName).length > 80 ||
-        typeof snapshot.creator.handle !== "string" || snapshot.creator.handle.length < 3 || snapshot.creator.handle.length > 30 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(snapshot.creator.handle) ||
-        !valid(transferReference, referencePattern) || digest("tip-transfer-reference", transferReference) !== row.referenceHash) fail("not_available");
-      return { snapshot, transferReference };
-    } catch { return fail("not_available"); }
   }
   return {
     // Call before Catalog's page lock; all creators sharing this abuse key serialize.
@@ -122,8 +99,9 @@ export function createTipPaymentIntentPort(input: Input) {
         if (!stored || stored.expiresAt <= command.at || digest("tip-guest-capability", secret) !== stored.capabilityHash) fail("not_authorized");
         guestCapability = Object.freeze({ secret, expiresAt: stored.expiresAt });
       } else if (stored) fail("not_authorized");
-      const { snapshot, transferReference } = readSnapshot(intent);
-      return Object.freeze({ instruction: projection(intent, snapshot, transferReference), guestCapability });
+      const { snapshot, transferReference } = readTipIntentSnapshot(intent, { keyring: input.keyring, lookupHmacKey: key });
+      const [claim] = await tx.select({ claimedAt: paymentTransferClaims.claimedAt }).from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intent.id)).limit(1);
+      return Object.freeze({ instruction: projection(intent, snapshot, transferReference, claim?.claimedAt.toISOString() ?? null), guestCapability });
     },
   };
 }

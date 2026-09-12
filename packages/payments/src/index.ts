@@ -58,3 +58,4 @@ export {
 } from "./vietqr.js";
 export { createTipReceivingAccountEligibilityPort } from "./tip-receiving-account.js";
 export { createTipPaymentIntentPort, type TipPaymentIntentPort, type TipCreationPaymentResult } from "./tip-intent-port.js";
+export { createTipReceiptService, type AuthorizedTipReceipt } from "./tip-receipt-service.js";

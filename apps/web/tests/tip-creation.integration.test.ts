@@ -6,11 +6,11 @@ import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   adminAuditEvents, createDatabase, creatorDiscoveryProjections, creatorHandleClaims, creatorPages,
   creatorPublicationRevisions, identityUsers,
-  paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, type PawketDatabase,
+  paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations, type PawketDatabase,
 } from "@pawket/database";
 import { createCreatorTipSettingsService, createPublicCatalogQuery, type CreatorSeed } from "@pawket/catalog";
-import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort } from "@pawket/identity";
-import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort } from "@pawket/payments";
+import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, recordSecurityThrottleAttempt } from "@pawket/identity";
+import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField, decryptSensitiveField, createLookupHmac } from "@pawket/security";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -87,7 +87,7 @@ afterAll(async () => {
 });
 
 
-import { createTipService, type CreateTipCommand } from "@pawket/tips";
+import { createTipService, createTipAccessPort, createTipHttpHandlers, type CreateTipCommand } from "@pawket/tips";
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function optedIn() {
@@ -106,6 +106,10 @@ function paymentPort(overrides: Partial<Parameters<typeof createTipPaymentIntent
 function createService(overrides: Partial<Parameters<typeof createTipService>[0]> = {}) {
   return createTipService({ db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),
     paymentsMode: "manual_only", publishingMode: "general_audience", keyring, lookupHmacKey: key, idempotencyTtlMs: 604_800_000, now: () => at, ...overrides });
+}
+function receiptService(overrides: Partial<Parameters<typeof createTipReceiptService>[0]> = {}) {
+  return createTipReceiptService({ db, paymentsMode: "manual_only", keyring, lookupHmacKey: key, tips: createTipAccessPort(),
+    buyerAccounts: createIdentityTipBuyerAccountPort(), creatorEligibility: service(), claimRateLimit: async () => true, now: () => at, ...overrides });
 }
 async function evidence(f: Fixture) {
   const tipRows = await db.select().from(tips).where(eq(tips.creatorUserId, f.userId));
@@ -314,5 +318,136 @@ describe("atomic tip creation across Tips, Payments, Catalog and Identity", () =
     }
     await createService().createTip(c);
     expect(Object.values(await evidence(f)).map((rows) => rows.length)).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+});
+
+describe("authorized tip receipts and non-authoritative transfer claims", () => {
+  test("real HTTP composition persists one guest intent, authorizes its cookie and enforces the shared IP budget", async () => {
+    const f = await optedIn(); const http = createTipHttpHandlers({ appBaseUrl: "https://pawket.test", paymentsMode: "manual_only", publishingMode: "general_audience", lookupHmacKey: key,
+      guestContextTtlMs: 604_800_000, rateWindowMs: 3_600_000, createIpLimit: 2, createCreatorLimit: 100, receiptLimit: 120,
+      authenticate: async () => null, creation: createService(), receipts: receiptService(), now: () => at,
+      resolveCreatorRateSubject: (handle) => db.transaction(async (tx) => (await service().getTipEligibility(tx, handle))?.creatorUserId ?? null),
+      throttle: (policy) => recordSecurityThrottleAttempt(db, { ...policy, scope: policy.action.endsWith("_creator") ? "account" : "network", now: at, blockMs: policy.windowMs }),
+    });
+    const makeRequest = (path: string, method: "GET" | "POST", cookie = "", body: unknown = {}) => new Request(`https://pawket.test${path}`, { method,
+      ...(method === "POST" ? { body: JSON.stringify(body) } : {}), headers: { origin: "https://pawket.test", "content-type": "application/json", "x-real-ip": "198.51.100.17", "idempotency-key": "synthetic-http-idempotency", cookie } });
+    const contextResponse = await http.guestContext(makeRequest("/api/v1/tips/guest-context", "POST"));
+    const contextCookie = contextResponse.headers.getSetCookie()[0]!.split(";")[0]!;
+    const created = await http.create(makeRequest(`/api/v1/public/creators/${f.handle}/tips`, "POST", contextCookie, { amountVnd: 50_000 }), f.handle);
+    expect(created.status).toBe(201);
+    const body = await created.json() as { instruction: { reference: string } };
+    const receiptCookie = created.headers.getSetCookie()[0]!.split(";")[0]!;
+    const reference = body.instruction.reference;
+    expect((await http.receipt(makeRequest(`/api/v1/tips/${reference}`, "GET", receiptCookie), reference)).status).toBe(200);
+    const otherCookie = receiptCookie.slice(0, receiptCookie.indexOf("=") + 1) + randomBytes(32).toString("base64url");
+    const denied = await http.receipt(makeRequest(`/api/v1/tips/${reference}`, "GET", otherCookie), reference);
+    expect(denied.status).toBe(404); expect(await denied.json()).toEqual({ code: "not_available" });
+    const replay = await http.create(makeRequest(`/api/v1/public/creators/${f.handle}/tips`, "POST", contextCookie, { amountVnd: 50_000 }), f.handle);
+    expect(replay.status).toBe(201); expect(await replay.json()).toEqual(body);
+    const limited = await http.create(makeRequest(`/api/v1/public/creators/${f.handle}/tips`, "POST", contextCookie, { amountVnd: 50_000 }), f.handle);
+    expect(limited.status).toBe(429); expect((await evidence(f)).tipRows).toHaveLength(1);
+  });
+
+  test("concurrent claims reserve a shared creator budget without exhausting the database connection pool", async () => {
+    const f = await optedIn(); const created = await createService().createTip(command(f));
+    const svc = receiptService({ async claimRateLimit(creatorUserId) {
+      return (await recordSecurityThrottleAttempt(db, { action: "tip_claim_creator", scope: "account", subjectHmac: hmac("tip-creator-rate", creatorUserId), now: at,
+        maximumAttempts: 5, windowMs: 3_600_000, blockMs: 3_600_000 })).allowed;
+    } });
+    const results = await Promise.allSettled(Array.from({ length: 20 }, () => svc.reportTransfer({ reference: created.instruction.reference,
+      access: { kind: "guest", capability: created.guestCapability!.secret }, requestId: randomUUID() })));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(5);
+    for (const result of results.filter((r) => r.status === "rejected")) expect(result).toMatchObject({ reason: { code: "rate_limited" } });
+    const intentId = (await evidence(f)).intents[0]!.id;
+    expect(await db.select().from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intentId))).toHaveLength(1);
+  });
+
+  test("a late claim outbox failure rolls back the claim and audit while preserving the pending payment", async () => {
+    const f = await optedIn(); const created = await createService().createTip(command(f)); const svc = receiptService();
+    const intentId = (await evidence(f)).intents[0]!.id;
+    const name = `reject_claim_event_${randomUUID().replaceAll("-", "")}`;
+    await db.execute(sql.raw(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type = 'tip.transfer_claimed.v1' THEN RAISE EXCEPTION 'synthetic claim outbox failure'; END IF; RETURN NEW; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER ${name} BEFORE INSERT ON system_outbox FOR EACH ROW EXECUTE FUNCTION ${name}()`));
+    const claim = { reference: created.instruction.reference, access: { kind: "guest" as const, capability: created.guestCapability!.secret }, requestId: randomUUID() };
+    try {
+      await expect(svc.reportTransfer(claim)).rejects.toMatchObject({ code: "dependency_unavailable" });
+      expect(await db.select().from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intentId))).toHaveLength(0);
+      expect(await db.select().from(adminAuditEvents).where(eq(adminAuditEvents.subjectId, intentId))).toHaveLength(0);
+      expect((await evidence(f)).intents[0]?.state).toBe("awaiting_transfer");
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER ${name} ON system_outbox`)); await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+    }
+    expect(await svc.reportTransfer(claim)).toMatchObject({ authoritative: false });
+  });
+
+  test("only the matching guest capability reads a receipt; reference alone and creator identity do not authorize it", async () => {
+    const f = await optedIn(); const first = await createService().createTip(command(f)); const second = await createService().createTip(command(f));
+    const svc = receiptService(); const reference = first.instruction.reference;
+    const read = await svc.readReceipt({ reference, access: { kind: "guest", capability: first.guestCapability!.secret } });
+    expect(read.instruction).toEqual(first.instruction);
+    expect(JSON.stringify(read.receipt)).not.toContain(f.accountNumber);
+    expect(JSON.stringify(read)).not.toContain("Synthetic Guest");
+    for (const access of [{ kind: "guest" as const, capability: "" }, { kind: "guest" as const, capability: second.guestCapability!.secret }, { kind: "buyer" as const, userId: f.userId }]) {
+      await expect(svc.readReceipt({ reference, access })).rejects.toMatchObject({ code: "not_authorized" });
+    }
+    await expect(svc.readReceipt({ reference: "PWFFFFFFFFFFFFFFFFFFFF", access: { kind: "guest", capability: first.guestCapability!.secret } })).rejects.toMatchObject({ code: "not_authorized" });
+    await expect(svc.reportTransfer({ reference: second.instruction.reference, access: { kind: "guest", capability: first.guestCapability!.secret }, requestId: randomUUID() })).rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  test("buyer ownership and active account are required even when a reference or foreign receipt secret is known", async () => {
+    const f = await optedIn(); const buyer = await fixture(); const other = await fixture(); const svc = receiptService();
+    const created = await createService().createTip({ ...command(f), principal: { kind: "buyer", userId: buyer.userId } });
+    const reference = created.instruction.reference;
+    expect((await svc.readReceipt({ reference, access: { kind: "buyer", userId: buyer.userId } })).instruction).toEqual(created.instruction);
+    await expect(svc.readReceipt({ reference, access: { kind: "buyer", userId: other.userId } })).rejects.toMatchObject({ code: "not_authorized" });
+    await expect(svc.readReceipt({ reference, access: { kind: "guest", capability: randomBytes(32).toString("base64url") } })).rejects.toMatchObject({ code: "not_authorized" });
+    await db.update(identityUsers).set({ accessStatus: "access_suspended" }).where(eq(identityUsers.id, buyer.userId));
+    await expect(svc.readReceipt({ reference, access: { kind: "buyer", userId: buyer.userId } })).rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  test("concurrent claims append one untrusted fact and never confirm or complete payment", async () => {
+    const f = await optedIn(); const creating = createService(); const c = command(f); const created = await creating.createTip(c);
+    const svc = receiptService(); const access = { kind: "guest" as const, capability: created.guestCapability!.secret }; const reference = created.instruction.reference;
+    const claim = { reference, access, requestId: randomUUID() };
+    const results = await Promise.all([svc.reportTransfer(claim), svc.reportTransfer(claim), svc.reportTransfer({ ...claim, requestId: randomUUID() })]);
+    expect(results).toEqual(Array(3).fill({ claimedAt: at, authoritative: false }));
+    const stored = await evidence(f); expect(stored.tipRows[0]?.state).toBe("awaiting_payment"); expect(stored.intents[0]?.state).toBe("awaiting_transfer");
+    const intentId = stored.intents[0]!.id;
+    expect(await db.select().from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intentId))).toHaveLength(1);
+    expect(await db.select().from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, intentId))).toHaveLength(0);
+    expect(await db.select().from(systemOutbox).where(and(eq(systemOutbox.aggregateId, intentId), eq(systemOutbox.eventType, "tip.transfer_claimed.v1")))).toHaveLength(1);
+    expect(await db.select().from(adminAuditEvents).where(and(eq(adminAuditEvents.subjectId, intentId), eq(adminAuditEvents.action, "tip.transfer_claimed")))).toHaveLength(1);
+    expect((await svc.readReceipt({ reference, access })).receipt).toMatchObject({ state: "awaiting_transfer", confirmedAt: null, transferClaimedAt: at.toISOString() });
+    expect((await creating.createTip(c)).instruction.transferClaimedAt).toBe(at.toISOString());
+    await expect(db.update(paymentTransferClaims).set({ authoritative: true }).where(eq(paymentTransferClaims.paymentIntentId, intentId))).rejects.toThrow();
+  });
+
+  test("overdue receipt is honest before the expiry worker runs and cannot expose instructions or accept claims", async () => {
+    const f = await optedIn(); const created = await createService().createTip(command(f)); const access = { kind: "guest" as const, capability: created.guestCapability!.secret };
+    const reference = created.instruction.reference;
+    const expired = receiptService({ now: () => new Date(at.getTime() + 86_400_000) });
+    expect(await expired.readReceipt({ reference, access })).toMatchObject({ receipt: { state: "expired" }, instruction: null });
+    await expect(expired.reportTransfer({ reference, access, requestId: randomUUID() })).rejects.toMatchObject({ code: "intent_not_pending" });
+    const lost = receiptService({ now: () => new Date(at.getTime() + 604_800_000) });
+    await expect(lost.readReceipt({ reference, access })).rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  test("hidden or retired creator leaves the authorized private receipt intact without a transfer instruction", async () => {
+    const f = await optedIn(); const created = await createService().createTip(command(f)); const svc = receiptService();
+    const read = { reference: created.instruction.reference, access: { kind: "guest" as const, capability: created.guestCapability!.secret } };
+    heldPages.add(f.pageId);
+    expect(await svc.readReceipt(read)).toMatchObject({ receipt: { state: "awaiting_transfer" }, instruction: null });
+    heldPages.delete(f.pageId);
+    await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
+    expect(await svc.readReceipt(read)).toMatchObject({ receipt: { state: "awaiting_transfer" }, instruction: null });
+    await expect(receiptService({ paymentsMode: "disabled" }).readReceipt(read)).rejects.toMatchObject({ code: "payments_disabled" });
+  });
+
+  test("unavailable decryption fails safely after authorization and does not reveal record presence before it", async () => {
+    const f = await optedIn(); const created = await createService().createTip(command(f));
+    const wrongKeyring = createEncryptionKeyring({ activeKeyId: "unrelated", keys: { unrelated: new Uint8Array(32).fill(88) } });
+    const svc = receiptService({ keyring: wrongKeyring });
+    await expect(svc.readReceipt({ reference: created.instruction.reference, access: { kind: "guest", capability: created.guestCapability!.secret } })).rejects.toMatchObject({ code: "not_available", message: "not_available" });
+    await expect(svc.readReceipt({ reference: created.instruction.reference, access: { kind: "guest", capability: randomBytes(32).toString("base64url") } })).rejects.toMatchObject({ code: "not_authorized" });
   });
 });
