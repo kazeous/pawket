@@ -4,7 +4,7 @@ import { trustedRequestId } from "./http/route-context";
 import { applySecurityHeaders } from "./http/security-headers";
 
 const privateNoStore = /^\/(creator(?:\/preview)?|admin\/content-reports|tips)(?:\/|$)/u;
-const tipNoReferrer = /^\/tips(?:\/|$)|^\/api\/v1\/(?:tips|creator\/tips)(?:\/|$)|^\/api\/v1\/public\/creators\/[^/]+\/tips$/u;
+const tipNoReferrer = /^\/(?:tips|creator\/tips)(?:\/|$)|^\/api\/v1\/(?:tips|creator\/(?:tips|tip-settings))(?:\/|$)|^\/api\/v1\/public\/creators\/[^/]+\/tips$/u;
 const publicNoStore = /^\/(creators|media)(?:\/|$)|^\/sitemap\.xml$/u;
 
 export function proxy(request: NextRequest): NextResponse {

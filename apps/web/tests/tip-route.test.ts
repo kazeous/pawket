@@ -9,6 +9,7 @@ test("tip route metrics never retain concrete creator handles or transfer refere
   expect(boundedRoute("/api/v1/tips/PW00000000000000000000/transfer-claims")).toBe("/api/v1/tips/[reference]/transfer-claims");
   expect(boundedRoute("/api/v1/tips/guest-context")).toBe("/api/v1/tips/guest-context");
   expect(boundedRoute("/api/v1/creator/tips")).toBe("/api/v1/creator/tips");
+  expect(boundedRoute("/api/v1/creator/tip-settings")).toBe("/api/v1/creator/tip-settings");
   expect(boundedRoute("/api/v1/creator/tips/08f9203f-5531-4e79-901a-97e3fb08979c/confirm")).toBe("/api/v1/creator/tips/[id]/confirm");
 });
 test("composition failure returns a private safe JSON response", async () => {

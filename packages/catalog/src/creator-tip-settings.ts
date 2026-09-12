@@ -101,7 +101,7 @@ export function createCreatorTipSettingsService(input: Input) {
     return result && isUuid(result.accountVersionId) ? result.accountVersionId : null;
   }
 
-  return {
+  const service = {
     async getSettings(command: { actorUserId: string; pageId: string }): Promise<CreatorTipSettingsSnapshot & Readonly<{ available: boolean }>> {
       return input.db.transaction(async (tx) => {
         const page = await ownedPage(tx, command.actorUserId, command.pageId);
@@ -183,6 +183,23 @@ export function createCreatorTipSettingsService(input: Input) {
         if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `creator-tip-settings-v1:${revisionId}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
         return snapshot(revision);
       });
+    },
+  };
+  async function ownPageId(userId: string): Promise<string | null> {
+    if (!identifier(userId)) fail("NOT_FOUND");
+    const [page] = await input.db.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, userId)).limit(1);
+    return page?.id ?? null;
+  }
+  return {
+    ...service,
+    async getOwnSettings(actorUserId: string) {
+      const pageId = await ownPageId(actorUserId);
+      return pageId ? service.getSettings({ actorUserId, pageId }) : null;
+    },
+    async saveOwnSettings(command: Omit<Parameters<typeof service.saveSettings>[0], "pageId">) {
+      const pageId = await ownPageId(command.actor.userId);
+      if (!pageId) fail("NOT_FOUND");
+      return service.saveSettings({ ...command, pageId });
     },
   };
 }

@@ -1550,11 +1550,31 @@ textarea:where(:not([data-slot], [data-slot] *)):disabled {
 .creator-publication:has([data-tip-surface]),
 .creator-publication:has([data-tip-surface]) .stack { grid-template-columns: minmax(0, 1fr); }
 [data-tip-surface] [data-slot="badge"] { max-width: 100%; white-space: normal; height: auto; min-height: 1.25rem; }
-[data-tip-surface] [data-slot="button"] {
+[data-tip-surface] [data-slot="button"],
+[data-tip-surface] [data-slot="alert-dialog-action"],
+[data-tip-surface] [data-slot="alert-dialog-cancel"] {
   max-width: 100%;
   white-space: normal;
   height: auto;
   min-height: 2rem;
+}
+[data-tip-surface][data-slot="alert-dialog-content"] {
+  grid-template-columns: minmax(0, 1fr);
+  max-height: calc(100% - 2rem);
+}
+[data-tip-surface][data-slot="alert-dialog-content"] > form { min-width: 0; }
+[data-tip-surface] [data-slot="alert-dialog-footer"] { flex-wrap: wrap; }
+[data-tip-surface] [data-slot="toggle"],
+[data-tip-surface] [data-slot="toggle-group-item"] {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  min-height: 2rem;
+}
+.creator-tip-desktop { display: none; }
+@container tip-page (width >= 44rem) {
+  .creator-tip-desktop { display: block; }
+  .creator-tip-mobile { display: none; }
 }
 @container tip-page (width < 20rem) {
   .site-header { grid-template-columns: minmax(0, 1fr); }

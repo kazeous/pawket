@@ -99,6 +99,18 @@ afterAll(async () => {
 });
 
 describe("creator tip settings and module eligibility ports", () => {
+  test("current-owner adapters resolve only the actor's page and preserve revision/idempotency checks", async () => {
+    const f = await fixture(); const other = await fixture(); const svc = service();
+    const { pageId: _pageId, ...ownCommand } = command(f); void _pageId;
+    expect(await svc.getOwnSettings("no-such-creator")).toBeNull();
+    expect(await svc.getOwnSettings(f.userId)).toMatchObject({ enabled: false, available: true, revisionNumber: 0 });
+    const first = await svc.saveOwnSettings(ownCommand);
+    expect(first).toMatchObject({ enabled: true, revisionNumber: 1 });
+    expect(await svc.saveOwnSettings(ownCommand)).toEqual(first);
+    expect(await svc.getOwnSettings(other.userId)).toMatchObject({ enabled: false, revisionNumber: 0 });
+    await expect(svc.saveOwnSettings({ ...ownCommand, idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "VERSION_CONFLICT" });
+    expect(await service({ paymentsMode: "disabled" }).getOwnSettings(f.userId)).toMatchObject({ enabled: true, available: false });
+  });
   test("requires creator opt-in and atomically saves policy, audit, outbox and replay facts", async () => {
     const f = await fixture(); const svc = service(); const save = command(f);
     expect(await eligible(f, svc)).toBeNull();

@@ -47,6 +47,7 @@ export function boundedRoute(pathname: string): string {
   if (pathname === "/api/v1/creator-page") return pathname;
   if (pathname === "/api/v1/tips/guest-context") return pathname;
   if (pathname === "/api/v1/creator/tips") return pathname;
+  if (pathname === "/api/v1/creator/tip-settings") return pathname;
   if (/^\/api\/v1\/creator\/tips\/[^/]+\/confirm$/u.test(pathname)) return "/api/v1/creator/tips/[id]/confirm";
   if (/^\/api\/v1\/public\/creators\/[^/]+\/tips$/u.test(pathname)) return "/api/v1/public/creators/[handle]/tips";
   if (/^\/api\/v1\/tips\/[^/]+\/transfer-claims$/u.test(pathname)) return "/api/v1/tips/[reference]/transfer-claims";
