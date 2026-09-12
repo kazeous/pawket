@@ -466,6 +466,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     deposits: verificationDeposits,
   });
   const tipSettings = createCreatorTipSettingsService({
+    applicationRevision: env.APP_REVISION,
     db: database.db, visibility: publicCatalog, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey }),
     paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
@@ -475,6 +476,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const tipBuyerAccounts = createIdentityTipBuyerAccountPort();
   setTipPaymentsEnabledMetric(env.TIP_PAYMENTS_MODE === "manual_only");
   const tipCreation = createTipService({
+    applicationRevision: env.APP_REVISION,
     onCommitted: (replayed) => recordTipOperation({ operation: "create", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, creatorEligibility: tipSettings, buyerAccounts: tipBuyerAccounts,
     payments: createTipPaymentIntentPort({ keyring, lookupHmacKey, intentTtlMs: env.TIP_INTENT_TTL_SECONDS * 1000,
@@ -487,6 +489,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     return recordSecurityThrottleAttempt(database.db, { ...input, scope: input.action.endsWith("_creator") ? "account" : "network", now: new Date(), blockMs: input.windowMs });
   }
   const tipReceipts = createTipReceiptService({
+    applicationRevision: env.APP_REVISION,
     onClaimCommitted: (replayed) => recordTipOperation({ operation: "claim", outcome: replayed ? "replayed" : "recorded" }),
     db: database.db, paymentsMode: env.TIP_PAYMENTS_MODE, keyring, lookupHmacKey, tips: createTipAccessPort(), buyerAccounts: tipBuyerAccounts, creatorEligibility: tipSettings,
     async claimRateLimit(creatorUserId) {
@@ -502,6 +505,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     resolveCreatorRateSubject: (handle) => database.db.transaction(async (tx) => (await tipSettings.getTipEligibility(tx, handle))?.creatorUserId ?? null),
   });
   const creatorTips = createCreatorTipPaymentService({
+    applicationRevision: env.APP_REVISION,
     onCommitted: (replayed) => recordTipOperation({ operation: "confirm", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, pageSize: env.TIP_QUEUE_PAGE_SIZE,
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,

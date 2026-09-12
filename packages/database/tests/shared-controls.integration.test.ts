@@ -371,7 +371,10 @@ describe("shared control repositories", () => {
       enforcementPaused: true,
       batchSize: 100,
     });
-    expect(paused.every((item) => item.outcome === "paused")).toBe(true);
+    expect(paused.filter((item) => !item.dataset.startsWith("tip_")).every((item) => item.outcome === "paused")).toBe(true);
+    const protectedTipReports = paused.filter((item) => item.dataset.startsWith("tip_"));
+    expect(protectedTipReports).toHaveLength(5);
+    expect(protectedTipReports.every((item) => item.mode === "report_only" && item.outcome === "completed" && item.processedCount === 0)).toBe(true);
     expect(await client`select id from identity_users where id = 'retention-eligible'`).toHaveLength(1);
 
     const enforced = await runRetentionSweep({
@@ -406,7 +409,7 @@ describe("shared control repositories", () => {
     expect(new Date(String(eligibleRevision?.minimized_at)).toISOString()).toBe(now.toISOString());
     expect(eligibleRevision).toMatchObject({ artist_display_name: null });
     expect(protectedRevision).toMatchObject({ minimized_at: null, artist_display_name: "Protected artist" });
-    expect(await db.select().from(systemRetentionRuns)).toHaveLength(18);
+    expect(await db.select().from(systemRetentionRuns)).toHaveLength(33);
     await expect(
       client`update system_retention_runs set outcome = 'failed'`,
     ).rejects.toThrow("immutable control record");

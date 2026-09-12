@@ -44,6 +44,7 @@ export class CreatorTipSettingsError extends Error {
 }
 function fail(code: CreatorTipSettingsError["code"]): never { throw new CreatorTipSettingsError(code); }
 type Input = Readonly<{
+  applicationRevision: string;
   db: PawketDatabase; visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   creatorAccount: CreatorTipAccountPort; receivingAccount: CreatorTipReceivingAccountPort;
   paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
@@ -52,6 +53,7 @@ type Input = Readonly<{
 }>;
 
 export function createCreatorTipSettingsService(input: Input) {
+  if (!identifier(input.applicationRevision)) fail("INVALID_REQUEST");
   const { minimumVnd, maximumVnd } = input.amountPolicy;
   const allowedPresetsVnd = [...input.amountPolicy.allowedPresetsVnd];
   if (!Number.isSafeInteger(minimumVnd) || !Number.isSafeInteger(maximumVnd) || minimumVnd < 10_000 || maximumVnd > 5_000_000 || maximumVnd < minimumVnd ||
@@ -176,7 +178,7 @@ export function createCreatorTipSettingsService(input: Input) {
           actorUserId: page.userId, actorSessionId: command.actor.sessionId, subjectType: "creator_tip_settings", subjectId: page.userId,
           action: "creator.tip_settings.updated", outcome: "succeeded",
           beforeState: { enabled: settings.enabled, version: settings.revisionNumber }, afterState: { enabled: revision.enabled, version: revision.revisionNumber },
-          assurance: { method: "recent_primary_auth" }, applicationRevision: "increment-4", requestId: command.requestId, occurredAt: at,
+          assurance: { method: "recent_primary_auth" }, applicationRevision: input.applicationRevision, requestId: command.requestId, occurredAt: at,
         });
         await insertOutboxEvent(tx, { eventType: "creator.tip_settings_updated.v1", eventVersion: 1, aggregateType: "creator_tip_settings", aggregateId: page.userId,
           payload: { creatorUserId: page.userId, revisionId, enabled: revision.enabled, correlationId: command.requestId }, occurredAt: at });

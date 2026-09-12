@@ -1,5 +1,9 @@
 .git
 .git/**
+.claude
+.claude/**
+**/.claude
+**/.claude/**
 .worktrees
 .worktrees/**
 **/.worktrees

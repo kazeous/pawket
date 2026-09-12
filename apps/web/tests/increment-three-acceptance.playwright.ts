@@ -533,6 +533,7 @@ async function verifyOperationalEvidence(
     initialized: true,
     poll: "up",
     refundScan: "up",
+    tipExpiryScan: "not_configured",
     publicMediaCleanupScan: "up",
     revision: candidateRevision,
     buildRevision: candidateRevision,

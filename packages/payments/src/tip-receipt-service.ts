@@ -8,6 +8,7 @@ import { readTipIntentSnapshot, tipInstructionProjection } from "./tip-snapshot.
 
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
+  applicationRevision: string;
   db: PawketDatabase; paymentsMode: "disabled" | "manual_only";
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   tips: { getTipOwnership(tx: PawketTransaction, tipId: string): Promise<Readonly<{ buyerUserId: string | null }> | null> };
@@ -23,6 +24,7 @@ const referenceValid = (v: unknown): v is string => typeof v === "string" && v.t
 const identifier = (v: unknown): v is string => typeof v === "string" && v.trim() === v && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(v);
 
 export function createTipReceiptService(input: Input) {
+  if (!identifier(input.applicationRevision)) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date()); const id = input.idFactory ?? randomUUID;
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!(at instanceof Date) || !Number.isFinite(at.getTime())) fail("dependency_unavailable"); return new Date(at); };
@@ -102,7 +104,7 @@ export function createTipReceiptService(input: Input) {
             guestCapabilityId: access.capabilityId, authoritative: false, requestId: command.requestId, claimedAt: at });
           await appendAdminAuditEvent(tx, { actorUserId: access.buyerUserId ?? "guest", subjectType: "payment_intent", subjectId: intent.id,
             action: "tip.transfer_claimed", outcome: "succeeded", afterState: { authoritative: false }, assurance: { method: access.buyerUserId ? "buyer_session" : "guest_receipt" },
-            applicationRevision: "increment-4", requestId: command.requestId, occurredAt: at });
+            applicationRevision: input.applicationRevision, requestId: command.requestId, occurredAt: at });
           await insertOutboxEvent(tx, { eventType: "tip.transfer_claimed.v1", eventVersion: 1, aggregateType: "payment_intent", aggregateId: intent.id,
             payload: { paymentIntentId: intent.id, tipId: intent.tipId, creatorUserId: intent.creatorUserId, authoritative: false, correlationId: command.requestId }, occurredAt: at });
           return Object.freeze({ claimedAt: at, authoritative: false });

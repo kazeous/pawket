@@ -43,7 +43,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
       async resolveReadyAssetsBatch(_db, requests) { return new Map(requests.map((r) => [r.ownerUserId, new Map()])); },
     },
   });
-  return createCreatorTipSettingsService({
+  return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
     paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,
@@ -104,11 +104,11 @@ function paymentPort(overrides: Partial<Parameters<typeof createTipPaymentIntent
   return createTipPaymentIntentPort({ keyring, lookupHmacKey: key, intentTtlMs: 86_400_000, guestReceiptTtlMs: 604_800_000, openIpLimit: 3, openCreatorLimit: 1000, ...overrides });
 }
 function createService(overrides: Partial<Parameters<typeof createTipService>[0]> = {}) {
-  return createTipService({ db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),
+  return createTipService({ applicationRevision: "synthetic-increment-four-revision", db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),
     paymentsMode: "manual_only", publishingMode: "general_audience", keyring, lookupHmacKey: key, idempotencyTtlMs: 604_800_000, now: () => at, ...overrides });
 }
 function receiptService(overrides: Partial<Parameters<typeof createTipReceiptService>[0]> = {}) {
-  return createTipReceiptService({ db, paymentsMode: "manual_only", keyring, lookupHmacKey: key, tips: createTipAccessPort(),
+  return createTipReceiptService({ applicationRevision: "synthetic-increment-four-revision", db, paymentsMode: "manual_only", keyring, lookupHmacKey: key, tips: createTipAccessPort(),
     buyerAccounts: createIdentityTipBuyerAccountPort(), creatorEligibility: service(), claimRateLimit: async () => true, now: () => at, ...overrides });
 }
 async function evidence(f: Fixture) {

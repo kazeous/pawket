@@ -44,6 +44,7 @@ export type PublicTipOffering = Readonly<{
   maximumVnd: number; presetsVnd: readonly number[];
 }>;
 type Input = Readonly<{
+  applicationRevision: string;
   db: PawketDatabase; creatorEligibility: CreatorTipEligibilityPort; payments: TipPaymentIntentPort;
   buyerAccounts: { isActiveTipBuyerAccount(tx: PawketTransaction, userId: string): Promise<boolean> };
   paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
@@ -53,6 +54,7 @@ type Input = Readonly<{
 }>;
 
 export function createTipService(input: Input) {
+  if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isSafeInteger(input.idempotencyTtlMs) || input.idempotencyTtlMs < 3_600_000 || input.idempotencyTtlMs > 2_592_000_000) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey);
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
@@ -118,7 +120,7 @@ export function createTipService(input: Input) {
             amountVnd, creator: { displayName: creator.displayName, handle: creator.canonicalHandle }, guestContext, abuseKeyHash, requestId, at });
           await appendAdminAuditEvent(tx, { actorUserId: buyerUserId ?? "guest", subjectType: "tip", subjectId: tipId,
             action: "tip.created", outcome: "succeeded", afterState: { state: "awaiting_payment", creatorUserId: creator.creatorUserId },
-            assurance: { method: buyerUserId ? "buyer_session" : "guest_context" }, applicationRevision: "increment-4", requestId, occurredAt: at });
+            assurance: { method: buyerUserId ? "buyer_session" : "guest_context" }, applicationRevision: input.applicationRevision, requestId, occurredAt: at });
           await insertOutboxEvent(tx, { eventType: "tip.created.v1", eventVersion: 1, aggregateType: "tip", aggregateId: tipId,
             payload: { tipId, creatorUserId: creator.creatorUserId, correlationId: requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-created-v1:${tipId}`, completedAt: at })) fail("idempotency_conflict");

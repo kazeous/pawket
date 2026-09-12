@@ -46,7 +46,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
       async resolveReadyAssetsBatch(_db, requests) { return new Map(requests.map((r) => [r.ownerUserId, new Map()])); },
     },
   });
-  return createCreatorTipSettingsService({
+  return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
     paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,
@@ -107,11 +107,11 @@ function paymentPort(overrides: Partial<Parameters<typeof createTipPaymentIntent
   return createTipPaymentIntentPort({ keyring, lookupHmacKey: key, intentTtlMs: 86_400_000, guestReceiptTtlMs: 604_800_000, openIpLimit: 3, openCreatorLimit: 1000, ...overrides });
 }
 function createService(overrides: Partial<Parameters<typeof createTipService>[0]> = {}) {
-  return createTipService({ db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),
+  return createTipService({ applicationRevision: "synthetic-increment-four-revision", db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),
     paymentsMode: "manual_only", publishingMode: "general_audience", keyring, lookupHmacKey: key, idempotencyTtlMs: 604_800_000, now: () => at, ...overrides });
 }
 function receiptService(overrides: Partial<Parameters<typeof createTipReceiptService>[0]> = {}) {
-  return createTipReceiptService({ db, paymentsMode: "manual_only", keyring, lookupHmacKey: key, tips: createTipAccessPort(),
+  return createTipReceiptService({ applicationRevision: "synthetic-increment-four-revision", db, paymentsMode: "manual_only", keyring, lookupHmacKey: key, tips: createTipAccessPort(),
     buyerAccounts: createIdentityTipBuyerAccountPort(), creatorEligibility: service(), claimRateLimit: async () => true, now: () => at, ...overrides });
 }
 async function evidence(f: Fixture) {
@@ -143,7 +143,7 @@ async function session(f: Fixture, options: { primaryAt?: Date; mfaAt?: Date | n
   return { userId: f.userId, sessionId };
 }
 function creatorService(overrides: Partial<Parameters<typeof createCreatorTipPaymentService>[0]> = {}) {
-  return createCreatorTipPaymentService({ db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, totpAuthMs: 300_000,
+  return createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, totpAuthMs: 300_000,
     assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }), now: () => at, ...overrides });
 }
 async function pending(options: Parameters<typeof session>[1] = {}, creation: Partial<Parameters<typeof createTipService>[0]> = {}) {
@@ -191,6 +191,9 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
     expect(await confirming.confirm(confirm)).toEqual(confirmed);
     expect(onConfirm.mock.calls).toEqual([[false], [true]]);
     expect((await confirmationFacts(f)).confirmations).toHaveLength(1);
+    const audit = await db.select().from(adminAuditEvents).where(inArray(adminAuditEvents.requestId, [c.requestId, claim.requestId, confirm.requestId]));
+    expect(audit).toHaveLength(3);
+    expect(audit.every((row) => row.applicationRevision === "synthetic-increment-four-revision")).toBe(true);
   });
 
   test("a revocation committed while confirmation waits on its session is observed before payment changes", async () => {

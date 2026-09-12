@@ -44,7 +44,7 @@ export default async function setup() {
     const visibility = createPublicCatalogQuery({ db, publishingMode: "general_audience", creatorSeeds: createIdentityCreatorSeedPort(),
       visibility: { async readHolds() { return { pageHeld: false, heldShowcaseIds: new Set<string>() }; }, async readHoldsBatch(_db, requests) { return new Map(requests.map((r) => [r.pageId, { pageHeld: false, heldShowcaseIds: new Set<string>() }])); } },
       mediaCatalog: { async resolveReadyAssets() { return new Map(); }, async resolveReadyAssetsBatch(_db, requests) { return new Map(requests.map((r) => [r.ownerUserId, new Map()])); } } });
-    const settings = createCreatorTipSettingsService({ db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(), receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
+    const settings = createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision", db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(), receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
       paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy: { minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [20_000, 50_000, 100_000] }, recentAuthMs: 900_000, commandFingerprintKey: key });
     await settings.saveSettings({ actor: { userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at }, pageId, expectedRevision: 0, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
   } finally { await database.close(); }

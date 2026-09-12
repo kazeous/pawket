@@ -176,6 +176,11 @@ jobs:
       - name: Browser tests
         run: corepack pnpm test:browser
 
+      - name: Increment 4 disabled and manual-only synthetic browser journeys
+        env:
+          PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment4_tips_browser
+        run: corepack pnpm test:browser:increment-four
+
       - name: Validate production Compose
         run: corepack pnpm compose:validate
 

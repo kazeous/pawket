@@ -13,6 +13,7 @@ type Assurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean;
 type GuestContent = Readonly<{ name: string | null; message: string | null }>;
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
+  applicationRevision: string;
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; paymentsMode: "disabled" | "manual_only";
   pageSize: number; recentAuthMs: number; totpAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
@@ -37,6 +38,7 @@ export function normalizeTipBankTransactionId(value: unknown): string {
 }
 
 export function createCreatorTipPaymentService(input: Input) {
+  if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100 ||
     !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
     !Number.isSafeInteger(input.totpAuthMs) || input.totpAuthMs < 30_000 || input.totpAuthMs > 300_000) fail("invalid_request");
@@ -165,7 +167,7 @@ export function createCreatorTipPaymentService(input: Input) {
           if (!confirmed || !await input.tips.completeTip(tx, { tipId: intent.tipId, creatorUserId: actor.userId, amountVnd, at })) fail("intent_not_pending");
           await appendAdminAuditEvent(tx, { actorUserId: actor.userId, actorSessionId: actor.sessionId, subjectType: "payment_intent", subjectId: intentId,
             action: "tip.confirmed", outcome: "succeeded", beforeState: { state: "awaiting_transfer" }, afterState: { state: "confirmed", confirmationId },
-            assurance: { method: proof.totpEnrolled ? "recent_primary_and_totp" : "recent_primary_auth" }, applicationRevision: "increment-4", requestId, occurredAt: at });
+            assurance: { method: proof.totpEnrolled ? "recent_primary_and_totp" : "recent_primary_auth" }, applicationRevision: input.applicationRevision, requestId, occurredAt: at });
           await insertOutboxEvent(tx, { eventType: "tip.confirmed.v1", eventVersion: 1, aggregateType: "payment_intent", aggregateId: intentId,
             payload: { paymentIntentId: intentId, tipId: intent.tipId, creatorUserId: actor.userId, confirmationId, correlationId: requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-confirmed-v1:${confirmationId}`, completedAt: at })) fail("idempotency_conflict");

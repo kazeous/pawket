@@ -43,7 +43,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
       async resolveReadyAssetsBatch(_db, requests) { return new Map(requests.map((r) => [r.ownerUserId, new Map()])); },
     },
   });
-  return createCreatorTipSettingsService({
+  return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
     paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,

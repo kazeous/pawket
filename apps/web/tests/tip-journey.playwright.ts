@@ -41,7 +41,7 @@ async function confirmSyntheticReceipt(reference: string) {
   const { intent } = await receiptFacts(reference); const database = createDatabase(browserDatabaseUrl);
   const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": new Uint8Array(32).fill(1) } });
   try {
-    await createCreatorTipPaymentService({ db: database.db, keyring, lookupHmacKey: new Uint8Array(32).fill(2), paymentsMode: "manual_only", pageSize: 25,
+    await createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db: database.db, keyring, lookupHmacKey: new Uint8Array(32).fill(2), paymentsMode: "manual_only", pageSize: 25,
       recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }) }).confirm({
       actor: { userId: tipBrowserUserId, sessionId: tipBrowserSessionId }, paymentIntentId: intent.id, observedAmountVnd: intent.amountVnd,
       observedTransferReference: reference, observedBankTransactionId: `SYNTHETIC-${randomUUID()}`, attestedReceived: true, idempotencyKey: randomUUID(), requestId: randomUUID(),
@@ -367,6 +367,10 @@ test("creator confirmation requires recent primary authentication and actual enr
     await page.reload(); const stepped = await open();
     await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toBeVisible(); expect((await receiptFacts(reference)).intent.state).toBe("awaiting_transfer");
     const verification = page.waitForResponse((r) => r.url().endsWith("/api/auth/two-factor/verify-totp"));
+    await stepped.getByLabel("Mã từ ứng dụng xác thực").fill("12345");
+    await stepped.getByRole("button", { name: "Xác thực và xác nhận", exact: true }).click();
+    await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toHaveAttribute("aria-invalid", "true");
+    await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toBeFocused();
     await stepped.getByLabel("Mã từ ứng dụng xác thực").fill(currentOwnerTotp()); await stepped.getByRole("button", { name: "Xác thực và xác nhận", exact: true }).click();
     expect((await verification).status()).toBe(200); await expect(stepped).toBeHidden(); expect((await receiptFacts(reference)).intent.state).toBe("confirmed");
   } finally {
