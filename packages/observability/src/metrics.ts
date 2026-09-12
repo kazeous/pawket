@@ -224,6 +224,8 @@ const allowedHttpRoutes = new Set([
   "/api/v1/creator-page/unpublish",
   "/api/v1/me",
   "/api/v1/tips/guest-context",
+  "/api/v1/creator/tips",
+  "/api/v1/creator/tips/[id]/confirm",
   "/api/v1/tips/[reference]",
   "/api/v1/tips/[reference]/transfer-claims",
   "/api/v1/public/creators/[handle]/tips",

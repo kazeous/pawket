@@ -59,3 +59,4 @@ export {
 export { createTipReceivingAccountEligibilityPort } from "./tip-receiving-account.js";
 export { createTipPaymentIntentPort, type TipPaymentIntentPort, type TipCreationPaymentResult } from "./tip-intent-port.js";
 export { createTipReceiptService, type AuthorizedTipReceipt } from "./tip-receipt-service.js";
+export { createCreatorTipPaymentService, type ConfirmCreatorTipCommand, type CreatorTipQueue } from "./creator-tip-service.js";
