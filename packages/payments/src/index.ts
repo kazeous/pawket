@@ -44,3 +44,15 @@ export {
   type TipInstructionProjection,
   type CreatorTipProjection,
 } from "./tip-contracts.js";
+export {
+  createVietQrTransferInstruction,
+  isVietQrDestinationSupported,
+  VIETQR_RECEIVING_BANKS,
+  VIETQR_MAX_AMOUNT_VND,
+  VIETQR_MAX_REFERENCE_LENGTH,
+  VietQrError,
+  type VietQrErrorCode,
+  type VietQrDestination,
+  type VietQrTransferInput,
+  type VietQrTransferInstruction,
+} from "./vietqr.js";

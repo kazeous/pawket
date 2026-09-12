@@ -1,0 +1,27 @@
+{
+  "reviewedAt": "2026-09-12",
+  "provenance": "Synthetic destinations and references; CRC independently computed with Python binascii.crc_hqx, initial 0xffff. Never used for transfers.",
+  "vectors": [
+    {
+      "bankBin": "970436",
+      "accountNumber": "0000001234567",
+      "amountVnd": 50000,
+      "transferReference": "PWTEST000000000000000001",
+      "payload": "00020101021238570010A00000072701270006970436011300000012345670208QRIBFTTA53037045405500005802VN62280824PWTEST0000000000000000016304555C"
+    },
+    {
+      "bankBin": "970415",
+      "accountNumber": "0000000000000000001",
+      "amountVnd": 9999999999999,
+      "transferReference": "PW0123456789ABCDEFGHIJKLM",
+      "payload": "00020101021238630010A00000072701330006970415011900000000000000000010208QRIBFTTA5303704541399999999999995802VN62290825PW0123456789ABCDEFGHIJKLM6304132D"
+    },
+    {
+      "bankBin": "970436",
+      "accountNumber": "000001",
+      "amountVnd": 5000000,
+      "transferReference": "PWTEST6",
+      "payload": "00020101021238500010A0000007270120000697043601060000010208QRIBFTTA5303704540750000005802VN62110807PWTEST663040200"
+    }
+  ]
+}
