@@ -93,6 +93,9 @@ importers:
       '@pawket/security':
         specifier: workspace:*
         version: link:../../packages/security
+      '@pawket/tips':
+        specifier: workspace:*
+        version: link:../../packages/tips
       '@pawket/trust':
         specifier: workspace:*
         version: link:../../packages/trust
@@ -342,6 +345,24 @@ importers:
         version: 6.0.0(supports-color@7.2.0)
 
   packages/security: {}
+
+  packages/tips:
+    dependencies:
+      '@pawket/catalog':
+        specifier: workspace:*
+        version: link:../catalog
+      '@pawket/database':
+        specifier: workspace:*
+        version: link:../database
+      '@pawket/payments':
+        specifier: workspace:*
+        version: link:../payments
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../security
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
 
   packages/trust:
     dependencies:

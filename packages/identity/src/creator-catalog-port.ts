@@ -19,6 +19,13 @@ export function createIdentityCreatorTipAccountPort() {
   };
 }
 
+export function createIdentityTipBuyerAccountPort() {
+  const accounts = createIdentityCreatorTipAccountPort();
+  return {
+    isActiveTipBuyerAccount: accounts.isActiveTipCreatorAccount,
+  };
+}
+
 type CreatorSeed = Readonly<{
   userId: string;
   capabilityState: "active" | "suspended";

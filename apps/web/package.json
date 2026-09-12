@@ -23,6 +23,7 @@
     "@pawket/public-media": "workspace:*",
     "@pawket/queue": "workspace:*",
     "@pawket/security": "workspace:*",
+    "@pawket/tips": "workspace:*",
     "@pawket/trust": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.2.6",
