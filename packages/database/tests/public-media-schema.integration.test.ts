@@ -560,7 +560,7 @@ describe("public media persistence", () => {
       where id = '${deleteFirst.assetId}'`), "23514", /require/i);
   });
 
-  test("keeps the current Drizzle snapshot chain linked through migration 0023", async () => {
+  test("keeps the Increment 3 Drizzle snapshot chain linked through migration 0023", async () => {
     const snapshot20 = JSON.parse(await readFile(new URL("../migrations/meta/0020_snapshot.json", import.meta.url), "utf8")) as { id: string };
     const snapshot21 = JSON.parse(await readFile(new URL("../migrations/meta/0021_snapshot.json", import.meta.url), "utf8")) as { id: string; prevId: string };
     const snapshot22 = JSON.parse(await readFile(new URL("../migrations/meta/0022_snapshot.json", import.meta.url), "utf8")) as { id: string; prevId: string };
@@ -569,8 +569,8 @@ describe("public media persistence", () => {
     expect(snapshot22.prevId).toBe(snapshot21.id);
     expect(snapshot23.prevId).toBe(snapshot22.id);
     const journal = JSON.parse(await readFile(new URL("../migrations/meta/_journal.json", import.meta.url), "utf8")) as { entries: Array<{ idx: number; tag: string }> };
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 23, tag: "0023_increment_3_immutability_and_retention" });
-    expect(journal.entries).toHaveLength(24);
+    expect(journal.entries[23]).toMatchObject({ idx: 23, tag: "0023_increment_3_immutability_and_retention" });
+    expect(journal.entries).toHaveLength(25);
   });
 
   test("keeps source and object identity private and has worker/quota/cleanup indexes", async () => {
@@ -624,10 +624,10 @@ describe("public media persistence", () => {
     expect(count?.count).toBe(0);
   });
 
-  test("applies the complete current migration journal through id/count 24", async () => {
+  test("applies the complete current migration journal through id/count 25", async () => {
     const [entry] = await client.unsafe<{ id: number; hash: string }[]>(`select id, hash from "${journalSchema}"."__drizzle_migrations" order by id desc limit 1`);
-    expect(entry?.id).toBe(24);
+    expect(entry?.id).toBe(25);
     const [count] = await client.unsafe<{ count: number }[]>(`select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`);
-    expect(count?.count).toBe(24);
+    expect(count?.count).toBe(25);
   });
 });

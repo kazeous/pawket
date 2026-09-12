@@ -169,6 +169,13 @@
       "when": 1788186826786,
       "tag": "0023_increment_3_immutability_and_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1789197706777,
+      "tag": "0024_increment_4_tips",
+      "breakpoints": true
     }
   ]
 }

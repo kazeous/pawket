@@ -18,5 +18,6 @@ export default defineConfig({
     schemaPath("public-media.ts"),
     schemaPath("public-trust.ts"),
     schemaPath("payments.ts"),
+    schemaPath("tips.ts"),
   ],
 });

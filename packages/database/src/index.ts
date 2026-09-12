@@ -1,5 +1,9 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
 export {
+  creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
+  paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations,
+} from "./schema.js";
+export {
   appendAdminAuditEvent,
   type NewAdminAuditEvent,
 } from "./admin-audit-repository.js";

@@ -197,7 +197,7 @@ async function expectCreatorHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(24);
+  expect(journal?.count).toBe(25);
 }
 
 async function createMigrationsThrough(maximumIndex: number): Promise<string> {
@@ -290,7 +290,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(24);
+      expect(after?.count).toBe(25);
     } finally {
       await client.end();
       await rm(through0019, { recursive: true, force: true });
@@ -318,7 +318,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(24);
+      expect(after?.count).toBe(25);
     } finally {
       await client.end();
       await rm(through0020, { recursive: true, force: true });
@@ -345,7 +345,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(24);
+      expect(after?.count).toBe(25);
     } finally {
       await client.end();
       await rm(through0021, { recursive: true, force: true });
@@ -395,7 +395,7 @@ describe("configured Drizzle creator migrator", () => {
       const [after] = await client.unsafe<{ count: number }[]>(
         `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
       );
-      expect(after?.count).toBe(24);
+      expect(after?.count).toBe(25);
     } finally {
       await client.end();
       await rm(through0022, { recursive: true, force: true });
