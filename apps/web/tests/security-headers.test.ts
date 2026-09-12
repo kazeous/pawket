@@ -16,6 +16,12 @@ const expectedSecurityHeaders = {
 };
 
 describe("HTTP hardening", () => {
+  it("preserves no-referrer through the actual proxy on tip pages and APIs", () => {
+    for (const path of ["/tips/PW00000000000000000000", "/api/v1/tips/PW00000000000000000000", "/api/v1/creator/tips", "/api/v1/public/creators/artist/tips"]) {
+      expect(proxy(new NextRequest(`https://pawket.test${path}`)).headers.get("referrer-policy")).toBe("no-referrer");
+    }
+    expect(proxy(new NextRequest("https://pawket.test/tips/PW00000000000000000000")).headers.get("cache-control")).toContain("private, no-store");
+  });
   it("sets the required response security headers without a CSP", () => {
     const response = applySecurityHeaders(new Response("ok"));
 

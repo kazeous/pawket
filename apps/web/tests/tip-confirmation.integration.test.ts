@@ -322,6 +322,7 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
   test("retired account, global disable and expiration reject confirmation without changing historical facts", async () => {
     const p = await pending();
     await expect(creatorService({ paymentsMode: "disabled" }).confirm(p.confirm)).rejects.toMatchObject({ code: "payments_disabled" });
+    expect((await creatorService({ paymentsMode: "disabled" }).listQueue({ actor: p.actor })).items).toHaveLength(1);
     const expiredAt = new Date(at.getTime() + 86_400_000);
     await db.update(identitySessions).set({ primaryAuthenticatedAt: expiredAt, expiresAt: new Date(expiredAt.getTime() + 900_000), idleExpiresAt: new Date(expiredAt.getTime() + 900_000), absoluteExpiresAt: new Date(expiredAt.getTime() + 900_000) }).where(eq(identitySessions.id, p.actor.sessionId));
     await expect(creatorService({ now: () => expiredAt }).confirm(p.confirm)).rejects.toMatchObject({ code: "intent_not_pending" });

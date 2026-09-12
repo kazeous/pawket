@@ -31,6 +31,16 @@ function privateResponse(response: Response) {
 }
 
 describe("tip HTTP capability and bounded request boundary", () => {
+  test("kill switch preserves authorized receipts but suppresses instructions and transfer claims", async () => {
+    const s = setup({ paymentsMode: "disabled" });
+    const response = await s.handlers.receipt(request(`/api/v1/tips/${reference}`, { method: "GET", body: undefined, headers: { cookie: `${tipReceiptCookieName(reference)}=${secret}` } }), reference);
+    expect(response.status).toBe(200); privateResponse(response);
+    expect(await response.json()).toEqual({ receipt, instruction: null, paymentsEnabled: false });
+    expect(s.receipts.readReceipt).toHaveBeenCalledWith({ reference, access: { kind: "guest", capability: secret } });
+    expect((await s.handlers.claim(request(undefined, { body: "{}" }), reference)).status).toBe(503);
+    expect(s.receipts.reportTransfer).not.toHaveBeenCalled();
+    expect((await s.handlers.receipt(request(undefined, { method: "GET", body: undefined, headers: { cookie: "" } }), reference)).status).toBe(404);
+  });
   test("creates the receipt without a JSON credential and sets both narrowly scoped Secure cookies", async () => {
     const s = setup(); const response = await s.handlers.create(request(), "artist");
     expect(response.status).toBe(201); privateResponse(response);

@@ -122,6 +122,23 @@ async function evidence(f: Fixture) {
 }
 
 describe("atomic tip creation across Tips, Payments, Catalog and Identity", () => {
+  test("public offering is current, contains no payment destination or internal identifiers and fails closed", async () => {
+    const f = await optedIn();
+    const expected = { canonicalHandle: f.handle, displayName: "Test artist", minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000] };
+    expect(await createService().getPublicOffering(f.handle)).toEqual(expected);
+    expect(await createService({ paymentsMode: "disabled" }).getPublicOffering(f.handle)).toBeNull();
+    expect(await createService({ publishingMode: "disabled" }).getPublicOffering(f.handle)).toBeNull();
+    expect(await createService().getPublicOffering("missing-creator")).toBeNull();
+    heldPages.add(f.pageId);
+    expect(await createService().getPublicOffering(f.handle)).toBeNull();
+    heldPages.delete(f.pageId);
+    const port = service();
+    const expanded = { async getTipEligibility(tx: Parameters<typeof port.getTipEligibility>[0], handle: string) { const current = await port.getTipEligibility(tx, handle); return current ? { ...current, extra: "private" } : null; } };
+    expect(await createService({ creatorEligibility: expanded }).getPublicOffering(f.handle)).toBeNull();
+    expect((await evidence(f)).intents).toHaveLength(0);
+    await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
+    expect(await createService().getPublicOffering(f.handle)).toBeNull();
+  });
   test("unpublish committing while creation waits is observed before any intent is created", async () => {
     const f = await optedIn();
     let locked!: (pid: number) => void; const ready = new Promise<number>((resolve) => { locked = resolve; });
@@ -440,7 +457,8 @@ describe("authorized tip receipts and non-authoritative transfer claims", () => 
     heldPages.delete(f.pageId);
     await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
     expect(await svc.readReceipt(read)).toMatchObject({ receipt: { state: "awaiting_transfer" }, instruction: null });
-    await expect(receiptService({ paymentsMode: "disabled" }).readReceipt(read)).rejects.toMatchObject({ code: "payments_disabled" });
+    expect(await receiptService({ paymentsMode: "disabled" }).readReceipt(read)).toMatchObject({ receipt: { state: "awaiting_transfer" }, instruction: null });
+    await expect(receiptService({ paymentsMode: "disabled" }).reportTransfer({ ...read, requestId: randomUUID() })).rejects.toMatchObject({ code: "payments_disabled" });
   });
 
   test("unavailable decryption fails safely after authorization and does not reveal record presence before it", async () => {

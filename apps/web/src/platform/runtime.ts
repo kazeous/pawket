@@ -71,6 +71,7 @@ type WebPlatformRuntime = {
   catalog: ReturnType<typeof createCatalogService>;
   publicCatalog: ReturnType<typeof createPublicCatalogQuery>;
   tipHandlers: ReturnType<typeof createTipHttpHandlers>;
+  publicTips: Pick<ReturnType<typeof createTipService>, "getPublicOffering">;
   tipSettings: ReturnType<typeof createCreatorTipSettingsService>;
   creatorTipHandlers: ReturnType<typeof createCreatorTipHttpHandlers>;
   creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
@@ -576,6 +577,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     catalog: catalogService,
     publicCatalog,
     tipHandlers,
+    publicTips: { getPublicOffering: tipCreation.getPublicOffering },
     tipSettings,
     creatorTipHandlers,
     creatorTips,

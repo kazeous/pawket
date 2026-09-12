@@ -28,7 +28,7 @@ export function createCreatorTipHttpHandlers(input: Input) {
   const origin = new URL(input.appBaseUrl).origin; const key = new Uint8Array(input.lookupHmacKey);
   function preflight(request: Request, method: "GET" | "POST") {
     if (request.method !== method) return tipJson(405, { code: "method_not_allowed" });
-    if (input.paymentsMode !== "manual_only") return tipJson(503, { code: "payments_disabled" });
+    if (method !== "GET" && input.paymentsMode !== "manual_only") return tipJson(503, { code: "payments_disabled" });
     if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) return tipJson(403, { code: "untrusted_origin" });
     return null;
   }

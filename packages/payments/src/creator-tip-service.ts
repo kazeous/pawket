@@ -43,8 +43,8 @@ export function createCreatorTipPaymentService(input: Input) {
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };
   const actorValid = (actor: Actor) => { if (!actor || !identifier(actor.userId) || !identifier(actor.sessionId)) fail("not_authorized"); };
-  async function boundary<T>(run: () => Promise<T>): Promise<T> {
-    if (input.paymentsMode !== "manual_only") fail("payments_disabled");
+  async function boundary<T>(run: () => Promise<T>, readOnly = false): Promise<T> {
+    if (!readOnly && input.paymentsMode !== "manual_only") fail("payments_disabled");
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   function validateAssurance(proof: Assurance | null, at: Date, fresh: boolean): Assurance {
@@ -114,7 +114,7 @@ export function createCreatorTipPaymentService(input: Input) {
         const items: CreatorTipProjection[] = [];
         for (const row of page) items.push(await project(tx, row, at, claimMap.get(row.id) ?? null));
         return Object.freeze({ items: Object.freeze(items), nextCursor: rows.length > input.pageSize ? encodeCursor(page[page.length - 1]!, command.actor.userId, state) : null });
-      }));
+      }), true);
     },
     async confirm(command: ConfirmCreatorTipCommand): Promise<CreatorTipProjection> {
       return boundary(async () => {

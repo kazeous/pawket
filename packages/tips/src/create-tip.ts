@@ -38,6 +38,11 @@ export type CreateTipCommand = Readonly<{
   principal: TipCreationPrincipal; canonicalHandle: string; amountVnd: unknown; name?: unknown; message?: unknown;
   abuseKeyHash: string; idempotencyKey: string; requestId: string;
 }>;
+// Explicit public offering: never serialize the internal eligibility port.
+export type PublicTipOffering = Readonly<{
+  canonicalHandle: string; displayName: string; minimumVnd: number;
+  maximumVnd: number; presetsVnd: readonly number[];
+}>;
 type Input = Readonly<{
   db: PawketDatabase; creatorEligibility: CreatorTipEligibilityPort; payments: TipPaymentIntentPort;
   buyerAccounts: { isActiveTipBuyerAccount(tx: PawketTransaction, userId: string): Promise<boolean> };
@@ -53,6 +58,17 @@ export function createTipService(input: Input) {
   const clock = input.now ?? (() => new Date()); const id = input.idFactory ?? randomUUID;
   const now = () => { const at = clock(); if (!(at instanceof Date) || !Number.isFinite(at.getTime())) fail("dependency_unavailable"); return new Date(at); };
   return {
+    async getPublicOffering(canonicalHandle: string): Promise<PublicTipOffering | null> {
+      if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience" || !handle(canonicalHandle)) return null;
+      try {
+        return await input.db.transaction(async (tx) => {
+          const creator = eligibility(await input.creatorEligibility.getTipEligibility(tx, canonicalHandle));
+          if (!creator || creator.canonicalHandle !== canonicalHandle) return null;
+          return Object.freeze({ canonicalHandle: creator.canonicalHandle, displayName: creator.displayName,
+            minimumVnd: creator.minimumVnd, maximumVnd: creator.maximumVnd, presetsVnd: creator.presetsVnd });
+        });
+      } catch { return fail("dependency_unavailable"); }
+    },
     async createTip(command: CreateTipCommand): Promise<TipCreationPaymentResult> {
       try {
         if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience") fail("payments_disabled");

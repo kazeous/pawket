@@ -1538,6 +1538,30 @@ textarea:where(:not([data-slot], [data-slot] *)):disabled {
     transition-duration: 0.01ms;
   }
 }
+
+/* Keep the new tip surfaces usable when browser zoom reduces available inline
+ * space. The existing disabled-mode pages retain their accepted layout. */
+.site-frame:has([data-tip-surface]) {
+  grid-template-columns: minmax(0, 1fr);
+  container: tip-page / inline-size;
+}
+.site-frame:has([data-tip-surface]) > .page-shell,
+[data-tip-surface] { min-width: 0; overflow-wrap: anywhere; }
+.creator-publication:has([data-tip-surface]),
+.creator-publication:has([data-tip-surface]) .stack { grid-template-columns: minmax(0, 1fr); }
+[data-tip-surface] [data-slot="badge"] { max-width: 100%; white-space: normal; height: auto; min-height: 1.25rem; }
+[data-tip-surface] [data-slot="button"] {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  min-height: 2rem;
+}
+@container tip-page (width < 20rem) {
+  .site-header { grid-template-columns: minmax(0, 1fr); }
+  .site-header .account-session,
+  .site-header .header-action { justify-self: start; }
+  .site-header .account-actions { flex-wrap: wrap; }
+}
 /* shadcn semantic variables resolve to Pawket's existing visual language.
  * Keep the existing root tokens unlayered: --color-accent and --color-muted
  * also name Tailwind theme entries, while legacy screens use the root values.

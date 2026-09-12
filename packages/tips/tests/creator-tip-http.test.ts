@@ -23,6 +23,14 @@ function privateResponse(response: Response) {
   expect(response.headers.get("cache-control")).toContain("no-store"); expect(response.headers.get("referrer-policy")).toBe("no-referrer");
 }
 describe("creator confirmation HTTP boundary", () => {
+  test("disabled mode retains authenticated creator history without enabling confirmation", async () => {
+    const s = setup({ paymentsMode: "disabled" });
+    const response = await s.handlers.queue(request({ method: "GET" }));
+    expect(response.status).toBe(200); privateResponse(response); expect(s.service.listQueue).toHaveBeenCalled();
+    expect((await s.handlers.confirm(request(), intentId)).status).toBe(503); expect(s.service.confirm).not.toHaveBeenCalled();
+    s.authenticate.mockResolvedValueOnce(null);
+    expect((await s.handlers.queue(request({ method: "GET" }))).status).toBe(401);
+  });
   test("binds commands only to the authenticated session and returns the committed creator projection", async () => {
     const s = setup(); const response = await s.handlers.confirm(request(), intentId);
     expect(response.status).toBe(200); privateResponse(response); expect(await response.json()).toEqual({ tip: completed });

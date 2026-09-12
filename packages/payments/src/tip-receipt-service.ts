@@ -25,8 +25,8 @@ export function createTipReceiptService(input: Input) {
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date()); const id = input.idFactory ?? randomUUID;
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!(at instanceof Date) || !Number.isFinite(at.getTime())) fail("dependency_unavailable"); return new Date(at); };
-  async function boundary<T>(run: () => Promise<T>): Promise<T> {
-    if (input.paymentsMode !== "manual_only") fail("payments_disabled");
+  async function boundary<T>(run: () => Promise<T>, readOnly = false): Promise<T> {
+    if (!readOnly && input.paymentsMode !== "manual_only") fail("payments_disabled");
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   async function find(tx: PawketTransaction, reference: string) {
@@ -62,7 +62,7 @@ export function createTipReceiptService(input: Input) {
         const { snapshot, transferReference } = readTipIntentSnapshot(candidate, { keyring: input.keyring, lookupHmacKey: key });
         // Creator/page/account locks always precede the intent lock. Hidden or
         // retired creators retain a private receipt, but no active instruction.
-        const creator = candidate.state === "awaiting_transfer" && candidate.expiresAt > now()
+        const creator = input.paymentsMode === "manual_only" && candidate.state === "awaiting_transfer" && candidate.expiresAt > now()
           ? await input.creatorEligibility.getTipEligibility(tx, snapshot.creator.handle) : null;
         await authorize(tx, candidate, command.access, now());
         const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.id, candidate.id)).limit(1).for("share");
@@ -72,7 +72,7 @@ export function createTipReceiptService(input: Input) {
         const result = receipt(intent, transferReference, snapshot.creator, at, claim?.claimedAt ?? null);
         const usable = result.state === "awaiting_transfer" && creator?.creatorUserId === intent.creatorUserId && creator.receivingAccountVersionId === intent.accountVersionId;
         return Object.freeze({ receipt: result, instruction: usable ? tipInstructionProjection(intent, snapshot, transferReference, result.transferClaimedAt) : null });
-      }));
+      }), true);
     },
     async reportTransfer(command: { reference: string; access: TipAccess; requestId: string }): Promise<TipTransferClaim> {
       return boundary(async () => {
