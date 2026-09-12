@@ -14,6 +14,7 @@ export default defineConfig({
   outputDir: path.resolve(import.meta.dirname, ".playwright-artifacts", "legacy"),
   testMatch: "**/*.playwright.ts",
   testIgnore: [
+    "ui-regression.playwright.ts",
     INCREMENT_THREE_DISABLED_TEST,
     ...INCREMENT_THREE_ENABLED_TESTS,
   ],
