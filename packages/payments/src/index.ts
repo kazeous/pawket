@@ -56,3 +56,4 @@ export {
   type VietQrTransferInput,
   type VietQrTransferInstruction,
 } from "./vietqr.js";
+export { createTipReceivingAccountEligibilityPort } from "./tip-receiving-account.js";

@@ -3,9 +3,21 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import {
   creatorApplicationRevisions,
   identityCreatorCapabilities,
+  identityUsers,
   type PawketDatabase,
   type PawketTransaction,
 } from "@pawket/database";
+
+export function createIdentityCreatorTipAccountPort() {
+  return {
+    async isActiveTipCreatorAccount(tx: PawketTransaction, userId: string): Promise<boolean> {
+      const [user] = await tx.select({ id: identityUsers.id }).from(identityUsers).where(and(
+        eq(identityUsers.id, userId), eq(identityUsers.accessStatus, "active"), eq(identityUsers.emailVerified, true),
+      )).limit(1).for("share");
+      return Boolean(user);
+    },
+  };
+}
 
 type CreatorSeed = Readonly<{
   userId: string;
