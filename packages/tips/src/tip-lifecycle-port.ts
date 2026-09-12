@@ -2,6 +2,18 @@ import { tips, type PawketTransaction } from "@pawket/database";
 import { decryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import { and, eq } from "drizzle-orm";
 import { normalizeTipGuestContent, type TipGuestContent } from "./guest-content.js";
+import type { TipExpiryPort } from "@pawket/payments";
+
+export function createTipExpiryPort(): TipExpiryPort {
+  return {
+    async expireTip(tx, command) {
+      const updated = await tx.update(tips).set({ state: "expired", closedAt: command.at, updatedAt: command.at }).where(and(
+        eq(tips.id, command.tipId), eq(tips.creatorUserId, command.creatorUserId), eq(tips.amountVnd, command.amountVnd), eq(tips.state, "awaiting_payment"),
+      )).returning({ id: tips.id });
+      return updated.length === 1;
+    },
+  };
+}
 
 export function createTipLifecyclePort(input: { keyring: EncryptionKeyring }) {
   return {

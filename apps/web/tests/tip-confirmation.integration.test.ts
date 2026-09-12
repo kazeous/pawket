@@ -2,16 +2,19 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   adminAuditEvents, createDatabase, creatorDiscoveryProjections, creatorHandleClaims, creatorPages,
-  creatorPublicationRevisions, identityUsers,
+  creatorPublicationRevisions, identityUsers, identityEmailHandoffs, runRetentionSweep, systemRetentionRuns,
   paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentConfirmations, identitySessions, identityTotpAuthenticators, identityRoleGrants, type PawketDatabase,
 } from "@pawket/database";
 import { createCreatorTipSettingsService, createPublicCatalogQuery, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, createIdentityTipAssurancePort } from "@pawket/identity";
-import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService, createCreatorTipPaymentService } from "@pawket/payments";
+import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService, createCreatorTipPaymentService, expireTipPaymentIntents } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField, createLookupHmac } from "@pawket/security";
+import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
+import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
+import { materializeTipNotification } from "../../worker/src/tip-notification.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for creator tip integration tests");
@@ -87,7 +90,7 @@ afterAll(async () => {
 });
 
 
-import { createTipService, createTipAccessPort, createTipLifecyclePort, type CreateTipCommand } from "@pawket/tips";
+import { createTipService, createTipAccessPort, createTipLifecyclePort, createTipExpiryPort, type CreateTipCommand } from "@pawket/tips";
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function optedIn() {
@@ -143,8 +146,8 @@ function creatorService(overrides: Partial<Parameters<typeof createCreatorTipPay
   return createCreatorTipPaymentService({ db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, totpAuthMs: 300_000,
     assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }), now: () => at, ...overrides });
 }
-async function pending(options: Parameters<typeof session>[1] = {}) {
-  const f = await optedIn(); const actor = await session(f, options); const c = command(f); const created = await createService().createTip(c);
+async function pending(options: Parameters<typeof session>[1] = {}, creation: Partial<Parameters<typeof createTipService>[0]> = {}) {
+  const f = await optedIn(); const actor = await session(f, options); const c = command(f); const created = await createService(creation).createTip(c);
   const [intent] = (await evidence(f)).intents;
   if (!intent) throw new Error("Missing synthetic intent");
   const confirm = { actor, paymentIntentId: intent.id, observedAmountVnd: 50_000, observedTransferReference: created.instruction.reference,
@@ -162,6 +165,34 @@ async function confirmationFacts(f: Fixture) {
 }
 
 describe("creator manual confirmation with authoritative Identity assurance", () => {
+  test("post-commit telemetry can fail without changing success or replay, and rejects emit no success", async () => {
+    const f = await optedIn(); const c = command(f);
+    const onCreate = vi.fn(() => { throw new Error("synthetic telemetry failure"); });
+    const creating = createService({ onCommitted: onCreate });
+    const created = await creating.createTip(c);
+    expect(await creating.createTip(c)).toEqual(created);
+    await expect(creating.createTip({ ...c, amountVnd: 20_000 })).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(onCreate.mock.calls).toEqual([[false], [true]]);
+    const claim = { reference: created.instruction.reference, access: { kind: "guest" as const, capability: created.guestCapability!.secret }, requestId: randomUUID() };
+    const onClaim = vi.fn(() => { throw new Error("synthetic telemetry failure"); });
+    const claiming = receiptService({ onClaimCommitted: onClaim });
+    const firstClaim = await claiming.reportTransfer(claim);
+    expect(await claiming.reportTransfer(claim)).toEqual(firstClaim);
+    expect(firstClaim.authoritative).toBe(false);
+    await expect(claiming.reportTransfer({ ...claim, access: { kind: "guest", capability: "invalid" } })).rejects.toMatchObject({ code: "not_authorized" });
+    expect(onClaim.mock.calls).toEqual([[false], [true]]);
+    const actor = await session(f); const [intent] = (await evidence(f)).intents;
+    const confirm = { actor, paymentIntentId: intent!.id, observedAmountVnd: 50_000, observedTransferReference: created.instruction.reference,
+      observedBankTransactionId: `txn-${randomUUID()}`, attestedReceived: true, idempotencyKey: randomUUID(), requestId: randomUUID() };
+    const onConfirm = vi.fn(() => { throw new Error("synthetic telemetry failure"); });
+    const confirming = creatorService({ onCommitted: onConfirm });
+    await expect(confirming.confirm({ ...confirm, observedAmountVnd: 20_000 })).rejects.toMatchObject({ code: "evidence_mismatch" });
+    const confirmed = await confirming.confirm(confirm);
+    expect(await confirming.confirm(confirm)).toEqual(confirmed);
+    expect(onConfirm.mock.calls).toEqual([[false], [true]]);
+    expect((await confirmationFacts(f)).confirmations).toHaveLength(1);
+  });
+
   test("a revocation committed while confirmation waits on its session is observed before payment changes", async () => {
     const p = await pending(); const ready = Promise.withResolvers<number>(); const hold = Promise.withResolvers<void>();
     const revoking = db.transaction(async (tx) => {
@@ -411,5 +442,182 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
       expect(rows.intents[0]?.state).toBe("awaiting_transfer"); expect(rows.tips[0]?.state).toBe("awaiting_payment");
     } finally { await db.execute(sql.raw(`DROP TRIGGER ${name} ON system_outbox`)); await db.execute(sql.raw(`DROP FUNCTION ${name}()`)); }
     expect((await creatorService().confirm(p.confirm)).state).toBe("confirmed");
+  });
+});
+
+describe("bounded tip expiry with atomic Tips and Payments facts", () => {
+  const due = new Date(at.getTime() + 300_000);
+  const shortPending = () => pending({}, { payments: paymentPort({ intentTtlMs: 300_000 }) });
+  const scan = (overrides: Partial<Parameters<typeof expireTipPaymentIntents>[0]> = {}) => expireTipPaymentIntents({ db, tips: createTipExpiryPort(), paymentsMode: "manual_only", batchSize: 100, now: due, applicationRevision: "synthetic-expiry-revision", ...overrides });
+  afterEach(async () => { await scan({ batchSize: 500 }); });
+
+  test("disabled and before-deadline scans are inert; due scan commits matching states and one fact", async () => {
+    const p = await shortPending();
+    expect(await scan({ paymentsMode: "disabled" })).toEqual({ scanned: 0, expired: 0 });
+    expect(await scan({ now: new Date(due.getTime() - 1) })).toEqual({ scanned: 0, expired: 0 });
+    expect(await scan()).toEqual({ scanned: 1, expired: 1 });
+    expect(await scan()).toEqual({ scanned: 0, expired: 0 });
+    const facts = await confirmationFacts(p.f); expect(facts.intents[0]?.state).toBe("expired"); expect(facts.tips[0]?.state).toBe("expired"); expect(facts.confirmations).toHaveLength(0);
+    const outbox = await db.select().from(systemOutbox).where(and(eq(systemOutbox.aggregateId, p.intent.id), eq(systemOutbox.eventType, "tip.expired.v1")));
+    const audit = await db.select().from(adminAuditEvents).where(and(eq(adminAuditEvents.subjectId, p.intent.id), eq(adminAuditEvents.action, "tip.expired")));
+    expect(outbox).toHaveLength(1); expect(audit).toHaveLength(1); expect(audit[0]?.applicationRevision).toBe("synthetic-expiry-revision");
+    expect(JSON.stringify([...outbox, ...audit])).not.toContain(p.created.instruction.reference); expect(JSON.stringify([...outbox, ...audit])).not.toMatch(/Synthetic Guest|0000001234567|Thank you/u);
+    await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "intent_not_pending" });
+  });
+
+  test("honors the batch bound and never changes an already confirmed intent", async () => {
+    const confirmed = await shortPending(); await creatorService().confirm(confirmed.confirm);
+    await shortPending(); await shortPending();
+    expect(await scan({ batchSize: 1 })).toEqual({ scanned: 1, expired: 1 });
+    expect(await scan({ batchSize: 1 })).toEqual({ scanned: 1, expired: 1 });
+    expect(await scan()).toEqual({ scanned: 0, expired: 0 });
+    const facts = await confirmationFacts(confirmed.f); expect(facts.intents[0]?.state).toBe("confirmed"); expect(facts.tips[0]?.state).toBe("completed"); expect(facts.confirmations).toHaveLength(1);
+  });
+
+  test("concurrent scans expire one intent exactly once", async () => {
+    const p = await shortPending();
+    const results = await Promise.all([scan({ batchSize: 1 }), scan({ batchSize: 1 })]);
+    expect(results.reduce((n, r) => n + r.expired, 0)).toBe(1);
+    const events = await db.select().from(systemOutbox).where(and(eq(systemOutbox.aggregateId, p.intent.id), eq(systemOutbox.eventType, "tip.expired.v1")));
+    expect(events).toHaveLength(1);
+  });
+
+  test("skips a locked intent and safely retries it after release", async () => {
+    const p = await shortPending(); const ready = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+    const holding = db.transaction(async (tx) => { await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(eq(paymentIntents.id, p.intent.id)).for("update"); ready.resolve(); await release.promise; });
+    await ready.promise;
+    try { expect(await scan()).toEqual({ scanned: 0, expired: 0 }); }
+    finally { release.resolve(); await holding; }
+    expect(await scan()).toEqual({ scanned: 1, expired: 1 });
+  });
+
+  test("confirmation and expiry serialize without a split Tip/payment state", async () => {
+    const p = await shortPending();
+    const [confirmation, expiry] = await Promise.allSettled([creatorService({ now: () => new Date(due.getTime() - 1) }).confirm(p.confirm), scan()]);
+    expect(expiry.status).toBe("fulfilled"); const facts = await confirmationFacts(p.f);
+    if (confirmation.status === "fulfilled") { expect(facts.intents[0]?.state).toBe("confirmed"); expect(facts.tips[0]?.state).toBe("completed"); expect(facts.confirmations).toHaveLength(1); }
+    else { expect(confirmation.reason).toMatchObject({ code: "intent_not_pending" }); expect(facts.intents[0]?.state).toBe("expired"); expect(facts.tips[0]?.state).toBe("expired"); expect(facts.confirmations).toHaveLength(0); }
+  });
+
+  test("outbox or lifecycle failure rolls back both states and allows retry", async () => {
+    const p = await shortPending(); const trigger = `reject_expiry_${randomUUID().replaceAll("-", "")}`;
+    await expect(scan({ tips: { async expireTip() { throw new Error("private synthetic dependency detail"); } } })).rejects.toMatchObject({ code: "dependency_unavailable", message: "dependency_unavailable" });
+    expect((await confirmationFacts(p.f)).intents[0]?.state).toBe("awaiting_transfer");
+    await db.execute(sql.raw(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type = 'tip.expired.v1' THEN RAISE EXCEPTION 'synthetic expiry failure'; END IF; RETURN NEW; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER ${trigger} BEFORE INSERT ON system_outbox FOR EACH ROW EXECUTE FUNCTION ${trigger}()`));
+    try {
+      await expect(scan()).rejects.toMatchObject({ code: "dependency_unavailable" });
+      const facts = await confirmationFacts(p.f); expect(facts.intents[0]?.state).toBe("awaiting_transfer"); expect(facts.tips[0]?.state).toBe("awaiting_payment");
+      expect(await db.select().from(adminAuditEvents).where(and(eq(adminAuditEvents.subjectId, p.intent.id), eq(adminAuditEvents.action, "tip.expired")))).toHaveLength(0);
+    } finally { await db.execute(sql.raw(`DROP TRIGGER ${trigger} ON system_outbox`)); await db.execute(sql.raw(`DROP FUNCTION ${trigger}()`)); }
+    expect(await scan()).toEqual({ scanned: 1, expired: 1 });
+  });
+});
+
+describe("tip notification handoff and protected report-only retention", () => {
+  const now = new Date(at.getTime() + 301_000);
+  async function sourceFor(p: Awaited<ReturnType<typeof pending>>, eventType: string) {
+    const [source] = await db.select().from(systemOutbox).where(and(eq(systemOutbox.eventType, eventType), eq(systemOutbox.aggregateId, eventType === "tip.created.v1" ? p.intent.tipId : p.intent.id)));
+    if (!source) throw new Error("Missing synthetic notification source");
+    return { outboxEventId: source.id, eventType: source.eventType, eventVersion: source.eventVersion, aggregateType: source.aggregateType, aggregateId: source.aggregateId };
+  }
+  test("concurrent replay creates one encrypted email and in-app handoff for each authoritative lifecycle fact", async () => {
+    const p = await pending(); const created = await sourceFor(p, "tip.created.v1");
+    const results = await Promise.all([materializeTipNotification({ db, keyring, event: created, now }), materializeTipNotification({ db, keyring, event: created, now })]);
+    expect(results.sort()).toEqual(["already_materialized", "created"]);
+    await creatorService().confirm(p.confirm); const confirmed = await sourceFor(p, "tip.confirmed.v1");
+    expect(await materializeTipNotification({ db, keyring, event: confirmed, now })).toBe("created");
+    const expired = await pending({}, { payments: paymentPort({ intentTtlMs: 300_000 }) });
+    await expireTipPaymentIntents({ db, tips: createTipExpiryPort(), paymentsMode: "manual_only", batchSize: 100, now, applicationRevision: "synthetic-notification-revision" });
+    const expiry = await sourceFor(expired, "tip.expired.v1"); expect(await materializeTipNotification({ db, keyring, event: expiry, now })).toBe("created");
+    const sourceIds = [created.outboxEventId, confirmed.outboxEventId, expiry.outboxEventId];
+    const emails = await db.select().from(identityEmailHandoffs).where(inArray(identityEmailHandoffs.sourceOutboxEventId, sourceIds));
+    const inApp = await db.select().from(systemOutbox).where(and(eq(systemOutbox.eventType, "tip.notification_available.v1"), inArray(systemOutbox.aggregateId, sourceIds)));
+    expect(emails).toHaveLength(3); expect(inApp).toHaveLength(3);
+    for (const row of emails) { expect(row.purpose).toBe("tip_status"); expect(row.destinationEnvelope).not.toBeNull(); expect(row.secretEnvelope).toBeNull(); expect(Object.keys(row.templateData).sort()).toEqual(["returnPath", "state"]); }
+    expect(JSON.stringify([...emails, ...inApp])).not.toMatch(/Synthetic Guest|0000001234567|Thank you/u); expect(JSON.stringify([...emails, ...inApp])).not.toContain(p.created.instruction.reference);
+    const sink = new DeterministicLocalSecurityEmailSink(); const email = emails.find((row) => row.sourceOutboxEventId === confirmed.outboxEventId)!;
+    expect(await deliverSecurityEmailHandoff(db, { handoffId: email.id, workerId: "synthetic-tip-delivery", keyring, sender: sink, now })).toBe("delivered");
+    expect(await deliverSecurityEmailHandoff(db, { handoffId: email.id, workerId: "synthetic-tip-delivery", keyring, sender: sink, now })).toBe("already_delivered"); expect(sink.snapshot()).toHaveLength(1);
+  });
+
+  test("forged queue metadata cannot authorize a handoff; delivery failure cannot change payment state", async () => {
+    const p = await pending(); await creatorService().confirm(p.confirm); const event = await sourceFor(p, "tip.confirmed.v1");
+    await expect(materializeTipNotification({ db, keyring, event: { ...event, aggregateId: randomUUID() }, now })).rejects.toThrow("Tip notification handoff failed");
+    await expect(materializeTipNotification({ db, keyring, event: { ...event, eventType: "tip.expired.v1" }, now })).rejects.toThrow("Tip notification handoff failed");
+    expect(await db.select().from(identityEmailHandoffs).where(eq(identityEmailHandoffs.sourceOutboxEventId, event.outboxEventId))).toHaveLength(0);
+    await materializeTipNotification({ db, keyring, event, now });
+    const [email] = await db.select().from(identityEmailHandoffs).where(eq(identityEmailHandoffs.sourceOutboxEventId, event.outboxEventId));
+    await expect(deliverSecurityEmailHandoff(db, { handoffId: email!.id, workerId: "synthetic-failed-tip-delivery", keyring, now, sender: { async send() { throw new Error("private provider details"); } } })).rejects.toThrow();
+    const facts = await confirmationFacts(p.f); expect(facts.intents[0]?.state).toBe("confirmed"); expect(facts.tips[0]?.state).toBe("completed"); expect(facts.confirmations).toHaveLength(1);
+    expect(await materializeTipNotification({ db, keyring, event, now })).toBe("already_materialized");
+  });
+
+  test("an unverified email records attention without inventing a destination or changing business state", async () => {
+    const p = await pending(); const event = await sourceFor(p, "tip.created.v1");
+    await db.update(identityUsers).set({ emailVerified: false, emailVerifiedAt: null, emailVerificationProvenance: null }).where(eq(identityUsers.id, p.f.userId));
+    expect(await materializeTipNotification({ db, keyring, event, now })).toBe("attention_required");
+    const [email] = await db.select().from(identityEmailHandoffs).where(eq(identityEmailHandoffs.sourceOutboxEventId, event.outboxEventId));
+    expect(email).toMatchObject({ status: "attention_required", failureCode: "no_verified_destination", destinationEnvelope: null, secretEnvelope: null });
+    expect((await confirmationFacts(p.f)).intents[0]?.state).toBe("awaiting_transfer");
+  });
+
+  test("tip datasets remain protected report-only even if the legacy sweep is set to enforce", async () => {
+    const reportAt = new Date(at.getTime() + 8 * 86_400_000); const beforeTips = await db.select().from(tips); const beforeIntents = await db.select().from(paymentIntents); const beforeConfirmations = await db.select().from(paymentConfirmations);
+    const results = await runRetentionSweep({ db, now: reportAt, mode: "enforce", enforcementPaused: false, batchSize: 25, policyVersion: "synthetic-tip-report-only" });
+    const tipResults = results.filter((row) => row.dataset.startsWith("tip_")); expect(tipResults).toHaveLength(5);
+    for (const result of tipResults) { expect(result).toMatchObject({ mode: "report_only", outcome: "completed", processedCount: 0 }); expect(result.protectedCount).toBe(result.candidateCount); }
+    expect(await db.select().from(tips)).toEqual(beforeTips); expect(await db.select().from(paymentIntents)).toEqual(beforeIntents); expect(await db.select().from(paymentConfirmations)).toEqual(beforeConfirmations);
+    const runs = await db.select().from(systemRetentionRuns).where(eq(systemRetentionRuns.policyVersion, "synthetic-tip-report-only"));
+    expect(runs.filter((row) => row.dataset.startsWith("tip_")).every((row) => row.mode === "report_only" && row.processedCount === 0)).toBe(true);
+    await expect(db.insert(systemRetentionRuns).values({ policyVersion: "synthetic-invalid-enforce", mode: "enforce", dataset: "tip_confirmations", cutoff: now, candidateCount: 1, protectedCount: 1, processedCount: 0, outcome: "completed", startedAt: now, completedAt: now })).rejects.toThrow();
+  });
+
+  test("database rejects minimizing a receiving account referenced by a tip", async () => {
+    const p = await pending();
+    await expect(db.update(paymentsReceivingAccountOnboarding).set({ accountNumberEnvelope: null, accountHolderLabelEnvelope: null, minimizedAt: now, updatedAt: now }).where(eq(paymentsReceivingAccountOnboarding.id, p.f.accountVersionId))).rejects.toMatchObject({ cause: expect.objectContaining({ message: "Tip receiving-account evidence is protected" }) });
+    const [account] = await db.select().from(paymentsReceivingAccountOnboarding).where(eq(paymentsReceivingAccountOnboarding.id, p.f.accountVersionId)); expect(account?.accountNumberEnvelope).not.toBeNull(); expect(account?.minimizedAt).toBeNull();
+  });
+
+  test("a minimizer waiting on an uncommitted tip observes its financial reference after commit", async () => {
+    const f = await optedIn(); const ready = Promise.withResolvers<number>(); const release = Promise.withResolvers<void>();
+    const port = paymentPort();
+    const creating = createService({ payments: { ...port, async createIntent(tx, command) {
+      const result = await port.createIntent(tx, command);
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      ready.resolve(backend!.pid); await release.promise; return result;
+    } } }).createTip(command(f));
+    const pid = await ready.promise;
+    const minimizing = db.update(paymentsReceivingAccountOnboarding).set({ accountNumberEnvelope: null, accountHolderLabelEnvelope: null, minimizedAt: now, updatedAt: now })
+      .where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId)).then(() => ({ minimized: true }), (error: unknown) => ({ error }));
+    try {
+      await vi.waitFor(async () => {
+        const [blocked] = await db.execute<{ value: boolean }>(sql`select exists(select 1 from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid))) as value`);
+        expect(blocked?.value).toBe(true);
+      }, { timeout: 3000, interval: 20 });
+    } finally { release.resolve(); }
+    await creating;
+    expect(await minimizing).toMatchObject({ error: { cause: { message: "Tip receiving-account evidence is protected" } } });
+    const [account] = await db.select().from(paymentsReceivingAccountOnboarding).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
+    expect(account?.minimizedAt).toBeNull(); expect((await evidence(f)).intents).toHaveLength(1);
+  });
+
+  test("creation waiting on account minimization fails closed without financial facts", async () => {
+    const f = await optedIn(); const ready = Promise.withResolvers<number>(); const release = Promise.withResolvers<void>();
+    const minimizing = db.transaction(async (tx) => {
+      await tx.update(paymentsReceivingAccountOnboarding).set({ accountNumberEnvelope: null, accountHolderLabelEnvelope: null, minimizedAt: now, updatedAt: now }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      ready.resolve(backend!.pid); await release.promise;
+    });
+    const pid = await ready.promise;
+    const creating = createService().createTip(command(f)).then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await vi.waitFor(async () => {
+        const [blocked] = await db.execute<{ value: boolean }>(sql`select exists(select 1 from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid))) as value`);
+        expect(blocked?.value).toBe(true);
+      }, { timeout: 3000, interval: 20 });
+    } finally { release.resolve(); }
+    await minimizing; expect(await creating).toHaveProperty("error");
+    const facts = await evidence(f); expect(facts.tipRows).toHaveLength(0); expect(facts.intents).toHaveLength(0); expect(facts.outbox).toHaveLength(0); expect(facts.audit).toHaveLength(0);
   });
 });

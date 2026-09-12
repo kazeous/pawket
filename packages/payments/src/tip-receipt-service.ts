@@ -15,6 +15,7 @@ type Input = Readonly<{
   creatorEligibility: { getTipEligibility(tx: PawketTransaction, handle: string): Promise<Readonly<{ creatorUserId: string; receivingAccountVersionId: string }> | null> };
   claimRateLimit(creatorUserId: string): Promise<boolean>;
   now?: () => Date; idFactory?: () => string;
+  onClaimCommitted?: (replayed: boolean) => void;
 }>;
 export type AuthorizedTipReceipt = Readonly<{ receipt: TipReceiptProjection; instruction: TipInstructionProjection | null }>;
 function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { throw new TipPaymentError(code); }
@@ -86,7 +87,8 @@ export function createTipReceiptService(input: Input) {
           return candidate.creatorUserId;
         });
         if (await input.claimRateLimit(creatorUserId) !== true) fail("rate_limited");
-        return input.db.transaction(async (tx) => {
+        let replayed = false;
+        const committed = await input.db.transaction(async (tx) => {
           if (!identifier(command.requestId)) fail("invalid_request");
           const candidate = await find(tx, command.reference);
           await authorize(tx, candidate, command.access, now());
@@ -95,7 +97,7 @@ export function createTipReceiptService(input: Input) {
           const at = now(); const access = await authorize(tx, intent, command.access, at);
           if (intent.state !== "awaiting_transfer" || intent.expiresAt <= at) fail("intent_not_pending");
           const [existing] = await tx.select({ claimedAt: paymentTransferClaims.claimedAt }).from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intent.id)).limit(1);
-          if (existing) return Object.freeze({ claimedAt: existing.claimedAt, authoritative: false });
+          if (existing) { replayed = true; return Object.freeze({ claimedAt: existing.claimedAt, authoritative: false }); }
           await tx.insert(paymentTransferClaims).values({ id: id(), paymentIntentId: intent.id, accessKind: access.buyerUserId ? "buyer" : "guest", buyerUserId: access.buyerUserId,
             guestCapabilityId: access.capabilityId, authoritative: false, requestId: command.requestId, claimedAt: at });
           await appendAdminAuditEvent(tx, { actorUserId: access.buyerUserId ?? "guest", subjectType: "payment_intent", subjectId: intent.id,
@@ -105,6 +107,8 @@ export function createTipReceiptService(input: Input) {
             payload: { paymentIntentId: intent.id, tipId: intent.tipId, creatorUserId: intent.creatorUserId, authoritative: false, correlationId: command.requestId }, occurredAt: at });
           return Object.freeze({ claimedAt: at, authoritative: false });
         });
+        try { input.onClaimCommitted?.(replayed); } catch { /* Claims remain non-authoritative if telemetry fails. */ }
+        return committed;
       });
     },
   };

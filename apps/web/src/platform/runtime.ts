@@ -51,6 +51,7 @@ import {
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
+import { recordTipOperation, setTipPaymentsEnabledMetric } from "@pawket/observability";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -472,10 +473,13 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, commandFingerprintKey: lookupHmacKey,
   });
   const tipBuyerAccounts = createIdentityTipBuyerAccountPort();
+  setTipPaymentsEnabledMetric(env.TIP_PAYMENTS_MODE === "manual_only");
   const tipCreation = createTipService({
+    onCommitted: (replayed) => recordTipOperation({ operation: "create", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, creatorEligibility: tipSettings, buyerAccounts: tipBuyerAccounts,
     payments: createTipPaymentIntentPort({ keyring, lookupHmacKey, intentTtlMs: env.TIP_INTENT_TTL_SECONDS * 1000,
-      guestReceiptTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, openIpLimit: env.TIP_OPEN_IP_LIMIT, openCreatorLimit: env.TIP_OPEN_CREATOR_LIMIT }),
+      guestReceiptTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, openIpLimit: env.TIP_OPEN_IP_LIMIT, openCreatorLimit: env.TIP_OPEN_CREATOR_LIMIT,
+      onQrOutcome: (outcome) => recordTipOperation({ operation: "qr", outcome }) }),
     paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
     keyring, lookupHmacKey, idempotencyTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000,
   });
@@ -483,6 +487,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     return recordSecurityThrottleAttempt(database.db, { ...input, scope: input.action.endsWith("_creator") ? "account" : "network", now: new Date(), blockMs: input.windowMs });
   }
   const tipReceipts = createTipReceiptService({
+    onClaimCommitted: (replayed) => recordTipOperation({ operation: "claim", outcome: replayed ? "replayed" : "recorded" }),
     db: database.db, paymentsMode: env.TIP_PAYMENTS_MODE, keyring, lookupHmacKey, tips: createTipAccessPort(), buyerAccounts: tipBuyerAccounts, creatorEligibility: tipSettings,
     async claimRateLimit(creatorUserId) {
       return (await tipThrottle({ action: "tip_claim_creator", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "tip-creator-rate", value: creatorUserId }),
@@ -497,6 +502,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     resolveCreatorRateSubject: (handle) => database.db.transaction(async (tx) => (await tipSettings.getTipEligibility(tx, handle))?.creatorUserId ?? null),
   });
   const creatorTips = createCreatorTipPaymentService({
+    onCommitted: (replayed) => recordTipOperation({ operation: "confirm", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, pageSize: env.TIP_QUEUE_PAGE_SIZE,
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
     assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }),

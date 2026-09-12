@@ -327,6 +327,119 @@ tests:
               summary: Worker public media cleanup scan has stopped completing
               runbook: ops/runbooks/creator-publication.md
 
+  - name: disabled tip expiry stays silent without scan telemetry
+    interval: 1m
+    input_series:
+      - series: 'pawket_tip_payments_enabled{job="worker",instance="synthetic-worker"}'
+        values: '0x22'
+      - series: 'pawket_worker_scan_healthy{scan="outbox",job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts: []
+
+  - name: enabled tip expiry missing before first success alerts and recovers
+    interval: 1m
+    input_series:
+      - series: 'pawket_tip_payments_enabled{job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="outbox",job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="tip_expiry",job="worker",instance="synthetic-worker"}'
+        values: '_ _ _ _ _ _ 1 1'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="tip_expiry",job="worker",instance="synthetic-worker"}'
+        values: '_ _ _ _ _ _ 360 420'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: critical
+            exp_annotations:
+              summary: Enabled tip expiry scan is missing unhealthy or stale
+              runbook: ops/runbooks/tip-operations.md
+      - eval_time: 6m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts: []
+
+  - name: enabled unhealthy tip expiry alerts after five minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_tip_payments_enabled{job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="outbox",job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="tip_expiry",job="worker",instance="synthetic-worker"}'
+        values: '0x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: critical
+            exp_annotations:
+              summary: Enabled tip expiry scan is missing unhealthy or stale
+              runbook: ops/runbooks/tip-operations.md
+
+  - name: enabled stale tip expiry alerts after maximum scan interval and grace
+    interval: 1m
+    input_series:
+      - series: 'pawket_tip_payments_enabled{job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="outbox",job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_scan_healthy{scan="tip_expiry",job="worker",instance="synthetic-worker"}'
+        values: '1x22'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="tip_expiry",job="worker",instance="synthetic-worker"}'
+        values: '0x22'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PawketTipExpiryUnhealthy
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: critical
+            exp_annotations:
+              summary: Enabled tip expiry scan is missing unhealthy or stale
+              runbook: ops/runbooks/tip-operations.md
+
+  - name: tip notification failure alerts independently of disabled payments
+    interval: 1m
+    input_series:
+      - series: pawket_tip_payments_enabled
+        values: '0x9'
+      - series: 'pawket_tip_operations_total{operation="notification",outcome="failed"}'
+        values: '0 0 1x7'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PawketTipNotificationHandoffFailures
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PawketTipNotificationHandoffFailures
+        exp_alerts:
+          - exp_labels:
+              operation: notification
+              outcome: failed
+              severity: warning
+            exp_annotations:
+              summary: Tip notification handoffs are failing independently of payment state
+              runbook: ops/runbooks/tip-operations.md
+
   - name: missing worker telemetry alerts after five minutes
     interval: 1m
     input_series: []

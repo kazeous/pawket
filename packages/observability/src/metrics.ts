@@ -7,6 +7,24 @@ import {
 
 export const metricsRegistry = new Registry();
 
+const tipOperationsTotal = new Counter({ name: "pawket_tip_operations_total", help: "Tip operation attempts by fixed operation and outcome; not proof of bank settlement.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const tipPaymentsEnabled = new Gauge({ name: "pawket_tip_payments_enabled", help: "Whether manual tip payment operations are enabled in this process.", registers: [metricsRegistry] });
+const tipOutcomes: Readonly<Record<string, readonly string[]>> = {
+  create: ["accepted", "replayed", "rejected", "rate_limited", "disabled", "failed"],
+  qr: ["produced", "failed"], claim: ["recorded", "replayed", "rejected", "rate_limited", "disabled", "failed"],
+  confirm: ["accepted", "replayed", "evidence_mismatch", "bank_transaction_conflict", "intent_not_pending", "idempotency_conflict", "recent_auth_required", "totp_required", "rejected", "rate_limited", "disabled", "failed"],
+  expiry: ["completed", "expired", "failed"], notification: ["created", "already_materialized", "attention_required", "failed"],
+};
+export function recordTipOperation(input: { operation: string; outcome: string; count?: number }): void {
+  assertSafeStructuredData(input, "metric"); const count = input.count ?? 1;
+  if (!Object.hasOwn(tipOutcomes, input.operation) || !tipOutcomes[input.operation]?.includes(input.outcome) || !Number.isSafeInteger(count) || count < 0 || count > 500) rejectUnsafeMetric();
+  tipOperationsTotal.inc({ operation: input.operation, outcome: input.outcome }, count);
+}
+export function setTipPaymentsEnabledMetric(enabled: boolean): void {
+  if (typeof enabled !== "boolean") rejectUnsafeMetric();
+  tipPaymentsEnabled.set(enabled ? 1 : 0);
+}
+
 const httpRequestsTotal = new Counter({
   name: "pawket_http_requests_total",
   help: "Total HTTP requests handled by Pawket.",
@@ -296,6 +314,7 @@ const allowedEmailPurposes = new Set([
   "password_reset",
   "refund_status",
   "security_notice",
+  "tip_status",
 ]);
 const allowedEmailOutcomes = new Set([
   "attention_required",
@@ -303,8 +322,9 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry"]);
 const allowedRetentionDatasets = new Set([
+  "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",
   "failed_quarantine",
   "processed_source",

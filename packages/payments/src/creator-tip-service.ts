@@ -19,6 +19,7 @@ type Input = Readonly<{
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean>;
     getConfirmedGuestContent(tx: PawketTransaction, command: { tipId: string; creatorUserId: string }): Promise<GuestContent | null> };
   now?: () => Date; idFactory?: () => string;
+  onCommitted?: (replayed: boolean) => void;
 }>;
 export type ConfirmCreatorTipCommand = Readonly<{ actor: Actor; paymentIntentId: string; observedAmountVnd: unknown; observedTransferReference: unknown;
   observedBankTransactionId: unknown; attestedReceived: unknown; idempotencyKey: string; requestId: string }>;
@@ -127,7 +128,8 @@ export function createCreatorTipPaymentService(input: Input) {
         const actor = { ...command.actor }; const intentId = command.paymentIntentId; const requestId = command.requestId;
         const keyHash = digest("tip-confirm-command-key", command.idempotencyKey);
         const fingerprint = digest("tip-confirm-command", JSON.stringify([actor.userId, intentId, amountVnd, reference, bankTransactionId, true]));
-        return input.db.transaction(async (tx) => {
+        let replayed = false;
+        const committed = await input.db.transaction(async (tx) => {
           const [candidate] = await tx.select().from(paymentIntents).where(and(eq(paymentIntents.id, intentId), eq(paymentIntents.creatorUserId, actor.userId), eq(paymentIntents.purpose, "tip"))).limit(1);
           if (!candidate) fail("not_authorized");
           const startedAt = now();
@@ -146,6 +148,7 @@ export function createCreatorTipPaymentService(input: Input) {
           if (intent.amountVnd !== amountVnd || snapshot.transferReference !== reference || intent.accountVersionId !== destination.accountVersionId ||
             snapshot.snapshot.bankBin !== destination.bankBin || snapshot.snapshot.accountNumber !== destination.accountNumber) fail("evidence_mismatch");
           if (started.kind === "replay") {
+            replayed = true;
             const [confirmation] = await tx.select().from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, intentId)).limit(1);
             if (intent.state !== "confirmed" || !confirmation || started.resultReference !== `tip-confirmed-v1:${confirmation.id}` || confirmation.idempotencyKeyHash !== keyHash || confirmation.bankTransactionFingerprint !== bankTransactionFingerprint) fail("idempotency_conflict");
             return project(tx, intent, at, await claimedAt(tx, intentId));
@@ -168,6 +171,8 @@ export function createCreatorTipPaymentService(input: Input) {
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-confirmed-v1:${confirmationId}`, completedAt: at })) fail("idempotency_conflict");
           return project(tx, confirmed, at, await claimedAt(tx, intentId));
         });
+        try { input.onCommitted?.(replayed); } catch { /* A metric failure never changes the committed result. */ }
+        return committed;
       });
     },
   };

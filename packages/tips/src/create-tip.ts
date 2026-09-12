@@ -49,6 +49,7 @@ type Input = Readonly<{
   paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; idempotencyTtlMs: number;
   now?: () => Date; idFactory?: () => string;
+  onCommitted?: (replayed: boolean) => void;
 }>;
 
 export function createTipService(input: Input) {
@@ -87,7 +88,8 @@ export function createTipService(input: Input) {
         const canonicalHandle = command.canonicalHandle; const abuseKeyHash = command.abuseKeyHash; const requestId = command.requestId;
         const keyHash = digest("tip-create-command-key", command.idempotencyKey);
         const requestFingerprint = digest("tip-create-command", JSON.stringify([actor, canonicalHandle, amountVnd, content.name, content.message]));
-        return await input.db.transaction(async (tx) => {
+        let replayed = false;
+        const committed = await input.db.transaction(async (tx) => {
           const startedAt = now();
           const started = await beginIdempotentCommand(tx, { actorUserId: actor, commandScope: "tips.create", keyHash, requestFingerprint,
             expiresAt: new Date(startedAt.getTime() + input.idempotencyTtlMs), now: startedAt });
@@ -100,6 +102,7 @@ export function createTipService(input: Input) {
           if (at < startedAt) fail("dependency_unavailable");
           requireIntegerVnd(amountVnd, creator);
           if (started.kind === "replay") {
+            replayed = true;
             const tipId = /^tip-created-v1:([0-9a-f-]{36})$/u.exec(started.resultReference)?.[1];
             if (!isUuid(tipId)) fail("idempotency_conflict");
             const [tip] = await tx.select().from(tips).where(and(eq(tips.id, tipId), eq(tips.creatorUserId, creator.creatorUserId))).limit(1);
@@ -121,6 +124,8 @@ export function createTipService(input: Input) {
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-created-v1:${tipId}`, completedAt: at })) fail("idempotency_conflict");
           return result;
         });
+        try { input.onCommitted?.(replayed); } catch { /* Observability cannot roll back or reinterpret committed state. */ }
+        return committed;
       } catch (error) {
         if (error instanceof TipPaymentError) throw error;
         // Database errors may include query parameters. Never expose their message

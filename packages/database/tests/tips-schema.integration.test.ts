@@ -135,11 +135,15 @@ describe("Increment 4 additive payment/tip schema", () => {
   test("migrates the real journal, retains the snapshot chain and reruns idempotently", async () => {
     await migrate(db, { migrationsFolder, migrationsSchema: journalSchema });
     const [count] = await client.unsafe<{ count: number }[]>(`select count(*)::int as count from "${journalSchema}".__drizzle_migrations`);
-    expect(count?.count).toBe(25);
+    const journal = JSON.parse(await readFile(join(migrationsFolder, "meta/_journal.json"), "utf8"));
+    expect(count?.count).toBe(journal.entries.length);
     const previous = JSON.parse(await readFile(join(migrationsFolder, "meta/0023_snapshot.json"), "utf8"));
     const current = JSON.parse(await readFile(join(migrationsFolder, "meta/0024_snapshot.json"), "utf8"));
     expect(current.prevId).toBe(previous.id);
     expect(Object.keys(current.tables).length - Object.keys(previous.tables).length).toBe(7);
+    const operations = JSON.parse(await readFile(join(migrationsFolder, "meta/0025_snapshot.json"), "utf8"));
+    expect(operations.prevId).toBe(current.id);
+    expect(Object.keys(operations.tables)).toEqual(Object.keys(current.tables));
     const foreignSchemas = await client<{ schema_name: string }[]>`
       select distinct target_ns.nspname as schema_name from pg_constraint c
       join pg_class source on source.oid = c.conrelid join pg_namespace source_ns on source_ns.oid = source.relnamespace

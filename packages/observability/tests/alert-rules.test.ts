@@ -68,6 +68,8 @@ const REQUIRED_INCREMENT_THREE_ALERTS = [
   "PawketPublicMediaCleanupFailures",
   "PawketPublicContentReportQueueOld",
   "PawketIncrementThreeWorkerScanUnhealthy",
+  "PawketTipExpiryUnhealthy",
+  "PawketTipNotificationHandoffFailures",
 ] as const;
 
 function parseAlertBlocks(source: string) {

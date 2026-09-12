@@ -24,6 +24,8 @@ export {
   recordRefundOperation,
   recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
+  recordTipOperation,
+  setTipPaymentsEnabledMetric,
   setOutboxMetrics,
   setPublicContentReportBacklogMetric,
   setPublicMediaCleanupOldestEligibleMetric,

@@ -174,3 +174,19 @@ groups:
         annotations:
           summary: Worker public media cleanup scan has stopped completing
           runbook: ops/runbooks/creator-publication.md
+      - alert: PawketTipExpiryUnhealthy
+        expr: (pawket_tip_payments_enabled == 1 and on(job, instance) pawket_worker_scan_healthy{scan="outbox"}) unless on(job, instance) (pawket_worker_scan_healthy{scan="tip_expiry"} == 1 and on(job, instance) (time() - pawket_worker_last_success_timestamp_seconds{scan="tip_expiry"} < 900))
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Enabled tip expiry scan is missing unhealthy or stale
+          runbook: ops/runbooks/tip-operations.md
+      - alert: PawketTipNotificationHandoffFailures
+        expr: increase(pawket_tip_operations_total{operation="notification",outcome="failed"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tip notification handoffs are failing independently of payment state
+          runbook: ops/runbooks/tip-operations.md

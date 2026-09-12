@@ -20,6 +20,7 @@ type Input = Readonly<{
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   intentTtlMs: number; guestReceiptTtlMs: number; openIpLimit: number; openCreatorLimit: number;
   idFactory?: () => string; referenceFactory?: () => string;
+  onQrOutcome?: (outcome: "produced" | "failed") => void;
 }>;
 
 export function createTipPaymentIntentPort(input: Input) {
@@ -63,7 +64,10 @@ export function createTipPaymentIntentPort(input: Input) {
         const transferReference = reference();
         if (!valid(transferReference, referencePattern)) fail("dependency_unavailable");
         // Validate the complete locked QR contract before persisting any intent.
-        createVietQrTransferInstruction({ bankBin: destination.bankBin, accountNumber: destination.accountNumber, amountVnd: command.amountVnd, transferReference });
+        try {
+          createVietQrTransferInstruction({ bankBin: destination.bankBin, accountNumber: destination.accountNumber, amountVnd: command.amountVnd, transferReference });
+        } catch (error) { try { input.onQrOutcome?.("failed"); } catch { /* Metric only. */ } throw error; }
+        try { input.onQrOutcome?.("produced"); } catch { /* Metric only; does not establish a committed intent. */ }
         const [intent] = await tx.insert(paymentIntents).values({ id: intentId, tipId: command.tipId, creatorUserId: command.creatorUserId,
           amountVnd: command.amountVnd, referenceHash: digest("tip-transfer-reference", transferReference),
           referenceEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: transferReference,

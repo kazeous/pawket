@@ -24,6 +24,8 @@ import {
   recordWorkerJobMetrics,
   recordSecurityEmailMetrics,
   recordRetentionMetrics,
+  recordTipOperation,
+  setTipPaymentsEnabledMetric,
   setOutboxMetrics,
   setPublicContentReportBacklogMetric,
   setRefundLiabilityMetrics,
@@ -34,7 +36,7 @@ import {
   setWorkerScanHealthMetric,
   withRequestContext,
 } from "@pawket/observability";
-import { scanVerificationDepositRefundWindows } from "@pawket/payments";
+import { expireTipPaymentIntents, scanVerificationDepositRefundWindows, TIP_NOTIFICATION_EVENTS, type TipExpiryPort } from "@pawket/payments";
 import {
   processPublicMediaAsset,
   PublicMediaWorkerRetryableError,
@@ -66,6 +68,7 @@ import {
 
 import type { WorkerHealthState } from "./worker-health.js";
 import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-email.js";
+import { materializeTipNotification } from "./tip-notification.js";
 
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
@@ -81,6 +84,9 @@ const SAFE_PAYMENTS_EVENTS = new Set([
   "payments.verification_deposit_refund_attention_required.v1",
 ]);
 const SAFE_DOMAIN_EVENTS = new Set([
+  "creator.tip_settings_updated.v1",
+  "tip.transfer_claimed.v1",
+  "tip.notification_available.v1",
   "identity.user_registered.v1",
   "identity.email_verified.v1",
   "identity.password_changed.v1",
@@ -146,6 +152,7 @@ export type WorkerRuntimeDependencies = {
   acknowledge: typeof acknowledgeOutboxEvent;
   processMediaAsset: typeof processPublicMediaAsset;
   scanRefundWindows: typeof scanVerificationDepositRefundWindows;
+  expireTipIntents: typeof expireTipPaymentIntents;
   readBacklogMetrics: typeof readOperationalBacklogMetrics;
   runRetention: typeof runRetentionSweep;
   runMediaCleanup: typeof runPublicMediaCleanup;
@@ -158,6 +165,7 @@ export type StartWorkerOptions = {
   databaseUrl: string;
   valkeyUrl: string;
   revision?: string;
+  tipPayments?: { mode: "disabled" | "manual_only"; batchSize: number; scanIntervalMs: number; tips: TipExpiryPort };
   concurrency: number;
   batchSize: number;
   leaseMs: number;
@@ -241,6 +249,7 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   acknowledge: acknowledgeOutboxEvent,
   processMediaAsset: processPublicMediaAsset,
   scanRefundWindows: scanVerificationDepositRefundWindows,
+  expireTipIntents: expireTipPaymentIntents,
   readBacklogMetrics: readOperationalBacklogMetrics,
   runRetention: runRetentionSweep,
   runMediaCleanup: runPublicMediaCleanup,
@@ -299,6 +308,7 @@ export function createWorkerJobProcessor(input: {
                 "application_outcome",
                 "creator_status",
                 "refund_status",
+                "tip_status",
               ].includes(purpose)
             ) {
               throw new Error("Invalid security email job");
@@ -337,6 +347,13 @@ export function createWorkerJobProcessor(input: {
                 outcome: "attention_required",
               });
             }
+          } else if ((TIP_NOTIFICATION_EVENTS as readonly string[]).includes(job.data.eventType)) {
+            try {
+              if (!input.securityEmail) throw new Error("Security email delivery unavailable");
+              const outcome = await materializeTipNotification({ db: input.database, event: job.data, keyring: input.securityEmail.keyring, now: new Date() });
+              recordTipOperation({ operation: "notification", outcome });
+              if (outcome !== "already_materialized") recordSecurityEmailMetrics({ purpose: "tip_status", outcome: outcome === "attention_required" ? "attention_required" : "queued" });
+            } catch { recordTipOperation({ operation: "notification", outcome: "failed" }); throw new Error("Tip notification handoff failed"); }
           } else if (DOMAIN_EMAIL_EVENTS.has(job.data.eventType)) {
             if (!input.securityEmail) {
               throw new Error("Security email delivery unavailable");
@@ -503,6 +520,8 @@ export function createMediaJobProcessor(input: {
 }
 
 export async function startWorker(options: StartWorkerOptions): Promise<WorkerHandle> {
+  if (options.tipPayments && (!["disabled", "manual_only"].includes(options.tipPayments.mode) || !Number.isInteger(options.tipPayments.batchSize) || options.tipPayments.batchSize < 1 || options.tipPayments.batchSize > 500 ||
+    !Number.isSafeInteger(options.tipPayments.scanIntervalMs) || options.tipPayments.scanIntervalMs < 5_000 || options.tipPayments.scanIntervalMs > 300_000 || typeof options.tipPayments.tips?.expireTip !== "function")) throw new Error("Invalid tip expiry configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -619,6 +638,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let currentDispatch: Promise<void> | undefined;
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
+  let lastTipExpiryScanAt = 0;
   let lastMediaCleanupScanAt = 0;
   let lastMediaCleanupScanSucceededAt: number | null = null;
   let lastPublicMediaWorkerHealthPublishedAt = 0;
@@ -629,6 +649,13 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   });
 
   setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
+  const tipExpiryEnabled = options.tipPayments?.mode === "manual_only";
+  setTipPaymentsEnabledMetric(tipExpiryEnabled);
+  if (options.healthState) {
+    options.healthState.tipExpiryConfigured = tipExpiryEnabled;
+    options.healthState.tipExpiryMaximumAgeMs = tipExpiryEnabled ? options.tipPayments!.scanIntervalMs * 3 : null;
+  }
+  if (tipExpiryEnabled) setWorkerScanHealthMetric({ scan: "tip_expiry", healthy: false });
   setWorkerScanHealthMetric({ scan: "refund", healthy: false });
   if (options.retention) {
     setWorkerScanHealthMetric({ scan: "retention", healthy: false });
@@ -769,19 +796,19 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       for (const result of retention) {
         recordRetentionMetrics({
           dataset: result.dataset,
-          mode: options.retention.mode,
+          mode: result.mode ?? options.retention.mode,
           disposition: result.outcome === "failed" ? "failed" : "candidate",
           count: result.outcome === "failed" ? 1 : result.candidateCount,
         });
         recordRetentionMetrics({
           dataset: result.dataset,
-          mode: options.retention.mode,
+          mode: result.mode ?? options.retention.mode,
           disposition: "protected",
           count: result.protectedCount,
         });
         recordRetentionMetrics({
           dataset: result.dataset,
-          mode: options.retention.mode,
+          mode: result.mode ?? options.retention.mode,
           disposition: "processed",
           count: result.processedCount,
         });
@@ -816,6 +843,23 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         { category: "retention_scan_failed", workerId, mode: options.retention.mode },
         "Retention scan failed",
       );
+    }
+  };
+
+  const scanTipExpiryIfDue = async (scanAt: number): Promise<void> => {
+    const policy = options.tipPayments;
+    if (!running || !policy || policy.mode !== "manual_only" || scanAt - lastTipExpiryScanAt < policy.scanIntervalMs) return;
+    lastTipExpiryScanAt = scanAt; setWorkerScanHealthMetric({ scan: "tip_expiry", healthy: false });
+    try {
+      const result = await dependencies.expireTipIntents({ db: database.db, tips: policy.tips, paymentsMode: policy.mode, batchSize: policy.batchSize, now: new Date(scanAt), applicationRevision: options.revision ?? "unversioned" });
+      if (!Number.isInteger(result.scanned) || result.scanned < 0 || result.scanned > policy.batchSize || result.expired !== result.scanned) throw new Error("Invalid tip expiry result");
+      recordTipOperation({ operation: "expiry", outcome: "completed" }); recordTipOperation({ operation: "expiry", outcome: "expired", count: result.expired });
+      setWorkerScanHealthMetric({ scan: "tip_expiry", healthy: true }); setWorkerLastSuccessMetric({ scan: "tip_expiry", timestampSeconds: scanAt / 1_000 });
+      if (options.healthState) options.healthState.lastTipExpiryScanSucceededAt = scanAt;
+      if (result.expired > 0) logger.info({ category: "tip_expiry_completed", scanned: result.scanned, expired: result.expired }, "Tip expiry scan completed");
+    } catch {
+      recordTipOperation({ operation: "expiry", outcome: "failed" }); setWorkerScanHealthMetric({ scan: "tip_expiry", healthy: false });
+      logger.error({ category: "tip_expiry_failed" }, "Tip expiry scan failed");
     }
   };
 
@@ -896,6 +940,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         "Outbox polling failed",
       );
     } finally {
+      await scanTipExpiryIfDue(Date.now());
       await scanMediaCleanupIfDue(Date.now());
       await scanRetentionIfDue(Date.now());
       await publishPublicMediaWorkerHealthIfDue(Date.now());

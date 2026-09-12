@@ -163,6 +163,9 @@ importers:
       '@pawket/security':
         specifier: workspace:*
         version: link:../../packages/security
+      '@pawket/tips':
+        specifier: workspace:*
+        version: link:../../packages/tips
       bullmq:
         specifier: 6.2.0
         version: 6.2.0(ioredis@6.0.0(supports-color@7.2.0))
@@ -176,6 +179,9 @@ importers:
       '@types/nodemailer':
         specifier: 8.0.1
         version: 8.0.1
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
 
   packages/admin:
     dependencies:
@@ -7112,7 +7118,7 @@ snapshots:
       obug: 2.1.4
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.11)(jsdom@27.2.0(supports-color@7.2.0))(vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12))
+      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.11)(jsdom@27.2.0(supports-color@7.2.0))(vite@8.2.2(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.23.12))
 
   '@vitest/expect@4.1.11':
     dependencies:
@@ -7122,14 +7128,6 @@ snapshots:
       '@vitest/utils': 4.1.11
       chai: 6.2.2
       tinyrainbow: 3.1.1
-
-  '@vitest/mocker@4.1.11(vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12))':
-    dependencies:
-      '@vitest/spy': 4.1.11
-      estree-walker: 3.0.3
-      magic-string: 0.30.21
-    optionalDependencies:
-      vite: 8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12)
 
   '@vitest/mocker@4.1.11(vite@8.2.2(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.23.12))':
     dependencies:
@@ -10111,20 +10109,6 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12):
-    dependencies:
-      lightningcss: 1.33.0
-      picomatch: 4.0.5
-      postcss: 8.5.26
-      rolldown: 1.2.5
-      tinyglobby: 0.2.17
-    optionalDependencies:
-      '@types/node': 24.13.3
-      esbuild: 0.25.12
-      fsevents: 2.3.3
-      jiti: 2.7.0
-      tsx: 4.23.12
-
   vite@8.2.2(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.23.12):
     dependencies:
       lightningcss: 1.33.0
@@ -10153,36 +10137,6 @@ snapshots:
       jiti: 2.7.0
       tsx: 4.23.12
     optional: true
-
-  vitest@4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.11)(jsdom@27.2.0(supports-color@7.2.0))(vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12)):
-    dependencies:
-      '@vitest/expect': 4.1.11
-      '@vitest/mocker': 4.1.11(vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12))
-      '@vitest/pretty-format': 4.1.11
-      '@vitest/runner': 4.1.11
-      '@vitest/snapshot': 4.1.11
-      '@vitest/spy': 4.1.11
-      '@vitest/utils': 4.1.11
-      es-module-lexer: 2.3.2
-      expect-type: 1.4.0
-      magic-string: 0.30.21
-      obug: 2.1.4
-      pathe: 2.0.3
-      picomatch: 4.0.5
-      std-env: 4.2.0
-      tinybench: 2.9.0
-      tinyexec: 1.3.0
-      tinyglobby: 0.2.17
-      tinyrainbow: 3.1.1
-      vite: 8.2.2(@types/node@24.13.3)(esbuild@0.25.12)(jiti@2.7.0)(tsx@4.23.12)
-      why-is-node-running: 2.3.0
-    optionalDependencies:
-      '@opentelemetry/api': 1.9.1
-      '@types/node': 24.13.3
-      '@vitest/coverage-v8': 4.1.11(vitest@4.1.11)
-      jsdom: 27.2.0(supports-color@7.2.0)
-    transitivePeerDependencies:
-      - msw
 
   vitest@4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.11)(jsdom@27.2.0(supports-color@7.2.0))(vite@8.2.2(@types/node@24.13.3)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.23.12)):
     dependencies:

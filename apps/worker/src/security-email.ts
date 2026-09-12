@@ -83,6 +83,7 @@ function challengePath(purpose: SecurityEmailMessage["purpose"]): string | null 
     case "application_outcome":
     case "creator_status":
     case "refund_status":
+    case "tip_status":
       return null;
   }
 }
@@ -103,6 +104,8 @@ function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
       return "Cập nhật quyền creator Pawket";
     case "refund_status":
       return "Cập nhật hoàn khoản xác minh Pawket";
+    case "tip_status":
+      return "Cập nhật tip Pawket";
   }
 }
 
@@ -190,6 +193,15 @@ function renderText(appBaseUrl: string, message: SecurityEmailMessage): string {
         return creatorStatusText(appBaseUrl, message.templateData.state);
       case "refund_status":
         return refundStatusText(appBaseUrl, message.templateData);
+      case "tip_status": {
+        const states: Record<string, string> = {
+          created: "Có yêu cầu tip mới trong lịch sử của bạn. Đây chưa phải xác nhận tiền đã vào ngân hàng.",
+          confirmed: "Pawket đã ghi nhận thao tác xác nhận tip thủ công của bạn.",
+          expired: "Một yêu cầu tip đã hết thời hạn chuyển khoản trên Pawket. Trạng thái này không xác định tiền có đến ngân hàng hay chưa.",
+        };
+        if (message.secret !== null || !Object.hasOwn(states, message.templateData.state ?? "") || Object.keys(message.templateData).sort().join() !== "returnPath,state" || message.templateData.returnPath !== "/creator/tips") throw new Error("Invalid security email message");
+        return `Cập nhật tip Pawket\n\n${states[message.templateData.state!]}\n\nMở danh sách để xem trạng thái hiện tại. Pawket không giữ tiền tip; chỉ đối chiếu với giao dịch thực nhận trong ngân hàng.\n${safePawketLink(appBaseUrl, "/creator/tips")}`;
+      }
       case "email_verification":
       case "password_reset":
       case "email_change":

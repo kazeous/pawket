@@ -10,6 +10,11 @@ export const RETENTION_DATASETS = [
   "receiving_accounts",
   "application_content",
   "security_throttles",
+  "tip_guest_capabilities",
+  "tip_guest_content",
+  "tip_instructions",
+  "tip_claims",
+  "tip_confirmations",
 ] as const;
 
 export const INCREMENT_THREE_RETENTION_DATASETS = [
@@ -24,6 +29,7 @@ export type RetentionMode = "report_only" | "enforce";
 
 export type RetentionDatasetResult = {
   dataset: RetentionDataset;
+  mode?: RetentionMode;
   cutoff: Date;
   candidateCount: number;
   protectedCount: number;
@@ -36,6 +42,8 @@ type CountRow = { candidate_count: number; eligible_count: number };
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
 function cutoffFor(dataset: RetentionDataset, now: Date): Date {
+  // These are inventory cutoffs, not approved deletion/minimization schedules.
+  if (dataset.startsWith("tip_")) return new Date(now);
   const days =
     dataset === "provisional_accounts" || dataset === "verifications"
       ? 7
@@ -69,6 +77,16 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
   const cutoffIso = cutoff.toISOString();
   const nowIso = now.toISOString();
   switch (dataset) {
+    case "tip_guest_capabilities":
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_guest_capabilities where expires_at <= ${nowIso}::timestamptz`;
+    case "tip_guest_content":
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from tips`;
+    case "tip_instructions":
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_intents`;
+    case "tip_claims":
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_transfer_claims`;
+    case "tip_confirmations":
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_confirmations`;
     case "provisional_accounts":
       return sql`
         with candidates as (
@@ -140,6 +158,7 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
       return sql`
         with candidates as (
           select p.id,
+            exists(select 1 from payment_intents i where i.account_version_id = p.id) or
             exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id) or
             exists(
               select 1 from creator_application_revisions r
@@ -222,10 +241,13 @@ async function enforceDataset(
   now: Date,
   batchSize: number,
 ): Promise<number> {
+  if (dataset.startsWith("tip_")) return 0;
   const cutoffIso = cutoff.toISOString();
   const nowIso = now.toISOString();
   let rows: Array<Record<string, unknown>>;
   switch (dataset) {
+    case "tip_guest_capabilities": case "tip_guest_content": case "tip_instructions": case "tip_claims": case "tip_confirmations":
+      return 0;
     case "verifications":
       rows = await tx.execute(sql`
         with selected as (
@@ -297,6 +319,7 @@ async function enforceDataset(
                 and a.updated_at < ${cutoffIso}::timestamptz and (a.state <> 'rejected' or a.cooldown_until < ${nowIso}::timestamptz)
             )
             and not exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id)
+            and not exists(select 1 from payment_intents i where i.account_version_id = p.id)
             and not exists(
               select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
               where r.proposed_receiving_account_id = p.id::text and a.current_revision_id = r.id
@@ -380,6 +403,7 @@ export async function runRetentionSweep(input: {
 }): Promise<RetentionDatasetResult[]> {
   const results: RetentionDatasetResult[] = [];
   for (const dataset of RETENTION_DATASETS) {
+    const mode: RetentionMode = dataset.startsWith("tip_") ? "report_only" : input.mode;
     const startedAt = new Date();
     const cutoff = cutoffFor(dataset, input.now);
     try {
@@ -390,13 +414,14 @@ export async function runRetentionSweep(input: {
           )
         `);
         const counts = await countCandidates(tx, dataset, cutoff, input.now);
-        const paused = input.mode === "enforce" && input.enforcementPaused;
+        const paused = mode === "enforce" && input.enforcementPaused;
         const processedCount =
-          input.mode === "enforce" && !paused
+          mode === "enforce" && !paused
             ? await enforceDataset(tx, dataset, cutoff, input.now, input.batchSize)
             : 0;
         const output: RetentionDatasetResult = {
           dataset,
+          mode,
           cutoff,
           candidateCount: counts.candidateCount,
           protectedCount: counts.candidateCount - counts.eligibleCount,
@@ -406,7 +431,7 @@ export async function runRetentionSweep(input: {
         await recordRun(tx, {
           ...output,
           policyVersion: input.policyVersion,
-          mode: input.mode,
+          mode,
           startedAt,
           completedAt: new Date(),
         });
@@ -416,6 +441,7 @@ export async function runRetentionSweep(input: {
     } catch {
       const failed: RetentionDatasetResult = {
         dataset,
+        mode,
         cutoff,
         candidateCount: 0,
         protectedCount: 0,
@@ -426,7 +452,7 @@ export async function runRetentionSweep(input: {
         recordRun(tx, {
           ...failed,
           policyVersion: input.policyVersion,
-          mode: input.mode,
+          mode,
           startedAt,
           completedAt: new Date(),
         }),
