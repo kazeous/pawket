@@ -9,7 +9,7 @@ import base from "./playwright.config";
 export default defineConfig({
   ...base,
   globalSetup: "./tests/increment-three-global-setup.ts",
-  testMatch: "ui-regression.playwright.ts",
+  testMatch: ["ui-regression.playwright.ts", "ui-foundation.playwright.ts"],
   testIgnore: [],
   outputDir: path.resolve(import.meta.dirname, ".playwright-artifacts", "ui-regression"),
   snapshotPathTemplate: "{testDir}/ui-regression-snapshots/{platform}/{arg}{ext}",
