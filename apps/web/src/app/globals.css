@@ -2,7 +2,50 @@
  * states: default · hover · focus · active · disabled · loading · error · success · contrast: pass (40–41) · responsive: pass (34, 49, 50–57)
  * macrostructure: existing Workbench · nav: existing N9 app shell · footer: existing Ft2 · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · icons: pass (30)
  */
+/* Preserve the accepted browser defaults on existing Pawket screens. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
 @import "../ui/tokens.css";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+/* A scoped subset of Tailwind Preflight supplies component defaults without
+ * changing the accepted browser defaults on legacy pages. Utilities override
+ * this base layer; existing unlayered element rules exclude component trees. */
+@layer base {
+  :where([data-slot], [data-slot] *) {
+    margin: 0;
+    padding: 0;
+    border: 0 solid var(--border);
+  }
+  :where([data-slot], [data-slot] *)::before,
+  :where([data-slot], [data-slot] *)::after {
+    border: 0 solid var(--border);
+  }
+  :where([data-slot], [data-slot] *):is(h1, h2, h3, h4, h5, h6) {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  :where([data-slot], [data-slot] *):is(button, input, select, textarea) {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    border-radius: 0;
+    background: transparent;
+  }
+  :where([data-slot], [data-slot] *):is(button, [type="button"], [type="submit"]) {
+    appearance: button;
+  }
+  :where([data-slot], [data-slot] *):is(input, textarea)::placeholder {
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
+  :where([data-slot], [data-slot] *):is(ol, ul) { list-style: none; }
+  :where([data-slot], [data-slot] *):is(a) { color: inherit; text-decoration: inherit; }
+  :where([data-slot], [data-slot] *):is(table) { border-collapse: collapse; text-indent: 0; }
+  :where([data-slot], [data-slot] *):is(svg, img, video, canvas) { display: block; vertical-align: middle; }
+  :where([data-slot], [data-slot] *):is(img, video) { max-width: 100%; height: auto; }
+}
 
 *,
 *::before,
@@ -35,19 +78,19 @@ body {
   color: var(--color-ink);
 }
 
-h1,
-h2,
-h3,
-p,
-ul,
-ol,
-dl {
+h1:where(:not([data-slot], [data-slot] *)),
+h2:where(:not([data-slot], [data-slot] *)),
+h3:where(:not([data-slot], [data-slot] *)),
+p:where(:not([data-slot], [data-slot] *)),
+ul:where(:not([data-slot], [data-slot] *)),
+ol:where(:not([data-slot], [data-slot] *)),
+dl:where(:not([data-slot], [data-slot] *)) {
   margin-block-start: 0;
 }
 
-h1,
-h2,
-h3 {
+h1:where(:not([data-slot], [data-slot] *)),
+h2:where(:not([data-slot], [data-slot] *)),
+h3:where(:not([data-slot], [data-slot] *)) {
   min-width: 0;
   overflow-wrap: anywhere;
   font-family: var(--font-display);
@@ -56,30 +99,30 @@ h3 {
   line-height: 1.05;
 }
 
-h1 {
+h1:where(:not([data-slot], [data-slot] *)) {
   font-size: var(--text-display-s);
 }
 
-h2 {
+h2:where(:not([data-slot], [data-slot] *)) {
   font-size: var(--text-xl);
 }
 
-h3 {
+h3:where(:not([data-slot], [data-slot] *)) {
   font-size: var(--text-md);
 }
 
-a {
+a:where(:not([data-slot], [data-slot] *)) {
   color: inherit;
 }
 
-button,
-input,
-select,
-textarea {
+button:where(:not([data-slot], [data-slot] *)),
+input:where(:not([data-slot], [data-slot] *)),
+select:where(:not([data-slot], [data-slot] *)),
+textarea:where(:not([data-slot], [data-slot] *)) {
   font: inherit;
 }
 
-button,
+button:where(:not([data-slot], [data-slot] *)),
 .button-link {
   min-height: var(--control-height);
   border: var(--rule-thin) solid var(--color-ink);
@@ -102,18 +145,18 @@ button,
     border-color var(--dur-micro) var(--ease-out);
 }
 
-button:active:not(:disabled),
+button:where(:not([data-slot], [data-slot] *)):active:not(:disabled),
 .button-link:active {
   translate: 0 1px;
 }
 
-button.secondary,
+button:where(:not([data-slot], [data-slot] *)).secondary,
 .button-link.secondary {
   background: transparent;
   color: var(--color-ink);
 }
 
-button.quiet,
+button:where(:not([data-slot], [data-slot] *)).quiet,
 .button-link.quiet {
   min-height: auto;
   border-color: transparent;
@@ -122,12 +165,12 @@ button.quiet,
   padding-inline: 0;
 }
 
-button.danger {
+button:where(:not([data-slot], [data-slot] *)).danger {
   border-color: var(--color-error);
   background: var(--color-error);
 }
 
-button:disabled,
+button:where(:not([data-slot], [data-slot] *)):disabled,
 .button-link[aria-disabled="true"] {
   border-color: var(--color-rule);
   background: var(--color-paper-3);
@@ -137,9 +180,9 @@ button:disabled,
   translate: none;
 }
 
-input,
-select,
-textarea {
+input:where(:not([data-slot], [data-slot] *)),
+select:where(:not([data-slot], [data-slot] *)),
+textarea:where(:not([data-slot], [data-slot] *)) {
   width: 100%;
   border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-control);
@@ -155,25 +198,25 @@ textarea {
     background-color var(--dur-micro) var(--ease-out);
 }
 
-textarea {
+textarea:where(:not([data-slot], [data-slot] *)) {
   min-height: 7rem;
   resize: vertical;
 }
 
-input::placeholder,
-textarea::placeholder {
+input:where(:not([data-slot], [data-slot] *))::placeholder,
+textarea:where(:not([data-slot], [data-slot] *))::placeholder {
   color: var(--color-muted);
 }
 
-input:hover:not(:disabled),
-select:hover:not(:disabled),
-textarea:hover:not(:disabled) {
+input:where(:not([data-slot], [data-slot] *)):hover:not(:disabled),
+select:where(:not([data-slot], [data-slot] *)):hover:not(:disabled),
+textarea:where(:not([data-slot], [data-slot] *)):hover:not(:disabled) {
   border-color: var(--color-neutral);
 }
 
-input:active:not(:disabled),
-select:active:not(:disabled),
-textarea:active:not(:disabled) {
+input:where(:not([data-slot], [data-slot] *)):active:not(:disabled),
+select:where(:not([data-slot], [data-slot] *)):active:not(:disabled),
+textarea:where(:not([data-slot], [data-slot] *)):active:not(:disabled) {
   border-color: var(--color-accent);
 }
 
@@ -186,9 +229,9 @@ a:focus-visible {
   outline-offset: 1px;
 }
 
-input:disabled,
-select:disabled,
-textarea:disabled {
+input:where(:not([data-slot], [data-slot] *)):disabled,
+select:where(:not([data-slot], [data-slot] *)):disabled,
+textarea:where(:not([data-slot], [data-slot] *)):disabled {
   border-color: var(--color-rule-2);
   background: var(--color-paper-2);
   color: var(--color-muted);
@@ -196,7 +239,7 @@ textarea:disabled {
   opacity: 0.55;
 }
 
-[aria-invalid="true"] {
+[aria-invalid="true"]:where(:not([data-slot], [data-slot] *)) {
   border-color: var(--color-error);
   box-shadow: 0 0 0 2px var(--color-error-soft);
 }
@@ -361,7 +404,7 @@ textarea:disabled {
   padding: var(--space-md) 0 var(--space-lg);
 }
 
-.site-footer p {
+.site-footer p:where(:not([data-slot], [data-slot] *)) {
   margin: 0;
   color: var(--color-muted);
   font-size: var(--text-xs);
@@ -417,7 +460,7 @@ textarea:disabled {
   padding-block: var(--space-lg);
 }
 
-.auth-intro p:not(.eyebrow) {
+.auth-intro p:where(:not([data-slot], [data-slot] *)):not(.eyebrow) {
   max-width: 34rem;
   color: var(--color-neutral);
   font-size: var(--text-md);
@@ -430,11 +473,11 @@ textarea:disabled {
   padding: clamp(var(--space-md), 4vw, var(--space-xl));
 }
 
-.auth-panel h2 {
+.auth-panel h2:where(:not([data-slot], [data-slot] *)) {
   margin-bottom: var(--space-sm);
 }
 
-.auth-panel > p {
+.auth-panel > p:where(:not([data-slot], [data-slot] *)) {
   color: var(--color-neutral);
 }
 
@@ -443,7 +486,7 @@ textarea:disabled {
   gap: var(--space-xs);
 }
 
-.field > label,
+.field > label:where(:not([data-slot], [data-slot] *)),
 .field-label {
   color: var(--color-ink-2);
   font-size: var(--text-sm);
@@ -492,7 +535,7 @@ textarea:disabled {
   font-size: var(--text-sm);
 }
 
-.checkbox-field input {
+.checkbox-field input:where(:not([data-slot], [data-slot] *)) {
   width: 1.1rem;
   min-height: 1.1rem;
   margin-top: var(--space-2xs);
@@ -559,7 +602,7 @@ textarea:disabled {
   font-weight: 800;
 }
 
-.status-banner p:last-child,
+.status-banner p:where(:not([data-slot], [data-slot] *)):last-child,
 .status-banner div > :last-child {
   margin-bottom: 0;
 }
@@ -604,7 +647,7 @@ textarea:disabled {
   padding: var(--space-md);
 }
 
-.form-error-summary h2,
+.form-error-summary h2:where(:not([data-slot], [data-slot] *)),
 .error-summary strong {
   margin-bottom: var(--space-xs);
   font-family: var(--font-body);
@@ -612,8 +655,8 @@ textarea:disabled {
   letter-spacing: 0;
 }
 
-.form-error-summary ul,
-.error-summary ul {
+.form-error-summary ul:where(:not([data-slot], [data-slot] *)),
+.error-summary ul:where(:not([data-slot], [data-slot] *)) {
   margin-bottom: 0;
   padding-left: 1.25rem;
 }
@@ -627,12 +670,12 @@ textarea:disabled {
   text-align: center;
 }
 
-.async-state h2 {
+.async-state h2:where(:not([data-slot], [data-slot] *)) {
   margin-bottom: var(--space-sm);
   font-size: var(--text-md);
 }
 
-.async-state p {
+.async-state p:where(:not([data-slot], [data-slot] *)) {
   max-width: 36rem;
   margin-bottom: 0;
   color: var(--color-muted);
@@ -677,7 +720,7 @@ textarea:disabled {
   padding-top: var(--space-md);
 }
 
-.action-bar p {
+.action-bar p:where(:not([data-slot], [data-slot] *)) {
   margin: 0;
   color: var(--color-muted);
   font-size: var(--text-sm);
@@ -693,7 +736,7 @@ textarea:disabled {
   padding-bottom: var(--space-xl);
 }
 
-.workspace-header h1 {
+.workspace-header h1:where(:not([data-slot], [data-slot] *)) {
   margin-bottom: var(--space-md);
 }
 
@@ -744,8 +787,8 @@ textarea:disabled {
   scroll-margin-top: var(--space-xl);
 }
 
-.work-surface > label,
-.work-surface form > label {
+.work-surface > label:where(:not([data-slot], [data-slot] *)),
+.work-surface form > label:where(:not([data-slot], [data-slot] *)) {
   display: grid;
   gap: var(--space-xs);
   color: var(--color-ink-2);
@@ -753,13 +796,13 @@ textarea:disabled {
   font-weight: 700;
 }
 
-.work-surface label:has(input[type="checkbox"]) {
+.work-surface label:has(input:where(:not([data-slot], [data-slot] *))[type="checkbox"]) {
   grid-template-columns: 1.25rem minmax(0, 1fr);
   align-items: start;
   font-weight: 500;
 }
 
-.work-surface input[type="checkbox"] {
+.work-surface input:where(:not([data-slot], [data-slot] *))[type="checkbox"] {
   width: 1.1rem;
   min-height: 1.1rem;
   margin-top: var(--space-2xs);
@@ -801,7 +844,7 @@ textarea:disabled {
   gap: var(--space-md);
 }
 
-.section-heading h2,
+.section-heading h2:where(:not([data-slot], [data-slot] *)),
 .section-heading .eyebrow {
   margin-bottom: 0;
 }
@@ -881,7 +924,7 @@ textarea:disabled {
   padding-block: var(--space-md);
 }
 
-.totp-manual p,
+.totp-manual p:where(:not([data-slot], [data-slot] *)),
 .totp-manual small {
   margin: 0;
 }
@@ -905,7 +948,7 @@ textarea:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-.recovery-block ol {
+.recovery-block ol:where(:not([data-slot], [data-slot] *)) {
   columns: 2;
   margin: var(--space-md) 0 0;
   padding-left: 1.5rem;
@@ -933,7 +976,7 @@ textarea:disabled {
   padding-bottom: var(--space-sm);
 }
 
-.owner-tabs button {
+.owner-tabs button:where(:not([data-slot], [data-slot] *)) {
   border-radius: 0;
 }
 
@@ -971,7 +1014,7 @@ textarea:disabled {
   padding-top: 0;
 }
 
-.queue-item p {
+.queue-item p:where(:not([data-slot], [data-slot] *)) {
   color: var(--color-neutral);
   font-size: var(--text-sm);
 }
@@ -983,8 +1026,8 @@ textarea:disabled {
   gap: var(--space-md);
 }
 
-.refund-form button,
-.reconcile-form button {
+.refund-form button:where(:not([data-slot], [data-slot] *)),
+.reconcile-form button:where(:not([data-slot], [data-slot] *)) {
   align-self: end;
 }
 
@@ -1013,13 +1056,13 @@ textarea:disabled {
   padding-bottom: var(--space-2xl);
 }
 
-.home-intro h1 {
+.home-intro h1:where(:not([data-slot], [data-slot] *)) {
   max-width: 11ch;
   margin-bottom: var(--space-lg);
   font-size: var(--text-display);
 }
 
-.home-intro p {
+.home-intro p:where(:not([data-slot], [data-slot] *)) {
   max-width: 42rem;
   margin-bottom: 0;
   color: var(--color-neutral);
@@ -1039,7 +1082,7 @@ textarea:disabled {
   padding-top: var(--space-xl);
 }
 
-.availability-strip p {
+.availability-strip p:where(:not([data-slot], [data-slot] *)) {
   display: grid;
   gap: var(--space-xs);
   margin: 0;
@@ -1075,7 +1118,7 @@ textarea:disabled {
 }
 
 .task-rail a,
-.owner-tabs button {
+.owner-tabs button:where(:not([data-slot], [data-slot] *)) {
   white-space: nowrap;
 }
 
@@ -1096,14 +1139,14 @@ textarea:disabled {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  button:hover:not(:disabled),
+  button:where(:not([data-slot], [data-slot] *)):hover:not(:disabled),
   .button-link:hover:not([aria-disabled="true"]) {
     border-color: var(--color-accent);
     background: var(--color-accent);
     color: var(--color-accent-ink);
   }
 
-  button.secondary:hover:not(:disabled),
+  button:where(:not([data-slot], [data-slot] *)).secondary:hover:not(:disabled),
   .button-link.secondary:hover:not([aria-disabled="true"]) {
     border-color: var(--color-accent);
     background: var(--color-accent-soft);
@@ -1116,7 +1159,7 @@ textarea:disabled {
     color: var(--color-ink);
   }
 
-  button.quiet:hover:not(:disabled),
+  button:where(:not([data-slot], [data-slot] *)).quiet:hover:not(:disabled),
   .button-link.quiet:hover:not([aria-disabled="true"]) {
     border-color: transparent;
     background: transparent;
@@ -1229,7 +1272,7 @@ textarea:disabled {
   }
 
   .button-row > *,
-  .action-bar button,
+  .action-bar button:where(:not([data-slot], [data-slot] *)),
   .action-bar .button-link {
     width: 100%;
   }
@@ -1238,11 +1281,11 @@ textarea:disabled {
     grid-template-columns: 1fr;
   }
 
-  .totp-manual-row button {
+  .totp-manual-row button:where(:not([data-slot], [data-slot] *)) {
     width: 100%;
   }
 
-  .recovery-block ol {
+  .recovery-block ol:where(:not([data-slot], [data-slot] *)) {
     columns: 1;
   }
 
@@ -1313,7 +1356,7 @@ textarea:disabled {
   gap: var(--space-sm);
 }
 
-.choice-row input {
+.choice-row input:where(:not([data-slot], [data-slot] *)) {
   width: auto;
   margin: 0;
 }
@@ -1333,7 +1376,7 @@ textarea:disabled {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
 }
 
-.media-status-list p {
+.media-status-list p:where(:not([data-slot], [data-slot] *)) {
   margin: 0;
   padding: var(--space-md);
   border: var(--rule-thin) solid var(--color-rule);
@@ -1494,4 +1537,101 @@ textarea:disabled {
     scroll-behavior: auto;
     transition-duration: 0.01ms;
   }
+}
+
+/* Keep the new tip surfaces usable when browser zoom reduces available inline
+ * space. The existing disabled-mode pages retain their accepted layout. */
+.site-frame:has([data-tip-surface]) {
+  grid-template-columns: minmax(0, 1fr);
+  container: tip-page / inline-size;
+}
+.site-frame:has([data-tip-surface]) > .page-shell,
+[data-tip-surface] { min-width: 0; overflow-wrap: anywhere; }
+.creator-publication:has([data-tip-surface]),
+.creator-publication:has([data-tip-surface]) .stack { grid-template-columns: minmax(0, 1fr); }
+[data-tip-surface] [data-slot="badge"] { max-width: 100%; white-space: normal; height: auto; min-height: 1.25rem; }
+[data-tip-surface] [data-slot="button"],
+[data-tip-surface] [data-slot="alert-dialog-action"],
+[data-tip-surface] [data-slot="alert-dialog-cancel"] {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  min-height: 2rem;
+}
+[data-tip-surface][data-slot="alert-dialog-content"] {
+  grid-template-columns: minmax(0, 1fr);
+  max-height: calc(100% - 2rem);
+}
+[data-tip-surface][data-slot="alert-dialog-content"] > form { min-width: 0; }
+[data-tip-surface] [data-slot="alert-dialog-footer"] { flex-wrap: wrap; }
+[data-tip-surface] [data-slot="toggle"],
+[data-tip-surface] [data-slot="toggle-group-item"] {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  min-height: 2rem;
+}
+.creator-tip-desktop { display: none; }
+@container tip-page (width >= 44rem) {
+  .creator-tip-desktop { display: block; }
+  .creator-tip-mobile { display: none; }
+}
+@container tip-page (width < 20rem) {
+  .site-header { grid-template-columns: minmax(0, 1fr); }
+  .site-header .account-session,
+  .site-header .header-action { justify-self: start; }
+  .site-header .account-actions { flex-wrap: wrap; }
+}
+/* shadcn semantic variables resolve to Pawket's existing visual language.
+ * Keep the existing root tokens unlayered: --color-accent and --color-muted
+ * also name Tailwind theme entries, while legacy screens use the root values.
+ */
+@theme inline {
+  --color-overlay: var(--overlay);
+  --font-heading: var(--font-display);
+  --font-sans: var(--font-body);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius-control) - 0.125rem);
+  --radius-md: var(--radius-control);
+  --radius-lg: var(--radius-control);
+  --radius-xl: var(--radius-surface);
+}
+:root {
+  --overlay: var(--color-overlay);
+  --background: var(--color-paper);
+  --foreground: var(--color-ink);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-surface-strong);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-ink);
+  --primary-foreground: var(--color-surface-strong);
+  --secondary: var(--color-paper-2);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-paper-2);
+  --muted-foreground: var(--color-muted);
+  --accent: var(--color-accent-soft);
+  --accent-foreground: var(--color-ink);
+  --destructive: var(--color-error);
+  --border: var(--color-rule);
+  --input: var(--color-rule);
+  --ring: var(--color-focus);
+  --radius: var(--radius-control);
 }

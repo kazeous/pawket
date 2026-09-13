@@ -31,7 +31,8 @@ export const systemRetentionRuns = pgTable(
   (table) => [
     index("system_retention_runs_started_idx").on(table.startedAt),
     check("system_retention_runs_mode_check", sql`${table.mode} in ('report_only', 'enforce')`),
-    check("system_retention_runs_dataset_check", sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'receiving_accounts', 'application_content', 'security_throttles')`),
+    check("system_retention_runs_dataset_check", sql`${table.dataset} in ('provisional_accounts', 'verifications', 'sessions', 'receiving_accounts', 'application_content', 'security_throttles', 'tip_guest_capabilities', 'tip_guest_content', 'tip_instructions', 'tip_claims', 'tip_confirmations')`),
+    check("system_retention_tip_report_only_check", sql`${table.dataset} not like 'tip_%' or (${table.mode} = 'report_only' and ${table.processedCount} = 0 and ${table.protectedCount} = ${table.candidateCount})`),
     check("system_retention_runs_outcome_check", sql`${table.outcome} in ('completed', 'paused', 'failed')`),
     check("system_retention_runs_counts_check", sql`${table.candidateCount} >= 0 and ${table.protectedCount} >= 0 and ${table.processedCount} >= 0 and ${table.processedCount} <= ${table.candidateCount}`),
     check("system_retention_runs_time_check", sql`${table.completedAt} >= ${table.startedAt}`),

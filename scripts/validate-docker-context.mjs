@@ -7,6 +7,8 @@ const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))
 const fixtureDirectory = path.join(repositoryRoot, ".docker-context-regression");
 
 const sensitiveFixtures = [
+  ".claude/context-private.txt",
+  ".worktrees/context-private.txt",
   "raw-dump.sql",
   "database.bak",
   "settings.local",

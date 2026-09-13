@@ -52,6 +52,7 @@ describe("worker telemetry server", () => {
       initialized: true,
       poll: "up",
       refundScan: "up",
+      tipExpiryScan: "not_configured",
       publicMediaCleanupScan: "not_configured",
       ...revision,
     });
@@ -102,6 +103,18 @@ describe("worker telemetry server", () => {
     expect(denied.headers.get("cache-control")).toBe("no-store");
     expect(allowed.status).toBe(200);
     expect(await allowed.text()).toContain("pawket_worker_test_metric 1");
+  });
+
+  test("requires a fresh tip expiry scan only when tip operations are enabled", () => {
+    const state = createWorkerHealthState();
+    Object.assign(state, { initializedAt: 1_000, lastPollSucceededAt: 1_000, lastRefundScanSucceededAt: 1_000,
+      publicMediaCleanupConfigured: true, lastPublicMediaCleanupScanSucceededAt: 1_000 });
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", tipExpiryScan: "not_configured" });
+    state.tipExpiryConfigured = true; state.tipExpiryMaximumAgeMs = 1_000;
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "not_ready", tipExpiryScan: "down" });
+    state.lastTipExpiryScanSucceededAt = 1_000;
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", tipExpiryScan: "up" });
+    expect(workerReadiness({ state, revision, now: 2_001 })).toMatchObject({ status: "not_ready", tipExpiryScan: "down" });
   });
 
   test("fails readiness for stale polls, stopping workers, and revision mismatch", () => {

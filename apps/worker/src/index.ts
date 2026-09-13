@@ -6,6 +6,7 @@ import {
 } from "@pawket/observability";
 import { createEncryptionKeyring } from "@pawket/security";
 import { createS3ObjectStorage } from "@pawket/public-media";
+import { createTipExpiryPort } from "@pawket/tips";
 import nodemailer from "nodemailer";
 
 import { createSecurityEmailSenderFromEnv } from "./security-email.js";
@@ -49,6 +50,7 @@ const worker = await startWorker({
   concurrency: env.WORKER_CONCURRENCY,
   batchSize: env.OUTBOX_BATCH_SIZE,
   leaseMs: env.OUTBOX_LEASE_MS,
+  tipPayments: { mode: env.TIP_PAYMENTS_MODE, batchSize: env.TIP_EXPIRY_BATCH_SIZE, scanIntervalMs: env.TIP_EXPIRY_SCAN_INTERVAL_MS, tips: createTipExpiryPort() },
   ...publicMediaConfiguration,
   securityEmail: {
     keyring,

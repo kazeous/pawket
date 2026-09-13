@@ -30,7 +30,11 @@ const nextConfig: NextConfig = {
         source: "/:path*",
         headers: Object.entries(securityHeaders).map(([key, value]) => ({ key, value })),
       },
-      ...["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*"].map((source) => ({
+      {
+        source: "/api/v1/creator/tip-settings",
+        headers: [{ key: "Cache-Control", value: "private, no-store, max-age=0" }, { key: "Referrer-Policy", value: "no-referrer" }],
+      },
+      ...["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*", "/tips/:path*", "/api/v1/tips/:path*", "/api/v1/creator/tips/:path*", "/api/v1/public/creators/:handle/tips"].map((source) => ({
         source,
         headers: [
           { key: "Cache-Control", value: "private, no-store, max-age=0" },

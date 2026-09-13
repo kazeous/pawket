@@ -1332,6 +1332,35 @@ describe("worker shutdown", () => {
     };
   }
 
+  test("tip expiry retries independently of outbox failure and logs only fixed categories", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const healthState = createWorkerHealthState();
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const expireTipIntents = vi.fn().mockRejectedValueOnce(new Error("private synthetic payment detail")).mockResolvedValue({ scanned: 0, expired: 0 });
+    const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15", concurrency: 1, batchSize: 10, leaseMs: 30_000,
+      signalSource: doubles.signalSource, logger, healthState, revision: "synthetic-worker-revision", tipPayments: { mode: "manual_only", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      dependencies: { ...doubles.dependencies, expireTipIntents, dispatch: vi.fn().mockRejectedValue(new Error("synthetic valkey failure")), scanRefundWindows: vi.fn().mockResolvedValue({ dueSoon: 0, dueToday: 0, overdue: 0, attention: 0, outstandingAmountVnd: 0 }) } });
+    try {
+      await vi.advanceTimersByTimeAsync(0); expect(expireTipIntents).toHaveBeenCalledTimes(1); expect(healthState.lastTipExpiryScanSucceededAt).toBeNull();
+      await vi.advanceTimersByTimeAsync(5_000); expect(expireTipIntents).toHaveBeenCalledTimes(2); expect(healthState.lastTipExpiryScanSucceededAt).not.toBeNull();
+      expect(expireTipIntents.mock.calls[1]?.[0]).toMatchObject({ paymentsMode: "manual_only", batchSize: 25, applicationRevision: "synthetic-worker-revision" });
+      expect(logger.error).toHaveBeenCalledWith({ category: "tip_expiry_failed" }, "Tip expiry scan failed");
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private synthetic payment detail");
+      expect(healthState.tipExpiryConfigured).toBe(true); expect(healthState.tipExpiryMaximumAgeMs).toBe(15_000);
+    } finally { await handle.stop(); }
+    await vi.advanceTimersByTimeAsync(10_000); expect(expireTipIntents).toHaveBeenCalledTimes(2);
+  });
+
+  test("tip expiry remains inert when disabled and rejects invalid bounds before startup", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const expireTipIntents = vi.fn(); const healthState = createWorkerHealthState();
+    const options = { databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15", concurrency: 1, batchSize: 10, leaseMs: 30_000,
+      signalSource: doubles.signalSource, healthState, logger: { info: vi.fn(), error: vi.fn() }, dependencies: { ...doubles.dependencies, expireTipIntents },
+      tipPayments: { mode: "disabled" as const, batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } } };
+    await expect(startWorker({ ...options, tipPayments: { ...options.tipPayments, batchSize: 501 } })).rejects.toThrow("Invalid tip expiry configuration"); expect(doubles.acquisitions).toHaveLength(0);
+    const handle = await startWorker(options);
+    try { await vi.advanceTimersByTimeAsync(10_000); expect(expireTipIntents).not.toHaveBeenCalled(); expect(healthState.tipExpiryConfigured).toBe(false); }
+    finally { await handle.stop(); }
+  });
+
   test("public-media runtime acquires and closes its worker before shared resources", async () => {
     const doubles = runtimeDoubles();
     const handle = await startWorker({

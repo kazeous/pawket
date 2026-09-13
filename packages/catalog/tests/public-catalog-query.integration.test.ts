@@ -339,7 +339,7 @@ describe("effective public catalog query", () => {
     expect([...first.items, ...second.items]).toHaveLength(27);
     await expect(query.listPublicCreators({ discipline: "illustration", handlePrefix: prefix, cursor: null, limit: 23 as 24 })).rejects.toMatchObject({ code: "INVALID_QUERY" });
     await expect(query.listPublicCreators({ discipline: "illustration", handlePrefix: prefix, cursor: "not-a-cursor", limit: 24 })).rejects.toMatchObject({ code: "INVALID_CURSOR" });
-  });
+  }, 15_000); // Includes 27 sequential creator-publication fixtures against real PostgreSQL.
 
   test("directory caps each request at 96 candidates and advances across an all-held population", async () => {
     pageHoldIds = new Set(); showcaseHoldIds = new Set(); publishingMode = "general_audience";

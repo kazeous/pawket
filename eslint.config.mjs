@@ -12,5 +12,5 @@ export default defineConfig([
       },
     },
   },
-  globalIgnores(["**/.next/**", "**/dist/**", "**/coverage/**"]),
+  globalIgnores(["**/.next/**", "**/dist/**", "**/coverage/**", "**/.playwright-artifacts/**", ".claude/**", ".worktrees/**", "docs/**"]),
 ]);

@@ -5,6 +5,7 @@ import {
   createCatalogHttpHandlers,
   createCatalogMediaOwnershipPort,
   createCatalogService,
+  createCreatorTipSettingsService,
   createPublicCatalogQuery,
   type VisibilityReadPort,
 } from "@pawket/catalog";
@@ -13,6 +14,9 @@ import { createDatabase } from "@pawket/database";
 import {
   createIdentityHttpHandlers,
   createIdentityCreatorSeedPort,
+  createIdentityCreatorTipAccountPort,
+  createIdentityTipBuyerAccountPort,
+  createIdentityTipAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
   createIdentityService,
@@ -34,6 +38,10 @@ import {
   createPaymentsHttpHandlers,
   createReceivingAccountService,
   createVerificationDepositService,
+  createTipPaymentIntentPort,
+  createTipReceiptService,
+  createTipReceivingAccountEligibilityPort,
+  createCreatorTipPaymentService,
 } from "@pawket/payments";
 import { recordAuthAbuseControl } from "@pawket/observability";
 import {
@@ -43,6 +51,8 @@ import {
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
+import { recordTipOperation, setTipPaymentsEnabledMetric } from "@pawket/observability";
+import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
   createTriageService,
@@ -61,6 +71,12 @@ type WebPlatformRuntime = {
   catalogHandlers: ReturnType<typeof createCatalogHttpHandlers>;
   catalog: ReturnType<typeof createCatalogService>;
   publicCatalog: ReturnType<typeof createPublicCatalogQuery>;
+  tipHandlers: ReturnType<typeof createTipHttpHandlers>;
+  publicTips: Pick<ReturnType<typeof createTipService>, "getPublicOffering">;
+  tipSettings: ReturnType<typeof createCreatorTipSettingsService>;
+  creatorTipHandlers: ReturnType<typeof createCreatorTipHttpHandlers>;
+  creatorTipSettingsHandlers: ReturnType<typeof createCreatorTipSettingsHttpHandlers>;
+  creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
@@ -449,6 +465,76 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     accounts: receivingAccounts,
     deposits: verificationDeposits,
   });
+  const tipSettings = createCreatorTipSettingsService({
+    applicationRevision: env.APP_REVISION,
+    db: database.db, visibility: publicCatalog, creatorAccount: createIdentityCreatorTipAccountPort(),
+    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey }),
+    paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
+    amountPolicy: { minimumVnd: env.TIP_AMOUNT_MIN_VND, maximumVnd: env.TIP_AMOUNT_MAX_VND, allowedPresetsVnd: env.TIP_SUGGESTED_PRESETS_VND },
+    recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, commandFingerprintKey: lookupHmacKey,
+  });
+  const tipBuyerAccounts = createIdentityTipBuyerAccountPort();
+  setTipPaymentsEnabledMetric(env.TIP_PAYMENTS_MODE === "manual_only");
+  const tipCreation = createTipService({
+    applicationRevision: env.APP_REVISION,
+    onCommitted: (replayed) => recordTipOperation({ operation: "create", outcome: replayed ? "replayed" : "accepted" }),
+    db: database.db, creatorEligibility: tipSettings, buyerAccounts: tipBuyerAccounts,
+    payments: createTipPaymentIntentPort({ keyring, lookupHmacKey, intentTtlMs: env.TIP_INTENT_TTL_SECONDS * 1000,
+      guestReceiptTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, openIpLimit: env.TIP_OPEN_IP_LIMIT, openCreatorLimit: env.TIP_OPEN_CREATOR_LIMIT,
+      onQrOutcome: (outcome) => recordTipOperation({ operation: "qr", outcome }) }),
+    paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
+    keyring, lookupHmacKey, idempotencyTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000,
+  });
+  async function tipThrottle(input: { action: string; subjectHmac: string; maximumAttempts: number; windowMs: number }) {
+    return recordSecurityThrottleAttempt(database.db, { ...input, scope: input.action.endsWith("_creator") ? "account" : "network", now: new Date(), blockMs: input.windowMs });
+  }
+  const tipReceipts = createTipReceiptService({
+    applicationRevision: env.APP_REVISION,
+    onClaimCommitted: (replayed) => recordTipOperation({ operation: "claim", outcome: replayed ? "replayed" : "recorded" }),
+    db: database.db, paymentsMode: env.TIP_PAYMENTS_MODE, keyring, lookupHmacKey, tips: createTipAccessPort(), buyerAccounts: tipBuyerAccounts, creatorEligibility: tipSettings,
+    async claimRateLimit(creatorUserId) {
+      return (await tipThrottle({ action: "tip_claim_creator", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "tip-creator-rate", value: creatorUserId }),
+        maximumAttempts: env.TIP_CREATE_CREATOR_LIMIT, windowMs: env.TIP_RATE_WINDOW_SECONDS * 1000 })).allowed;
+    },
+  });
+  const tipHandlers = createTipHttpHandlers({
+    appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE, lookupHmacKey,
+    guestContextTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, rateWindowMs: env.TIP_RATE_WINDOW_SECONDS * 1000,
+    createIpLimit: env.TIP_CREATE_IP_LIMIT, createCreatorLimit: env.TIP_CREATE_CREATOR_LIMIT, receiptLimit: env.TIP_RECEIPT_REQUEST_LIMIT,
+    authenticate, creation: tipCreation, receipts: tipReceipts, throttle: tipThrottle,
+    resolveCreatorRateSubject: (handle) => database.db.transaction(async (tx) => (await tipSettings.getTipEligibility(tx, handle))?.creatorUserId ?? null),
+  });
+  const creatorTips = createCreatorTipPaymentService({
+    applicationRevision: env.APP_REVISION,
+    onCommitted: (replayed) => recordTipOperation({ operation: "confirm", outcome: replayed ? "replayed" : "accepted" }),
+    db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, pageSize: env.TIP_QUEUE_PAGE_SIZE,
+    recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
+    assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }),
+  });
+  const creatorTipHandlers = createCreatorTipHttpHandlers({
+    appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, lookupHmacKey, authenticate, service: creatorTips,
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const policy = { action: `tip_creator_${operation}`, now: new Date(), windowMs: env.TIP_RATE_WINDOW_SECONDS * 1000, blockMs: env.TIP_RATE_WINDOW_SECONDS * 1000 };
+      const [actor, network] = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "tip-creator-command-rate", value: actorUserId }),
+          maximumAttempts: operation === "queue" ? env.TIP_RECEIPT_REQUEST_LIMIT : env.TIP_CREATE_CREATOR_LIMIT }),
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash, maximumAttempts: env.TIP_RECEIPT_REQUEST_LIMIT }),
+      ]);
+      return actor.allowed && network.allowed;
+    },
+  });
+  const creatorTipSettingsHandlers = createCreatorTipSettingsHttpHandlers({
+    appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE, lookupHmacKey, authenticate, service: tipSettings,
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const policy = { action: `tip_settings_${operation}`, now: new Date(), windowMs: env.TIP_RATE_WINDOW_SECONDS * 1000, blockMs: env.TIP_RATE_WINDOW_SECONDS * 1000 };
+      const [actor, network] = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "tip-settings-command-rate", value: actorUserId }),
+          maximumAttempts: operation === "read" ? env.TIP_RECEIPT_REQUEST_LIMIT : env.TIP_CREATE_CREATOR_LIMIT }),
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash, maximumAttempts: env.TIP_RECEIPT_REQUEST_LIMIT }),
+      ]);
+      return actor.allowed && network.allowed;
+    },
+  });
   const creatorReviewHandlers = createCreatorReviewHttpHandlers({
     trustedOrigins: env.AUTH_TRUSTED_ORIGINS,
     authenticate,
@@ -513,6 +599,12 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     catalogHandlers,
     catalog: catalogService,
     publicCatalog,
+    tipHandlers,
+    publicTips: { getPublicOffering: tipCreation.getPublicOffering },
+    tipSettings,
+    creatorTipHandlers,
+    creatorTipSettingsHandlers,
+    creatorTips,
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,

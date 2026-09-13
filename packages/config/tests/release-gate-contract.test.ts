@@ -66,12 +66,19 @@ describe("release-gate workflow contract", () => {
       PUBLIC_MEDIA_DERIVATIVE_BUCKET: "pawket-ci-media-derivatives",
       PUBLIC_MEDIA_S3_FORCE_PATH_STYLE: "true",
     });
-    expect(environment.PAWKET_BROWSER_APP_REVISION).toBe("${{ github.sha }}");
+    const candidateRevision = "${{ github.event.pull_request.head.sha || github.sha }}";
+    expect(environment.PAWKET_BROWSER_APP_REVISION).toBe(candidateRevision);
+    indexOfRequired(`ref: ${candidateRevision}`);
+    indexOfRequired('test "$(git rev-parse HEAD)" = "$PAWKET_BROWSER_APP_REVISION"');
+    indexOfRequired('git merge-base --is-ancestor "$PAWKET_PR_BASE_REVISION" HEAD');
+    expect(environment.PAWKET_PR_BASE_REVISION).toBe("${{ github.event.pull_request.base.sha }}");
     expect(environment.CREATOR_PUBLISHING_MODE).toBe("disabled");
+    expect(environment.TIP_PAYMENTS_MODE).toBe("disabled");
     expect(environment.PUBLIC_MEDIA_RETENTION_MODE).toBe("report_only");
     indexOfRequired("image: adobe/s3mock:5.2.0");
     indexOfRequired("run: corepack pnpm increment-three:validate");
-    expect(workflow.match(/--build-arg SOURCE_COMMIT=\$\{\{ github\.sha \}\}/gu)).toHaveLength(3);
+    expect(workflow.match(/--build-arg SOURCE_COMMIT="\$PAWKET_BROWSER_APP_REVISION"/gu)).toHaveLength(3);
+    indexOfRequired("run: corepack pnpm test:browser:increment-four");
   });
 
   it("runs the pinned advisory, license-metadata, and full-history secret gates", () => {

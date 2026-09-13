@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { trustedRequestId } from "./http/route-context";
 import { applySecurityHeaders } from "./http/security-headers";
 
-const privateNoStore = /^\/(creator(?:\/preview)?|admin\/content-reports)(?:\/|$)/u;
+const privateNoStore = /^\/(creator(?:\/preview)?|admin\/content-reports|tips)(?:\/|$)/u;
+const tipNoReferrer = /^\/(?:tips|creator\/tips)(?:\/|$)|^\/api\/v1\/(?:tips|creator\/(?:tips|tip-settings))(?:\/|$)|^\/api\/v1\/public\/creators\/[^/]+\/tips$/u;
 const publicNoStore = /^\/(creators|media)(?:\/|$)|^\/sitemap\.xml$/u;
 
 export function proxy(request: NextRequest): NextResponse {
@@ -19,5 +20,7 @@ export function proxy(request: NextRequest): NextResponse {
   if (publicNoStore.test(request.nextUrl.pathname)) {
     response.headers.set("cache-control", "public, no-store");
   }
-  return applySecurityHeaders(response) as NextResponse;
+  applySecurityHeaders(response);
+  if (tipNoReferrer.test(request.nextUrl.pathname)) response.headers.set("referrer-policy", "no-referrer");
+  return response;
 }

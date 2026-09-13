@@ -1,5 +1,9 @@
 export { systemOutbox } from "./system-outbox.js";
 export {
+  creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
+  paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations,
+} from "./tips.js";
+export {
   identityAccounts,
   identityEmailAddresses,
   identityEmailHandoffs,

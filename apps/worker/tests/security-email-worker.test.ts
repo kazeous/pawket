@@ -304,6 +304,19 @@ describe("production SMTP security email sender", () => {
     });
   });
 
+  test("tip status templates are fixed, omit financial evidence and reject extra data", async () => {
+    const sent: SmtpMail[] = [];
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp,
+      createTransport() { return { async sendMail(mail) { sent.push(mail); } }; } });
+    for (const state of ["created", "confirmed", "expired"]) await sender.send({ handoffId: "synthetic-tip-handoff", purpose: "tip_status", destination: "synthetic@example.invalid", secret: null, templateData: { state, returnPath: "/creator/tips" } });
+    expect(sent).toHaveLength(3); for (const mail of sent) { expect(mail.subject).toBe("Cập nhật tip Pawket"); expect(mail.text).toContain("https://pawket.example/creator/tips"); expect(mail.text).toContain("Pawket không giữ tiền tip"); }
+    expect(sent[0]?.text).toContain("chưa phải xác nhận tiền"); expect(sent[1]?.text).toContain("xác nhận tip thủ công"); expect(sent[2]?.text).toContain("không xác định tiền có đến ngân hàng");
+    for (const templateData of [{ state: "confirmed", returnPath: "https://evil.invalid" }, { state: "confirmed", returnPath: "/creator/tips", name: "private guest" }, { state: "__proto__", returnPath: "/creator/tips" }]) {
+      await expect(sender.send({ handoffId: "synthetic-tip-handoff", purpose: "tip_status", destination: "synthetic@example.invalid", secret: null, templateData })).rejects.toThrow();
+    }
+    expect(sent).toHaveLength(3);
+  });
+
   test("records a retryable email failure before rethrowing a fixed safe error", async () => {
     // Catches worker retries without a bounded failure signal or leaked provider text.
     metricsRegistry.resetMetrics();
