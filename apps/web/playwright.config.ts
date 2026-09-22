@@ -15,6 +15,7 @@ export default defineConfig({
   testMatch: "**/*.playwright.ts",
   testIgnore: [
     "tip-journey.playwright.ts",
+    "owner-tip-policy.playwright.ts",
     "ui-foundation.playwright.ts",
     "ui-regression.playwright.ts",
     INCREMENT_THREE_DISABLED_TEST,

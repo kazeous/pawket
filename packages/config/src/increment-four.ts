@@ -1,27 +1,14 @@
 import { z } from "zod";
 
 // Deployment strings must be canonical decimal integers. In particular blank,
-// exponent, decimal and formatted values must never be coerced into valid VND.
+// exponent, decimal and formatted values cannot become operational limits.
 const integerSetting = (minimum: number, maximum: number) => z.preprocess(
   (value) => typeof value === "string" && /^(0|[1-9][0-9]*)$/u.test(value) ? Number(value) : value,
   z.number().int().min(minimum).max(maximum),
 );
 
-const presets = z.string().max(160).transform((value, context) => {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    const result = z.array(z.number().int().min(10_000).max(5_000_000)).min(3).max(10).safeParse(parsed);
-    if (result.success && new Set(result.data).size === result.data.length) return result.data;
-  } catch { /* Return a safe field-only validation error. */ }
-  context.addIssue({ code: "custom" });
-  return z.NEVER;
-});
-
 export const incrementFourEnvShape = {
   TIP_PAYMENTS_MODE: z.enum(["disabled", "manual_only"]).default("disabled"),
-  TIP_AMOUNT_MIN_VND: integerSetting(10_000, 5_000_000).optional(),
-  TIP_AMOUNT_MAX_VND: integerSetting(10_000, 5_000_000).optional(),
-  TIP_SUGGESTED_PRESETS_VND: presets.optional(),
   TIP_INTENT_TTL_SECONDS: integerSetting(300, 604_800).default(86_400),
   TIP_GUEST_RECEIPT_TTL_SECONDS: integerSetting(3_600, 2_592_000).default(604_800),
   TIP_RECENT_AUTH_SECONDS: integerSetting(60, 900).default(900),
@@ -39,13 +26,7 @@ export const incrementFourEnvShape = {
 
 type ParsedIncrementFourEnv = z.infer<z.ZodObject<typeof incrementFourEnvShape>>;
 export type TipPaymentsMode = ParsedIncrementFourEnv["TIP_PAYMENTS_MODE"];
-export type IncrementFourServerEnv = Omit<ParsedIncrementFourEnv,
-  "TIP_AMOUNT_MIN_VND" | "TIP_AMOUNT_MAX_VND" | "TIP_SUGGESTED_PRESETS_VND"
-> & {
-  TIP_AMOUNT_MIN_VND: number;
-  TIP_AMOUNT_MAX_VND: number;
-  TIP_SUGGESTED_PRESETS_VND: ReadonlyArray<number>;
-};
+export type IncrementFourServerEnv = ParsedIncrementFourEnv;
 
 type PaymentDependencies = {
   PII_ACTIVE_KEY_ID?: string;
@@ -64,26 +45,13 @@ export class IncrementFourConfigError extends Error {
 
 export function resolveIncrementFourEnv(
   parsed: ParsedIncrementFourEnv & PaymentDependencies,
-  appEnv: "local" | "test" | "staging" | "production",
+  _appEnv: "local" | "test" | "staging" | "production",
 ): IncrementFourServerEnv {
+  void _appEnv; // Keep the environment resolver contract; amounts no longer vary by it.
   const failures: Array<{ field: string; reason: string }> = [];
-  if (appEnv === "staging" || appEnv === "production") {
-    for (const field of ["TIP_AMOUNT_MIN_VND", "TIP_AMOUNT_MAX_VND", "TIP_SUGGESTED_PRESETS_VND"] as const) {
-      if (parsed[field] === undefined) failures.push({ field, reason: "must be explicitly configured when deployed" });
-    }
-  }
-  const resolved: IncrementFourServerEnv = {
-    ...parsed,
-    TIP_AMOUNT_MIN_VND: parsed.TIP_AMOUNT_MIN_VND ?? 10_000,
-    TIP_AMOUNT_MAX_VND: parsed.TIP_AMOUNT_MAX_VND ?? 5_000_000,
-    TIP_SUGGESTED_PRESETS_VND: Object.freeze([...(parsed.TIP_SUGGESTED_PRESETS_VND ?? [20_000, 50_000, 100_000])]),
-  };
-  if (resolved.TIP_AMOUNT_MIN_VND > resolved.TIP_AMOUNT_MAX_VND) {
-    failures.push({ field: "TIP_AMOUNT_MAX_VND", reason: "must be at least TIP_AMOUNT_MIN_VND" });
-  }
-  if (resolved.TIP_SUGGESTED_PRESETS_VND.some((amount) => amount < resolved.TIP_AMOUNT_MIN_VND || amount > resolved.TIP_AMOUNT_MAX_VND)) {
-    failures.push({ field: "TIP_SUGGESTED_PRESETS_VND", reason: "must fall within the configured amount bounds" });
-  }
+  // Business amounts belong to the versioned database policy. Obsolete amount
+  // environment variables cannot override it or prevent unrelated app startup.
+  const resolved: IncrementFourServerEnv = parsed;
   if (resolved.TIP_GUEST_RECEIPT_TTL_SECONDS < resolved.TIP_INTENT_TTL_SECONDS) {
     failures.push({ field: "TIP_GUEST_RECEIPT_TTL_SECONDS", reason: "must cover the intent lifetime" });
   }

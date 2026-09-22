@@ -8,13 +8,14 @@ import {
   creatorPublicationRevisions, identityUsers, identityEmailHandoffs, runRetentionSweep, systemRetentionRuns,
   paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentConfirmations, identitySessions, identityTotpAuthenticators, identityRoleGrants, type PawketDatabase,
 } from "@pawket/database";
-import { createCreatorTipSettingsService, createPublicCatalogQuery, type CreatorSeed } from "@pawket/catalog";
+import { createCreatorTipSettingsService, createPublicCatalogQuery, createPlatformTipPolicyReadPort, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, createIdentityTipAssurancePort } from "@pawket/identity";
 import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService, createCreatorTipPaymentService, expireTipPaymentIntents } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField, createLookupHmac } from "@pawket/security";
 import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
 import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
 import { materializeTipNotification } from "../../worker/src/tip-notification.js";
+import { narrowerTipPolicy, setTipPolicy } from "./owner-tip-policy-test-support.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for creator tip integration tests");
@@ -28,7 +29,7 @@ const key = new Uint8Array(32).fill(74); // Synthetic test-only key material.
 const keyring = createEncryptionKeyring({ activeKeyId: "tip-settings-test", keys: { "tip-settings-test": key } });
 const seeds = new Map<string, CreatorSeed>();
 const heldPages = new Set<string>();
-const amountPolicy = { minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [20_000, 50_000, 100_000, 200_000] };
+let policyRevision = 1;
 
 function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsService>[0]> = {}) {
   const visibility = createPublicCatalogQuery({
@@ -49,7 +50,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
   return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
-    paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,
+    paymentsMode: "manual_only", publishingMode: "general_audience", platformPolicy: createPlatformTipPolicyReadPort(),
     recentAuthMs: 900_000, commandFingerprintKey: key, now: () => at, ...overrides,
   });
 }
@@ -96,7 +97,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function optedIn() {
   const f = await fixture();
   await service().saveSettings({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at },
-    pageId: f.pageId, expectedRevision: 0, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+    pageId: f.pageId, expectedRevision: 0, expectedPolicyRevision: policyRevision, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
   return f;
 }
 const hmac = (context: string, value: string) => createLookupHmac({ key, context, value });
@@ -389,10 +390,31 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
 
   test("stopping new tips or unpublishing does not prevent exact settlement of an existing intent", async () => {
     const p = await pending();
-    await service().saveSettings({ actor: { ...p.actor, primaryAuthenticatedAt: at }, pageId: p.f.pageId, expectedRevision: 1, enabled: false, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+    await service().saveSettings({ actor: { ...p.actor, primaryAuthenticatedAt: at }, pageId: p.f.pageId, expectedRevision: 1, expectedPolicyRevision: policyRevision, enabled: false, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
     await db.update(creatorPages).set({ publishedRevisionId: null }).where(eq(creatorPages.id, p.f.pageId));
     expect((await creatorService().confirm(p.confirm)).state).toBe("confirmed");
     await expect(createService().createTip(command(p.f))).rejects.toMatchObject({ code: "not_available" });
+  });
+
+  test("owner policy edits cannot change confirmation amount, reference, destination, expiry or original policy evidence", async () => {
+    const p = await pending(); const originalTip = (await evidence(p.f)).tipRows[0]!;
+    try {
+      policyRevision = (await setTipPolicy(db, key, at, p.f.userId, { ...narrowerTipPolicy, minimumVnd: 100_000, allowedPresetsVnd: [100_000, 200_000, 300_000] })).revisionNumber;
+      await expect(createService().createTip(command(p.f))).rejects.toMatchObject({ code: "policy_changed" });
+      const read = await receiptService().readReceipt({ reference: p.created.instruction.reference,
+        access: { kind: "guest", capability: p.created.guestCapability!.secret } });
+      expect(read.instruction).toEqual(p.created.instruction);
+      const confirmed = await creatorService().confirm(p.confirm);
+      expect(confirmed.state).toBe("confirmed");
+      expect(await creatorService().confirm(p.confirm)).toEqual(confirmed);
+      const facts = await confirmationFacts(p.f);
+      expect(facts.confirmations).toHaveLength(1);
+      expect(facts.intents[0]).toMatchObject({ amountVnd: p.intent.amountVnd, accountVersionId: p.intent.accountVersionId,
+        referenceHash: p.intent.referenceHash, referenceEnvelope: p.intent.referenceEnvelope, destinationEnvelope: p.intent.destinationEnvelope,
+        expiresAt: p.intent.expiresAt, state: "confirmed" });
+      expect(facts.tips[0]).toMatchObject({ amountVnd: originalTip.amountVnd, platformPolicyRevisionId: originalTip.platformPolicyRevisionId,
+        settingRevisionId: originalTip.settingRevisionId, state: "completed" });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, p.f.userId)).revisionNumber; }
   });
 
   test("an explicit policy rejection is terminal and cannot be confirmed", async () => {
@@ -453,6 +475,19 @@ describe("bounded tip expiry with atomic Tips and Payments facts", () => {
   const shortPending = () => pending({}, { payments: paymentPort({ intentTtlMs: 300_000 }) });
   const scan = (overrides: Partial<Parameters<typeof expireTipPaymentIntents>[0]> = {}) => expireTipPaymentIntents({ db, tips: createTipExpiryPort(), paymentsMode: "manual_only", batchSize: 100, now: due, applicationRevision: "synthetic-expiry-revision", ...overrides });
   afterEach(async () => { await scan({ batchSize: 500 }); });
+
+  test("an edited amount policy never resets or prevents the original expiry", async () => {
+    const p = await shortPending(); const original = (await evidence(p.f)).tipRows[0]!;
+    try {
+      policyRevision = (await setTipPolicy(db, key, at, p.f.userId, { ...narrowerTipPolicy, minimumVnd: 100_000, allowedPresetsVnd: [100_000, 200_000, 300_000] })).revisionNumber;
+      expect(await scan({ now: new Date(due.getTime() - 1) })).toEqual({ scanned: 0, expired: 0 });
+      expect(await scan()).toEqual({ scanned: 1, expired: 1 });
+      const facts = await confirmationFacts(p.f);
+      expect(facts.intents[0]).toMatchObject({ state: "expired", amountVnd: p.intent.amountVnd, expiresAt: due,
+        referenceEnvelope: p.intent.referenceEnvelope, destinationEnvelope: p.intent.destinationEnvelope });
+      expect(facts.tips[0]).toMatchObject({ state: "expired", platformPolicyRevisionId: original.platformPolicyRevisionId, settingRevisionId: original.settingRevisionId });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, p.f.userId)).revisionNumber; }
+  });
 
   test("disabled and before-deadline scans are inert; due scan commits matching states and one fact", async () => {
     const p = await shortPending();

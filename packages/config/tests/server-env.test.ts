@@ -5,9 +5,6 @@ import { parseServerEnv } from "../src/index.js";
 const completeProductionEnv = {
   NODE_ENV: "production",
   APP_ENV: "production",
-  TIP_AMOUNT_MIN_VND: "10000",
-  TIP_AMOUNT_MAX_VND: "5000000",
-  TIP_SUGGESTED_PRESETS_VND: "[20000,50000,100000]",
   APP_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
   APP_BUILD_REVISION: "af05d661ef806fa7f2e3f63af12ad211e3d8b178",
   DATABASE_URL: "postgresql://pawket:secret@localhost:5432/pawket",

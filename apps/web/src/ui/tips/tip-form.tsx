@@ -13,14 +13,16 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { PaymentInstruction } from "./payment-instruction";
-import { formatVnd, isRecord, readCreatedInstruction, tipErrorText, tipRequest, TipRequestError } from "./tip-client";
+import { formatVnd, isRecord, readCreatedInstruction, readTipOffering, tipErrorText, tipRequest, TipRequestError } from "./tip-client";
 
 type Errors = Partial<Record<"amount" | "name" | "message", string>>;
 type Attempt = { key: string; body: { amountVnd: number; name: string; message: string } };
 
-export function TipForm({ offering }: Readonly<{ offering: PublicTipOffering }>) {
+export function TipForm({ offering: initialOffering }: Readonly<{ offering: PublicTipOffering }>) {
   const id = useId(); const formRef = useRef<HTMLFormElement>(null); const busy = useRef(false);
   const attempt = useRef<Attempt | null>(null);
+  const [offering, setOffering] = useState(initialOffering);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const [amount, setAmount] = useState(String(offering.presetsVnd[0]));
   const [name, setName] = useState(""); const [message, setMessage] = useState("");
   const [errors, setErrors] = useState<Errors>({}); const [error, setError] = useState("");
@@ -29,8 +31,24 @@ export function TipForm({ offering }: Readonly<{ offering: PublicTipOffering }>)
   const resultRef = useRef<HTMLElement>(null);
   useEffect(() => { if (instruction) resultRef.current?.focus(); }, [instruction]);
 
+  async function refreshOffering() {
+    try {
+      const latest = readTipOffering(await tipRequest(`/api/v1/public/creators/${offering.canonicalHandle}/tips`), offering.canonicalHandle);
+      setOffering(latest); setRefreshRequired(false); setError(tipErrorText("policy_changed"));
+      if (Number(amount) < latest.minimumVnd || Number(amount) > latest.maximumVnd) setErrors((previous) => ({ ...previous, amount: `Chính sách mới yêu cầu số tiền từ ${formatVnd(latest.minimumVnd)} đến ${formatVnd(latest.maximumVnd)}. Số tiền bạn nhập chưa được thay đổi.` }));
+      requestAnimationFrame(() => document.getElementById(`${id}-amount`)?.focus());
+    } catch {
+      setRefreshRequired(true); setError("Chính sách số tiền đã thay đổi nhưng chưa tải được giới hạn mới. Tải lại mức gợi ý để tiếp tục; nội dung bạn nhập vẫn được giữ nguyên.");
+    }
+  }
+
+  async function retryRefresh() {
+    if (busy.current) return; busy.current = true; setPending(true);
+    try { await refreshOffering(); } finally { busy.current = false; setPending(false); }
+  }
+
   async function submit(event: FormEvent) {
-    event.preventDefault(); if (busy.current) return;
+    event.preventDefault(); if (busy.current || refreshRequired) return;
     const next: Errors = {};
     if (!/^[0-9]{1,7}$/u.test(amount) || !Number.isSafeInteger(Number(amount)) || Number(amount) < offering.minimumVnd || Number(amount) > offering.maximumVnd) next.amount = `Nhập số nguyên từ ${formatVnd(offering.minimumVnd)} đến ${formatVnd(offering.maximumVnd)}, không dùng dấu chấm hoặc dấu phẩy.`;
     if (Array.from(name.normalize("NFC").trim()).length > 80) next.name = "Tên tối đa 80 ký tự.";
@@ -50,6 +68,7 @@ export function TipForm({ offering }: Readonly<{ offering: PublicTipOffering }>)
     } catch (failure) {
       const code = failure instanceof TipRequestError ? failure.code : "dependency_unavailable";
       setError(tipErrorText(code));
+      if (code === "policy_changed") { attempt.current = null; setLocked(false); setRefreshRequired(true); await refreshOffering(); }
       // A lost/ambiguous response must retry the same immutable command.
       if (["invalid_amount", "invalid_guest_content", "invalid_request"].includes(code)) { attempt.current = null; setLocked(false); }
     } finally { busy.current = false; setPending(false); }
@@ -98,7 +117,7 @@ export function TipForm({ offering }: Readonly<{ offering: PublicTipOffering }>)
         </FieldGroup>
         {error ? <Alert variant="destructive"><AlertTitle>Chưa tạo được hướng dẫn</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
       </CardContent>
-      <CardFooter><Button type="submit" disabled={pending}>{pending ? <Spinner data-icon="inline-start" /> : null}{pending ? "Đang tạo hướng dẫn…" : locked ? "Thử lại yêu cầu này" : "Tạo hướng dẫn chuyển khoản"}</Button></CardFooter>
+      <CardFooter className="flex flex-wrap gap-3"><Button type="submit" disabled={pending || refreshRequired}>{pending ? <Spinner data-icon="inline-start" /> : null}{pending ? "Đang tạo hướng dẫn…" : locked ? "Thử lại yêu cầu này" : "Tạo hướng dẫn chuyển khoản"}</Button>{refreshRequired ? <Button type="button" variant="outline" disabled={pending} onClick={() => void retryRefresh()}>Tải lại mức gợi ý</Button> : null}</CardFooter>
     </Card>
   </form>;
 }

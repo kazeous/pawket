@@ -6,15 +6,16 @@ import {
   identityTotpAuthenticators,
   identityUsers,
   type PawketDatabase,
+  type PawketTransaction,
 } from "@pawket/database";
 
 export async function resolveOwnerSessionPermission(
-  db: PawketDatabase,
-  input: { userId: string; sessionId: string; now: Date },
+  db: PawketDatabase | PawketTransaction,
+  input: { userId: string; sessionId: string; now: Date; lock?: boolean },
 ): Promise<boolean> {
   if (Number.isNaN(input.now.getTime())) return false;
 
-  const [owner] = await db
+  const query = db
     .select({ id: identityRoleGrants.id })
     .from(identityRoleGrants)
     .innerJoin(identityUsers, eq(identityUsers.id, identityRoleGrants.userId))
@@ -49,6 +50,8 @@ export async function resolveOwnerSessionPermission(
       ),
     )
     .limit(1);
-
+  // Policy mutations share-lock the permission evidence until commit, so a
+  // concurrent revocation is ordered before or after the authorized change.
+  const [owner] = await (input.lock ? query.for("share") : query);
   return Boolean(owner);
 }

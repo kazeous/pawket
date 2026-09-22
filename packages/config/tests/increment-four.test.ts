@@ -22,8 +22,8 @@ describe("Increment 4 fail-closed configuration", () => {
   test("keeps defaults and publishing/retention independent", () => {
     const parsed = parseServerEnv(localBase);
     expect(parsed).toMatchObject({
-      TIP_PAYMENTS_MODE: "disabled", TIP_AMOUNT_MIN_VND: 10_000, TIP_AMOUNT_MAX_VND: 5_000_000,
-      TIP_SUGGESTED_PRESETS_VND: [20_000, 50_000, 100_000],
+      TIP_PAYMENTS_MODE: "disabled",
+
       CREATOR_PUBLISHING_MODE: "disabled", PUBLIC_MEDIA_RETENTION_MODE: "report_only",
     });
     expect(parseServerEnv({ ...localBase, TIP_PAYMENTS_MODE: "manual_only" })).toMatchObject({
@@ -35,31 +35,16 @@ describe("Increment 4 fail-closed configuration", () => {
     expect(() => parseServerEnv({ ...localBase, TIP_PAYMENTS_MODE: mode })).toThrow("TIP_PAYMENTS_MODE");
   });
 
-  test.each(["-1", "0", "10000.0", "1e4", "10,000", "", " 10000", "010000", "9007199254740992"])("rejects noncanonical/bounded VND %j even disabled", (value) => {
-    expect(() => parseServerEnv({ ...localBase, TIP_AMOUNT_MIN_VND: value })).toThrow("TIP_AMOUNT_MIN_VND");
+  test.each(["production", "staging", "test"] as const)("does not require an env amount policy in %s", (environment) => {
+    expect(resolveIncrementFourEnv(shape.parse({}), environment).TIP_PAYMENTS_MODE).toBe("disabled");
   });
 
-  test.each(["production", "staging"] as const)("requires explicit deployed amount policy in %s", (environment) => {
-    for (const missing of Object.keys(amountSettings)) {
-      const settings: Record<string, string> = { ...amountSettings };
-      delete settings[missing];
-      expect(() => resolveIncrementFourEnv(shape.parse(settings), environment)).toThrow(missing);
-    }
-    expect(resolveIncrementFourEnv(shape.parse(amountSettings), environment).TIP_PAYMENTS_MODE).toBe("disabled");
+  test.each(["", "malformed", "-1", "10000.0", "1e4", "[1,1]"])("ignores obsolete business amounts %j without relaxing operational validation", (value) => {
+    const parsed = parseServerEnv({ ...localBase, TIP_AMOUNT_MIN_VND: value, TIP_AMOUNT_MAX_VND: value, TIP_SUGGESTED_PRESETS_VND: value });
+    for (const field of Object.keys(amountSettings)) expect(parsed).not.toHaveProperty(field);
+    expect(parsed.TIP_PAYMENTS_MODE).toBe("disabled");
+    expect(() => parseServerEnv({ ...localBase, TIP_INTENT_TTL_SECONDS: "bad" })).toThrow("TIP_INTENT_TTL_SECONDS");
   });
-
-  test("rejects reversed bounds and presets outside configured bounds", () => {
-    expect(() => resolveIncrementFourEnv(shape.parse({ ...amountSettings, TIP_AMOUNT_MIN_VND: "200000", TIP_AMOUNT_MAX_VND: "100000" }), "test")).toThrow("TIP_AMOUNT_MAX_VND");
-    expect(() => resolveIncrementFourEnv(shape.parse({ ...amountSettings, TIP_AMOUNT_MIN_VND: "30000" }), "test")).toThrow("TIP_SUGGESTED_PRESETS_VND");
-  });
-
-  test.each(["[20000,20000,100000]", "[20000,50000.5,100000]", '["20000",50000,100000]', "[]", "[20000,50000,5000001]", "sensitive-marker"])("rejects invalid preset list safely: %s", (value) => {
-    expect(() => parseServerEnv({ ...localBase, TIP_SUGGESTED_PRESETS_VND: value })).toThrow("TIP_SUGGESTED_PRESETS_VND");
-    try { parseServerEnv({ ...localBase, TIP_SUGGESTED_PRESETS_VND: value }); } catch (error) {
-      expect(String(error)).not.toContain(value);
-    }
-  });
-
   test("manual mode requires encryption and authentication dependencies", () => {
     const parsed = shape.parse({ ...amountSettings, TIP_PAYMENTS_MODE: "manual_only" });
     expect(() => resolveIncrementFourEnv(parsed, "test")).toThrow("validated encryption keyring");
@@ -89,10 +74,10 @@ describe("Increment 4 fail-closed configuration", () => {
     expect(example).toContain("TIP_PAYMENTS_MODE=disabled");
     expect(ci).toContain("TIP_PAYMENTS_MODE: disabled");
     expect(compose.match(/^      TIP_PAYMENTS_MODE: disabled$/gm)).toHaveLength(2);
-    for (const [key, value] of Object.entries(amountSettings)) {
-      expect(example).toContain(`${key}=${value}`);
-      expect(ci).toContain(`${key}: '${value}'`);
-      expect(compose.split(`${key}: \${${key}:?Set ${key} in Coolify}`).length - 1).toBe(2);
+    for (const key of Object.keys(amountSettings)) {
+      expect(example).not.toContain(key);
+      expect(ci).not.toContain(key);
+      expect(compose).not.toContain(key);
     }
   });
 });

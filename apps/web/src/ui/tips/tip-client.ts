@@ -1,4 +1,5 @@
 import type { AuthorizedTipReceipt, TipInstructionProjection, TipReceiptProjection } from "@pawket/payments";
+import type { PublicTipOffering } from "@pawket/tips";
 
 export const formatVnd = (value: number) => `${new Intl.NumberFormat("vi-VN").format(value)} ₫`;
 export const formatTipTime = (value: string) => new Intl.DateTimeFormat("vi-VN", {
@@ -8,7 +9,7 @@ export class TipRequestError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
-export async function tipRequest(path: string, init: RequestInit = {}): Promise<unknown> {
+export async function tipRequest(path: string, init: RequestInit = {}, maximumBytes = 16_384): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
@@ -17,7 +18,7 @@ export async function tipRequest(path: string, init: RequestInit = {}): Promise<
     const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
     try {
       for (;;) { const { value, done } = await reader.read(); if (done) break; total += value.byteLength;
-        if (total > 16_384) { await reader.cancel(); throw new TipRequestError("dependency_unavailable"); } chunks.push(value); }
+        if (total > maximumBytes) { await reader.cancel(); throw new TipRequestError("dependency_unavailable"); } chunks.push(value); }
     } finally { reader.releaseLock(); }
     const bytes = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
@@ -29,6 +30,26 @@ export async function tipRequest(path: string, init: RequestInit = {}): Promise<
   } finally { clearTimeout(timer); }
 }
 export const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+// Drafts live only in this mounted form. Reauthentication can replace the
+// shared session cookie, so verify the account before using any saved intent.
+export async function requireTipDraftActor(expectedUserId: string): Promise<void> {
+  let value: unknown;
+  try { value = await tipRequest("/api/v1/me"); }
+  catch (error) {
+    if (error instanceof TipRequestError && error.code === "AUTHENTICATION_REQUIRED") throw new TipRequestError("authentication_required");
+    if (error instanceof TipRequestError && error.code === "IDENTITY_UNAVAILABLE") throw new TipRequestError("dependency_unavailable");
+    throw error;
+  }
+  if (!isRecord(value) || !isRecord(value.user) || typeof value.user.id !== "string") throw new TipRequestError("dependency_unavailable");
+  if (value.user.id !== expectedUserId) throw new TipRequestError("account_changed");
+}
+export function readTipOffering(value: unknown, handle: string): PublicTipOffering {
+  const v = isRecord(value) ? value.offering : null;
+  if (!isRecord(v) || v.canonicalHandle !== handle || typeof v.displayName !== "string" || Array.from(v.displayName).length < 1 || Array.from(v.displayName).length > 80 ||
+    typeof v.minimumVnd !== "number" || typeof v.maximumVnd !== "number" || !Number.isSafeInteger(v.minimumVnd) || !Number.isSafeInteger(v.maximumVnd) || v.minimumVnd < 10_000 || v.maximumVnd > 5_000_000 || v.minimumVnd > v.maximumVnd ||
+    !Array.isArray(v.presetsVnd) || v.presetsVnd.length !== 3 || new Set(v.presetsVnd).size !== 3 || v.presetsVnd.some((amount) => typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < (v.minimumVnd as number) || amount > (v.maximumVnd as number))) throw new TipRequestError("dependency_unavailable");
+  return { canonicalHandle: handle, displayName: v.displayName, minimumVnd: v.minimumVnd, maximumVnd: v.maximumVnd, presetsVnd: [...v.presetsVnd] as number[] };
+}
 export function readCreatedInstruction(value: unknown, handle: string, amount: number): TipInstructionProjection {
   const v = isRecord(value) ? value.instruction : null;
   if (!isRecord(v) || typeof v.reference !== "string" || !/^PW[0-9A-F]{20}$/u.test(v.reference) ||
@@ -51,6 +72,7 @@ export function tipErrorText(code: string) {
     case "not_available": return "Nghệ sĩ hiện chưa thể nhận tip này. Vui lòng tải lại trang để kiểm tra.";
     case "rate_limited": return "Bạn đã thử nhiều lần. Vui lòng đợi trước khi thử lại.";
     case "invalid_amount": return "Số tiền không còn phù hợp. Vui lòng kiểm tra lại.";
+    case "policy_changed": return "Chính sách số tiền vừa thay đổi. Hãy kiểm tra giới hạn mới bên trên và chọn lại số tiền nếu cần. Số tiền, tên và lời nhắn bạn đã nhập vẫn được giữ nguyên.";
     case "invalid_guest_content": return "Tên hoặc lời nhắn chưa hợp lệ. Vui lòng kiểm tra độ dài và ký tự.";
     case "guest_context_required": return "Trình duyệt cần cho phép cookie để lưu quyền xem tip. Hãy bật cookie rồi thử lại.";
     case "idempotency_conflict": case "intent_not_pending": return "Yêu cầu này không thể tiếp tục. Vui lòng kiểm tra phiếu tip đã tạo trước khi gửi yêu cầu khác.";

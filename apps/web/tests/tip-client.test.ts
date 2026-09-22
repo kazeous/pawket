@@ -1,8 +1,19 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { formatVnd, readCreatedInstruction, tipErrorText, tipRequest } from "../src/ui/tips/tip-client";
+import { formatVnd, readCreatedInstruction, requireTipDraftActor, tipErrorText, tipRequest } from "../src/ui/tips/tip-client";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("private tip browser boundary", () => {
+  test("reauthenticated drafts require the original account and normalize identity errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user: { id: "original" } })));
+    await expect(requireTipDraftActor("original")).resolves.toBeUndefined();
+    await expect(requireTipDraftActor("different")).rejects.toMatchObject({ code: "account_changed" });
+    for (const [remote, expected] of [["AUTHENTICATION_REQUIRED", "authentication_required"], ["IDENTITY_UNAVAILABLE", "dependency_unavailable"]]) {
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ code: remote }, { status: 401 })));
+      await expect(requireTipDraftActor("original")).rejects.toMatchObject({ code: expected });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user: null })));
+    await expect(requireTipDraftActor("original")).rejects.toMatchObject({ code: "dependency_unavailable" });
+  });
   test("rejects oversized, malformed and non-JSON responses with a stable safe error", async () => {
     for (const response of [new Response("private html", { headers: { "content-type": "text/html" } }),
       new Response('"' + "x".repeat(16_385) + '"', { headers: { "content-type": "application/json" } }),

@@ -1576,6 +1576,19 @@ textarea:where(:not([data-slot], [data-slot] *)):disabled {
   .creator-tip-desktop { display: block; }
   .creator-tip-mobile { display: none; }
 }
+@container tip-page (width < 48rem) {
+  .site-header { grid-template-columns: minmax(0, 1fr); }
+  .site-header .site-context { display: none; }
+  .site-header .account-session {
+    width: 100%;
+    grid-column: 1 / -1;
+    justify-self: stretch;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .site-header .account-identity { max-width: none; text-align: left; }
+  .site-header .account-actions { justify-self: start; flex-wrap: wrap; }
+}
 @container tip-page (width < 20rem) {
   .site-header { grid-template-columns: minmax(0, 1fr); }
   .site-header .account-session,

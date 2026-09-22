@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import {
-  acknowledgeOutboxEvent, createDatabase, creatorTipSettingRevisions, creatorTipSettings, identityEmailHandoffs, identityUsers,
+  PLATFORM_TIP_POLICY_BOOTSTRAP_ID, acknowledgeOutboxEvent, createDatabase, creatorTipSettingRevisions, creatorTipSettings, identityEmailHandoffs, identityUsers,
   insertOutboxEvent, paymentGuestCapabilities, paymentIntents, paymentsReceivingAccountOnboarding, systemOutbox, tips,
 } from "@pawket/database";
 import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
@@ -46,13 +46,13 @@ test("real PostgreSQL and Valkey retry a committed tip handoff and deliver expir
   const sourceId = await db.transaction(async (tx) => {
     await tx.insert(identityUsers).values({ id: creatorUserId, name: "Synthetic Artist", email: `${creatorUserId}@example.invalid`, canonicalEmail: `${creatorUserId}@example.invalid`,
       emailVerified: true, emailVerifiedAt: createdAt, emailVerificationProvenance: "password_email_challenge", createdAt, updatedAt: createdAt });
-    await tx.insert(creatorTipSettingRevisions).values({ id: settingId, creatorUserId, revisionNumber: 1, enabled: true, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000], actorSessionId: "synthetic", requestId: randomUUID(), createdAt });
+    await tx.insert(creatorTipSettingRevisions).values({ id: settingId, creatorUserId, revisionNumber: 1, enabled: true, platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000], actorSessionId: "synthetic", requestId: randomUUID(), createdAt });
     await tx.insert(creatorTipSettings).values({ creatorUserId, revisionId: settingId, createdAt, updatedAt: createdAt });
     await tx.insert(paymentsReceivingAccountOnboarding).values({ id: accountId, onboardingId: randomUUID(), applicantUserId: creatorUserId, version: 1, bankBin: "970436", bankName: "Vietcombank", maskedSuffix: "•••• 0001", accountFingerprint: hash(),
       accountNumberEnvelope: envelope("payments_receiving_account", accountId, "account_number", "000001"),
       accountHolderLabelEnvelope: envelope("payments_receiving_account", accountId, "account_holder_label", "SYNTHETIC ARTIST"),
       proofState: "verified", proofVerifiedAt: createdAt, createdAt, updatedAt: createdAt });
-    await tx.insert(tips).values({ id: tipId, creatorUserId, settingRevisionId: settingId, amountVnd: 50_000,
+    await tx.insert(tips).values({ id: tipId, creatorUserId, settingRevisionId: settingId, platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, amountVnd: 50_000,
       guestContentEnvelope: envelope("tip", tipId, "guest_content", '{"name":"Synthetic Guest","message":"private synthetic message"}'), createdAt, updatedAt: createdAt });
     await tx.insert(paymentIntents).values({ id: intentId, tipId, creatorUserId, amountVnd: 50_000, referenceHash: hash(),
       referenceEnvelope: envelope("payment_intent", intentId, "transfer_reference", "PW00000000000000000001"),

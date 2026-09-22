@@ -1,4 +1,5 @@
 export { systemOutbox } from "./system-outbox.js";
+export { PLATFORM_TIP_POLICY_BOOTSTRAP_ID, platformTipPolicyCurrent, platformTipPolicyRevisions } from "./platform-tip-policy.js";
 export {
   creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
   paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations,

@@ -11,7 +11,8 @@ if (browserDatabaseConfiguration.targetDatabaseName !== "pawket_increment4_tips_
 export default defineConfig({
   ...base,
   globalSetup: "./tests/increment-four-global-setup.ts",
-  testMatch: ["tip-journey.playwright.ts"], testIgnore: [], timeout: 60_000,
+  testMatch: ["tip-journey.playwright.ts", "owner-tip-policy.playwright.ts"], testIgnore: [], timeout: 60_000,
+  fullyParallel: false, workers: 1,
   outputDir: path.resolve(import.meta.dirname, ".playwright-artifacts", "increment-four"),
   use: { ...base.use, baseURL: "http://127.0.0.1:4177", locale: "vi-VN", colorScheme: "light",
     contextOptions: { reducedMotion: "reduce" }, extraHTTPHeaders: { "x-real-ip": "127.0.0.1" } },

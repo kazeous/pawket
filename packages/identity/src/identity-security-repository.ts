@@ -358,7 +358,7 @@ export class StepUpProofError extends Error {
 }
 
 export async function createStepUpProof(
-  db: PawketDatabase,
+  db: PawketDatabase | PawketTransaction,
   input: {
     sessionId: string;
     userId: string;
@@ -501,7 +501,7 @@ export async function consumeStepUpProof(
 }
 
 export async function resolveOwnerPermission(
-  db: PawketDatabase,
+  db: PawketDatabase | PawketTransaction,
   userId: string,
 ): Promise<boolean> {
   const [owner] = await db

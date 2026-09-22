@@ -8,6 +8,9 @@ import { identityUsers } from "./identity-core";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit 0.31 resolves this TypeScript schema without the emitted suffix.
 import { paymentsReceivingAccountOnboarding } from "./payments";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { platformTipPolicyRevisions } from "./platform-tip-policy";
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
@@ -25,6 +28,7 @@ const envelopeCheck = (column: SQLWrapper) => sql`coalesce(
 
 export const creatorTipSettingRevisions = pgTable("creator_tip_setting_revisions", {
   id: uuid("id").primaryKey(),
+  platformPolicyRevisionId: uuid("platform_policy_revision_id").references(() => platformTipPolicyRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
   creatorUserId: text("creator_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   revisionNumber: integer("revision_number").notNull(),
   enabled: boolean("enabled").notNull().default(false),
@@ -59,6 +63,7 @@ export const creatorTipSettings = pgTable("creator_tip_settings", {
 
 export const tips = pgTable("tips", {
   id: uuid("id").primaryKey(),
+  platformPolicyRevisionId: uuid("platform_policy_revision_id").references(() => platformTipPolicyRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
   creatorUserId: text("creator_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   buyerUserId: text("buyer_user_id").references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   settingRevisionId: uuid("setting_revision_id").notNull(),

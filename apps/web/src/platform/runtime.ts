@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { createCatalogCapabilityTransitionPort, createCreatorReviewHttpHandlers, createCreatorReviewService, resolveOwnerSessionPermission } from "@pawket/admin";
+import { createCatalogCapabilityTransitionPort, createCreatorReviewHttpHandlers, createCreatorReviewService, createTipPolicyHttpHandlers, createOwnerTipPolicyAssurancePort, resolveOwnerSessionPermission } from "@pawket/admin";
 import {
   createCatalogHttpHandlers,
   createCatalogMediaOwnershipPort,
   createCatalogService,
   createCreatorTipSettingsService,
+  createPlatformTipPolicyService,
   createPublicCatalogQuery,
   type VisibilityReadPort,
 } from "@pawket/catalog";
@@ -76,6 +77,7 @@ type WebPlatformRuntime = {
   tipSettings: ReturnType<typeof createCreatorTipSettingsService>;
   creatorTipHandlers: ReturnType<typeof createCreatorTipHttpHandlers>;
   creatorTipSettingsHandlers: ReturnType<typeof createCreatorTipSettingsHttpHandlers>;
+  tipPolicyHandlers: ReturnType<typeof createTipPolicyHttpHandlers>;
   creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
@@ -465,12 +467,16 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     accounts: receivingAccounts,
     deposits: verificationDeposits,
   });
+  const tipPolicy = createPlatformTipPolicyService({
+    db: database.db, applicationRevision: env.APP_REVISION, commandFingerprintKey: lookupHmacKey,
+    ...createOwnerTipPolicyAssurancePort(),
+  });
   const tipSettings = createCreatorTipSettingsService({
     applicationRevision: env.APP_REVISION,
     db: database.db, visibility: publicCatalog, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey }),
     paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
-    amountPolicy: { minimumVnd: env.TIP_AMOUNT_MIN_VND, maximumVnd: env.TIP_AMOUNT_MAX_VND, allowedPresetsVnd: env.TIP_SUGGESTED_PRESETS_VND },
+    platformPolicy: tipPolicy,
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, commandFingerprintKey: lookupHmacKey,
   });
   const tipBuyerAccounts = createIdentityTipBuyerAccountPort();
@@ -488,6 +494,24 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   async function tipThrottle(input: { action: string; subjectHmac: string; maximumAttempts: number; windowMs: number }) {
     return recordSecurityThrottleAttempt(database.db, { ...input, scope: input.action.endsWith("_creator") ? "account" : "network", now: new Date(), blockMs: input.windowMs });
   }
+  const tipPolicyHandlers = createTipPolicyHttpHandlers({
+    appBaseUrl: env.APP_BASE_URL, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE,
+    publishingMode: env.CREATOR_PUBLISHING_MODE, authenticate, service: tipPolicy,
+    async authorizeOwner(headers) {
+      const actor = await authenticate(headers);
+      if (!actor) return "unauthenticated";
+      return await resolveOwnerSessionPermission(database.db, { ...actor, now: new Date() }) ? "authorized" : "forbidden";
+    },
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const policy = { action: `owner_tip_policy_${operation}`, now: new Date(), windowMs: 60_000, blockMs: 60_000 };
+      const [actor, network] = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account",
+          subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "owner-tip-policy-actor", value: actorUserId }), maximumAttempts: operation === "read" ? 120 : 20 }),
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash, maximumAttempts: 120 }),
+      ]);
+      return actor.allowed && network.allowed;
+    },
+  });
   const tipReceipts = createTipReceiptService({
     applicationRevision: env.APP_REVISION,
     onClaimCommitted: (replayed) => recordTipOperation({ operation: "claim", outcome: replayed ? "replayed" : "recorded" }),
@@ -502,7 +526,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     guestContextTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, rateWindowMs: env.TIP_RATE_WINDOW_SECONDS * 1000,
     createIpLimit: env.TIP_CREATE_IP_LIMIT, createCreatorLimit: env.TIP_CREATE_CREATOR_LIMIT, receiptLimit: env.TIP_RECEIPT_REQUEST_LIMIT,
     authenticate, creation: tipCreation, receipts: tipReceipts, throttle: tipThrottle,
-    resolveCreatorRateSubject: (handle) => database.db.transaction(async (tx) => (await tipSettings.getTipEligibility(tx, handle))?.creatorUserId ?? null),
+    resolveCreatorRateSubject: (handle) => database.db.transaction(async (tx) => (await tipSettings.getExistingTipEligibility(tx, handle))?.creatorUserId ?? null),
   });
   const creatorTips = createCreatorTipPaymentService({
     applicationRevision: env.APP_REVISION,
@@ -604,6 +628,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     tipSettings,
     creatorTipHandlers,
     creatorTipSettingsHandlers,
+    tipPolicyHandlers,
     creatorTips,
     mediaCommandHandlers,
     mediaHandlers,

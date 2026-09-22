@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { types as nodeTypes } from "node:util";
 import { TipPaymentError, type AuthorizedTipReceipt, type TipAccess, type TipTransferClaim } from "@pawket/payments";
 import { createLookupHmac } from "@pawket/security";
-import type { createTipService } from "./create-tip.js";
+import type { createTipService, PublicTipOffering } from "./create-tip.js";
 import { readTipBody, tipBodyRecord, tipCookie, tipCookieHeader, tipJson, tipNetworkKey, tipReceiptCookieName, tipReference, TIP_GUEST_CONTEXT_COOKIE } from "./http-boundary.js";
 
 type Input = Readonly<{
@@ -9,19 +10,44 @@ type Input = Readonly<{
   lookupHmacKey: Uint8Array; guestContextTtlMs: number; rateWindowMs: number; createIpLimit: number; createCreatorLimit: number; receiptLimit: number;
   authenticate(headers: Headers): Promise<Readonly<{ userId: string }> | null>;
   resolveCreatorRateSubject(handle: string): Promise<string | null>;
-  throttle(input: { action: "tip_context" | "tip_create_ip" | "tip_create_creator" | "tip_receipt" | "tip_claim_ip"; subjectHmac: string; maximumAttempts: number; windowMs: number }): Promise<{ allowed: boolean }>;
-  creation: Pick<ReturnType<typeof createTipService>, "createTip">;
+  throttle(input: { action: "tip_context" | "tip_create_ip" | "tip_create_creator" | "tip_receipt" | "tip_claim_ip" | "tip_offering"; subjectHmac: string; maximumAttempts: number; windowMs: number }): Promise<{ allowed: boolean }>;
+  creation: Pick<ReturnType<typeof createTipService>, "createTip" | "getPublicOffering">;
   receipts: { readReceipt(command: { reference: string; access: TipAccess }): Promise<AuthorizedTipReceipt>; reportTransfer(command: { reference: string; access: TipAccess; requestId: string }): Promise<TipTransferClaim> };
   now?: () => Date;
 }>;
 const validHandle = (v: unknown): v is string => typeof v === "string" && v.trim() === v && v.length >= 3 && v.length <= 30 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(v);
 const idem = (v: unknown): v is string => typeof v === "string" && v.trim() === v && /^[A-Za-z0-9._-]{8,200}$/u.test(v);
 const invalid = (status = 400) => tipJson(status, { code: "invalid_request" });
+function publicOffering(value: unknown, canonicalHandle: string): PublicTipOffering | null {
+  if (value === null) return null;
+  const reject = (): never => { throw new TipPaymentError("dependency_unavailable"); };
+  if (!value || typeof value !== "object" || nodeTypes.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return reject();
+  const keys = ["canonicalHandle", "displayName", "minimumVnd", "maximumVnd", "presetsVnd"];
+  if (Reflect.ownKeys(value).length !== keys.length) return reject();
+  const descriptors = Object.getOwnPropertyDescriptors(value); const safe: Record<string, unknown> = {};
+  for (const key of keys) {
+    const field = descriptors[key]; if (!field || !field.enumerable || !("value" in field)) return reject();
+    safe[key] = field.value;
+  }
+  if (safe.canonicalHandle !== canonicalHandle || typeof safe.displayName !== "string" || Array.from(safe.displayName).length < 1 || Array.from(safe.displayName).length > 80 ||
+    typeof safe.minimumVnd !== "number" || typeof safe.maximumVnd !== "number" || !Number.isSafeInteger(safe.minimumVnd) || !Number.isSafeInteger(safe.maximumVnd) ||
+    safe.minimumVnd < 10_000 || safe.maximumVnd > 5_000_000 || safe.minimumVnd > safe.maximumVnd ||
+    !Array.isArray(safe.presetsVnd) || nodeTypes.isProxy(safe.presetsVnd) || Object.getPrototypeOf(safe.presetsVnd) !== Array.prototype || safe.presetsVnd.length !== 3 || Reflect.ownKeys(safe.presetsVnd).length !== 4) return reject();
+  const amounts = Object.getOwnPropertyDescriptors(safe.presetsVnd); const presetsVnd: number[] = [];
+  for (let index = 0; index < 3; index++) {
+    const amount = amounts[String(index)];
+    if (!amount || !amount.enumerable || !("value" in amount) || typeof amount.value !== "number" || !Number.isSafeInteger(amount.value) || amount.value < safe.minimumVnd || amount.value > safe.maximumVnd) return reject();
+    presetsVnd.push(amount.value);
+  }
+  if (new Set(presetsVnd).size !== 3) return reject();
+  return { canonicalHandle, displayName: safe.displayName, minimumVnd: safe.minimumVnd, maximumVnd: safe.maximumVnd, presetsVnd };
+}
 function failure(error: unknown) {
   if (!(error instanceof TipPaymentError)) return tipJson(503, { code: "dependency_unavailable" });
   switch (error.code) {
     case "payments_disabled": return tipJson(503, { code: error.code });
     case "rate_limited": return tipJson(429, { code: error.code });
+    case "policy_changed": return tipJson(409, { code: error.code });
     case "invalid_amount": case "invalid_guest_content": case "invalid_request": return tipJson(400, { code: error.code });
     case "idempotency_conflict": case "intent_not_pending": return tipJson(409, { code: error.code });
     case "not_available": case "not_authorized": return tipJson(404, { code: "not_available" });
@@ -58,6 +84,16 @@ export function createTipHttpHandlers(input: Input) {
     throw new TipPaymentError("not_authorized");
   }
   return {
+    async readOffering(request: Request, canonicalHandle: string): Promise<Response> {
+      const rejected = preflight(request, "GET"); if (rejected) return rejected;
+      if (request.headers.has("origin") && request.headers.get("origin") !== origin) return tipJson(403, { code: "untrusted_origin" });
+      if (!validHandle(canonicalHandle)) return tipJson(404, { code: "not_available" });
+      if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience") return tipJson(200, { offering: null });
+      try {
+        await throttle(request, "tip_offering", input.receiptLimit);
+        return tipJson(200, { offering: publicOffering(await input.creation.getPublicOffering(canonicalHandle), canonicalHandle) });
+      } catch (error) { return failure(error); }
+    },
     async guestContext(request: Request): Promise<Response> {
       const rejected = preflight(request, "POST", true); if (rejected) return rejected;
       try {

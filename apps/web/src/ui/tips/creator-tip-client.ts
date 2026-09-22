@@ -1,6 +1,7 @@
 import type { CreatorTipProjection, CreatorTipQueue, PaymentIntentState } from "@pawket/payments";
 import type { CreatorTipSettingsSnapshot } from "@pawket/catalog";
 import { isRecord, TipRequestError } from "./tip-client";
+import { readTipPolicy } from "./tip-policy-client";
 
 export const tipStateLabels: Record<PaymentIntentState, string> = {
   awaiting_transfer: "Chờ chuyển khoản", confirmed: "Đã xác nhận", expired: "Đã hết hạn", rejected: "Đã từ chối",
@@ -12,7 +13,14 @@ export function readCreatorTipSettings(s: unknown): CreatorTipSettingsSnapshot {
     (s.revisionNumber === 0 ? s.revisionId !== null : typeof s.revisionId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(s.revisionId)) ||
     typeof s.enabled !== "boolean" || typeof s.minimumVnd !== "number" || typeof s.maximumVnd !== "number" || !Number.isSafeInteger(s.minimumVnd) || !Number.isSafeInteger(s.maximumVnd) || s.minimumVnd < 10_000 || s.maximumVnd > 5_000_000 || s.minimumVnd > s.maximumVnd ||
     !Array.isArray(s.presetsVnd) || s.presetsVnd.length !== 3 || new Set(s.presetsVnd).size !== 3 || s.presetsVnd.some((v) => typeof v !== "number" || !Number.isInteger(v) || v < (s.minimumVnd as number) || v > (s.maximumVnd as number))) throw new TipRequestError("dependency_unavailable");
-  return { revisionId: s.revisionId as string | null, revisionNumber: s.revisionNumber, enabled: s.enabled, minimumVnd: s.minimumVnd, maximumVnd: s.maximumVnd, presetsVnd: [...s.presetsVnd] as number[] };
+  const effectivePolicy = s.effectivePolicy === null ? null : readTipPolicy(s.effectivePolicy);
+  if ((s.platformPolicyRevisionId !== null && (typeof s.platformPolicyRevisionId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(s.platformPolicyRevisionId))) ||
+    typeof s.presetsFallback !== "boolean" || !Array.isArray(s.effectivePresetsVnd)) throw new TipRequestError("dependency_unavailable");
+  const fallback = Boolean(effectivePolicy && !s.presetsVnd.every((v) => effectivePolicy.allowedPresetsVnd.includes(v as number)));
+  const effectivePresets = effectivePolicy ? fallback ? effectivePolicy.allowedPresetsVnd.slice(0, 3) : s.presetsVnd : [];
+  if (s.presetsFallback !== fallback || JSON.stringify(s.effectivePresetsVnd) !== JSON.stringify(effectivePresets)) throw new TipRequestError("dependency_unavailable");
+  return { revisionId: s.revisionId as string | null, revisionNumber: s.revisionNumber, enabled: s.enabled, minimumVnd: s.minimumVnd, maximumVnd: s.maximumVnd, presetsVnd: [...s.presetsVnd] as number[],
+    platformPolicyRevisionId: s.platformPolicyRevisionId as string | null, effectivePolicy, effectivePresetsVnd: [...s.effectivePresetsVnd] as number[], presetsFallback: s.presetsFallback };
 }
 export function readCreatorTip(v: unknown): CreatorTipProjection {
   const validTime = (t: unknown): t is string => typeof t === "string" && Number.isFinite(Date.parse(t));

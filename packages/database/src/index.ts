@@ -1,4 +1,5 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
+export { PLATFORM_TIP_POLICY_BOOTSTRAP_ID, platformTipPolicyCurrent, platformTipPolicyRevisions } from "./schema.js";
 export {
   creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
   paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations,
