@@ -91,13 +91,16 @@ describe("release-gate workflow contract", () => {
     indexOfRequired("--log-opts=--all");
   });
 
-  it("suppresses only the three reviewed historical Valkey image-tag false positives", () => {
+  it("suppresses only reviewed historical image-tag and synthetic idempotency-key false positives", () => {
     // Catches broad secret-scan suppression that could conceal unrelated history findings.
     expect(gitleaksIgnore).toBe(
       [
         "c53e58de35e682c1d9b0a1576568cf11052228ea:.github/workflows/verify.yml:generic-api-key:47",
         "ff07c189689698d88c8d93640ca60c83a6ee16cd:compose.prod.yaml:generic-api-key:19",
         "94db6cb9033c9e769b119d1043208cdef00e283a:compose.dev.yaml:generic-api-key:20",
+        // Both findings are the fixed HTTP unit-test request key, not credentials.
+        "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:20",
+        "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:31",
       ].join("\n"),
     );
   });
