@@ -3,10 +3,11 @@ import { CreatorTipSettingsError } from "@pawket/catalog";
 import { createCreatorTipSettingsHttpHandlers } from "../src/creator-tip-settings-http.js";
 
 const actor = { userId: "creator-session-owner", sessionId: "current-session", primaryAuthenticatedAt: new Date() };
-const settings = { revisionId: null, revisionNumber: 0, enabled: false, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000], available: true };
-const body = { expectedRevision: 0, enabled: true, presetsVnd: settings.presetsVnd };
+const settings = { revisionId: null, revisionNumber: 0, enabled: false, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000], available: true, platformPolicyRevisionId: null, effectivePolicy: { revisionId: "00000000-0000-4000-8000-000000000001", revisionNumber: 1, minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [20_000, 50_000, 100_000], effectiveAt: "2026-09-22T00:00:00.000Z" }, effectivePresetsVnd: [20_000, 50_000, 100_000], presetsFallback: false };
+const body = { expectedRevision: 0, expectedPolicyRevision: 1, enabled: true, presetsVnd: settings.presetsVnd };
 function setup(overrides: Partial<Parameters<typeof createCreatorTipSettingsHttpHandlers>[0]> = {}) {
-  const service = { getOwnSettings: vi.fn(async () => settings), saveOwnSettings: vi.fn(async () => settings) };
+  const { available: _available, ...saved } = settings; void _available;
+  const service = { getOwnSettings: vi.fn(async () => settings), saveOwnSettings: vi.fn(async () => saved) };
   const authenticate = vi.fn(async (): Promise<typeof actor | null> => actor); const throttle = vi.fn(async () => true);
   const handlers = createCreatorTipSettingsHttpHandlers({ appBaseUrl: "https://pawket.test", paymentsMode: "manual_only", publishingMode: "general_audience", lookupHmacKey: new Uint8Array(32).fill(48), service, authenticate, throttle, ...overrides });
   return { handlers, service, authenticate, throttle };
@@ -43,6 +44,7 @@ describe("creator tip settings HTTP ownership and privacy", () => {
     }
   });
   test.each([
+    [{ ...body, expectedPolicyRevision: 0 }, 400], [{ ...body, expectedPolicyRevision: "1" }, 400], [{ ...body, expectedPolicyRevision: undefined }, 400],
     [{ ...body, expectedRevision: "0" }, 400], [{ ...body, enabled: "true" }, 400], [{ ...body, presetsVnd: [1, 2] }, 400],
     [{ ...body, expectedRevision: -1 }, 400], [{ ...body, presetsVnd: [20_000, 50_000, "100000"] }, 400],
   ])("rejects malformed settings command %#", async (value, status) => { const s = setup(); expect((await s.handlers.save(request({ body: JSON.stringify(value) }))).status).toBe(status); expect(s.service.saveOwnSettings).not.toHaveBeenCalled(); });
@@ -54,7 +56,28 @@ describe("creator tip settings HTTP ownership and privacy", () => {
     expect((await s.handlers.read(request({ method: "GET" }, "?pageId=another"))).status).toBe(400);
     s.service.saveOwnSettings.mockRejectedValueOnce(new CreatorTipSettingsError("RECENT_AUTH_REQUIRED"));
     const recent = await s.handlers.save(request()); expect(recent.status).toBe(403); expect(await recent.json()).toEqual({ code: "recent_auth_required" });
+    s.service.saveOwnSettings.mockRejectedValueOnce(new CreatorTipSettingsError("POLICY_CHANGED"));
+    const conflict = await s.handlers.save(request()); expect(conflict.status).toBe(409); expect(await conflict.json()).toEqual({ code: "policy_changed" });
     s.service.saveOwnSettings.mockRejectedValueOnce(new Error("private database failure"));
     const failed = await s.handlers.save(request()); expect(failed.status).toBe(503); expect(await failed.text()).not.toContain("private database failure");
+  });
+  test("rejects expanded, accessor and inconsistent dependency projections without leaking fields", async () => {
+    const getter = vi.fn(() => "private secret");
+    const accessor = Object.defineProperty({ ...settings }, "minimumVnd", { enumerable: true, get: getter });
+    for (const malformed of [
+      { ...settings, privateReason: "private secret" }, accessor,
+      { ...settings, effectivePolicy: { ...settings.effectivePolicy, privateReason: "private secret" } },
+      { ...settings, effectivePresetsVnd: [100_000, 50_000, 20_000] },
+      { ...settings, presetsFallback: true }, { ...settings, revisionNumber: 1 },
+    ]) {
+      const s = setup(); s.service.getOwnSettings.mockResolvedValueOnce(malformed);
+      const response = await s.handlers.read(request({ method: "GET" }));
+      expect(response.status).toBe(503); expect(await response.json()).toEqual({ code: "dependency_unavailable" });
+    }
+    expect(getter).not.toHaveBeenCalled();
+    const s = setup();
+    s.service.saveOwnSettings.mockResolvedValueOnce({ ...settings });
+    const response = await s.handlers.save(request());
+    expect(response.status).toBe(503);
   });
 });

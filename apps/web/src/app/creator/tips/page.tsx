@@ -16,7 +16,8 @@ export const metadata: Metadata = { title: "Quản lý tip · Pawket", robots: {
 
 export default async function CreatorTipsPage({ searchParams }: Readonly<{ searchParams: Promise<Record<string, string | string[] | undefined>> }>) {
   const runtime = getPlatformRuntime(); const incoming = new Headers(await headers());
-  if (!await runtime.authenticate(incoming)) redirect("/sign-in");
+  const actor = await runtime.authenticate(incoming);
+  if (!actor) redirect("/sign-in");
   const env = loadServerEnv(); const params = await searchParams; const rawState = params.state ?? "awaiting_transfer";
   const validState = typeof rawState === "string" && Object.hasOwn(tipStateLabels, rawState);
   const state: PaymentIntentState = validState ? rawState as PaymentIntentState : "awaiting_transfer";
@@ -49,7 +50,7 @@ export default async function CreatorTipsPage({ searchParams }: Readonly<{ searc
   const paymentsEnabled = env.TIP_PAYMENTS_MODE === "manual_only";
   return <AppShell context="Quản lý tip" action={{ href: "/creator", label: "Trang nghệ sĩ" }}>
     <section data-tip-surface className="flex min-w-0 flex-col gap-6"><header className="workspace-header"><div><p className="eyebrow">Tip</p><h1>Quản lý tip của bạn</h1><p className="lede">Cài đặt nhận tip và đối chiếu tiền vào tài khoản ngân hàng của bạn.</p></div></header>
-      {settingsError ? <Alert variant="destructive"><AlertTitle>Chưa tải được cài đặt nhận tip</AlertTitle><AlertDescription>Tải lại trang để kiểm tra. Bạn vẫn có thể thử xem danh sách tip bên dưới.</AlertDescription></Alert> : <CreatorTipSettings key={`${settings?.revisionNumber ?? "none"}:${settings?.available}:${paymentsEnabled}`} initial={settings} editable={paymentsEnabled && env.CREATOR_PUBLISHING_MODE === "general_audience"} />}
+      {settingsError ? <Alert variant="destructive"><AlertTitle>Chưa tải được cài đặt nhận tip</AlertTitle><AlertDescription>Tải lại trang để kiểm tra. Bạn vẫn có thể thử xem danh sách tip bên dưới.</AlertDescription></Alert> : <CreatorTipSettings key={`${settings?.revisionNumber ?? "none"}:${settings?.available}:${paymentsEnabled}`} initial={settings} editable={paymentsEnabled && env.CREATOR_PUBLISHING_MODE === "general_audience"} initialActorUserId={actor.userId} />}
       <CreatorTipQueue queue={queue} state={state} paymentsEnabled={paymentsEnabled} error={queueError} />
     </section>
   </AppShell>;

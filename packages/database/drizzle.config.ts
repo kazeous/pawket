@@ -19,5 +19,6 @@ export default defineConfig({
     schemaPath("public-trust.ts"),
     schemaPath("payments.ts"),
     schemaPath("tips.ts"),
+    schemaPath("platform-tip-policy.ts"),
   ],
 });

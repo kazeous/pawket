@@ -73,8 +73,10 @@ test("shared-control expand migration upgrades 88849bd shape while old outbox co
     if (!sharedControlMigration) {
       throw new Error("Shared-control expand migration is required for upgrade testing");
     }
+    // Reproduce the deployed baseline in actual migration order. Later files
+    // require shared-control tables and must not bind to public fallbacks.
     for (const migration of upgradeMigrations.filter(
-      (migration) => migration !== sharedControlMigration,
+      (migration) => migration < sharedControlMigration,
     )) {
       await executeMigration(client, migration);
     }
@@ -175,6 +177,14 @@ test("shared-control expand migration upgrades 88849bd shape while old outbox co
         where aggregate_id = 'legacy-unlocked-1'
       `),
     ).rejects.toMatchObject({ code: "23514" });
+
+    // The complete later schema must also preserve the expanded legacy rows.
+    for (const migration of upgradeMigrations.filter((migration) => migration > sharedControlMigration)) {
+      await executeMigration(client, migration);
+    }
+    const [preserved] = await client<{ payload: Record<string, unknown> }[]>`
+      select payload from system_outbox where aggregate_id = 'baseline-88849bd'`;
+    expect(preserved?.payload).toEqual({ safe: true });
   } finally {
     await client.unsafe("set search_path to public");
     await client.unsafe(`drop schema if exists "${schemaName}" cascade`);

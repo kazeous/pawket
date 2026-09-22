@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
-import type { CreatorTipEligibility, CreatorTipEligibilityPort } from "@pawket/catalog";
+import type { CreatorTipEligibility, ExistingCreatorTipEligibility, CreatorTipEligibilityPort } from "@pawket/catalog";
 import { appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent, tips, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { requireIntegerVnd, TipPaymentError, type TipCreationPaymentResult, type TipPaymentIntentPort } from "@pawket/payments";
 import { createLookupHmac, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
@@ -14,10 +14,11 @@ const isUuid = (v: unknown): v is string => typeof v === "string" && v.trim() ==
 const handle = (v: unknown): v is string => typeof v === "string" && v.length >= 3 && v.length <= 30 && v.trim() === v && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(v);
 function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { throw new TipPaymentError(code); }
 
-// Trust only the explicit Catalog contract; reject accessors and expanded ports.
-function eligibility(value: unknown): CreatorTipEligibility | null {
+// Trust only the explicit Catalog contracts; reject accessors and expanded ports.
+function readEligibility(value: unknown, existing: boolean): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || nodeTypes.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
-  const keys = ["creatorUserId", "pageId", "publicationRevisionId", "canonicalHandle", "displayName", "settingRevisionId", "minimumVnd", "maximumVnd", "presetsVnd", "receivingAccountVersionId"];
+  const keys = ["creatorUserId", "pageId", "publicationRevisionId", "canonicalHandle", "displayName", "settingRevisionId", "receivingAccountVersionId",
+    ...(existing ? [] : ["minimumVnd", "maximumVnd", "presetsVnd", "platformPolicyRevisionId"])];
   if (Reflect.ownKeys(value).length !== keys.length) return null;
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const safe: Record<string, unknown> = {};
@@ -26,11 +27,26 @@ function eligibility(value: unknown): CreatorTipEligibility | null {
     safe[key] = field.value;
   }
   if (!identifier(safe.creatorUserId) || !isUuid(safe.pageId) || !isUuid(safe.publicationRevisionId) || !isUuid(safe.settingRevisionId) || !isUuid(safe.receivingAccountVersionId) ||
-    !handle(safe.canonicalHandle) || typeof safe.displayName !== "string" || Array.from(safe.displayName).length < 1 || Array.from(safe.displayName).length > 80 ||
-    typeof safe.minimumVnd !== "number" || typeof safe.maximumVnd !== "number" || !Number.isSafeInteger(safe.minimumVnd) || !Number.isSafeInteger(safe.maximumVnd) || safe.minimumVnd < 10_000 || safe.maximumVnd > 5_000_000 || safe.minimumVnd > safe.maximumVnd ||
-    !Array.isArray(safe.presetsVnd) || nodeTypes.isProxy(safe.presetsVnd) || safe.presetsVnd.length !== 3 || new Set(safe.presetsVnd).size !== 3 ||
-    safe.presetsVnd.some((v) => !Number.isSafeInteger(v) || v < (safe.minimumVnd as number) || v > (safe.maximumVnd as number))) return null;
-  return Object.freeze({ ...safe, presetsVnd: Object.freeze([...safe.presetsVnd]) }) as CreatorTipEligibility;
+    !handle(safe.canonicalHandle) || typeof safe.displayName !== "string" || Array.from(safe.displayName).length < 1 || Array.from(safe.displayName).length > 80) return null;
+  return safe;
+}
+function existingEligibility(value: unknown): ExistingCreatorTipEligibility | null {
+  const safe = readEligibility(value, true);
+  return safe ? Object.freeze(safe) as ExistingCreatorTipEligibility : null;
+}
+function eligibility(value: unknown): CreatorTipEligibility | null {
+  const safe = readEligibility(value, false);
+  if (!safe || !isUuid(safe.platformPolicyRevisionId) || typeof safe.minimumVnd !== "number" || typeof safe.maximumVnd !== "number" ||
+    !Number.isSafeInteger(safe.minimumVnd) || !Number.isSafeInteger(safe.maximumVnd) || safe.minimumVnd < 10_000 || safe.maximumVnd > 5_000_000 || safe.minimumVnd > safe.maximumVnd ||
+    !Array.isArray(safe.presetsVnd) || nodeTypes.isProxy(safe.presetsVnd) || Object.getPrototypeOf(safe.presetsVnd) !== Array.prototype || safe.presetsVnd.length !== 3 || Reflect.ownKeys(safe.presetsVnd).length !== 4) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(safe.presetsVnd); const presets: number[] = [];
+  for (let index = 0; index < 3; index++) {
+    const field = descriptors[String(index)];
+    if (!field || !field.enumerable || !("value" in field) || !Number.isSafeInteger(field.value) || field.value < (safe.minimumVnd as number) || field.value > (safe.maximumVnd as number)) return null;
+    presets.push(field.value as number);
+  }
+  if (new Set(presets).size !== 3) return null;
+  return Object.freeze({ ...safe, presetsVnd: Object.freeze(presets) }) as CreatorTipEligibility;
 }
 
 export type TipCreationPrincipal = Readonly<{ kind: "guest"; context: string }> | Readonly<{ kind: "buyer"; userId: string }>;
@@ -97,23 +113,28 @@ export function createTipService(input: Input) {
             expiresAt: new Date(startedAt.getTime() + input.idempotencyTtlMs), now: startedAt });
           if (started.kind !== "acquired" && started.kind !== "replay") fail("idempotency_conflict");
           await input.payments.lockCreationAbuseKey(tx, abuseKeyHash);
-          const creator = eligibility(await input.creatorEligibility.getTipEligibility(tx, canonicalHandle));
-          if (!creator || creator.canonicalHandle !== canonicalHandle) fail("not_available");
-          if (buyerUserId && await input.buyerAccounts.isActiveTipBuyerAccount(tx, buyerUserId) !== true) fail("not_authorized");
-          const at = now();
-          if (at < startedAt) fail("dependency_unavailable");
-          requireIntegerVnd(amountVnd, creator);
+          // Replay is authorized from immutable payment evidence and the current
+          // creator/account guards. A later amount policy cannot invalidate it.
           if (started.kind === "replay") {
             replayed = true;
+            const creator = existingEligibility(await input.creatorEligibility.getExistingTipEligibility(tx, canonicalHandle));
+            if (!creator || creator.canonicalHandle !== canonicalHandle) fail("not_available");
+            if (buyerUserId && await input.buyerAccounts.isActiveTipBuyerAccount(tx, buyerUserId) !== true) fail("not_authorized");
+            const at = now(); if (at < startedAt) fail("dependency_unavailable");
             const tipId = /^tip-created-v1:([0-9a-f-]{36})$/u.exec(started.resultReference)?.[1];
             if (!isUuid(tipId)) fail("idempotency_conflict");
             const [tip] = await tx.select().from(tips).where(and(eq(tips.id, tipId), eq(tips.creatorUserId, creator.creatorUserId))).limit(1);
             if (!tip || tip.buyerUserId !== buyerUserId || tip.amountVnd !== amountVnd) fail("idempotency_conflict");
             return input.payments.replayIntent(tx, { tipId, creatorUserId: creator.creatorUserId, accountVersionId: creator.receivingAccountVersionId, guestContext, at });
           }
+          const creator = eligibility(await input.creatorEligibility.getTipEligibility(tx, canonicalHandle));
+          if (!creator || creator.canonicalHandle !== canonicalHandle) fail("not_available");
+          if (buyerUserId && await input.buyerAccounts.isActiveTipBuyerAccount(tx, buyerUserId) !== true) fail("not_authorized");
+          const at = now(); if (at < startedAt) fail("dependency_unavailable");
+          if (amountVnd < creator.minimumVnd || amountVnd > creator.maximumVnd) fail("policy_changed");
           await input.payments.assertOpenCapacity(tx, { creatorUserId: creator.creatorUserId, abuseKeyHash, at });
           const tipId = id(); if (!isUuid(tipId)) fail("dependency_unavailable");
-          await tx.insert(tips).values({ id: tipId, creatorUserId: creator.creatorUserId, buyerUserId, settingRevisionId: creator.settingRevisionId, amountVnd,
+          await tx.insert(tips).values({ id: tipId, creatorUserId: creator.creatorUserId, buyerUserId, settingRevisionId: creator.settingRevisionId, platformPolicyRevisionId: creator.platformPolicyRevisionId, amountVnd,
             guestContentEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: JSON.stringify(content), binding: { recordType: "tips", recordId: tipId, fieldName: "guest_content" } }),
             createdAt: at, updatedAt: at });
           const result = await input.payments.createIntent(tx, { tipId, creatorUserId: creator.creatorUserId, accountVersionId: creator.receivingAccountVersionId,

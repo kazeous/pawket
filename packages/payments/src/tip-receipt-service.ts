@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 
 import { TipPaymentError, requireIntegerVnd, type TipAccess, type TipInstructionProjection, type TipReceiptProjection, type TipTransferClaim } from "./tip-contracts.js";
 import { readTipIntentSnapshot, tipInstructionProjection } from "./tip-snapshot.js";
+import { readTipPortRecord } from "./tip-port-boundary.js";
 
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
@@ -13,7 +14,10 @@ type Input = Readonly<{
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   tips: { getTipOwnership(tx: PawketTransaction, tipId: string): Promise<Readonly<{ buyerUserId: string | null }> | null> };
   buyerAccounts: { isActiveTipBuyerAccount(tx: PawketTransaction, userId: string): Promise<boolean> };
-  creatorEligibility: { getTipEligibility(tx: PawketTransaction, handle: string): Promise<Readonly<{ creatorUserId: string; receivingAccountVersionId: string }> | null> };
+  creatorEligibility: { getExistingTipEligibility(tx: PawketTransaction, handle: string): Promise<Readonly<{
+    creatorUserId: string; pageId: string; publicationRevisionId: string; canonicalHandle: string;
+    displayName: string; settingRevisionId: string; receivingAccountVersionId: string;
+  }> | null> };
   claimRateLimit(creatorUserId: string): Promise<boolean>;
   now?: () => Date; idFactory?: () => string;
   onClaimCommitted?: (replayed: boolean) => void;
@@ -22,6 +26,13 @@ export type AuthorizedTipReceipt = Readonly<{ receipt: TipReceiptProjection; ins
 function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { throw new TipPaymentError(code); }
 const referenceValid = (v: unknown): v is string => typeof v === "string" && v.trim() === v && /^PW[A-F0-9]{20}$/u.test(v);
 const identifier = (v: unknown): v is string => typeof v === "string" && v.trim() === v && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(v);
+const uuid = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(v);
+function existingCreator(value: unknown, handle: string) {
+  const record = readTipPortRecord(value, ["creatorUserId", "pageId", "publicationRevisionId", "canonicalHandle", "displayName", "settingRevisionId", "receivingAccountVersionId"]);
+  if (!record || !identifier(record.creatorUserId) || !uuid(record.pageId) || !uuid(record.publicationRevisionId) || !uuid(record.settingRevisionId) || !uuid(record.receivingAccountVersionId) ||
+    record.canonicalHandle !== handle || typeof record.displayName !== "string" || Array.from(record.displayName).length < 1 || Array.from(record.displayName).length > 80) return null;
+  return { creatorUserId: record.creatorUserId, receivingAccountVersionId: record.receivingAccountVersionId };
+}
 
 export function createTipReceiptService(input: Input) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
@@ -40,8 +51,8 @@ export function createTipReceiptService(input: Input) {
   }
   async function authorize(tx: PawketTransaction, intent: Intent, access: TipAccess, at: Date, verifyActiveBuyer = true): Promise<{ buyerUserId: string | null; capabilityId: string | null }> {
     if (!access || (access.kind !== "buyer" && access.kind !== "guest")) fail("not_authorized");
-    const ownership = await input.tips.getTipOwnership(tx, intent.tipId);
-    if (!ownership || Object.keys(ownership).join() !== "buyerUserId") fail("not_authorized");
+    const ownership = readTipPortRecord(await input.tips.getTipOwnership(tx, intent.tipId), ["buyerUserId"]);
+    if (!ownership) fail("not_authorized");
     if (access.kind === "buyer") {
       if (!identifier(access.userId) || ownership.buyerUserId !== access.userId || (verifyActiveBuyer && await input.buyerAccounts.isActiveTipBuyerAccount(tx, access.userId) !== true)) fail("not_authorized");
       return { buyerUserId: access.userId, capabilityId: null };
@@ -66,7 +77,7 @@ export function createTipReceiptService(input: Input) {
         // Creator/page/account locks always precede the intent lock. Hidden or
         // retired creators retain a private receipt, but no active instruction.
         const creator = input.paymentsMode === "manual_only" && candidate.state === "awaiting_transfer" && candidate.expiresAt > now()
-          ? await input.creatorEligibility.getTipEligibility(tx, snapshot.creator.handle) : null;
+          ? existingCreator(await input.creatorEligibility.getExistingTipEligibility(tx, snapshot.creator.handle), snapshot.creator.handle) : null;
         await authorize(tx, candidate, command.access, now());
         const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.id, candidate.id)).limit(1).for("share");
         if (!intent) fail("not_authorized");

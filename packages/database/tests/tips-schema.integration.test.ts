@@ -13,7 +13,7 @@ import { createEncryptionKeyring, createLookupHmac, encryptSensitiveField } from
 
 import * as schema from "../src/schema.js";
 import {
-  creatorTipSettings, creatorTipSettingRevisions, identityUsers, paymentConfirmations,
+  PLATFORM_TIP_POLICY_BOOTSTRAP_ID, creatorTipSettings, creatorTipSettingRevisions, identityUsers, paymentConfirmations,
   paymentGuestCapabilities, paymentIntents, paymentsReceivingAccountOnboarding,
   paymentTransferClaims, tips,
 } from "../src/index.js";
@@ -51,7 +51,7 @@ async function draft(guest = true) {
   const intentId = randomUUID();
   await db.insert(creatorTipSettingRevisions).values({
     id: settingRevisionId, creatorUserId, revisionNumber: 1, enabled: true,
-    minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000],
+    platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000],
     actorSessionId: "synthetic-session", requestId: randomUUID(), createdAt: at,
   });
   await db.insert(creatorTipSettings).values({ creatorUserId, revisionId: settingRevisionId, createdAt: at, updatedAt: at });
@@ -64,7 +64,7 @@ async function draft(guest = true) {
   });
   return {
     tip: {
-      id: tipId, creatorUserId, buyerUserId, settingRevisionId, amountVnd: 50_000,
+      id: tipId, creatorUserId, buyerUserId, settingRevisionId, platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, amountVnd: 50_000,
       guestContentEnvelope: envelope("tips", tipId, "guest_content", '{"name":"Synthetic guest","message":"Test only"}'),
       createdAt: at, updatedAt: at,
     },
@@ -144,6 +144,14 @@ describe("Increment 4 additive payment/tip schema", () => {
     const operations = JSON.parse(await readFile(join(migrationsFolder, "meta/0025_snapshot.json"), "utf8"));
     expect(operations.prevId).toBe(current.id);
     expect(Object.keys(operations.tables)).toEqual(Object.keys(current.tables));
+    const policy = JSON.parse(await readFile(join(migrationsFolder, "meta/0026_snapshot.json"), "utf8"));
+    expect(policy.prevId).toBe(operations.id);
+    expect(Object.keys(policy.tables).filter((table) => !Object.hasOwn(operations.tables, table)).sort()).toEqual([
+      "public.platform_tip_policy_current", "public.platform_tip_policy_revisions",
+    ]);
+    for (const table of ["public.tips", "public.creator_tip_setting_revisions"]) {
+      expect(policy.tables[table].columns.platform_policy_revision_id).toMatchObject({ type: "uuid", notNull: false });
+    }
     const foreignSchemas = await client<{ schema_name: string }[]>`
       select distinct target_ns.nspname as schema_name from pg_constraint c
       join pg_class source on source.oid = c.conrelid join pg_namespace source_ns on source_ns.oid = source.relnamespace
@@ -163,6 +171,24 @@ describe("Increment 4 additive payment/tip schema", () => {
     const indexes = await client<{ indexdef: string }[]>`select indexdef from pg_indexes where schemaname = ${schemaName} and (tablename like 'payment_%' or tablename = 'tips')`;
     expect(indexes.some((i) => i.indexdef.includes("WHERE (state = 'awaiting_transfer'"))).toBe(true);
     expect(indexes.every((i) => !/envelope|account_number|message/u.test(i.indexdef))).toBe(true);
+  });
+
+  test("new tip and creator evidence require the current platform policy and retain immutable provenance", async () => {
+    const pending = await draft();
+    for (const platformPolicyRevisionId of [null, randomUUID()]) {
+      await sqlState(db.transaction((tx) => insertGraph(tx, pending, { tip: { platformPolicyRevisionId } })), "23514");
+      await sqlState(db.insert(creatorTipSettingRevisions).values({ id: randomUUID(), creatorUserId: pending.tip.creatorUserId,
+        revisionNumber: 2, enabled: true, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000],
+        platformPolicyRevisionId, actorSessionId: "synthetic", requestId: randomUUID(), createdAt: at }), "23514");
+    }
+    const existing = await fixture();
+    await sqlState(db.update(tips).set({ platformPolicyRevisionId: null }).where(eq(tips.id, existing.tip.id)), "55000");
+    await sqlState(db.update(creatorTipSettingRevisions).set({ platformPolicyRevisionId: null }).where(eq(creatorTipSettingRevisions.id, existing.tip.settingRevisionId)), "55000");
+    // Legitimate lifecycle transitions retain the provenance under the generic
+    // 0024 immutable-facts guard; adding the field needs no duplicate trigger.
+    await confirm(existing);
+    const [completed] = await db.select().from(tips).where(eq(tips.id, existing.tip.id));
+    expect(completed).toMatchObject({ state: "completed", platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID });
   });
 
   test("rejects orphan tips and missing, short-lived or wrong-owner capabilities at commit", async () => {
@@ -207,7 +233,7 @@ describe("Increment 4 additive payment/tip schema", () => {
     const next = randomUUID();
     await db.insert(creatorTipSettingRevisions).values({
       id: next, creatorUserId: first.tip.creatorUserId, revisionNumber: 2, enabled: false,
-      minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000],
+      platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000],
       actorSessionId: "synthetic", requestId: randomUUID(), createdAt: confirmedAt,
     });
     await db.update(creatorTipSettings).set({ revisionId: next, updatedAt: confirmedAt }).where(eq(creatorTipSettings.creatorUserId, first.tip.creatorUserId));
@@ -222,7 +248,7 @@ describe("Increment 4 additive payment/tip schema", () => {
     const creatorUserId = await user();
     await sqlState(db.insert(creatorTipSettingRevisions).values({
       id: randomUUID(), creatorUserId, revisionNumber: 1, enabled: true,
-      minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd,
+      platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd,
       actorSessionId: "synthetic", requestId: randomUUID(), createdAt: at,
     }), "23514");
   });
@@ -336,7 +362,7 @@ describe("Increment 4 additive payment/tip schema", () => {
       const beforeId = await user(upgradeDb);
       const beforeColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
       await migrate(upgradeDb, { migrationsFolder, migrationsSchema: upgradeJournal });
-      const newTables = ["creator_tip_settings", "creator_tip_setting_revisions", "tips", "payment_intents", "payment_guest_capabilities", "payment_transfer_claims", "payment_confirmations"];
+      const newTables = ["platform_tip_policy_current", "platform_tip_policy_revisions", "creator_tip_settings", "creator_tip_setting_revisions", "tips", "payment_intents", "payment_guest_capabilities", "payment_transfer_claims", "payment_confirmations"];
       const afterColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
       expect(afterColumns.filter((row) => !newTables.includes(row.table_name))).toEqual(beforeColumns);
       const afterId = await user(upgradeDb);
@@ -350,6 +376,95 @@ describe("Increment 4 additive payment/tip schema", () => {
       await upgrade.unsafe(`drop schema if exists "${upgradeJournal}" cascade`);
       await upgrade.end();
       if (resolve(temporary) !== join(resolve(tmpdir()), basename(temporary)) || !basename(temporary).startsWith("pawket-increment-four-upgrade-")) throw new Error("Unsafe temporary migration cleanup path");
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  test("0025 to 0026 preserves legacy payment evidence without fabricating provenance and blocks old writers", async () => {
+    const original = await fixture();
+    const bindings = [
+      ["identity_users", "id", original.tip.creatorUserId],
+      ["payments_receiving_account_onboarding", "id", original.intent.accountVersionId],
+      ["creator_tip_setting_revisions", "id", original.tip.settingRevisionId],
+      ["creator_tip_settings", "creator_user_id", original.tip.creatorUserId],
+      ["tips", "id", original.tip.id],
+      ["payment_intents", "id", original.intent.id],
+      ["payment_guest_capabilities", "id", original.capability.id],
+    ] as const;
+    const rows = await Promise.all(bindings.map(async ([table, field, value]) => {
+      const [result] = await client.unsafe<{ row: Record<string, unknown> }[]>(
+        `select to_jsonb(item) - 'platform_policy_revision_id' as row from "${table}" item where "${field}" = $1`, [value]);
+      return { table, row: result!.row };
+    }));
+    const upgradeSchema = `${schemaName}_policy_upgrade`;
+    const upgradeJournal = `${upgradeSchema}_journal`;
+    const temporary = await mkdtemp(join(tmpdir(), "pawket-policy-upgrade-"));
+    const upgrade = postgres(databaseUrl, { max: 1, onnotice: () => undefined });
+    try {
+      await mkdir(join(temporary, "meta"));
+      const journal = JSON.parse(await readFile(join(migrationsFolder, "meta/_journal.json"), "utf8"));
+      const entries = journal.entries.filter((entry: { idx: number }) => entry.idx <= 25);
+      await writeFile(join(temporary, "meta/_journal.json"), JSON.stringify({ ...journal, entries }));
+      for (const entry of entries) await copyFile(join(migrationsFolder, `${entry.tag}.sql`), join(temporary, `${entry.tag}.sql`));
+      await upgrade.unsafe(`create schema "${upgradeSchema}"`);
+      await upgrade.unsafe(`set search_path to "${upgradeSchema}", public`);
+      const upgradeDb = drizzle(upgrade, { schema });
+      await migrate(upgradeDb, { migrationsFolder: temporary, migrationsSchema: upgradeJournal });
+      // Reproduce valid Increment 4 rows with the actual old table types. The
+      // fixed table list keeps identifier construction independent of input.
+      await upgrade.begin(async (tx) => {
+        for (const { table, row } of rows) await tx.unsafe(
+          `insert into "${table}" select * from jsonb_populate_record(null::"${table}", $1::jsonb)`, [JSON.stringify(row)]);
+      });
+      await migrate(upgradeDb, { migrationsFolder, migrationsSchema: upgradeJournal });
+      for (const { table, row } of rows) {
+        const [actual] = await upgrade.unsafe<{ row: Record<string, unknown> }[]>(`select to_jsonb(item) as row from "${table}" item`);
+        expect(actual!.row).toEqual(["tips", "creator_tip_setting_revisions"].includes(table)
+          ? { ...row, platform_policy_revision_id: null } : row);
+      }
+      const [bootstrap] = await upgrade`select origin, actor_user_id from platform_tip_policy_revisions`;
+      expect(bootstrap).toEqual({ origin: "system_bootstrap", actor_user_id: null });
+      await sqlState(upgradeDb.update(tips).set({ platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID }).where(eq(tips.id, original.tip.id)), "55000");
+      const legacySettings = rows.find((row) => row.table === "creator_tip_setting_revisions")!.row;
+      await sqlState(upgrade.unsafe("insert into creator_tip_setting_revisions select * from jsonb_populate_record(null::creator_tip_setting_revisions, $1::jsonb)",
+        [JSON.stringify({ ...legacySettings, id: randomUUID(), revision_number: 2 })]), "23514");
+      const legacyTip = rows.find((row) => row.table === "tips")!.row;
+      await sqlState(upgrade.unsafe("insert into tips select * from jsonb_populate_record(null::tips, $1::jsonb)",
+        [JSON.stringify({ ...legacyTip, id: randomUUID() })]), "23514");
+
+      // Narrowing later policy does not govern settlement of the original
+      // legacy graph. Confirmation still binds its original amount/account.
+      const revisionId = randomUUID();
+      await upgrade.begin(async (tx) => {
+        await tx`insert into platform_tip_policy_revisions
+          (id, revision_number, previous_revision_id, minimum_vnd, maximum_vnd, allowed_presets_vnd,
+            origin, actor_user_id, actor_session_id, request_id, reason, effective_at)
+          select ${revisionId}, 2, id, 100000, 5000000, array[100000,200000,300000],
+            'owner', ${original.tip.creatorUserId}, 'synthetic-session', 'synthetic-request', 'Narrow policy after upgrade', effective_at
+          from platform_tip_policy_revisions where revision_number = 1`;
+        await tx`update platform_tip_policy_current set revision_id = ${revisionId}`;
+      });
+      await sqlState(upgradeDb.insert(creatorTipSettingRevisions).values({
+        id: randomUUID(), creatorUserId: original.tip.creatorUserId, revisionNumber: 2, enabled: true,
+        platformPolicyRevisionId: PLATFORM_TIP_POLICY_BOOTSTRAP_ID, minimumVnd: 100_000, maximumVnd: 5_000_000,
+        presetsVnd: [100_000, 200_000, 300_000], actorSessionId: "synthetic-session", requestId: randomUUID(), createdAt: at,
+      }), "23514");
+      await upgradeDb.transaction(async (tx) => {
+        await tx.insert(paymentConfirmations).values(confirmation(original));
+        await tx.update(paymentIntents).set({ state: "confirmed", closedAt: confirmedAt, updatedAt: confirmedAt }).where(eq(paymentIntents.id, original.intent.id));
+        await tx.update(tips).set({ state: "completed", closedAt: confirmedAt, updatedAt: confirmedAt }).where(eq(tips.id, original.tip.id));
+      });
+      const [completed] = await upgradeDb.select().from(tips).where(eq(tips.id, original.tip.id));
+      expect(completed).toMatchObject({ state: "completed", amountVnd: 50_000, platformPolicyRevisionId: null });
+      await migrate(upgradeDb, { migrationsFolder, migrationsSchema: upgradeJournal });
+      const [count] = await upgrade`select count(*)::int as count from platform_tip_policy_revisions`;
+      expect(count!.count).toBe(2);
+    } finally {
+      await upgrade.unsafe("set search_path to public");
+      await upgrade.unsafe(`drop schema if exists "${upgradeSchema}" cascade`);
+      await upgrade.unsafe(`drop schema if exists "${upgradeJournal}" cascade`);
+      await upgrade.end();
+      if (resolve(temporary) !== join(resolve(tmpdir()), basename(temporary)) || !basename(temporary).startsWith("pawket-policy-upgrade-")) throw new Error("Unsafe temporary migration cleanup path");
       await rm(temporary, { recursive: true, force: true });
     }
   });

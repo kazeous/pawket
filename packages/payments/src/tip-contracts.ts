@@ -2,7 +2,7 @@ declare const integerVnd: unique symbol;
 export type IntegerVnd = number & { readonly [integerVnd]: true };
 
 export const TIP_ERROR_CODES = [
-  "payments_disabled", "invalid_amount", "invalid_guest_content", "invalid_request",
+  "payments_disabled", "policy_changed", "invalid_amount", "invalid_guest_content", "invalid_request",
   "not_available", "not_authorized", "recent_auth_required", "totp_required",
   "rate_limited", "idempotency_conflict", "intent_not_pending", "evidence_mismatch",
   "bank_transaction_conflict", "dependency_unavailable",

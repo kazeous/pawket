@@ -11,7 +11,9 @@ const instruction: TipInstructionProjection = { reference, creator: { displayNam
 const { destination: _destination, qrPayload: _qrPayload, ...receipt } = instruction;
 void _destination; void _qrPayload;
 function setup(overrides: Partial<Parameters<typeof createTipHttpHandlers>[0]> = {}) {
-  const creation = { createTip: vi.fn(async (): Promise<TipCreationPaymentResult> => ({ instruction, guestCapability: { secret, expiresAt: new Date(at.getTime() + 604_800_000) } })) };
+  const creation = { createTip: vi.fn(async (): Promise<TipCreationPaymentResult> => ({ instruction, guestCapability: { secret, expiresAt: new Date(at.getTime() + 604_800_000) } })),
+    getPublicOffering: vi.fn(async (): Promise<{ canonicalHandle: string; displayName: string; minimumVnd: number; maximumVnd: number; presetsVnd: number[] } | null> =>
+      ({ canonicalHandle: "artist", displayName: "Artist", minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000] })) };
   const receipts = { readReceipt: vi.fn(async () => ({ receipt, instruction })), reportTransfer: vi.fn(async () => ({ claimedAt: at, authoritative: false as const })) };
   const authenticate = vi.fn(async (): Promise<{ userId: string } | null> => null);
   const throttle = vi.fn(async () => ({ allowed: true })); const resolveCreatorRateSubject = vi.fn(async () => "creator-internal-id");
@@ -31,6 +33,51 @@ function privateResponse(response: Response) {
 }
 
 describe("tip HTTP capability and bounded request boundary", () => {
+  test("refreshes only public amount choices with a bounded network throttle and no receipt credentials", async () => {
+    const s = setup(); const response = await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "artist");
+    expect(response.status).toBe(200); privateResponse(response);
+    expect(await response.json()).toEqual({ offering: { canonicalHandle: "artist", displayName: "Artist", minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000] } });
+    expect(response.headers.getSetCookie()).toEqual([]);
+    expect(s.throttle).toHaveBeenCalledWith({ action: "tip_offering", subjectHmac: expect.stringMatching(/^hmac-sha256:v1:/u), maximumAttempts: 120, windowMs: 3_600_000 });
+    expect(s.authenticate).not.toHaveBeenCalled(); expect(s.receipts.readReceipt).not.toHaveBeenCalled();
+    s.creation.getPublicOffering.mockResolvedValueOnce(null);
+    expect(await (await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "artist")).json()).toEqual({ offering: null });
+  });
+  test("offering reads fail closed for unavailable modes, cross-site requests, malformed handles, queries and throttling", async () => {
+    for (const modes of [{ paymentsMode: "disabled" as const }, { publishingMode: "disabled" as const }]) {
+      const s = setup(modes); const response = await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "artist");
+      expect(response.status).toBe(200); expect(await response.json()).toEqual({ offering: null });
+      expect(s.creation.getPublicOffering).not.toHaveBeenCalled();
+    }
+    for (const headers of [{ origin: "https://evil.test" }, { "sec-fetch-site": "cross-site" }]) {
+      const s = setup(); const response = await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined, headers }), "artist");
+      expect(response.status).toBe(403); expect(s.creation.getPublicOffering).not.toHaveBeenCalled();
+    }
+    const s = setup();
+    expect((await s.handlers.readOffering(request(), "artist")).status).toBe(405);
+    expect((await s.handlers.readOffering(request("/api/v1/public/creators/artist/tips?private=true", { method: "GET", body: undefined }), "artist")).status).toBe(400);
+    expect((await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "a".repeat(31))).status).toBe(404);
+    expect(s.creation.getPublicOffering).not.toHaveBeenCalled();
+    s.throttle.mockResolvedValueOnce({ allowed: false });
+    expect((await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "artist")).status).toBe(429);
+    expect(s.creation.getPublicOffering).not.toHaveBeenCalled();
+  });
+  test("offering projection rejects expanded private fields, accessors, wrong handles and invalid nested amounts", async () => {
+    const getter = vi.fn(() => { throw new Error("Do not call provider getter"); });
+    const offering = { canonicalHandle: "artist", displayName: "Artist", minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000] };
+    for (const value of [
+      { ...offering, accountNumber: "000001234567" }, { ...offering, canonicalHandle: "other-artist" },
+      { ...offering, presetsVnd: [20_000, 20_000, 100_000] },
+      { ...offering, presetsVnd: Object.defineProperty([...offering.presetsVnd], "0", { enumerable: true, get: getter }) },
+      Object.defineProperty({ ...offering }, "displayName", { enumerable: true, get: getter }),
+      new Proxy(offering, { getPrototypeOf: getter }),
+    ]) {
+      const s = setup(); s.creation.getPublicOffering.mockResolvedValueOnce(value);
+      const response = await s.handlers.readOffering(request(undefined, { method: "GET", body: undefined }), "artist");
+      expect(response.status).toBe(503); privateResponse(response); expect(await response.json()).toEqual({ code: "dependency_unavailable" });
+    }
+    expect(getter).not.toHaveBeenCalled();
+  });
   test("kill switch preserves authorized receipts but suppresses instructions and transfer claims", async () => {
     const s = setup({ paymentsMode: "disabled" });
     const response = await s.handlers.receipt(request(`/api/v1/tips/${reference}`, { method: "GET", body: undefined, headers: { cookie: `${tipReceiptCookieName(reference)}=${secret}` } }), reference);
@@ -51,6 +98,14 @@ describe("tip HTTP capability and bounded request boundary", () => {
     expect(s.creation.createTip).toHaveBeenCalledWith(expect.objectContaining({ principal: { kind: "guest", context }, amountVnd: 50_000,
       abuseKeyHash: expect.stringMatching(/^hmac-sha256:v1:/u), idempotencyKey: "synthetic-command-1" }));
     expect(JSON.stringify(s.throttle.mock.calls)).not.toContain("192.0.2.44"); expect(JSON.stringify(s.throttle.mock.calls)).not.toContain(context);
+  });
+
+  test("a policy change returns a private stable conflict without issuing receipt cookies", async () => {
+    const s = setup(); s.creation.createTip.mockRejectedValueOnce(new TipPaymentError("policy_changed"));
+    const response = await s.handlers.create(request(), "artist");
+    expect(response.status).toBe(409); privateResponse(response);
+    expect(await response.json()).toEqual({ code: "policy_changed" });
+    expect(response.headers.getSetCookie()).toEqual([]);
   });
 
   test("establishes an opaque guest context without exposing it and preserves it for lost-response retries", async () => {

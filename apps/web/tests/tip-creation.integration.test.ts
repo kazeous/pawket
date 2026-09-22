@@ -8,10 +8,11 @@ import {
   creatorPublicationRevisions, identityUsers,
   paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentTransferClaims, paymentConfirmations, type PawketDatabase,
 } from "@pawket/database";
-import { createCreatorTipSettingsService, createPublicCatalogQuery, type CreatorSeed } from "@pawket/catalog";
+import { createCreatorTipSettingsService, createPublicCatalogQuery, createPlatformTipPolicyReadPort, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, recordSecurityThrottleAttempt } from "@pawket/identity";
 import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField, decryptSensitiveField, createLookupHmac } from "@pawket/security";
+import { expectPolicyWait, narrowerTipPolicy, ownerPolicyService, setTipPolicy } from "./owner-tip-policy-test-support.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for creator tip integration tests");
@@ -25,7 +26,7 @@ const key = new Uint8Array(32).fill(74); // Synthetic test-only key material.
 const keyring = createEncryptionKeyring({ activeKeyId: "tip-settings-test", keys: { "tip-settings-test": key } });
 const seeds = new Map<string, CreatorSeed>();
 const heldPages = new Set<string>();
-const amountPolicy = { minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [20_000, 50_000, 100_000, 200_000] };
+let policyRevision = 1;
 
 function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsService>[0]> = {}) {
   const visibility = createPublicCatalogQuery({
@@ -46,7 +47,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
   return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
-    paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,
+    paymentsMode: "manual_only", publishingMode: "general_audience", platformPolicy: createPlatformTipPolicyReadPort(),
     recentAuthMs: 900_000, commandFingerprintKey: key, now: () => at, ...overrides,
   });
 }
@@ -93,7 +94,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function optedIn() {
   const f = await fixture();
   await service().saveSettings({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at },
-    pageId: f.pageId, expectedRevision: 0, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+    pageId: f.pageId, expectedRevision: 0, expectedPolicyRevision: policyRevision, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
   return f;
 }
 const hmac = (context: string, value: string) => createLookupHmac({ key, context, value });
@@ -122,6 +123,162 @@ async function evidence(f: Fixture) {
 }
 
 describe("atomic tip creation across Tips, Payments, Catalog and Identity", () => {
+  test("new policy changes offerings and stale submits while old receipts and same-command retries retain immutable evidence", async () => {
+    const f = await optedIn(); const svc = createService(); const independent = createService(); const c = { ...command(f), amountVnd: 20_000 };
+    const created = await svc.createTip(c); const before = await evidence(f);
+    const access = { kind: "guest" as const, capability: created.guestCapability!.secret };
+    try {
+      const policy = await setTipPolicy(db, key, at, f.userId, narrowerTipPolicy); policyRevision = policy.revisionNumber;
+      for (const instance of [svc, independent]) {
+        expect(await instance.getPublicOffering(f.handle)).toEqual({ canonicalHandle: f.handle, displayName: "Test artist", minimumVnd: 30_000, maximumVnd: 500_000, presetsVnd: narrowerTipPolicy.allowedPresetsVnd });
+        expect(await instance.createTip(c)).toEqual(created);
+        await expect(instance.createTip({ ...command(f), amountVnd: 20_000 })).rejects.toMatchObject({ code: "policy_changed" });
+        await expect(instance.createTip({ ...command(f), amountVnd: 600_000 })).rejects.toMatchObject({ code: "policy_changed" });
+      }
+      expect(await receiptService().readReceipt({ reference: created.instruction.reference, access })).toMatchObject({ instruction: created.instruction });
+      expect(await evidence(f)).toEqual(before);
+      const next = await independent.createTip({ ...command(f), amountVnd: 30_000 });
+      expect(next.instruction.amountVnd).toBe(30_000);
+      expect((await evidence(f)).tipRows.find((tip) => tip.amountVnd === 30_000)?.platformPolicyRevisionId).toBe(policy.revisionId);
+      await service().saveSettings({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at },
+        pageId: f.pageId, expectedRevision: 1, expectedPolicyRevision: policyRevision, enabled: true,
+        presetsVnd: [200_000, 100_000, 30_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+      expect(await svc.createTip(c)).toEqual(created);
+      expect(await receiptService().readReceipt({ reference: created.instruction.reference, access })).toMatchObject({ instruction: created.instruction });
+      await expect(svc.createTip({ ...c, amountVnd: 30_000 })).rejects.toMatchObject({ code: "idempotency_conflict" });
+      heldPages.add(f.pageId); await expect(svc.createTip(c)).rejects.toMatchObject({ code: "not_available" }); heldPages.delete(f.pageId);
+      await expect(createService({ paymentsMode: "disabled" }).createTip(c)).rejects.toMatchObject({ code: "payments_disabled" });
+      await expect(receiptService().readReceipt({ reference: created.instruction.reference, access: { kind: "guest", capability: randomBytes(32).toString("base64url") } })).rejects.toMatchObject({ code: "not_authorized" });
+    } finally { heldPages.delete(f.pageId); policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("missing current policy stops new creation but is never needed to replay or read an existing instruction", async () => {
+    const f = await optedIn(); const c = command(f); const created = await createService().createTip(c);
+    const missing = service({ platformPolicy: { readPolicy: async () => null } });
+    const svc = createService({ creatorEligibility: missing });
+    expect(await svc.getPublicOffering(f.handle)).toBeNull();
+    await expect(svc.createTip(command(f))).rejects.toMatchObject({ code: "not_available" });
+    expect(await svc.createTip(c)).toEqual(created);
+    const projection = await receiptService({ creatorEligibility: missing }).readReceipt({ reference: created.instruction.reference, access: { kind: "guest", capability: created.guestCapability!.secret } });
+    expect(projection.instruction).toEqual(created.instruction);
+    expect((await evidence(f)).tipRows).toHaveLength(1);
+  });
+
+  test("a raised maximum authorizes a new amount despite the creator's historical lower-bound snapshot", async () => {
+    const f = await fixture();
+    try {
+      policyRevision = (await setTipPolicy(db, key, at, f.userId, { minimumVnd: 20_000, maximumVnd: 100_000, allowedPresetsVnd: [20_000, 50_000, 100_000] })).revisionNumber;
+      const saved = await service().saveSettings({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at },
+        pageId: f.pageId, expectedRevision: 0, expectedPolicyRevision: policyRevision, enabled: true,
+        presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+      const svc = createService();
+      await expect(svc.createTip({ ...command(f), amountVnd: 200_000 })).rejects.toMatchObject({ code: "policy_changed" });
+      const policy = await setTipPolicy(db, key, at, f.userId); policyRevision = policy.revisionNumber;
+      for (const amountVnd of [10_000, 200_000]) {
+        expect((await svc.createTip({ ...command(f), amountVnd })).instruction.amountVnd).toBe(amountVnd);
+      }
+      const facts = await evidence(f);
+      expect(facts.tipRows).toHaveLength(2);
+      for (const row of facts.tipRows) expect(row).toMatchObject({ settingRevisionId: saved.revisionId, platformPolicyRevisionId: policy.revisionId });
+      expect(await service().getOwnSettings(f.userId)).toMatchObject({ revisionId: saved.revisionId, minimumVnd: 20_000, maximumVnd: 100_000,
+        effectivePolicy: { minimumVnd: 10_000, maximumVnd: 5_000_000 } });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("buyer and guest instructions, retries and transfer claims preserve their original evidence after a policy edit", async () => {
+    const f = await optedIn(); const buyer = await fixture(); const svc = createService(); const receipts = receiptService();
+    const buyerCommand = { ...command(f), principal: { kind: "buyer" as const, userId: buyer.userId }, amountVnd: 20_000 };
+    const guestCommand = { ...command(f), amountVnd: 20_000 };
+    const buyerTip = await svc.createTip(buyerCommand); const guestTip = await svc.createTip(guestCommand);
+    const before = await evidence(f);
+    try {
+      policyRevision = (await setTipPolicy(db, key, at, f.userId, narrowerTipPolicy)).revisionNumber;
+      for (const [created, original, access] of [
+        [buyerTip, buyerCommand, { kind: "buyer" as const, userId: buyer.userId }],
+        [guestTip, guestCommand, { kind: "guest" as const, capability: guestTip.guestCapability!.secret }],
+      ] as const) {
+        expect(await svc.createTip(original)).toEqual(created);
+        expect(await receipts.readReceipt({ reference: created.instruction.reference, access })).toMatchObject({ instruction: created.instruction });
+        const claim = await receipts.reportTransfer({ reference: created.instruction.reference, access, requestId: randomUUID() });
+        expect(claim).toEqual({ claimedAt: at, authoritative: false });
+        const claimed = await receipts.readReceipt({ reference: created.instruction.reference, access });
+        expect(claimed.instruction).toEqual({ ...created.instruction, transferClaimedAt: at.toISOString() });
+      }
+      expect(await evidence(f)).toEqual(before);
+      await db.update(identityUsers).set({ accessStatus: "access_suspended" }).where(eq(identityUsers.id, buyer.userId));
+      await expect(svc.createTip(buyerCommand)).rejects.toMatchObject({ code: "not_authorized" });
+      await expect(receipts.readReceipt({ reference: buyerTip.instruction.reference, access: { kind: "buyer", userId: buyer.userId } })).rejects.toMatchObject({ code: "not_authorized" });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("malformed dependency eligibility never creates an intent or reveals an existing destination", async () => {
+    const f = await optedIn(); const port = service(); const original = command(f); const created = await createService().createTip(original);
+    const current = await db.transaction((tx) => port.getTipEligibility(tx, f.handle));
+    const existing = await db.transaction((tx) => port.getExistingTipEligibility(tx, f.handle));
+    if (!current || !existing) throw new Error("Missing synthetic eligibility");
+    const getter = vi.fn(() => { throw new Error("Dependency getter must never execute"); });
+    const arrayGetter = Object.defineProperty([...current.presetsVnd], "0", { enumerable: true, get: getter });
+    const badNew = [
+      { ...current, privateReason: "must not escape" },
+      { ...current, platformPolicyRevisionId: "invalid" },
+      { ...current, minimumVnd: 9_999 },
+      { ...current, maximumVnd: 5_000_001 },
+      { ...current, presetsVnd: [20_000, 20_000, 100_000] },
+      { ...current, presetsVnd: arrayGetter },
+      Object.defineProperty({ ...current }, "minimumVnd", { enumerable: true, get: getter }),
+      new Proxy(current, { getPrototypeOf: getter }),
+    ];
+    const before = await evidence(f);
+    for (const value of badNew) {
+      const unsafe = createService({ creatorEligibility: { ...port, getTipEligibility: async () => value } });
+      expect(await unsafe.getPublicOffering(f.handle)).toBeNull();
+      await expect(unsafe.createTip(command(f))).rejects.toMatchObject({ code: "not_available" });
+    }
+    for (const value of [
+      { ...existing, privateReason: "must not escape" },
+      { ...existing, receivingAccountVersionId: "invalid" },
+      Object.defineProperty({ ...existing }, "receivingAccountVersionId", { enumerable: true, get: getter }),
+      new Proxy(existing, { getPrototypeOf: getter }),
+    ]) {
+      const unsafe = { ...port, getExistingTipEligibility: async () => value };
+      await expect(createService({ creatorEligibility: unsafe }).createTip(original)).rejects.toMatchObject({ code: "not_available" });
+      expect(await receiptService({ creatorEligibility: unsafe }).readReceipt({ reference: created.instruction.reference,
+        access: { kind: "guest", capability: created.guestCapability!.secret } })).toMatchObject({ receipt: { amountVnd: 50_000 }, instruction: null });
+    }
+    expect(getter).not.toHaveBeenCalled();
+    expect(await evidence(f)).toEqual(before);
+  });
+
+  test("new tip creation retains the shared policy fence through intent commit before an owner update", async () => {
+    const f = await optedIn(); const entered = Promise.withResolvers<number>(); const gate = Promise.withResolvers<void>(); const payments = paymentPort();
+    const creating = createService({ payments: { ...payments, async createIntent(tx, command) {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`); entered.resolve(row!.pid); await gate.promise; return payments.createIntent(tx, command);
+    } } }).createTip({ ...command(f), amountVnd: 20_000 });
+    const pid = await entered.promise; const updating = setTipPolicy(db, key, at, f.userId, narrowerTipPolicy);
+    try { await expectPolicyWait(db, pid); } finally { gate.resolve(); }
+    try {
+      const created = await creating; const policy = await updating; policyRevision = policy.revisionNumber;
+      expect(created.instruction.amountVnd).toBe(20_000);
+      expect((await evidence(f)).tipRows[0]?.platformPolicyRevisionId).not.toBe(policy.revisionId);
+      await expect(createService().createTip({ ...command(f), amountVnd: 20_000 })).rejects.toMatchObject({ code: "policy_changed" });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("creation waiting behind a committed owner update observes the new policy before any intent is written", async () => {
+    const f = await optedIn(); const entered = Promise.withResolvers<number>(); const gate = Promise.withResolvers<void>();
+    const owner = ownerPolicyService(db, key, at, { async authorizeOwner(tx) {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`); entered.resolve(row!.pid); await gate.promise; return true;
+    } });
+    const updating = setTipPolicy(db, key, at, f.userId, narrowerTipPolicy, owner); const pid = await entered.promise;
+    const creating = createService().createTip({ ...command(f), amountVnd: 20_000 }).then((value) => ({ value }), (error: unknown) => ({ error }));
+    try { await expectPolicyWait(db, pid); } finally { gate.resolve(); }
+    try {
+      policyRevision = (await updating).revisionNumber;
+      expect(await creating).toMatchObject({ error: { code: "policy_changed" } });
+      expect((await evidence(f)).tipRows).toHaveLength(0);
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
   test("public offering is current, contains no payment destination or internal identifiers and fails closed", async () => {
     const f = await optedIn();
     const expected = { canonicalHandle: f.handle, displayName: "Test artist", minimumVnd: 10_000, maximumVnd: 5_000_000, presetsVnd: [20_000, 50_000, 100_000] };
@@ -133,7 +290,7 @@ describe("atomic tip creation across Tips, Payments, Catalog and Identity", () =
     expect(await createService().getPublicOffering(f.handle)).toBeNull();
     heldPages.delete(f.pageId);
     const port = service();
-    const expanded = { async getTipEligibility(tx: Parameters<typeof port.getTipEligibility>[0], handle: string) { const current = await port.getTipEligibility(tx, handle); return current ? { ...current, extra: "private" } : null; } };
+    const expanded = { getExistingTipEligibility: port.getExistingTipEligibility, async getTipEligibility(tx: Parameters<typeof port.getTipEligibility>[0], handle: string) { const current = await port.getTipEligibility(tx, handle); return current ? { ...current, extra: "private" } : null; } };
     expect(await createService({ creatorEligibility: expanded }).getPublicOffering(f.handle)).toBeNull();
     expect((await evidence(f)).intents).toHaveLength(0);
     await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
@@ -303,7 +460,7 @@ describe("atomic tip creation across Tips, Payments, Catalog and Identity", () =
   test("an account version mismatch or expanded eligibility port fails closed", async () => {
     const f = await optedIn(); const catalog = service();
     for (const changed of [ { receivingAccountVersionId: randomUUID() }, { bankAccount: f.accountNumber } ]) {
-      const svc = createService({ creatorEligibility: { async getTipEligibility(tx, handle) { const result = await catalog.getTipEligibility(tx, handle); return result ? { ...result, ...changed } : null; } } });
+      const svc = createService({ creatorEligibility: { getExistingTipEligibility: catalog.getExistingTipEligibility, async getTipEligibility(tx, handle) { const result = await catalog.getTipEligibility(tx, handle); return result ? { ...result, ...changed } : null; } } });
       await expect(svc.createTip(command(f))).rejects.toMatchObject({ code: "not_available" });
       expect((await evidence(f)).tipRows).toHaveLength(0);
     }
@@ -343,7 +500,7 @@ describe("authorized tip receipts and non-authoritative transfer claims", () => 
     const f = await optedIn(); const http = createTipHttpHandlers({ appBaseUrl: "https://pawket.test", paymentsMode: "manual_only", publishingMode: "general_audience", lookupHmacKey: key,
       guestContextTtlMs: 604_800_000, rateWindowMs: 3_600_000, createIpLimit: 2, createCreatorLimit: 100, receiptLimit: 120,
       authenticate: async () => null, creation: createService(), receipts: receiptService(), now: () => at,
-      resolveCreatorRateSubject: (handle) => db.transaction(async (tx) => (await service().getTipEligibility(tx, handle))?.creatorUserId ?? null),
+      resolveCreatorRateSubject: (handle) => db.transaction(async (tx) => (await service().getExistingTipEligibility(tx, handle))?.creatorUserId ?? null),
       throttle: (policy) => recordSecurityThrottleAttempt(db, { ...policy, scope: policy.action.endsWith("_creator") ? "account" : "network", now: at, blockMs: policy.windowMs }),
     });
     const makeRequest = (path: string, method: "GET" | "POST", cookie = "", body: unknown = {}) => new Request(`https://pawket.test${path}`, { method,

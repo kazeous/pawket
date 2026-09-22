@@ -1,17 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
   adminAuditEvents, createDatabase, creatorDiscoveryProjections, creatorHandleClaims, creatorPages,
   creatorPublicationRevisions, creatorTipSettingRevisions, identityUsers,
   paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, type PawketDatabase,
 } from "@pawket/database";
-import { createCreatorTipSettingsService, createPublicCatalogQuery, type CreatorSeed } from "@pawket/catalog";
+import { createCreatorTipSettingsService, createPublicCatalogQuery, createPlatformTipPolicyReadPort, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort } from "@pawket/identity";
 import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
+import { expectPolicyWait, launchTipPolicy, narrowerTipPolicy, ownerPolicyService, setTipPolicy } from "./owner-tip-policy-test-support.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for creator tip integration tests");
@@ -25,7 +26,7 @@ const key = new Uint8Array(32).fill(74); // Synthetic test-only key material.
 const keyring = createEncryptionKeyring({ activeKeyId: "tip-settings-test", keys: { "tip-settings-test": key } });
 const seeds = new Map<string, CreatorSeed>();
 const heldPages = new Set<string>();
-const amountPolicy = { minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [20_000, 50_000, 100_000, 200_000] };
+let policyRevision = 1;
 
 function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsService>[0]> = {}) {
   const visibility = createPublicCatalogQuery({
@@ -46,7 +47,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
   return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
-    paymentsMode: "manual_only", publishingMode: "general_audience", amountPolicy,
+    paymentsMode: "manual_only", publishingMode: "general_audience", platformPolicy: createPlatformTipPolicyReadPort(),
     recentAuthMs: 900_000, commandFingerprintKey: key, now: () => at, ...overrides,
   });
 }
@@ -74,14 +75,14 @@ async function fixture(accountNumber = "0000001234567", bindingId?: string) {
   return { userId, pageId, handle, publicationId, accountVersionId, accountNumber };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
-const command = (f: Fixture) => ({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at }, pageId: f.pageId, expectedRevision: 0, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
+const command = (f: Fixture) => ({ actor: { userId: f.userId, sessionId: "synthetic-session", primaryAuthenticatedAt: at }, pageId: f.pageId, expectedRevision: 0, expectedPolicyRevision: policyRevision, enabled: true, presetsVnd: [20_000, 50_000, 100_000], idempotencyKey: randomUUID(), requestId: randomUUID() });
 const eligible = (f: Fixture, svc = service()) => db.transaction((tx) => svc.getTipEligibility(tx, f.handle));
 async function evidence(f: Fixture) {
   return Promise.all([
     db.select().from(creatorTipSettingRevisions).where(eq(creatorTipSettingRevisions.creatorUserId, f.userId)),
     db.select().from(adminAuditEvents).where(eq(adminAuditEvents.subjectId, f.userId)),
     db.select().from(systemOutbox).where(eq(systemOutbox.aggregateId, f.userId)),
-    db.select().from(systemCommandIdempotency).where(eq(systemCommandIdempotency.actorUserId, f.userId)),
+    db.select().from(systemCommandIdempotency).where(and(eq(systemCommandIdempotency.actorUserId, f.userId), eq(systemCommandIdempotency.commandScope, "catalog.tip_settings.set"))),
   ]);
 }
 
@@ -128,7 +129,7 @@ describe("creator tip settings and module eligibility ports", () => {
   test("idempotent replay cannot overwrite a newer setting and conflicting keys roll back", async () => {
     const f = await fixture(); const svc = service(); const original = command(f);
     const first = await svc.saveSettings(original);
-    const second = await svc.saveSettings({ ...command(f), expectedRevision: 1, enabled: false, presetsVnd: [50_000, 100_000, 200_000] });
+    const second = await svc.saveSettings({ ...command(f), expectedRevision: 1, enabled: false, presetsVnd: [50_000, 100_000, 20_000] });
     expect(second.revisionNumber).toBe(2);
     expect(await svc.saveSettings(original)).toEqual(first);
     expect(await svc.getSettings({ actorUserId: f.userId, pageId: f.pageId })).toMatchObject({ revisionNumber: 2, enabled: false });
@@ -187,13 +188,95 @@ describe("creator tip settings and module eligibility ports", () => {
     }
   });
 
-  test("retirement and a narrower platform policy never rewrite historical setting revisions", async () => {
+  test("a policy edit applies immediately across service instances with fallback but never rewrites saved choices", async () => {
     const f = await fixture(); const svc = service(); const original = await svc.saveSettings(command(f));
-    const narrowed = service({ amountPolicy: { minimumVnd: 30_000, maximumVnd: 500_000, allowedPresetsVnd: [50_000, 100_000, 200_000] } });
-    expect(await eligible(f, narrowed)).toBeNull();
-    await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
-    expect(await eligible(f, svc)).toBeNull();
-    expect(await svc.getSettings({ actorUserId: f.userId, pageId: f.pageId })).toMatchObject({ ...original, available: false });
+    const savedRows = (await evidence(f))[0]; const staleSave = { ...command(f), expectedRevision: 1 };
+    try {
+      const policy = await setTipPolicy(db, key, at, f.userId, narrowerTipPolicy); policyRevision = policy.revisionNumber;
+      for (const instance of [svc, service()]) {
+        expect(await eligible(f, instance)).toMatchObject({ minimumVnd: 30_000, maximumVnd: 500_000, presetsVnd: narrowerTipPolicy.allowedPresetsVnd, platformPolicyRevisionId: policy.revisionId });
+        expect(await instance.getOwnSettings(f.userId)).toMatchObject({ revisionId: original.revisionId, presetsVnd: original.presetsVnd, minimumVnd: 10_000,
+          effectivePolicy: policy, effectivePresetsVnd: narrowerTipPolicy.allowedPresetsVnd, presetsFallback: true, available: true });
+      }
+      expect((await evidence(f))[0]).toEqual(savedRows);
+      await expect(svc.saveSettings(staleSave)).rejects.toMatchObject({ code: "POLICY_CHANGED" });
+      expect((await evidence(f))[0]).toEqual(savedRows);
+      const adopted = await svc.saveSettings({ ...command(f), expectedRevision: 1, presetsVnd: [200_000, 30_000, 100_000] });
+      expect(adopted).toMatchObject({ revisionNumber: 2, presetsFallback: false, platformPolicyRevisionId: policy.revisionId, minimumVnd: 30_000, maximumVnd: 500_000, effectivePresetsVnd: [200_000, 30_000, 100_000] });
+      await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, f.accountVersionId));
+      expect(await eligible(f, svc)).toBeNull();
+      expect(await svc.getOwnSettings(f.userId)).toMatchObject({ ...adopted, available: false });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("wider limits use live policy and valid saved presets retain creator order", async () => {
+    const f = await fixture();
+    try {
+      policyRevision = (await setTipPolicy(db, key, at, f.userId, { ...launchTipPolicy, maximumVnd: 100_000 })).revisionNumber;
+      const original = await service().saveSettings({ ...command(f), presetsVnd: [100_000, 20_000, 50_000] });
+      policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber;
+      expect(await eligible(f)).toMatchObject({ maximumVnd: 5_000_000, presetsVnd: [100_000, 20_000, 50_000] });
+      expect(await service().getOwnSettings(f.userId)).toMatchObject({ maximumVnd: original.maximumVnd, presetsFallback: false, effectivePolicy: { maximumVnd: 5_000_000 } });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("fallback and disabled-mode policy reads never opt a creator in or revise their saved settings", async () => {
+    const f = await fixture(); const saved = await service().saveSettings({ ...command(f), enabled: false });
+    const before = await evidence(f);
+    try {
+      const policy = await setTipPolicy(db, key, at, f.userId, narrowerTipPolicy); policyRevision = policy.revisionNumber;
+      expect(await eligible(f)).toBeNull();
+      for (const svc of [service(), service({ paymentsMode: "disabled" }), service({ publishingMode: "disabled" })]) {
+        expect(await svc.getOwnSettings(f.userId)).toMatchObject({ revisionId: saved.revisionId, enabled: false,
+          presetsVnd: saved.presetsVnd, effectivePolicy: policy, presetsFallback: true, effectivePresetsVnd: narrowerTipPolicy.allowedPresetsVnd });
+      }
+      expect(await evidence(f)).toEqual(before);
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("missing or malformed policy fails new settings closed while preserving private historical reads", async () => {
+    const f = await fixture(); const original = await service().saveSettings(command(f)); const before = await evidence(f);
+    const live = original.effectivePolicy!;
+    const getter = Object.defineProperty({ ...live }, "minimumVnd", { enumerable: true, get() { throw new Error("Must not invoke policy getter"); } });
+    for (const value of [null, { ...live, privateReason: "never expose" }, { ...live, allowedPresetsVnd: [20_000, 20_000, 50_000] }, getter]) {
+      const svc = service({ platformPolicy: { readPolicy: async () => value } });
+      expect(await eligible(f, svc)).toBeNull();
+      expect(await svc.getOwnSettings(f.userId)).toMatchObject({ revisionId: original.revisionId, available: false, effectivePolicy: null, effectivePresetsVnd: [] });
+      await expect(svc.saveSettings({ ...command(f), expectedRevision: 1 })).rejects.toMatchObject({ code: "INVALID_POLICY" });
+    }
+    expect(await evidence(f)).toEqual(before);
+  });
+
+  test("a creator save holds the shared policy fence until commit before an owner edit", async () => {
+    const f = await fixture(); const entered = Promise.withResolvers<number>(); const gate = Promise.withResolvers<void>();
+    const readPort = createPlatformTipPolicyReadPort();
+    const saving = service({ platformPolicy: { async readPolicy(tx) {
+      const policy = await readPort.readPolicy(tx); const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      entered.resolve(row!.pid); await gate.promise; return policy;
+    } } }).saveSettings(command(f));
+    const pid = await entered.promise;
+    const editing = setTipPolicy(db, key, at, f.userId, narrowerTipPolicy);
+    try { await expectPolicyWait(db, pid); } finally { gate.resolve(); }
+    try {
+      const saved = await saving; const updated = await editing; policyRevision = updated.revisionNumber;
+      expect(saved.platformPolicyRevisionId).not.toBe(updated.revisionId);
+      expect(await service().getOwnSettings(f.userId)).toMatchObject({ revisionId: saved.revisionId, presetsFallback: true, effectivePolicy: updated });
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
+  });
+
+  test("a creator save waiting behind an owner edit rejects its stale policy version without writing", async () => {
+    const f = await fixture(); const save = command(f); const entered = Promise.withResolvers<number>(); const gate = Promise.withResolvers<void>();
+    const owner = ownerPolicyService(db, key, at, { async authorizeOwner(tx) {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`); entered.resolve(row!.pid); await gate.promise; return true;
+    } });
+    const editing = setTipPolicy(db, key, at, f.userId, narrowerTipPolicy, owner); const pid = await entered.promise;
+    const saving = service().saveSettings(save).then((value) => ({ value }), (error: unknown) => ({ error }));
+    try { await expectPolicyWait(db, pid); } finally { gate.resolve(); }
+    try {
+      policyRevision = (await editing).revisionNumber;
+      expect(await saving).toMatchObject({ error: { code: "POLICY_CHANGED" } });
+      expect((await evidence(f))[0]).toHaveLength(0);
+    } finally { policyRevision = (await setTipPolicy(db, key, at, f.userId)).revisionNumber; }
   });
 
   test("wrong or over-broad provider projections fail closed and a write failure leaves no partial evidence", async () => {
