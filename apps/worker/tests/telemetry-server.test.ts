@@ -53,6 +53,8 @@ describe("worker telemetry server", () => {
       poll: "up",
       refundScan: "up",
       tipExpiryScan: "not_configured",
+      sepay: "disabled",
+      sepayRecoveryScan: "not_configured",
       publicMediaCleanupScan: "not_configured",
       ...revision,
     });
@@ -144,6 +146,17 @@ describe("worker telemetry server", () => {
         now: 1_000,
       }).status,
     ).toBe("not_ready");
+  });
+
+  test("separates provider contract status from enabled recovery failure and stale scans", () => {
+    const state = createWorkerHealthState();
+    Object.assign(state, { initializedAt: 1_000, lastPollSucceededAt: 1_000, lastRefundScanSucceededAt: 1_000,
+      publicMediaCleanupConfigured: true, lastPublicMediaCleanupScanSucceededAt: 1_000, sepayStatus: "contract_pending",
+      sepayRecoveryConfigured: true, sepayRecoveryMaximumAgeMs: 1_000 });
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "not_ready", sepay: "contract_pending", sepayRecoveryScan: "down" });
+    state.lastSePayRecoverySucceededAt = 1_000;
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", sepay: "contract_pending", sepayRecoveryScan: "up" });
+    expect(workerReadiness({ state, revision, now: 2_001 })).toMatchObject({ status: "not_ready", sepayRecoveryScan: "down" });
   });
 
   test("returns fixed responses for unsupported methods and paths", async () => {

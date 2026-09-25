@@ -1,3 +1,4 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
 import { appendAdminAuditEvent, insertOutboxEvent, paymentIntents, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { and, asc, eq, lte } from "drizzle-orm";
@@ -10,12 +11,12 @@ export type TipExpiryResult = Readonly<{ scanned: number; expired: number }>;
 
 /** No decryption, network delivery or creator decision occurs in this scan. */
 export async function expireTipPaymentIntents(input: Readonly<{
-  db: PawketDatabase; tips: TipExpiryPort; paymentsMode: "disabled" | "manual_only";
+  db: PawketDatabase; tips: TipExpiryPort; paymentsMode: TipPaymentsMode;
   batchSize: number; now: Date; applicationRevision: string;
 }>): Promise<TipExpiryResult> {
-  if (!["disabled", "manual_only"].includes(input.paymentsMode) || !Number.isInteger(input.batchSize) || input.batchSize < 1 || input.batchSize > 500 ||
+  if (!["disabled", "manual_only", "sepay_optional"].includes(input.paymentsMode) || !Number.isInteger(input.batchSize) || input.batchSize < 1 || input.batchSize > 500 ||
     !(input.now instanceof Date) || !Number.isFinite(input.now.getTime()) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(input.applicationRevision)) throw new TipPaymentError("invalid_request");
-  if (input.paymentsMode === "disabled") return { scanned: 0, expired: 0 };
+  if (!isTipPaymentsEnabled(input.paymentsMode)) return { scanned: 0, expired: 0 };
   const at = new Date(input.now); const requestId = randomUUID();
   try {
     return await input.db.transaction(async (tx) => {

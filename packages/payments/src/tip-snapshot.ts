@@ -9,9 +9,11 @@ export type Snapshot = { version: 1; bankBin: string; bankName: string; accountN
 
 export function tipInstructionProjection(row: typeof paymentIntents.$inferSelect, snapshot: Snapshot, transferReference: string, transferClaimedAt: string | null = null): TipInstructionProjection {
   const amountVnd = requireIntegerVnd(row.amountVnd);
+  if (row.settlementLane !== "manual_attested" && row.settlementLane !== "provider_bound") fail("not_available");
   const qr = createVietQrTransferInstruction({ bankBin: snapshot.bankBin, accountNumber: snapshot.accountNumber, amountVnd, transferReference });
   return Object.freeze({ reference: transferReference, creator: Object.freeze({ ...snapshot.creator }), amountVnd, currency: "VND",
     state: "awaiting_transfer", expiresAt: row.expiresAt.toISOString(), confirmedAt: null, transferClaimedAt,
+    settlementLane: row.settlementLane, confirmationSource: null,
     destination: Object.freeze({ bankBin: snapshot.bankBin, bankName: snapshot.bankName, accountNumber: snapshot.accountNumber, accountName: snapshot.accountName }), qrPayload: qr.payload });
 }
 export function readTipIntentSnapshot(row: typeof paymentIntents.$inferSelect, input: { keyring: EncryptionKeyring; lookupHmacKey: Uint8Array }): { snapshot: Snapshot; transferReference: string } {

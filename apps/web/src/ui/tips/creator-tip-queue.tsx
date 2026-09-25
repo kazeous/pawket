@@ -17,7 +17,7 @@ import { formatTipTime, formatVnd } from "./tip-client";
 
 function TipDetails({ tip }: Readonly<{ tip: CreatorTipProjection }>) {
   return <div className="flex min-w-0 flex-col gap-2"><Badge variant={tip.state === "confirmed" ? "default" : "secondary"}>{tipStateLabels[tip.state]}</Badge>
-    <p className="text-sm text-muted-foreground">{tip.state === "confirmed" ? `Xác nhận thủ công lúc ${formatTipTime(tip.confirmedAt)}` : `Hạn chuyển khoản: ${formatTipTime(tip.expiresAt)}`}</p>
+    <p className="text-sm text-muted-foreground">{tip.state === "confirmed" ? `${tip.confirmationSource === "sepay_automatic" ? "Tự động đối soát qua SePay" : tip.confirmationSource === "creator_reviewed_sepay" ? "Đã đối chiếu với SePay" : "Xác nhận thủ công"} lúc ${formatTipTime(tip.confirmedAt)}` : `Hạn chuyển khoản: ${formatTipTime(tip.expiresAt)}`}</p>
     {tip.state !== "confirmed" && tip.transferClaimedAt ? <p className="text-sm">Khách báo đã chuyển. Chưa xác minh tiền thực nhận.</p> : null}
     {tip.state === "confirmed" ? <div className="flex min-w-0 flex-col gap-1 whitespace-pre-wrap text-sm"><p>Tên khách: {tip.guestContent.name ?? "Không cung cấp"}</p><p>Lời nhắn: {tip.guestContent.message ?? "Không cung cấp"}</p></div> : <p className="text-sm text-muted-foreground">Tên và lời nhắn chỉ mở sau khi xác nhận tiền thực nhận.</p>}
   </div>;
@@ -25,7 +25,9 @@ function TipDetails({ tip }: Readonly<{ tip: CreatorTipProjection }>) {
 export function CreatorTipQueue({ queue, state, paymentsEnabled, error }: Readonly<{ queue: Queue | null; state: PaymentIntentState; paymentsEnabled: boolean; error: string | null }>) {
   const router = useRouter(); const [refreshing, startTransition] = useTransition(); const [selected, setSelected] = useState<CreatorTipProjection | null>(null); const [notice, setNotice] = useState("");
   const refresh = () => startTransition(() => router.refresh());
-  const action = (tip: CreatorTipProjection) => tip.state === "awaiting_transfer" && paymentsEnabled ? <Button type="button" variant="outline" onClick={() => setSelected(tip)}>Đối chiếu giao dịch</Button> : null;
+  const action = (tip: CreatorTipProjection) => tip.state === "awaiting_transfer" && paymentsEnabled ? tip.settlementLane === "provider_bound"
+    ? <a href="/creator/tips/sepay" className="text-sm underline">Đối soát qua SePay</a>
+    : <Button type="button" variant="outline" onClick={() => setSelected(tip)}>Đối chiếu giao dịch</Button> : null;
   return <Card><CardHeader><CardTitle role="heading" aria-level={2}>Danh sách tip</CardTitle><CardDescription>Đối chiếu trực tiếp với ngân hàng trước khi xác nhận. Danh sách được chia thành từng trang.</CardDescription></CardHeader>
     <CardContent className="flex min-w-0 flex-col gap-4">
       <ToggleGroup multiple={false} variant="outline" value={[state]} disabled={refreshing} aria-label="Lọc trạng thái tip" className="max-w-full flex-wrap" onValueChange={(values) => {

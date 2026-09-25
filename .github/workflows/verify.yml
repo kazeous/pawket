@@ -191,6 +191,11 @@ jobs:
       - name: Validate production Compose
         run: corepack pnpm compose:validate
 
+      - name: Increment 5 closed-provider and synthetic reconciliation browser journeys
+        env:
+          PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment4_tips_browser
+        run: corepack pnpm test:browser:increment-five
+
       - name: Set up QEMU for ARM64 builds
         uses: docker/setup-qemu-action@v3
 

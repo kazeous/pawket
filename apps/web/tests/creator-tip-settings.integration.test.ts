@@ -46,7 +46,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
   });
   return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
-    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
+    receivingAccount: createTipReceivingAccountEligibilityPort({ paymentsMode: "manual_only", keyring, lookupHmacKey: key }),
     paymentsMode: "manual_only", publishingMode: "general_audience", platformPolicy: createPlatformTipPolicyReadPort(),
     recentAuthMs: 900_000, commandFingerprintKey: key, now: () => at, ...overrides,
   });

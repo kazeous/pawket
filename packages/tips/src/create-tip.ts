@@ -1,8 +1,9 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import type { CreatorTipEligibility, ExistingCreatorTipEligibility, CreatorTipEligibilityPort } from "@pawket/catalog";
 import { appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent, tips, type PawketDatabase, type PawketTransaction } from "@pawket/database";
-import { requireIntegerVnd, TipPaymentError, type TipCreationPaymentResult, type TipPaymentIntentPort } from "@pawket/payments";
+import { requireIntegerVnd, retryPaymentAccountChange, TipPaymentError, type TipCreationPaymentResult, type TipPaymentIntentPort } from "@pawket/payments";
 import { createLookupHmac, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import { and, eq } from "drizzle-orm";
 
@@ -63,7 +64,7 @@ type Input = Readonly<{
   applicationRevision: string;
   db: PawketDatabase; creatorEligibility: CreatorTipEligibilityPort; payments: TipPaymentIntentPort;
   buyerAccounts: { isActiveTipBuyerAccount(tx: PawketTransaction, userId: string): Promise<boolean> };
-  paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
+  paymentsMode: TipPaymentsMode; publishingMode: "disabled" | "general_audience";
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; idempotencyTtlMs: number;
   now?: () => Date; idFactory?: () => string;
   onCommitted?: (replayed: boolean) => void;
@@ -78,19 +79,19 @@ export function createTipService(input: Input) {
   const now = () => { const at = clock(); if (!(at instanceof Date) || !Number.isFinite(at.getTime())) fail("dependency_unavailable"); return new Date(at); };
   return {
     async getPublicOffering(canonicalHandle: string): Promise<PublicTipOffering | null> {
-      if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience" || !handle(canonicalHandle)) return null;
+      if (!isTipPaymentsEnabled(input.paymentsMode) || input.publishingMode !== "general_audience" || !handle(canonicalHandle)) return null;
       try {
-        return await input.db.transaction(async (tx) => {
+        return await retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
           const creator = eligibility(await input.creatorEligibility.getTipEligibility(tx, canonicalHandle));
           if (!creator || creator.canonicalHandle !== canonicalHandle) return null;
           return Object.freeze({ canonicalHandle: creator.canonicalHandle, displayName: creator.displayName,
             minimumVnd: creator.minimumVnd, maximumVnd: creator.maximumVnd, presetsVnd: creator.presetsVnd });
-        });
+        }));
       } catch { return fail("dependency_unavailable"); }
     },
     async createTip(command: CreateTipCommand): Promise<TipCreationPaymentResult> {
       try {
-        if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience") fail("payments_disabled");
+        if (!isTipPaymentsEnabled(input.paymentsMode) || input.publishingMode !== "general_audience") fail("payments_disabled");
         if (!handle(command.canonicalHandle) || !identifier(command.requestId) ||
           typeof command.idempotencyKey !== "string" || command.idempotencyKey.trim() !== command.idempotencyKey || !/^[A-Za-z0-9._-]{8,200}$/u.test(command.idempotencyKey) ||
           typeof command.abuseKeyHash !== "string" || command.abuseKeyHash.trim() !== command.abuseKeyHash || !/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u.test(command.abuseKeyHash)) fail("invalid_request");
@@ -107,7 +108,7 @@ export function createTipService(input: Input) {
         const keyHash = digest("tip-create-command-key", command.idempotencyKey);
         const requestFingerprint = digest("tip-create-command", JSON.stringify([actor, canonicalHandle, amountVnd, content.name, content.message]));
         let replayed = false;
-        const committed = await input.db.transaction(async (tx) => {
+        const committed = await retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
           const startedAt = now();
           const started = await beginIdempotentCommand(tx, { actorUserId: actor, commandScope: "tips.create", keyHash, requestFingerprint,
             expiresAt: new Date(startedAt.getTime() + input.idempotencyTtlMs), now: startedAt });
@@ -146,7 +147,7 @@ export function createTipService(input: Input) {
             payload: { tipId, creatorUserId: creator.creatorUserId, correlationId: requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-created-v1:${tipId}`, completedAt: at })) fail("idempotency_conflict");
           return result;
-        });
+        }));
         try { input.onCommitted?.(replayed); } catch { /* Observability cannot roll back or reinterpret committed state. */ }
         return committed;
       } catch (error) {

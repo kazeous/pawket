@@ -24,6 +24,24 @@ test("metrics accept only fixed route labels and never export a transfer referen
   expect(await metricsRegistry.metrics()).not.toContain("PW00000000000000000000");
 });
 
+test("SePay metrics use fixed routes and discard callback query codes and resource identities", async () => {
+  const id = "a17f2010-7d22-419b-90cc-394e4093c213";
+  const cases = [
+    [`/api/v1/webhooks/sepay/${id}`, "/api/v1/webhooks/sepay/[connectionId]"],
+    [`/api/v1/creator/tips/sepay/${id}/accounts`, "/api/v1/creator/tips/sepay/[connectionId]/accounts"],
+    [`/api/v1/creator/tips/sepay/${id}/bind`, "/api/v1/creator/tips/sepay/[connectionId]/bind"],
+    [`/api/v1/creator/tips/sepay/${id}/change`, "/api/v1/creator/tips/sepay/[connectionId]/change"],
+    [`/api/v1/creator/tips/sepay/reviews/${id}/confirm`, "/api/v1/creator/tips/sepay/reviews/[inboxId]/confirm"],
+    [`/api/v1/creator/tips/sepay/reviews/${id}/decide`, "/api/v1/creator/tips/sepay/reviews/[inboxId]/decide"],
+  ];
+  for (const [path, route] of cases) {
+    expect(boundedRoute(path!)).toBe(route);
+    await withTipRoute(new Request(`https://pawket.test${path}`), () => Response.json({}));
+  }
+  await withTipRoute(new Request("https://pawket.test/api/v1/creator/tips/sepay/callback?code=synthetic-private-code&state=synthetic-private-state"), () => new Response(null, { status: 303 }));
+  expect(await metricsRegistry.metrics()).not.toMatch(/synthetic-private-code|synthetic-private-state|a17f2010/u);
+});
+
 test("tip failure metrics distinguish rate limits and evidence conflicts without exporting response data", async () => {
   const cases = [
     ["/api/v1/tips/PW00000000000000000000/transfer-claims", 429, "rate_limited", "claim", "rate_limited"],

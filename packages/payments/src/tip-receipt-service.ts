@@ -1,16 +1,19 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
-import { appendAdminAuditEvent, insertOutboxEvent, paymentGuestCapabilities, paymentIntents, paymentTransferClaims, type PawketDatabase, type PawketTransaction } from "@pawket/database";
+import { appendAdminAuditEvent, insertOutboxEvent, paymentConfirmations, paymentGuestCapabilities, paymentIntents, paymentTransferClaims, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
 import { eq } from "drizzle-orm";
 
 import { TipPaymentError, requireIntegerVnd, type TipAccess, type TipInstructionProjection, type TipReceiptProjection, type TipTransferClaim } from "./tip-contracts.js";
 import { readTipIntentSnapshot, tipInstructionProjection } from "./tip-snapshot.js";
 import { readTipPortRecord } from "./tip-port-boundary.js";
+import { lockTipReceivingDestination, lockTipSettlementBinding } from "./tip-receiving-account.js";
+import { retryPaymentAccountChange } from "./payment-account-fence.js";
 
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
   applicationRevision: string;
-  db: PawketDatabase; paymentsMode: "disabled" | "manual_only";
+  db: PawketDatabase; paymentsMode: TipPaymentsMode;
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   tips: { getTipOwnership(tx: PawketTransaction, tipId: string): Promise<Readonly<{ buyerUserId: string | null }> | null> };
   buyerAccounts: { isActiveTipBuyerAccount(tx: PawketTransaction, userId: string): Promise<boolean> };
@@ -40,7 +43,7 @@ export function createTipReceiptService(input: Input) {
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!(at instanceof Date) || !Number.isFinite(at.getTime())) fail("dependency_unavailable"); return new Date(at); };
   async function boundary<T>(run: () => Promise<T>, readOnly = false): Promise<T> {
-    if (!readOnly && input.paymentsMode !== "manual_only") fail("payments_disabled");
+    if (!readOnly && !isTipPaymentsEnabled(input.paymentsMode)) fail("payments_disabled");
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   async function find(tx: PawketTransaction, reference: string) {
@@ -62,31 +65,42 @@ export function createTipReceiptService(input: Input) {
     if (!capability || capability.expiresAt <= at || capability.capabilityHash !== digest("tip-guest-capability", access.capability)) fail("not_authorized");
     return { buyerUserId: null, capabilityId: capability.id };
   }
-  function receipt(intent: Intent, transferReference: string, creator: TipReceiptProjection["creator"], at: Date, claimedAt: Date | null): TipReceiptProjection {
+  async function receipt(tx: PawketTransaction, intent: Intent, transferReference: string, creator: TipReceiptProjection["creator"], at: Date, claimedAt: Date | null): Promise<TipReceiptProjection> {
     const state = intent.state === "awaiting_transfer" && intent.expiresAt <= at ? "expired" : intent.state;
     if (state !== "awaiting_transfer" && state !== "confirmed" && state !== "expired" && state !== "rejected") fail("not_available");
+    if (intent.settlementLane !== "manual_attested" && intent.settlementLane !== "provider_bound") fail("not_available");
+    let confirmationSource: TipReceiptProjection["confirmationSource"] = null;
+    if (state === "confirmed") {
+      const [confirmation] = await tx.select({ source: paymentConfirmations.source }).from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, intent.id)).limit(1);
+      if (confirmation?.source !== "creator_manual" && confirmation?.source !== "sepay_automatic" && confirmation?.source !== "creator_reviewed_sepay") fail("not_available");
+      confirmationSource = confirmation.source;
+    }
     return Object.freeze({ reference: transferReference, creator: Object.freeze({ ...creator }), amountVnd: requireIntegerVnd(intent.amountVnd), currency: "VND",
-      state, expiresAt: intent.expiresAt.toISOString(), confirmedAt: state === "confirmed" ? intent.closedAt!.toISOString() : null, transferClaimedAt: claimedAt?.toISOString() ?? null });
+      state, expiresAt: intent.expiresAt.toISOString(), confirmedAt: state === "confirmed" ? intent.closedAt!.toISOString() : null, transferClaimedAt: claimedAt?.toISOString() ?? null,
+      settlementLane: intent.settlementLane, confirmationSource });
   }
   return {
     async readReceipt(command: { reference: string; access: TipAccess }): Promise<AuthorizedTipReceipt> {
-      return boundary(() => input.db.transaction(async (tx) => {
+      return boundary(() => retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
         const candidate = await find(tx, command.reference);
         await authorize(tx, candidate, command.access, now(), false);
         const { snapshot, transferReference } = readTipIntentSnapshot(candidate, { keyring: input.keyring, lookupHmacKey: key });
         // Creator/page/account locks always precede the intent lock. Hidden or
         // retired creators retain a private receipt, but no active instruction.
-        const creator = input.paymentsMode === "manual_only" && candidate.state === "awaiting_transfer" && candidate.expiresAt > now()
+        const creator = isTipPaymentsEnabled(input.paymentsMode) && candidate.state === "awaiting_transfer" && candidate.expiresAt > now()
           ? existingCreator(await input.creatorEligibility.getExistingTipEligibility(tx, snapshot.creator.handle), snapshot.creator.handle) : null;
+        const destination = creator ? await lockTipReceivingDestination(tx, creator.creatorUserId, now(), { keyring: input.keyring, lookupHmacKey: key }) : null;
+        const settlement = destination ? await lockTipSettlementBinding(tx, destination, candidate.creatorUserId, input.paymentsMode) : null;
         await authorize(tx, candidate, command.access, now());
         const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.id, candidate.id)).limit(1).for("share");
         if (!intent) fail("not_authorized");
         const at = now(); await authorize(tx, intent, command.access, at, false);
         const [claim] = await tx.select({ claimedAt: paymentTransferClaims.claimedAt }).from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intent.id)).limit(1);
-        const result = receipt(intent, transferReference, snapshot.creator, at, claim?.claimedAt ?? null);
-        const usable = result.state === "awaiting_transfer" && creator?.creatorUserId === intent.creatorUserId && creator.receivingAccountVersionId === intent.accountVersionId;
+        const result = await receipt(tx, intent, transferReference, snapshot.creator, at, claim?.claimedAt ?? null);
+        const usable = result.state === "awaiting_transfer" && creator?.creatorUserId === intent.creatorUserId && creator.receivingAccountVersionId === intent.accountVersionId &&
+          destination?.accountVersionId === intent.accountVersionId && settlement?.settlementLane === intent.settlementLane && settlement.cutoverId === intent.cutoverId;
         return Object.freeze({ receipt: result, instruction: usable ? tipInstructionProjection(intent, snapshot, transferReference, result.transferClaimedAt) : null });
-      }), true);
+      })), true);
     },
     async reportTransfer(command: { reference: string; access: TipAccess; requestId: string }): Promise<TipTransferClaim> {
       return boundary(async () => {

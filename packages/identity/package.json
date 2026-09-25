@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./email-address": "./src/email-address.ts",
     "./security-email": "./src/security-email.ts",
+    "./sepay-assurance-port": "./src/sepay-assurance-port.ts",
     "./security-email-handoff": "./src/security-email-handoff.ts"
   },
   "scripts": {

@@ -190,3 +190,26 @@ groups:
         annotations:
           summary: Tip notification handoffs are failing independently of payment state
           runbook: ops/runbooks/tip-operations.md
+      - alert: PawketSePayRecoveryUnhealthy
+        expr: (pawket_sepay_recovery_enabled == 1) unless on(job, instance) (pawket_worker_scan_healthy{scan="sepay_recovery"} == 1 and on(job, instance) (time() - pawket_worker_last_success_timestamp_seconds{scan="sepay_recovery"} < 1020))
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Enabled SePay recovery scan is missing unhealthy or stale
+          runbook: ops/runbooks/sepay-reconciliation.md
+      - alert: PawketSePayInboxDelayed
+        expr: pawket_sepay_inbox_oldest_age_seconds > 900 and on(job, instance) pawket_sepay_recovery_enabled == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: SePay pending receipts are older than fifteen minutes
+          runbook: ops/runbooks/sepay-reconciliation.md
+      - alert: PawketSePayRetryExhausted
+        expr: increase(pawket_sepay_operations_total{operation="reconcile",outcome="retry_exhausted"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: SePay reconciliation retries require creator review
+          runbook: ops/runbooks/sepay-reconciliation.md

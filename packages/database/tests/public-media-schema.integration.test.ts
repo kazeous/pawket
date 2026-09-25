@@ -570,7 +570,7 @@ describe("public media persistence", () => {
     expect(snapshot23.prevId).toBe(snapshot22.id);
     const journal = JSON.parse(await readFile(new URL("../migrations/meta/_journal.json", import.meta.url), "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries[23]).toMatchObject({ idx: 23, tag: "0023_increment_3_immutability_and_retention" });
-    expect(journal.entries).toHaveLength(27);
+    expect(journal.entries).toHaveLength(29);
   });
 
   test("keeps source and object identity private and has worker/quota/cleanup indexes", async () => {
@@ -624,10 +624,10 @@ describe("public media persistence", () => {
     expect(count?.count).toBe(0);
   });
 
-  test("applies the complete current migration journal through id/count 27", async () => {
+  test("applies the complete current migration journal through id/count 29", async () => {
     const [entry] = await client.unsafe<{ id: number; hash: string }[]>(`select id, hash from "${journalSchema}"."__drizzle_migrations" order by id desc limit 1`);
-    expect(entry?.id).toBe(27);
+    expect(entry?.id).toBe(29);
     const [count] = await client.unsafe<{ count: number }[]>(`select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`);
-    expect(count?.count).toBe(27);
+    expect(count?.count).toBe(29);
   });
 });

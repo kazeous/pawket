@@ -234,6 +234,76 @@ async function countCandidates(
   };
 }
 
+function receivingAccountRetentionEligibility(cutoffIso: string, nowIso: string): SQL {
+  return sql`p.minimized_at is null
+    and exists (
+      select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
+      where r.proposed_receiving_account_id = p.id::text and a.state in ('withdrawn','rejected')
+        and a.updated_at < ${cutoffIso}::timestamptz and (a.state <> 'rejected' or a.cooldown_until < ${nowIso}::timestamptz)
+    )
+    and not exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id)
+    and not exists(select 1 from payment_intents i where i.account_version_id = p.id)
+    and not exists(
+      select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
+      where r.proposed_receiving_account_id = p.id::text and a.current_revision_id = r.id
+        and a.state in ('draft','submitted','under_review','changes_requested')
+    )
+    and not exists(
+      select 1 from payments_verification_deposit_challenges c
+      where c.account_version_id = p.id and c.state in ('issued','sent_reported')
+    )
+    and not exists(select 1 from payments_verification_deposit_refund_obligations o where o.account_version_id = p.id and o.state in ('pending_window','ready','attention_required'))
+    and not exists(
+      select 1 from payments_unmatched_deposits u join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
+      where c.account_version_id = p.id and u.refund_liability_state in ('unknown','pending','attention_required')
+    )
+    and not ${activeHold("receiving_accounts", "receiving_account", sql`p.id::text`)}
+    and not ${activeHold("receiving_accounts", "user", sql`p.applicant_user_id`)}`;
+}
+
+async function minimizeReceivingAccounts(
+  tx: PawketTransaction,
+  cutoffIso: string,
+  nowIso: string,
+  batchSize: number,
+): Promise<number> {
+  const eligibility = receivingAccountRetentionEligibility(cutoffIso, nowIso);
+  const candidates = await tx.execute<{ id: string; account_fingerprint: string }>(sql`
+    select p.id, p.account_fingerprint from payments_receiving_account_onboarding p
+    where ${eligibility}
+    order by p.updated_at, p.id limit ${batchSize}
+  `);
+  // Payment writers take the shared physical-account fence before row locks.
+  // Retention must do the same, skipping busy fingerprints without waiting.
+  const acquired = new Set<string>();
+  for (const fingerprint of [...new Set(candidates.map((row) => row.account_fingerprint))].sort()) {
+    const [lock] = await tx.execute<{ acquired: boolean }>(sql`
+      select pg_try_advisory_xact_lock(
+        hashtextextended(${`payments:account-fingerprint:${fingerprint}`}, 0)
+      ) as acquired
+    `);
+    if (lock?.acquired) acquired.add(fingerprint);
+  }
+  const fenced = candidates.filter((row) => acquired.has(row.account_fingerprint));
+  if (fenced.length === 0) return 0;
+
+  const rows = await tx.execute(sql`
+    with selected as (
+      select p.id from payments_receiving_account_onboarding p
+      where (p.id, p.account_fingerprint) in (${sql.join(
+        fenced.map((row) => sql`(${row.id}::uuid, ${row.account_fingerprint}::text)`),
+        sql`, `,
+      )})
+        and ${eligibility}
+      order by p.updated_at, p.id limit ${batchSize} for update skip locked
+    ) update payments_receiving_account_onboarding p
+      set account_number_envelope = null, account_holder_label_envelope = null,
+          minimized_at = ${nowIso}::timestamptz, updated_at = ${nowIso}::timestamptz
+      from selected s where p.id = s.id returning p.id
+  `);
+  return rows.length;
+}
+
 async function enforceDataset(
   tx: PawketTransaction,
   dataset: RetentionDataset,
@@ -309,39 +379,7 @@ async function enforceDataset(
         ) delete from identity_users u using selected s where u.id = s.id returning u.id`);
       break;
     case "receiving_accounts":
-      rows = await tx.execute(sql`
-        with selected as (
-          select p.id from payments_receiving_account_onboarding p
-          where p.minimized_at is null
-            and exists (
-              select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
-              where r.proposed_receiving_account_id = p.id::text and a.state in ('withdrawn','rejected')
-                and a.updated_at < ${cutoffIso}::timestamptz and (a.state <> 'rejected' or a.cooldown_until < ${nowIso}::timestamptz)
-            )
-            and not exists(select 1 from identity_creator_capabilities c where c.user_id = p.applicant_user_id)
-            and not exists(select 1 from payment_intents i where i.account_version_id = p.id)
-            and not exists(
-              select 1 from creator_application_revisions r join creator_applications a on a.id = r.application_id
-              where r.proposed_receiving_account_id = p.id::text and a.current_revision_id = r.id
-                and a.state in ('draft','submitted','under_review','changes_requested')
-            )
-            and not exists(
-              select 1 from payments_verification_deposit_challenges c
-              where c.account_version_id = p.id and c.state in ('issued','sent_reported')
-            )
-            and not exists(select 1 from payments_verification_deposit_refund_obligations o where o.account_version_id = p.id and o.state in ('pending_window','ready','attention_required'))
-            and not exists(
-              select 1 from payments_unmatched_deposits u join payments_verification_deposit_challenges c on c.id = u.possible_challenge_id
-              where c.account_version_id = p.id and u.refund_liability_state in ('unknown','pending','attention_required')
-            )
-            and not ${activeHold("receiving_accounts", "receiving_account", sql`p.id::text`)}
-            and not ${activeHold("receiving_accounts", "user", sql`p.applicant_user_id`)}
-          order by p.updated_at, p.id limit ${batchSize} for update skip locked
-        ) update payments_receiving_account_onboarding p
-          set account_number_envelope = null, account_holder_label_envelope = null,
-              minimized_at = ${nowIso}::timestamptz, updated_at = ${nowIso}::timestamptz
-          from selected s where p.id = s.id returning p.id`);
-      break;
+      return minimizeReceivingAccounts(tx, cutoffIso, nowIso, batchSize);
     case "application_content":
       rows = await tx.execute(sql`
         with selected as (

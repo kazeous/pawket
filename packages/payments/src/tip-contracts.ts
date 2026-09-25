@@ -35,6 +35,8 @@ export function requireIntegerVnd(value: unknown, policy?: Pick<TipAmountPolicy,
 
 export type PaymentIntentState = "awaiting_transfer" | "confirmed" | "expired" | "rejected";
 export type TipState = "awaiting_payment" | "completed" | "expired" | "rejected";
+export type TipSettlementLane = "manual_attested" | "provider_bound";
+export type TipConfirmationSource = "creator_manual" | "sepay_automatic" | "creator_reviewed_sepay";
 export type TipPaymentPurpose = Readonly<{ kind: "tip"; tipId: string }>;
 export type TipPaymentIntent = Readonly<{
   id: string;
@@ -82,6 +84,8 @@ export type TipReceiptProjection = Readonly<{
   expiresAt: string;
   confirmedAt: string | null;
   transferClaimedAt: string | null;
+  settlementLane: TipSettlementLane;
+  confirmationSource: TipConfirmationSource | null;
 }>;
 // This extension is only for a successfully authorized transaction instruction.
 // Public creator/directory and ordinary queue projections must not use it.
@@ -96,6 +100,8 @@ export type CreatorTipProjection = Readonly<{
   state: PaymentIntentState;
   expiresAt: string;
   transferClaimedAt: string | null;
+  settlementLane: TipSettlementLane;
+  confirmationSource: TipConfirmationSource | null;
 }> & (
   | Readonly<{ state: "confirmed"; confirmedAt: string; guestContent: Readonly<{ name: string | null; message: string | null }> }>
   | Readonly<{ state: Exclude<PaymentIntentState, "confirmed">; confirmedAt: null; guestContent?: never }>

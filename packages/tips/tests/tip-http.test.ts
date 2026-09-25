@@ -6,7 +6,7 @@ import { tipCookie, tipNetworkKey, TIP_GUEST_CONTEXT_COOKIE, tipReceiptCookieNam
 const at = new Date("2026-09-12T00:00:00Z"); const key = new Uint8Array(32).fill(37);
 const reference = `PW${"1".repeat(20)}`; const context = "A".repeat(43); const secret = "B".repeat(43);
 const instruction: TipInstructionProjection = { reference, creator: { displayName: "Artist", handle: "artist" }, amountVnd: requireIntegerVnd(50_000), currency: "VND",
-  state: "awaiting_transfer", expiresAt: new Date(at.getTime() + 86_400_000).toISOString(), confirmedAt: null, transferClaimedAt: null,
+  state: "awaiting_transfer", expiresAt: new Date(at.getTime() + 86_400_000).toISOString(), confirmedAt: null, transferClaimedAt: null, settlementLane: "manual_attested", confirmationSource: null,
   destination: { bankBin: "970436", bankName: "Vietcombank", accountNumber: "000001234567", accountName: "SYNTHETIC ARTIST" }, qrPayload: "synthetic-local-payload" };
 const { destination: _destination, qrPayload: _qrPayload, ...receipt } = instruction;
 void _destination; void _qrPayload;

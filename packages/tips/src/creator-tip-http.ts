@@ -1,10 +1,11 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
 import { TipPaymentError, type ConfirmCreatorTipCommand, type CreatorTipProjection, type CreatorTipQueue, type PaymentIntentState } from "@pawket/payments";
 import { readTipBody, tipBodyRecord, tipJson, tipNetworkKey } from "./http-boundary.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
 type Input = Readonly<{
-  appBaseUrl: string; paymentsMode: "disabled" | "manual_only"; lookupHmacKey: Uint8Array;
+  appBaseUrl: string; paymentsMode: TipPaymentsMode; lookupHmacKey: Uint8Array;
   authenticate(headers: Headers): Promise<Actor | null>;
   throttle(command: { actorUserId: string; networkKeyHash: string; operation: "queue" | "confirm" }): Promise<boolean>;
   service: { listQueue(command: { actor: Actor; state?: PaymentIntentState; cursor?: string }): Promise<CreatorTipQueue>;
@@ -28,7 +29,7 @@ export function createCreatorTipHttpHandlers(input: Input) {
   const origin = new URL(input.appBaseUrl).origin; const key = new Uint8Array(input.lookupHmacKey);
   function preflight(request: Request, method: "GET" | "POST") {
     if (request.method !== method) return tipJson(405, { code: "method_not_allowed" });
-    if (method !== "GET" && input.paymentsMode !== "manual_only") return tipJson(503, { code: "payments_disabled" });
+    if (method !== "GET" && !isTipPaymentsEnabled(input.paymentsMode)) return tipJson(503, { code: "payments_disabled" });
     if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) return tipJson(403, { code: "untrusted_origin" });
     return null;
   }

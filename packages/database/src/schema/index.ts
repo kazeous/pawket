@@ -1,4 +1,9 @@
 export { systemOutbox } from "./system-outbox.js";
+export {
+  paymentsSepayConnections, paymentsSepayConnectionRevisions, paymentsSepayOAuthAttempts,
+  paymentsSepayAccountCutovers, paymentsSepayInbox, paymentsSepayInboxConflicts,
+  paymentsSepayProcessing, paymentsSepayDecisions, paymentsSepayTransactions,
+} from "./sepay.js";
 export { PLATFORM_TIP_POLICY_BOOTSTRAP_ID, platformTipPolicyCurrent, platformTipPolicyRevisions } from "./platform-tip-policy.js";
 export {
   creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
@@ -61,3 +66,4 @@ export {
   systemRetentionHolds,
   systemRetentionRuns,
 } from "./shared-controls.js";
+export { paymentsSepayProviderBudgets } from "./sepay-budget.js";

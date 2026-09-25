@@ -4,6 +4,71 @@ rule_files:
 evaluation_interval: 1s
 
 tests:
+  - name: disabled SePay recovery does not alert on missing scan
+    interval: 1m
+    input_series:
+      - series: 'pawket_sepay_recovery_enabled{job="worker",instance="synthetic-worker"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PawketSePayRecoveryUnhealthy
+        exp_alerts: []
+  - name: enabled SePay missing recovery alerts after five minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_sepay_recovery_enabled{job="worker",instance="synthetic-worker"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketSePayRecoveryUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketSePayRecoveryUnhealthy
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: critical
+            exp_annotations:
+              summary: Enabled SePay recovery scan is missing unhealthy or stale
+              runbook: ops/runbooks/sepay-reconciliation.md
+  - name: SePay pending backlog alerts only after sustained delay
+    interval: 1m
+    input_series:
+      - series: 'pawket_sepay_recovery_enabled{job="worker",instance="synthetic-worker"}'
+        values: '1x10'
+      - series: 'pawket_sepay_inbox_oldest_age_seconds{job="worker",instance="synthetic-worker"}'
+        values: '1200x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketSePayInboxDelayed
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketSePayInboxDelayed
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: warning
+            exp_annotations:
+              summary: SePay pending receipts are older than fifteen minutes
+              runbook: ops/runbooks/sepay-reconciliation.md
+  - name: SePay retry exhaustion alerts independently of activation
+    interval: 1m
+    input_series:
+      - series: 'pawket_sepay_operations_total{operation="reconcile",outcome="retry_exhausted"}'
+        values: '0 0 1x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PawketSePayRetryExhausted
+        exp_alerts:
+          - exp_labels:
+              operation: reconcile
+              outcome: retry_exhausted
+              severity: warning
+            exp_annotations:
+              summary: SePay reconciliation retries require creator review
+              runbook: ops/runbooks/sepay-reconciliation.md
   - name: outbox scan starts unhealthy and clears only after success
     interval: 1s
     input_series:

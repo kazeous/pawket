@@ -1332,17 +1332,17 @@ describe("worker shutdown", () => {
     };
   }
 
-  test("tip expiry retries independently of outbox failure and logs only fixed categories", async () => {
+  test.each(["manual_only", "sepay_optional"] as const)("%s tip expiry retries independently of outbox failure and logs only fixed categories", async (mode) => {
     vi.useFakeTimers(); const doubles = runtimeDoubles(); const healthState = createWorkerHealthState();
     const logger = { info: vi.fn(), error: vi.fn() };
     const expireTipIntents = vi.fn().mockRejectedValueOnce(new Error("private synthetic payment detail")).mockResolvedValue({ scanned: 0, expired: 0 });
     const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15", concurrency: 1, batchSize: 10, leaseMs: 30_000,
-      signalSource: doubles.signalSource, logger, healthState, revision: "synthetic-worker-revision", tipPayments: { mode: "manual_only", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      signalSource: doubles.signalSource, logger, healthState, revision: "synthetic-worker-revision", tipPayments: { mode, batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
       dependencies: { ...doubles.dependencies, expireTipIntents, dispatch: vi.fn().mockRejectedValue(new Error("synthetic valkey failure")), scanRefundWindows: vi.fn().mockResolvedValue({ dueSoon: 0, dueToday: 0, overdue: 0, attention: 0, outstandingAmountVnd: 0 }) } });
     try {
       await vi.advanceTimersByTimeAsync(0); expect(expireTipIntents).toHaveBeenCalledTimes(1); expect(healthState.lastTipExpiryScanSucceededAt).toBeNull();
       await vi.advanceTimersByTimeAsync(5_000); expect(expireTipIntents).toHaveBeenCalledTimes(2); expect(healthState.lastTipExpiryScanSucceededAt).not.toBeNull();
-      expect(expireTipIntents.mock.calls[1]?.[0]).toMatchObject({ paymentsMode: "manual_only", batchSize: 25, applicationRevision: "synthetic-worker-revision" });
+      expect(expireTipIntents.mock.calls[1]?.[0]).toMatchObject({ paymentsMode: mode, batchSize: 25, applicationRevision: "synthetic-worker-revision" });
       expect(logger.error).toHaveBeenCalledWith({ category: "tip_expiry_failed" }, "Tip expiry scan failed");
       expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private synthetic payment detail");
       expect(healthState.tipExpiryConfigured).toBe(true); expect(healthState.tipExpiryMaximumAgeMs).toBe(15_000);
@@ -1359,6 +1359,91 @@ describe("worker shutdown", () => {
     const handle = await startWorker(options);
     try { await vi.advanceTimersByTimeAsync(10_000); expect(expireTipIntents).not.toHaveBeenCalled(); expect(healthState.tipExpiryConfigured).toBe(false); }
     finally { await handle.stop(); }
+  });
+
+  test("SePay DB recovery survives outbox failure, records freshness and stops scheduling on shutdown", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const state = createWorkerHealthState();
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const recoverDue = vi.fn().mockRejectedValueOnce(new Error("synthetic private provider error")).mockResolvedValue(1);
+    const readBacklog = vi.fn().mockResolvedValue({ pending: 0, reviewRequired: 1, oldestAgeSeconds: 0 });
+    const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger, healthState: state,
+      tipPayments: { mode: "sepay_optional", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      sepay: { environment: "test", mode: "sepay_optional", providerContractReady: false, batchSize: 5, scanIntervalMs: 5_000,
+        createService: () => ({ recoverDue, processInbox: vi.fn() }) },
+      dependencies: { ...doubles.dependencies, readSePayBacklog: readBacklog, expireTipIntents: vi.fn().mockResolvedValue({ scanned: 0, expired: 0 }),
+        dispatch: vi.fn().mockRejectedValue(new Error("synthetic queue outage")), scanRefundWindows: vi.fn().mockResolvedValue({ dueSoon: 0, dueToday: 0, overdue: 0, attention: 0, outstandingAmountVnd: 0 }) } });
+    try {
+      await vi.advanceTimersByTimeAsync(0); expect(recoverDue).toHaveBeenCalledWith(5); expect(state.lastSePayRecoverySucceededAt).toBeNull();
+      await vi.advanceTimersByTimeAsync(5_000); expect(recoverDue).toHaveBeenCalledTimes(2); expect(readBacklog).toHaveBeenCalledTimes(1);
+      expect(state.lastSePayRecoverySucceededAt).not.toBeNull(); expect(state.sepayStatus).toBe("contract_pending"); expect(state.sepayRecoveryConfigured).toBe(true);
+      expect(logger.error).toHaveBeenCalledWith({ category: "sepay_recovery_failed" }, "SePay recovery scan failed");
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain("synthetic private provider error");
+    } finally { await handle.stop(); }
+    await vi.advanceTimersByTimeAsync(10_000); expect(recoverDue).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(["disabled", "manual_only"] as const)("SePay automatic recovery is inert in %s mode", async (mode) => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const recoverDue = vi.fn(); const state = createWorkerHealthState();
+    const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, healthState: state, logger: { info: vi.fn(), error: vi.fn() },
+      sepay: { environment: "test", mode, providerContractReady: false, batchSize: 5, scanIntervalMs: 5_000, createService: () => ({ recoverDue, processInbox: vi.fn() }) },
+      dependencies: doubles.dependencies });
+    try { await vi.advanceTimersByTimeAsync(10_000); expect(recoverDue).not.toHaveBeenCalled(); expect(state.sepayRecoveryConfigured).toBe(false); }
+    finally { await handle.stop(); }
+  });
+
+  test("SePay readback does not stall outbox polling or overlap scans and shutdown drains it", async () => {
+    vi.useFakeTimers();
+    const scan = deferred<number>();
+    const doubles = runtimeDoubles();
+    const healthState = createWorkerHealthState();
+    const recoverDue = vi.fn(() => scan.promise);
+    const readBacklog = vi.fn().mockResolvedValue({ pending: 0, reviewRequired: 0, oldestAgeSeconds: 0 });
+    const handle = await startWorker({
+      databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused",
+      valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000,
+      signalSource: doubles.signalSource, healthState, logger: { info: vi.fn(), error: vi.fn() },
+      tipPayments: { mode: "sepay_optional", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      sepay: { environment: "test", mode: "sepay_optional", providerContractReady: true, batchSize: 5,
+        scanIntervalMs: 5_000, createService: () => ({ recoverDue, processInbox: vi.fn() }) },
+      dependencies: {
+        ...doubles.dependencies,
+        expireTipIntents: vi.fn().mockResolvedValue({ scanned: 0, expired: 0 }),
+        readSePayBacklog: readBacklog,
+        scanRefundWindows: vi.fn().mockResolvedValue({ dueSoon: 0, dueToday: 0, overdue: 0, attention: 0, outstandingAmountVnd: 0 }),
+        readBacklogMetrics: vi.fn().mockResolvedValue({
+          outbox: { pending: 0, oldestAgeSeconds: 0 },
+          email: { pending: 0, oldestAgeSeconds: 0, attention: 0 },
+          publicMedia: { oldestPendingSeconds: 0 },
+          publicContentReports: { oldestOpenSeconds: 0 },
+        }),
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(recoverDue).toHaveBeenCalledTimes(1);
+      expect(doubles.dispatch.mock.calls.length).toBeGreaterThanOrEqual(15);
+      expect(healthState.lastPollSucceededAt).not.toBeNull();
+      expect(Date.now() - healthState.lastPollSucceededAt!).toBeLessThanOrEqual(1_000);
+      expect(readBacklog).not.toHaveBeenCalled();
+
+      let stopped = false;
+      const stopping = handle.stop().then(() => { stopped = true; });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(stopped).toBe(false);
+      expect(doubles.calls).not.toContain("postgres");
+      scan.resolve(1);
+      await stopping;
+      expect(readBacklog).toHaveBeenCalledTimes(1);
+      expect(doubles.calls).toContain("postgres");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(recoverDue).toHaveBeenCalledTimes(1);
+    } finally {
+      scan.resolve(1);
+      await handle.stop();
+    }
   });
 
   test("public-media runtime acquires and closes its worker before shared resources", async () => {

@@ -1,3 +1,4 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import { CreatorTipSettingsError, readPlatformTipPolicySnapshot, type createCreatorTipSettingsService } from "@pawket/catalog";
@@ -5,7 +6,7 @@ import { readTipBody, tipBodyRecord, tipJson, tipNetworkKey } from "./http-bound
 
 type Actor = Readonly<{ userId: string; sessionId: string; primaryAuthenticatedAt: Date }>;
 type Input = Readonly<{
-  appBaseUrl: string; paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience"; lookupHmacKey: Uint8Array;
+  appBaseUrl: string; paymentsMode: TipPaymentsMode; publishingMode: "disabled" | "general_audience"; lookupHmacKey: Uint8Array;
   authenticate(headers: Headers): Promise<Actor | null>;
   service: Pick<ReturnType<typeof createCreatorTipSettingsService>, "getOwnSettings" | "saveOwnSettings">;
   throttle(command: { actorUserId: string; networkKeyHash: string; operation: "read" | "save" }): Promise<boolean>;
@@ -66,7 +67,7 @@ export function createCreatorTipSettingsHttpHandlers(input: Input) {
   const origin = new URL(input.appBaseUrl).origin; const key = new Uint8Array(input.lookupHmacKey);
   function preflight(request: Request, method: "GET" | "POST") {
     if (request.method !== method) return tipJson(405, { code: "method_not_allowed" });
-    if (method === "POST" && (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience")) return tipJson(503, { code: "payments_disabled" });
+    if (method === "POST" && (!isTipPaymentsEnabled(input.paymentsMode) || input.publishingMode !== "general_audience")) return tipJson(503, { code: "payments_disabled" });
     if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) return tipJson(403, { code: "untrusted_origin" });
     if (new URL(request.url).search) return tipJson(400, { code: "invalid_request" });
     return null;
@@ -84,7 +85,7 @@ export function createCreatorTipSettingsHttpHandlers(input: Input) {
       const denied = preflight(request, "GET"); if (denied) return denied;
       try {
         const actor = await authorize(request, "read"); if (actor instanceof Response) return actor;
-        return tipJson(200, { settings: projectSettings(await input.service.getOwnSettings(actor.userId), true), paymentsEnabled: input.paymentsMode === "manual_only", publishingEnabled: input.publishingMode === "general_audience" });
+        return tipJson(200, { settings: projectSettings(await input.service.getOwnSettings(actor.userId), true), paymentsEnabled: isTipPaymentsEnabled(input.paymentsMode), publishingEnabled: input.publishingMode === "general_audience" });
       } catch (error) { return failure(error); }
     },
     async save(request: Request) {

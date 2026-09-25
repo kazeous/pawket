@@ -77,7 +77,7 @@ function stringContainsCredentials(value: string): boolean {
       const url = new URL(candidate);
       if (url.username || url.password) return true;
       for (const key of url.searchParams.keys()) {
-        if (structuredKeyIsSensitive(key)) return true;
+        if (structuredKeyIsSensitive(key) || key === "code" || key === "state") return true;
       }
     } catch {
       // A malformed URL-shaped application string is not treated as a credential URL.

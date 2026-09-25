@@ -1,5 +1,5 @@
 import { sql, type SQLWrapper } from "drizzle-orm";
-import { bigint, boolean, check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { EncryptionEnvelope } from "@pawket/security";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
@@ -11,6 +11,9 @@ import { paymentsReceivingAccountOnboarding } from "./payments";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
 import { platformTipPolicyRevisions } from "./platform-tip-policy";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { paymentsSepayAccountCutovers, paymentsSepayTransactions } from "./sepay";
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
@@ -96,6 +99,8 @@ export const paymentIntents = pgTable("payment_intents", {
   referenceEnvelope: jsonb("reference_envelope").$type<EncryptionEnvelope<"payment_intents", "transfer_reference">>().notNull(),
   destinationEnvelope: jsonb("destination_envelope").$type<EncryptionEnvelope<"payment_intents", "destination">>().notNull(),
   accountVersionId: uuid("account_version_id").notNull().references(() => paymentsReceivingAccountOnboarding.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  settlementLane: text("settlement_lane").notNull().default("manual_attested"),
+  cutoverId: uuid("cutover_id").references((): AnyPgColumn => paymentsSepayAccountCutovers.id, { onDelete: "restrict", onUpdate: "restrict" }),
   abuseKeyHash: text("abuse_key_hash").notNull(),
   state: text("state").notNull().default("awaiting_transfer"),
   expiresAt: time("expires_at").notNull(),
@@ -113,6 +118,8 @@ export const paymentIntents = pgTable("payment_intents", {
   index("payment_intents_open_abuse_idx").on(table.abuseKeyHash, table.createdAt).where(sql`${table.state} = 'awaiting_transfer'`),
   foreignKey({ name: "payment_intents_tip_binding_fk", columns: [table.tipId, table.creatorUserId, table.amountVnd], foreignColumns: [tips.id, tips.creatorUserId, tips.amountVnd] }).onDelete("restrict").onUpdate("restrict"),
   check("payment_intents_purpose_check", sql`${table.purpose} = 'tip' and ${table.currency} = 'VND'`),
+  check("payment_intents_settlement_lane_check", sql`(${table.settlementLane} = 'manual_attested' and ${table.cutoverId} is null)
+    or (${table.settlementLane} = 'provider_bound' and ${table.cutoverId} is not null)`),
   check("payment_intents_amount_check", sql`${table.amountVnd} between 1 and 9999999999999`),
   check("payment_intents_reference_hash_check", hmacCheck(table.referenceHash)),
   check("payment_intents_abuse_hash_check", hmacCheck(table.abuseKeyHash)),
@@ -167,20 +174,30 @@ export const paymentConfirmations = pgTable("payment_confirmations", {
   accountVersionId: uuid("account_version_id").notNull(),
   observedAmountVnd: vnd("observed_amount_vnd").notNull(),
   referenceHash: text("reference_hash").notNull(),
-  bankTransactionFingerprint: text("bank_transaction_fingerprint").notNull(),
+  bankTransactionFingerprint: text("bank_transaction_fingerprint"),
+  providerTransactionId: uuid("provider_transaction_id").references((): AnyPgColumn => paymentsSepayTransactions.id, { onDelete: "restrict", onUpdate: "restrict" }),
+  workerIdentity: text("worker_identity"),
   source: text("source").notNull().default("creator_manual"),
-  attestedReceived: boolean("attested_received").notNull(),
-  actorSessionId: text("actor_session_id").notNull(),
-  primaryAuthenticatedAt: time("primary_authenticated_at").notNull(),
+  attestedReceived: boolean("attested_received"),
+  actorSessionId: text("actor_session_id"),
+  primaryAuthenticatedAt: time("primary_authenticated_at"),
   totpVerifiedAt: time("totp_verified_at"),
-  idempotencyKeyHash: text("idempotency_key_hash").notNull(),
+  idempotencyKeyHash: text("idempotency_key_hash"),
   requestId: text("request_id").notNull(),
   confirmedAt: time("confirmed_at").notNull(),
 }, (table) => [
   uniqueIndex("payment_confirmations_intent_uidx").on(table.paymentIntentId),
   uniqueIndex("payment_confirmations_bank_txn_uidx").on(table.bankTransactionFingerprint),
+  uniqueIndex("payment_confirmations_provider_txn_uidx").on(table.providerTransactionId),
   foreignKey({ name: "payment_confirmations_intent_binding_fk", columns: [table.paymentIntentId, table.creatorUserId, table.observedAmountVnd, table.referenceHash, table.accountVersionId], foreignColumns: [paymentIntents.id, paymentIntents.creatorUserId, paymentIntents.amountVnd, paymentIntents.referenceHash, paymentIntents.accountVersionId] }).onDelete("restrict").onUpdate("restrict"),
-  check("payment_confirmations_source_check", sql`${table.source} = 'creator_manual' and ${table.attestedReceived} = true`),
+  check("payment_confirmations_source_check", sql`coalesce(
+    (${table.source} = 'creator_manual' and ${table.bankTransactionFingerprint} is not null and ${table.providerTransactionId} is null and ${table.workerIdentity} is null
+      and ${table.attestedReceived} = true and ${table.actorSessionId} is not null and ${table.primaryAuthenticatedAt} is not null and ${table.idempotencyKeyHash} is not null)
+    or (${table.source} = 'sepay_automatic' and ${table.bankTransactionFingerprint} is null and ${table.providerTransactionId} is not null
+      and ${table.workerIdentity} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' and ${table.attestedReceived} is null and ${table.actorSessionId} is null
+      and ${table.primaryAuthenticatedAt} is null and ${table.totpVerifiedAt} is null and ${table.idempotencyKeyHash} is null)
+    or (${table.source} = 'creator_reviewed_sepay' and ${table.bankTransactionFingerprint} is null and ${table.providerTransactionId} is not null and ${table.workerIdentity} is null
+      and ${table.attestedReceived} = true and ${table.actorSessionId} is not null and ${table.primaryAuthenticatedAt} is not null and ${table.idempotencyKeyHash} is not null), false)`),
   check("payment_confirmations_bank_txn_check", hmacCheck(table.bankTransactionFingerprint)),
   check("payment_confirmations_idempotency_check", hmacCheck(table.idempotencyKeyHash)),
   check("payment_confirmations_assurance_time_check", sql`${table.primaryAuthenticatedAt} <= ${table.confirmedAt}

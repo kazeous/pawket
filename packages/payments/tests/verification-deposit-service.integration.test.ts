@@ -1,4 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -231,10 +232,10 @@ afterAll(async () => {
   await client.end();
 });
 
-function service(): VerificationDepositService {
+function service(database = db): VerificationDepositService {
   expect(typeof api.createVerificationDepositService).toBe("function");
   return api.createVerificationDepositService!({
-    db,
+    db: database,
     keyring,
     lookupHmacKey,
     supportedBanks,
@@ -890,5 +891,80 @@ describe("verification-deposit service", () => {
         and outcome = 'attention_required'
     `;
     expect(attentionCount?.count).toBe(1);
+  });
+});
+
+describe("verification-deposit fingerprint lock order", () => {
+  test.each(["issue", "report", "reconcile", "reconcile_fallback", "reconcile_changed"] as const)("%s waits for the physical account fence before locking rows", async (operation) => {
+    const suffix = randomUUID();
+    const applicant = `lock-order-${suffix}`;
+    const application = randomUUID();
+    const revision = randomUUID();
+    const accountNumber = `91000000000${["issue", "report", "reconcile", "reconcile_fallback", "reconcile_changed"].indexOf(operation)}`;
+    await db.insert(identityUsers).values({ id: applicant, name: "Lock Order Fixture", email: `${suffix}@example.invalid`,
+      canonicalEmail: `${suffix}@example.invalid`, emailVerified: true, emailVerifiedAt: clock,
+      emailVerificationProvenance: "password_email_challenge", createdAt: clock, updatedAt: clock });
+    const account = await api.createReceivingAccountService!({ db, keyring, lookupHmacKey, supportedBanks, now: () => clock }).propose({
+      applicantUserId: applicant, sessionId: `${applicant}-session`, primaryAuthenticatedAt: clock,
+      idempotencyKey: `propose-${suffix}`, bankBin: "970436", accountNumber, accountHolderLabel: "LOCK ORDER FIXTURE",
+    });
+    await client`insert into creator_applications (id, user_id, state, version, current_revision_id, created_at, updated_at)
+      values (${application}, ${applicant}, 'submitted', 2, ${revision}, ${clock.toISOString()}, ${clock.toISOString()})`;
+    await client`insert into creator_application_revisions (id, application_id, revision_number, artist_display_name,
+      short_introduction, applicant_email, dob_envelope, portfolio_urls, primary_art_discipline, practice_description,
+      content_intent, proposed_receiving_account_id, age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+      values (${revision}, ${application}, 1, 'Lock Order Artist', 'Synthetic concurrency fixture.', ${`${suffix}@example.invalid`},
+      '{"version":1}'::jsonb, '["https://portfolio.example.invalid/fixture"]'::jsonb, 'illustration', 'Synthetic illustration practice.',
+      'general_audience_only', ${account.referenceId}, 26, '2026-08-28', ${clock.toISOString()}, ${clock.toISOString()}, ${clock.toISOString()})`;
+    const [destination] = await client<{ account_fingerprint: string }[]>`select account_fingerprint
+      from payments_receiving_account_onboarding where id = ${account.referenceId}`;
+    const actor = postgres(databaseUrl!, { max: 1, connection: { search_path: `${schemaName},public` } });
+    const blocker = postgres(databaseUrl!, { max: 1, connection: { search_path: `${schemaName},public` } });
+    const deposits = service(drizzle(actor));
+    const issue = { ownerUserId: "deposit-owner", ownerSessionId: "deposit-owner-session", stepUpProofId: randomUUID(),
+      applicationId: application, revisionId: revision, accountVersionId: account.referenceId,
+      idempotencyKey: `issue-${suffix}`, requestId: `request.issue.${suffix}` };
+    let pending: Promise<{ value: unknown } | { error: unknown }> | undefined;
+    try {
+      const challenge = operation === "issue" ? undefined : await deposits.issueChallenge(issue);
+      const [backend] = await actor<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      await blocker.begin(async (tx) => {
+        await tx`select pg_advisory_xact_lock(hashtextextended(${`payments:account-fingerprint:${destination!.account_fingerprint}`}, 0))`;
+        const command = operation === "issue" ? deposits.issueChallenge(issue)
+          : operation === "report" ? deposits.reportSent({ applicantUserId: applicant, challengeId: challenge!.id,
+            reportedSentAt: clock, idempotencyKey: `report-${suffix}` })
+          : deposits.reconcile({ ownerUserId: "deposit-owner", ownerSessionId: "deposit-owner-session", stepUpProofId: randomUUID(),
+            idempotencyKey: `reconcile-${suffix}`, requestId: `request.reconcile.${suffix}`, bankTransactionReference: `synthetic-${suffix}`,
+            actualAmountVnd: 20_000, actualTransferReference: operation === "reconcile" ? challenge!.reference! : "unknown-reference", receivedAt: clock,
+            sourceBankBin: "970436", sourceAccountNumber: accountNumber, privateNote: "Synthetic concurrency receipt" });
+        pending = command.then((value) => ({ value }), (error: unknown) => ({ error }));
+        // Observe actual PostgreSQL contention, rather than assuming scheduling
+        // order from a sleep. A proposal/cutover holder must still lock the rows.
+        await expect.poll(async () => {
+          const [waiting] = await client<{ waiting: boolean }[]>`select exists (select 1 from pg_locks
+            where pid = ${backend!.pid} and locktype = 'advisory' and not granted) as waiting`;
+          return waiting!.waiting;
+        }, { timeout: 3_000, interval: 10 }).toBe(true);
+        await tx`set local lock_timeout = '500ms'`;
+        await tx`select id from payments_receiving_account_onboarding where id = ${account.referenceId} for update`;
+        if (challenge) await tx`select id from payments_verification_deposit_challenges where id = ${challenge.id} for update`;
+        if (operation === "reconcile_changed") await tx`update payments_verification_deposit_challenges
+          set state = 'expired', updated_at = ${clock.toISOString()} where id = ${challenge!.id}`;
+      });
+      const result = await pending;
+      expect(result).toHaveProperty("value");
+      if (operation === "reconcile") expect(result).toMatchObject({ value: { kind: "matched" } });
+      if (operation === "report") expect(result).toMatchObject({ value: { state: "sent_reported" } });
+      if (operation === "reconcile_fallback" || operation === "reconcile_changed") {
+        expect(result).toMatchObject({ value: { kind: "unmatched", reason: "reference_mismatch" } });
+        const [evidence] = await client<{ possible_challenge_id: string | null }[]>`select possible_challenge_id
+          from payments_unmatched_deposits where private_note = 'Synthetic concurrency receipt'
+            and source_account_fingerprint = ${destination!.account_fingerprint}`;
+        expect(evidence!.possible_challenge_id).toBe(operation === "reconcile_changed" ? null : challenge!.id);
+      }
+    } finally {
+      await pending;
+      await Promise.all([actor.end(), blocker.end()]);
+    }
   });
 });

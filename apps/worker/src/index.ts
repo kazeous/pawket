@@ -11,6 +11,7 @@ import nodemailer from "nodemailer";
 
 import { createSecurityEmailSenderFromEnv } from "./security-email.js";
 import { createWorkerPublicMediaConfiguration } from "./public-media-cleanup-config.js";
+import { createWorkerSePayConfiguration } from "./sepay-config.js";
 import { startWorkerTelemetryServer } from "./telemetry-server.js";
 import { createWorkerHealthState } from "./worker-health.js";
 import { startWorker } from "./worker-runtime.js";
@@ -51,6 +52,7 @@ const worker = await startWorker({
   batchSize: env.OUTBOX_BATCH_SIZE,
   leaseMs: env.OUTBOX_LEASE_MS,
   tipPayments: { mode: env.TIP_PAYMENTS_MODE, batchSize: env.TIP_EXPIRY_BATCH_SIZE, scanIntervalMs: env.TIP_EXPIRY_SCAN_INTERVAL_MS, tips: createTipExpiryPort() },
+  sepay: createWorkerSePayConfiguration(env, keyring),
   ...publicMediaConfiguration,
   securityEmail: {
     keyring,

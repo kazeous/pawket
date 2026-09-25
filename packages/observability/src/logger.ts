@@ -41,6 +41,7 @@ export function createLogger(options: {
     options.env.PII_LOOKUP_HMAC_KEY,
     options.env.GOOGLE_CLIENT_SECRET,
     options.env.DISCORD_CLIENT_SECRET,
+    options.env.SEPAY_OAUTH_CLIENT_SECRET,
     options.env.BOOTSTRAP_OWNER_EMAIL,
     options.env.OPERATING_BANK_BIN,
     options.env.OPERATING_BANK_ACCOUNT_NUMBER,

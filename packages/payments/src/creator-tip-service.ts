@@ -1,3 +1,4 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent, paymentConfirmations, paymentIntents, paymentTransferClaims, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
@@ -7,6 +8,7 @@ import { requireIntegerVnd, TipPaymentError, type CreatorTipProjection, type Pay
 import { lockTipReceivingDestination } from "./tip-receiving-account.js";
 import { readTipIntentSnapshot } from "./tip-snapshot.js";
 import { readTipPortRecord } from "./tip-port-boundary.js";
+import { retryPaymentAccountChange } from "./payment-account-fence.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
 type Assurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date }>;
@@ -14,7 +16,7 @@ type GuestContent = Readonly<{ name: string | null; message: string | null }>;
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
   applicationRevision: string;
-  db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; paymentsMode: "disabled" | "manual_only";
+  db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; paymentsMode: TipPaymentsMode;
   pageSize: number; recentAuthMs: number; totpAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean>;
@@ -47,7 +49,7 @@ export function createCreatorTipPaymentService(input: Input) {
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };
   const actorValid = (actor: Actor) => { if (!actor || !identifier(actor.userId) || !identifier(actor.sessionId)) fail("not_authorized"); };
   async function boundary<T>(run: () => Promise<T>, readOnly = false): Promise<T> {
-    if (!readOnly && input.paymentsMode !== "manual_only") fail("payments_disabled");
+    if (!readOnly && !isTipPaymentsEnabled(input.paymentsMode)) fail("payments_disabled");
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   function validateAssurance(proof: Assurance | null, at: Date, fresh: boolean): Assurance {
@@ -81,17 +83,22 @@ export function createCreatorTipPaymentService(input: Input) {
   async function project(tx: PawketTransaction, row: Intent, at: Date, claimedAt: Date | null): Promise<CreatorTipProjection> {
     const { transferReference } = readTipIntentSnapshot(row, { keyring: input.keyring, lookupHmacKey: key });
     const state = row.state === "awaiting_transfer" && row.expiresAt <= at ? "expired" : row.state;
-    const common = { id: row.id, reference: transferReference, amountVnd: requireIntegerVnd(row.amountVnd), expiresAt: row.expiresAt.toISOString(), transferClaimedAt: claimedAt?.toISOString() ?? null };
+    const settlementLane = row.settlementLane;
+    if (settlementLane !== "manual_attested" && settlementLane !== "provider_bound") fail("dependency_unavailable");
+    const common = { id: row.id, reference: transferReference, amountVnd: requireIntegerVnd(row.amountVnd), expiresAt: row.expiresAt.toISOString(), transferClaimedAt: claimedAt?.toISOString() ?? null, settlementLane: settlementLane as "manual_attested" | "provider_bound" };
     if (state === "confirmed") {
+      const [confirmation] = await tx.select({ source: paymentConfirmations.source }).from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, row.id)).limit(1);
+      const confirmationSource = confirmation?.source;
+      if (confirmationSource !== "creator_manual" && confirmationSource !== "sepay_automatic" && confirmationSource !== "creator_reviewed_sepay") fail("dependency_unavailable");
       const fields = readTipPortRecord(await input.tips.getConfirmedGuestContent(tx, { tipId: row.tipId, creatorUserId: row.creatorUserId }), ["name", "message"]);
       const boundedText = (value: unknown, maximum: number): value is string | null => value === null || (typeof value === "string" && value.trim() === value &&
         value.normalize("NFC") === value && Array.from(value).length >= 1 && Array.from(value).length <= maximum && !/[\uD800-\uDFFF\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value));
       if (!fields || !boundedText(fields.name, 80) || !boundedText(fields.message, 280) || !row.closedAt) fail("dependency_unavailable");
       const guestContent = Object.freeze({ name: fields.name, message: fields.message });
-      return Object.freeze({ ...common, state, confirmedAt: row.closedAt.toISOString(), guestContent });
+      return Object.freeze({ ...common, state, confirmationSource, confirmedAt: row.closedAt.toISOString(), guestContent });
     }
     if (state !== "awaiting_transfer" && state !== "expired" && state !== "rejected") fail("dependency_unavailable");
-    return Object.freeze({ ...common, state, confirmedAt: null });
+    return Object.freeze({ ...common, state, confirmedAt: null, confirmationSource: null });
   }
   async function claimedAt(tx: PawketTransaction, intentId: string) {
     const [claim] = await tx.select({ at: paymentTransferClaims.claimedAt }).from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intentId)).limit(1);
@@ -131,9 +138,10 @@ export function createCreatorTipPaymentService(input: Input) {
         const keyHash = digest("tip-confirm-command-key", command.idempotencyKey);
         const fingerprint = digest("tip-confirm-command", JSON.stringify([actor.userId, intentId, amountVnd, reference, bankTransactionId, true]));
         let replayed = false;
-        const committed = await input.db.transaction(async (tx) => {
+        const committed = await retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
           const [candidate] = await tx.select().from(paymentIntents).where(and(eq(paymentIntents.id, intentId), eq(paymentIntents.creatorUserId, actor.userId), eq(paymentIntents.purpose, "tip"))).limit(1);
           if (!candidate) fail("not_authorized");
+          if (candidate.settlementLane !== "manual_attested") fail("evidence_mismatch");
           const startedAt = now();
           const started = await beginIdempotentCommand(tx, { actorUserId: actor.userId, commandScope: "payments.tip_confirm", keyHash, requestFingerprint: fingerprint, now: startedAt, expiresAt: new Date(startedAt.getTime() + 86_400_000) });
           if (started.kind !== "acquired" && started.kind !== "replay") fail("idempotency_conflict");
@@ -144,6 +152,7 @@ export function createCreatorTipPaymentService(input: Input) {
           await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`tip-bank:${bankTransactionFingerprint}`}, 0))`);
           const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.id, intentId)).limit(1).for("update");
           if (!intent || intent.creatorUserId !== actor.userId) fail("not_authorized");
+          if (intent.settlementLane !== "manual_attested" || intent.cutoverId !== null) fail("evidence_mismatch");
           const at = now(); validateAssurance(proof, at, true);
           if (at < startedAt) fail("dependency_unavailable");
           const snapshot = readTipIntentSnapshot(intent, { keyring: input.keyring, lookupHmacKey: key });
@@ -172,7 +181,7 @@ export function createCreatorTipPaymentService(input: Input) {
             payload: { paymentIntentId: intentId, tipId: intent.tipId, creatorUserId: actor.userId, confirmationId, correlationId: requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-confirmed-v1:${confirmationId}`, completedAt: at })) fail("idempotency_conflict");
           return project(tx, confirmed, at, await claimedAt(tx, intentId));
-        });
+        }));
         try { input.onCommitted?.(replayed); } catch { /* A metric failure never changes the committed result. */ }
         return committed;
       });
