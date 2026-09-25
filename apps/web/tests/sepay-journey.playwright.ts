@@ -66,6 +66,10 @@ for (const width of [375, 1440]) {
     await expect(page.getByRole("button", { name: "Đối chiếu lại và xác nhận", exact: true })).toBeDisabled();
     await page.getByRole("button", { name: "Tạo khóa ký mới", exact: true }).click();
     await expect(page.getByLabel("Khóa ký chỉ hiển thị lần này", { exact: true })).toHaveValue(syntheticSecret);
+    // The secret renders before refresh finishes. Audit the completed command,
+    // after controls have left their disabled-opacity transition.
+    await expect(page.getByRole("status")).toHaveText("Đã cập nhật kết nối.");
+    await expect(page.getByRole("button", { name: "Tạo khóa ký mới", exact: true })).toHaveCSS("opacity", "1");
     const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, cookies: document.cookie }));
     expect(storage).not.toContain(syntheticSecret);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
