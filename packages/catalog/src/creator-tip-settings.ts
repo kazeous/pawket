@@ -1,3 +1,4 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomUUID } from "node:crypto";
 import {
   appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, creatorHandleClaims,
@@ -54,7 +55,7 @@ type Input = Readonly<{
   applicationRevision: string;
   db: PawketDatabase; visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   creatorAccount: CreatorTipAccountPort; receivingAccount: CreatorTipReceivingAccountPort;
-  paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
+  paymentsMode: TipPaymentsMode; publishingMode: "disabled" | "general_audience";
   platformPolicy: PlatformTipPolicyPort; recentAuthMs: number; commandFingerprintKey: Uint8Array;
   now?: () => Date; idFactory?: () => string;
 }>;
@@ -64,7 +65,7 @@ export function createCreatorTipSettingsService(input: Input) {
   if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 1 || input.recentAuthMs > 900_000) fail("INVALID_POLICY");
   const clock = input.now ?? (() => new Date());
   const id = input.idFactory ?? randomUUID;
-  const modesActive = () => input.paymentsMode === "manual_only" && input.publishingMode === "general_audience";
+  const modesActive = () => isTipPaymentsEnabled(input.paymentsMode) && input.publishingMode === "general_audience";
   const readPolicy = async (tx: PawketTransaction) => readPlatformTipPolicySnapshot(await input.platformPolicy.readPolicy(tx));
   const validTriple = (value: unknown): value is number[] => Array.isArray(value) && value.length === 3 && new Set(value).size === 3 && value.every((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 10_000 && v <= 5_000_000);
   const validPresets = (value: unknown, policy: PlatformTipPolicySnapshot): value is number[] => validTriple(value) && value.every((v) => policy.allowedPresetsVnd.includes(v));

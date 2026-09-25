@@ -1,3 +1,4 @@
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { randomBytes, randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import { TipPaymentError, type AuthorizedTipReceipt, type TipAccess, type TipTransferClaim } from "@pawket/payments";
@@ -6,7 +7,7 @@ import type { createTipService, PublicTipOffering } from "./create-tip.js";
 import { readTipBody, tipBodyRecord, tipCookie, tipCookieHeader, tipJson, tipNetworkKey, tipReceiptCookieName, tipReference, TIP_GUEST_CONTEXT_COOKIE } from "./http-boundary.js";
 
 type Input = Readonly<{
-  appBaseUrl: string; paymentsMode: "disabled" | "manual_only"; publishingMode: "disabled" | "general_audience";
+  appBaseUrl: string; paymentsMode: TipPaymentsMode; publishingMode: "disabled" | "general_audience";
   lookupHmacKey: Uint8Array; guestContextTtlMs: number; rateWindowMs: number; createIpLimit: number; createCreatorLimit: number; receiptLimit: number;
   authenticate(headers: Headers): Promise<Readonly<{ userId: string }> | null>;
   resolveCreatorRateSubject(handle: string): Promise<string | null>;
@@ -63,7 +64,7 @@ export function createTipHttpHandlers(input: Input) {
     !Number.isInteger(input.receiptLimit) || input.receiptLimit < 1 || input.receiptLimit > 1000) throw new TipPaymentError("invalid_request");
   function preflight(request: Request, method: "GET" | "POST", creating = false) {
     if (request.method !== method) return tipJson(405, { code: "method_not_allowed" });
-    if ((method !== "GET" && input.paymentsMode !== "manual_only") || (creating && input.publishingMode !== "general_audience")) return tipJson(503, { code: "payments_disabled" });
+    if ((method !== "GET" && !isTipPaymentsEnabled(input.paymentsMode)) || (creating && input.publishingMode !== "general_audience")) return tipJson(503, { code: "payments_disabled" });
     if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) return tipJson(403, { code: "untrusted_origin" });
     if (new URL(request.url).search) return invalid();
     return null;
@@ -88,7 +89,7 @@ export function createTipHttpHandlers(input: Input) {
       const rejected = preflight(request, "GET"); if (rejected) return rejected;
       if (request.headers.has("origin") && request.headers.get("origin") !== origin) return tipJson(403, { code: "untrusted_origin" });
       if (!validHandle(canonicalHandle)) return tipJson(404, { code: "not_available" });
-      if (input.paymentsMode !== "manual_only" || input.publishingMode !== "general_audience") return tipJson(200, { offering: null });
+      if (!isTipPaymentsEnabled(input.paymentsMode) || input.publishingMode !== "general_audience") return tipJson(200, { offering: null });
       try {
         await throttle(request, "tip_offering", input.receiptLimit);
         return tipJson(200, { offering: publicOffering(await input.creation.getPublicOffering(canonicalHandle), canonicalHandle) });
@@ -138,7 +139,7 @@ export function createTipHttpHandlers(input: Input) {
         await throttle(request, "tip_receipt", input.receiptLimit);
         if (!tipReference(reference)) throw new TipPaymentError("not_authorized");
         const result = await input.receipts.readReceipt({ reference, access: await access(request, reference) });
-        return tipJson(200, { receipt: result.receipt, instruction: input.paymentsMode === "manual_only" ? result.instruction : null, paymentsEnabled: input.paymentsMode === "manual_only" });
+        return tipJson(200, { receipt: result.receipt, instruction: isTipPaymentsEnabled(input.paymentsMode) ? result.instruction : null, paymentsEnabled: isTipPaymentsEnabled(input.paymentsMode) });
       } catch (error) { return failure(error); }
     },
     async claim(request: Request, reference: string): Promise<Response> {

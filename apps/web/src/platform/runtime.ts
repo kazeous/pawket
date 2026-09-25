@@ -18,6 +18,7 @@ import {
   createIdentityCreatorTipAccountPort,
   createIdentityTipBuyerAccountPort,
   createIdentityTipAssurancePort,
+  createIdentitySePayAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
   createIdentityService,
@@ -43,6 +44,8 @@ import {
   createTipReceiptService,
   createTipReceivingAccountEligibilityPort,
   createCreatorTipPaymentService,
+  createSePayConnectionService, createSePayInboxService, createSePayReconciliationService, createSePayReviewService,
+  createSePayOAuthProvider, createSePayBudgetedProvider, createSePayHttpHandlers,
 } from "@pawket/payments";
 import { recordAuthAbuseControl } from "@pawket/observability";
 import {
@@ -52,7 +55,7 @@ import {
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
-import { recordTipOperation, setTipPaymentsEnabledMetric } from "@pawket/observability";
+import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation } from "@pawket/observability";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -79,6 +82,7 @@ type WebPlatformRuntime = {
   creatorTipSettingsHandlers: ReturnType<typeof createCreatorTipSettingsHttpHandlers>;
   tipPolicyHandlers: ReturnType<typeof createTipPolicyHttpHandlers>;
   creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
+  sepayHandlers: ReturnType<typeof createSePayHttpHandlers>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
@@ -474,18 +478,18 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const tipSettings = createCreatorTipSettingsService({
     applicationRevision: env.APP_REVISION,
     db: database.db, visibility: publicCatalog, creatorAccount: createIdentityCreatorTipAccountPort(),
-    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey }),
+    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE }),
     paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
     platformPolicy: tipPolicy,
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, commandFingerprintKey: lookupHmacKey,
   });
   const tipBuyerAccounts = createIdentityTipBuyerAccountPort();
-  setTipPaymentsEnabledMetric(env.TIP_PAYMENTS_MODE === "manual_only");
+  setTipPaymentsEnabledMetric(env.TIP_PAYMENTS_MODE !== "disabled");
   const tipCreation = createTipService({
     applicationRevision: env.APP_REVISION,
     onCommitted: (replayed) => recordTipOperation({ operation: "create", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, creatorEligibility: tipSettings, buyerAccounts: tipBuyerAccounts,
-    payments: createTipPaymentIntentPort({ keyring, lookupHmacKey, intentTtlMs: env.TIP_INTENT_TTL_SECONDS * 1000,
+    payments: createTipPaymentIntentPort({ keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, intentTtlMs: env.TIP_INTENT_TTL_SECONDS * 1000,
       guestReceiptTtlMs: env.TIP_GUEST_RECEIPT_TTL_SECONDS * 1000, openIpLimit: env.TIP_OPEN_IP_LIMIT, openCreatorLimit: env.TIP_OPEN_CREATOR_LIMIT,
       onQrOutcome: (outcome) => recordTipOperation({ operation: "qr", outcome }) }),
     paymentsMode: env.TIP_PAYMENTS_MODE, publishingMode: env.CREATOR_PUBLISHING_MODE,
@@ -534,6 +538,29 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, pageSize: env.TIP_QUEUE_PAGE_SIZE,
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
     assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }),
+  });
+  const sepayEnvironment = env.SEPAY_ENVIRONMENT ?? (env.APP_ENV === "production" ? "live" : "test");
+  const sepayProvider = createSePayBudgetedProvider({ db: database.db, provider: createSePayOAuthProvider(sepayEnvironment) });
+  const sepayAssurance = createIdentitySePayAssurancePort();
+  const sepayConnections = createSePayConnectionService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE,
+    environment: sepayEnvironment, appBaseUrl: env.APP_BASE_URL, redirectUri: env.SEPAY_OAUTH_REDIRECT_URI ?? new URL("/api/v1/creator/tips/sepay/callback", env.APP_BASE_URL).href,
+    applicationRevision: env.APP_REVISION, assurance: sepayAssurance, provider: sepayProvider });
+  const sepayReconciliation = createSePayReconciliationService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE,
+    environment: sepayEnvironment, applicationRevision: env.APP_REVISION, workerIdentity: "web-reviewed-sepay", provider: sepayProvider, connections: sepayConnections,
+    assurance: sepayAssurance, tips: createTipLifecyclePort({ keyring }), maxAttempts: env.SEPAY_PROCESSING_MAX_ATTEMPTS, onOperation: recordSePayOperation });
+  const sepayReviews = createSePayReviewService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, environment: sepayEnvironment,
+    applicationRevision: env.APP_REVISION, assurance: sepayAssurance, authorizeOwner: async (tx, actor) => Boolean(await resolveOwnerSessionPermission(tx, { ...actor, now: new Date() })) });
+  const sepayHandlers = createSePayHttpHandlers({ appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, ingressEnabled: env.SEPAY_INGRESS_MODE === "enabled",
+    lookupHmacKey, authenticate, connections: sepayConnections, reviews: sepayReviews, reconciliation: sepayReconciliation, onOperation: recordSePayOperation,
+    inbox: createSePayInboxService({ db: database.db, keyring, lookupHmacKey, enabled: env.SEPAY_INGRESS_MODE === "enabled", environment: sepayEnvironment }),
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const policy = { action: `sepay_${operation}`, now: new Date(), windowMs: 60_000, blockMs: 60_000 };
+      const [actor, network] = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "sepay-actor", value: actorUserId }), maximumAttempts: operation === "write" ? 20 : 120 }),
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash, maximumAttempts: 120 }),
+      ]);
+      return actor.allowed && network.allowed;
+    },
   });
   const creatorTipHandlers = createCreatorTipHttpHandlers({
     appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, lookupHmacKey, authenticate, service: creatorTips,
@@ -630,6 +657,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     creatorTipSettingsHandlers,
     tipPolicyHandlers,
     creatorTips,
+    sepayHandlers,
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,

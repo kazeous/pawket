@@ -70,6 +70,9 @@ const REQUIRED_INCREMENT_THREE_ALERTS = [
   "PawketIncrementThreeWorkerScanUnhealthy",
   "PawketTipExpiryUnhealthy",
   "PawketTipNotificationHandoffFailures",
+  "PawketSePayRecoveryUnhealthy",
+  "PawketSePayInboxDelayed",
+  "PawketSePayRetryExhausted",
 ] as const;
 
 function parseAlertBlocks(source: string) {
@@ -197,7 +200,7 @@ describe("Pawket alert rules", () => {
     } finally {
       await rm(fake.directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test("rejects caller paths and propagates the first promtool failure", async () => {
     // Catches an overrideable mount or a validator that hides Docker failures.

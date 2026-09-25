@@ -30,6 +30,12 @@ export async function tipRequest(path: string, init: RequestInit = {}, maximumBy
   } finally { clearTimeout(timer); }
 }
 export const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+export function readTipSettlement(value: Record<string, unknown>) {
+  if (value.settlementLane !== "manual_attested" && value.settlementLane !== "provider_bound") throw new TipRequestError("dependency_unavailable");
+  const source = value.confirmationSource;
+  if (value.state === "confirmed" ? (value.settlementLane === "manual_attested" ? source !== "creator_manual" : source !== "sepay_automatic" && source !== "creator_reviewed_sepay") : source !== null) throw new TipRequestError("dependency_unavailable");
+  return { settlementLane: value.settlementLane, confirmationSource: source } as Pick<TipReceiptProjection, "settlementLane" | "confirmationSource">;
+}
 // Drafts live only in this mounted form. Reauthentication can replace the
 // shared session cookie, so verify the account before using any saved intent.
 export async function requireTipDraftActor(expectedUserId: string): Promise<void> {
@@ -63,6 +69,7 @@ export function readCreatedInstruction(value: unknown, handle: string, amount: n
     typeof v.qrPayload !== "string" || v.qrPayload.length < 50 || v.qrPayload.length > 1000) throw new TipRequestError("dependency_unavailable");
   // Only the known authorized display fields cross into component state.
   return { reference: v.reference, creator: { handle, displayName: v.creator.displayName }, amountVnd: amount as TipInstructionProjection["amountVnd"], currency: "VND",
+    ...readTipSettlement(v),
     state: "awaiting_transfer", expiresAt: v.expiresAt, confirmedAt: null, transferClaimedAt: v.transferClaimedAt as string | null,
     destination: { bankBin: v.destination.bankBin, bankName: v.destination.bankName, accountNumber: v.destination.accountNumber, accountName: v.destination.accountName }, qrPayload: v.qrPayload };
 }
@@ -93,6 +100,7 @@ export function readTipReceipt(value: unknown, reference: string): TipReceiptVie
     (r.state === "confirmed" ? !validTime(r.confirmedAt) : r.confirmedAt !== null) ||
     (r.transferClaimedAt !== null && !validTime(r.transferClaimedAt)) || typeof value.paymentsEnabled !== "boolean") throw new TipRequestError("dependency_unavailable");
   const receipt: TipReceiptProjection = { reference, creator: { handle: r.creator.handle, displayName: r.creator.displayName },
+    ...readTipSettlement(r),
     amountVnd: r.amountVnd as TipReceiptProjection["amountVnd"], currency: "VND", state: r.state as TipReceiptProjection["state"], expiresAt: r.expiresAt,
     confirmedAt: r.confirmedAt as string | null, transferClaimedAt: r.transferClaimedAt as string | null };
   let instruction: TipInstructionProjection | null = null;

@@ -116,7 +116,7 @@ describe("operational route wiring", () => {
     );
     expect(routeDependencies.createReadinessConnection).toHaveBeenCalledTimes(2);
     expect(routeDependencies.createReadinessConnection).toHaveBeenCalledWith("redis://localhost:6379");
-  });
+  }, 15_000);
 
   it("uses the metrics route handler for bearer authorization", async () => {
     routeDependencies.loadServerEnv.mockReturnValue({

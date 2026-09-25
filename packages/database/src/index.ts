@@ -1,4 +1,9 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
+export {
+  paymentsSepayConnections, paymentsSepayConnectionRevisions, paymentsSepayOAuthAttempts,
+  paymentsSepayAccountCutovers, paymentsSepayInbox, paymentsSepayInboxConflicts,
+  paymentsSepayProcessing, paymentsSepayDecisions, paymentsSepayTransactions,
+} from "./schema.js";
 export { PLATFORM_TIP_POLICY_BOOTSTRAP_ID, platformTipPolicyCurrent, platformTipPolicyRevisions } from "./schema.js";
 export {
   creatorTipSettings, creatorTipSettingRevisions, tips, paymentIntents,
@@ -101,3 +106,4 @@ export {
   systemRetentionRuns,
   systemOutbox,
 } from "./schema.js";
+export { paymentsSepayProviderBudgets } from "./schema/sepay-budget.js";

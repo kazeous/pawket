@@ -13,7 +13,8 @@ import {
   encryptSensitiveField,
   type EncryptionKeyring,
 } from "@pawket/security";
-import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { lockPaymentAccountLineage, retryPaymentAccountChange } from "./payment-account-fence.js";
 
 import {
   fingerprintReceivingAccount,
@@ -149,10 +150,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
         key: input.lookupHmacKey,
       });
 
-      return input.db.transaction(async (tx) => {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`payments-account:${command.applicantUserId}`}, 0))`,
-        );
+      return retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
         const idempotency = await beginIdempotentCommand(tx, {
           actorUserId: command.applicantUserId,
           commandScope: "payments.receiving_account.propose",
@@ -198,17 +196,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
           .limit(1);
         if (!applicant) throw new ReceivingAccountServiceError("Eligible applicant required");
 
-        const [current] = await tx
-          .select()
-          .from(paymentsReceivingAccountOnboarding)
-          .where(
-            and(
-              eq(paymentsReceivingAccountOnboarding.applicantUserId, command.applicantUserId),
-              isNull(paymentsReceivingAccountOnboarding.retiredAt),
-            ),
-          )
-          .limit(1)
-          .for("update");
+        const current = await lockPaymentAccountLineage(tx, command.applicantUserId, [accountFingerprint]);
 
         if (
           current?.accountFingerprint === accountFingerprint &&
@@ -284,7 +272,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
           throw new ReceivingAccountServiceError("Receiving account command did not complete");
         }
         return projection(created);
-      });
+      }));
     },
   };
 }

@@ -1011,6 +1011,119 @@ describe("shared control repositories", () => {
     }
   });
 
+  test("retention skips a busy physical account fence before locking rows and continues its bounded batch", async () => {
+    // A payment writer may own the fingerprint while preparing to lock its account.
+    // Taking that row first makes retention wait in the account trigger and deadlock.
+    const now = new Date("2001-02-01T12:00:00.000Z");
+    const busyFingerprint = `hmac-sha256:v1:${"K".repeat(43)}`;
+    const availableFingerprint = `hmac-sha256:v1:${"L".repeat(43)}`;
+    const fixtureIds = [1, 2, 3].map((index) => ({
+      user: `i5-retention-fence-${index}`,
+      account: `71000000-0000-4000-8000-00000000000${index}`,
+      onboarding: `72000000-0000-4000-8000-00000000000${index}`,
+      application: `73000000-0000-4000-8000-00000000000${index}`,
+      revision: `74000000-0000-4000-8000-00000000000${index}`,
+      fingerprint: index < 3 ? busyFingerprint : availableFingerprint,
+    }));
+    for (const fixture of fixtureIds) {
+      await client`
+        insert into identity_users
+          (id, name, email, canonical_email, email_verified, email_verified_at,
+           email_verification_provenance, two_factor_enabled, access_status,
+           authorization_version, created_at, updated_at)
+        values (${fixture.user}, 'Retention Fence Artist', ${`${fixture.user}@example.test`},
+          ${`${fixture.user}@example.test`}, true, '2000-01-01T00:00:00Z',
+          'password_email_challenge', false, 'active', 1,
+          '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
+      `;
+      await client`
+        insert into payments_receiving_account_onboarding
+          (id, onboarding_id, applicant_user_id, version, bank_bin, bank_name,
+           account_number_envelope, account_holder_label_envelope, masked_suffix,
+           account_fingerprint, proof_state, created_at, updated_at)
+        values (${fixture.account}, ${fixture.onboarding}, ${fixture.user}, 1,
+          '970436', 'Test Bank', '{"version":1}'::jsonb, '{"version":1}'::jsonb,
+          '•••• 5001', ${fixture.fingerprint}, 'unverified',
+          '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
+      `;
+      await client`
+        insert into creator_applications (id, user_id, state, version, created_at, updated_at)
+        values (${fixture.application}, ${fixture.user}, 'withdrawn', 1,
+          '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
+      `;
+      await client`
+        insert into creator_application_revisions
+          (id, application_id, revision_number, artist_display_name, short_introduction,
+           applicant_email, dob_envelope, portfolio_urls, primary_art_discipline,
+           practice_description, content_intent, proposed_receiving_account_id,
+           age_at_submission, age_evaluated_on, submitted_at, created_at, updated_at)
+        values (${fixture.revision}, ${fixture.application}, 1, 'Retention artist',
+          'Introduction', ${`${fixture.user}@example.test`}, '{"version":1}'::jsonb,
+          '["https://example.test/retention"]'::jsonb, 'illustration', 'Practice',
+          'general_audience_only', ${fixture.account}, 21, '2000-01-01',
+          '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
+      `;
+      // Keep the final application's account reference available for the retry sweep.
+      await client`
+        insert into system_retention_holds
+          (dataset, subject_type, subject_id, reason_category, reference_id, starts_at, created_at)
+        values ('application_content', 'creator_application', ${fixture.application},
+          'legal', ${`${fixture.user}-application`}, '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
+      `;
+    }
+
+    const writer = postgres(databaseUrl, { max: 1 });
+    let transactionOpen = false;
+    try {
+      await writer.unsafe(`set search_path to "${schemaName}", public`);
+      await writer.unsafe("begin");
+      transactionOpen = true;
+      await writer`
+        select pg_advisory_xact_lock(hashtextextended(${`payments:account-fingerprint:${busyFingerprint}`}, 0))
+      `;
+      // Bound a regression's lock wait so it yields a failed run rather than hanging.
+      await client.unsafe("set statement_timeout = '1500ms'");
+      const sweepInput = {
+        db, now, policyVersion: "i5-retention-fence-v1", enforcementPaused: false, batchSize: 3,
+      };
+      const report = await runRetentionSweep({ ...sweepInput, mode: "report_only" });
+      expect(report.find((item) => item.dataset === "receiving_accounts")).toMatchObject({
+        candidateCount: 3, protectedCount: 0, processedCount: 0, outcome: "completed",
+      });
+      const raced = await runRetentionSweep({ ...sweepInput, mode: "enforce" });
+      expect(raced.find((item) => item.dataset === "receiving_accounts")).toMatchObject({
+        candidateCount: 3, protectedCount: 0, processedCount: 1, outcome: "completed",
+      });
+      const accounts = await client<{ id: string; minimized: boolean; has_private_data: boolean }[]>`
+        select id, minimized_at is not null as minimized,
+          account_number_envelope is not null and account_holder_label_envelope is not null as has_private_data
+        from payments_receiving_account_onboarding
+        where id in ${client(fixtureIds.map((fixture) => fixture.account))} order by id
+      `;
+      expect(accounts).toEqual([
+        { id: fixtureIds[0]!.account, minimized: false, has_private_data: true },
+        { id: fixtureIds[1]!.account, minimized: false, has_private_data: true },
+        { id: fixtureIds[2]!.account, minimized: true, has_private_data: false },
+      ]);
+      // The writer can still take its row while retaining the physical fence.
+      await writer.unsafe("set local lock_timeout = '250ms'");
+      expect(await writer`
+        select id from payments_receiving_account_onboarding
+        where account_fingerprint = ${busyFingerprint} for update nowait
+      `).toHaveLength(2);
+      await writer.unsafe("commit");
+      transactionOpen = false;
+      const retried = await runRetentionSweep({ ...sweepInput, mode: "enforce" });
+      expect(retried.find((item) => item.dataset === "receiving_accounts")).toMatchObject({
+        candidateCount: 2, protectedCount: 0, processedCount: 2, outcome: "completed",
+      });
+    } finally {
+      if (transactionOpen) await writer.unsafe("rollback");
+      await writer.end();
+      await client.unsafe("reset statement_timeout");
+    }
+  });
+
   test("retention minimizes the current account referenced by an old final application", async () => {
     // Break caught: eligibility and the binding trigger requiring retired_at even
     // though final application timing is the approved retention clock.

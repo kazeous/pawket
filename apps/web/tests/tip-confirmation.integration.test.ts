@@ -49,7 +49,7 @@ function service(overrides: Partial<Parameters<typeof createCreatorTipSettingsSe
   });
   return createCreatorTipSettingsService({ applicationRevision: "synthetic-increment-four-revision",
     db, visibility, creatorAccount: createIdentityCreatorTipAccountPort(),
-    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey: key }),
+    receivingAccount: createTipReceivingAccountEligibilityPort({ paymentsMode: "manual_only", keyring, lookupHmacKey: key }),
     paymentsMode: "manual_only", publishingMode: "general_audience", platformPolicy: createPlatformTipPolicyReadPort(),
     recentAuthMs: 900_000, commandFingerprintKey: key, now: () => at, ...overrides,
   });
@@ -105,7 +105,7 @@ const command = (f: Fixture): CreateTipCommand => ({ principal: { kind: "guest",
   canonicalHandle: f.handle, amountVnd: 50_000, name: " Synthetic Guest ", message: " Thank you 🎨 ",
   abuseKeyHash: hmac("tip-abuse-key", randomUUID()), idempotencyKey: randomUUID(), requestId: randomUUID() });
 function paymentPort(overrides: Partial<Parameters<typeof createTipPaymentIntentPort>[0]> = {}) {
-  return createTipPaymentIntentPort({ keyring, lookupHmacKey: key, intentTtlMs: 86_400_000, guestReceiptTtlMs: 604_800_000, openIpLimit: 3, openCreatorLimit: 1000, ...overrides });
+  return createTipPaymentIntentPort({ paymentsMode: "manual_only", keyring, lookupHmacKey: key, intentTtlMs: 86_400_000, guestReceiptTtlMs: 604_800_000, openIpLimit: 3, openCreatorLimit: 1000, ...overrides });
 }
 function createService(overrides: Partial<Parameters<typeof createTipService>[0]> = {}) {
   return createTipService({ applicationRevision: "synthetic-increment-four-revision", db, creatorEligibility: service(), payments: paymentPort(), buyerAccounts: createIdentityTipBuyerAccountPort(),

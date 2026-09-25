@@ -207,6 +207,9 @@ importers:
 
   packages/catalog:
     dependencies:
+      '@pawket/config':
+        specifier: workspace:*
+        version: link:../config
       '@pawket/database':
         specifier: workspace:*
         version: link:../database
@@ -293,6 +296,9 @@ importers:
 
   packages/payments:
     dependencies:
+      '@pawket/config':
+        specifier: workspace:*
+        version: link:../config
       '@pawket/database':
         specifier: workspace:*
         version: link:../database
@@ -357,6 +363,9 @@ importers:
       '@pawket/catalog':
         specifier: workspace:*
         version: link:../catalog
+      '@pawket/config':
+        specifier: workspace:*
+        version: link:../config
       '@pawket/database':
         specifier: workspace:*
         version: link:../database

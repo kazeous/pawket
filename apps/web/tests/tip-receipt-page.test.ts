@@ -3,7 +3,7 @@ import { resolveTipReceiptPage } from "../src/platform/tip-receipt-page";
 import { readTipReceipt } from "../src/ui/tips/tip-client";
 
 const reference = "PW0123456789ABCDEF0123";
-const receipt = { reference, creator: { handle: "test-artist", displayName: "Artist" }, amountVnd: 50_000, currency: "VND", state: "confirmed", confirmedAt: "2026-09-12T00:00:00Z", expiresAt: "2026-09-13T00:00:00Z", transferClaimedAt: null };
+const receipt = { reference, creator: { handle: "test-artist", displayName: "Artist" }, amountVnd: 50_000, currency: "VND", state: "confirmed", settlementLane: "manual_attested", confirmationSource: "creator_manual", confirmedAt: "2026-09-12T00:00:00Z", expiresAt: "2026-09-13T00:00:00Z", transferClaimedAt: null };
 const data = { receipt, instruction: null, paymentsEnabled: false };
 function input(response: Response, cookie = "") {
   return { reference, headers: new Headers({ cookie, "x-real-ip": "192.0.2.5" }), appBaseUrl: "https://pawket.test", handlers: { receipt: vi.fn(async () => response) }, authenticate: vi.fn(async (): Promise<{ userId: string } | null> => null) };
@@ -34,6 +34,15 @@ describe("server-rendered private receipt", () => {
     expect(() => readTipReceipt({ ...data, instruction: {} }, reference)).toThrow();
     expect(() => readTipReceipt({ ...data, receipt: { ...receipt, confirmedAt: null } }, reference)).toThrow();
     expect(() => readTipReceipt({ ...data, receipt: { ...receipt, state: "awaiting_transfer" } }, reference)).toThrow();
-    expect(readTipReceipt({ ...data, receipt: { ...receipt, state: "expired", confirmedAt: null } }, reference).receipt.state).toBe("expired");
+    expect(readTipReceipt({ ...data, receipt: { ...receipt, state: "expired", confirmedAt: null, confirmationSource: null } }, reference).receipt.state).toBe("expired");
+  });
+  test("requires lane-specific provenance and never treats provider evidence as manual attestation", () => {
+    for (const confirmationSource of ["sepay_automatic", "creator_reviewed_sepay"]) {
+      expect(readTipReceipt({ ...data, receipt: { ...receipt, settlementLane: "provider_bound", confirmationSource } }, reference).receipt.confirmationSource).toBe(confirmationSource);
+      expect(() => readTipReceipt({ ...data, receipt: { ...receipt, confirmationSource } }, reference)).toThrow();
+    }
+    for (const change of [{ settlementLane: "provider_bound" }, { confirmationSource: null }, { settlementLane: undefined }, { confirmationSource: undefined }]) {
+      expect(() => readTipReceipt({ ...data, receipt: { ...receipt, ...change } }, reference)).toThrow();
+    }
   });
 });

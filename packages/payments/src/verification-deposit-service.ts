@@ -30,6 +30,7 @@ import {
 import { and, asc, desc, eq, gte, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 
 import { fingerprintReceivingAccount } from "./receiving-account-policy.js";
+import { lockPaymentAccountFingerprints, PaymentAccountChangedError, retryPaymentAccountChange } from "./payment-account-fence.js";
 
 const CHALLENGE_LIFETIME_MS = 72 * 60 * 60_000;
 const IDEMPOTENCY_LIFETIME_MS = 24 * 60 * 60_000;
@@ -355,6 +356,13 @@ export function createVerificationDepositService(input: VerificationDepositServi
           throw new VerificationDepositServiceError("Challenge issue conflicts");
         }
 
+        // Account-version fingerprints are immutable. Acquire the physical
+        // account fence before any application, challenge or account row lock.
+        const [candidate] = await tx.select({ fingerprint: paymentsReceivingAccountOnboarding.accountFingerprint })
+          .from(paymentsReceivingAccountOnboarding).where(eq(paymentsReceivingAccountOnboarding.id, command.accountVersionId)).limit(1);
+        if (!candidate) throw new VerificationDepositServiceError("Submitted receiving account required");
+        await lockPaymentAccountFingerprints(tx, [candidate.fingerprint]);
+
         const [application] = await tx
           .select({
             id: creatorApplications.id,
@@ -525,7 +533,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
         ],
         lookupHmacKey: input.lookupHmacKey,
       });
-      return input.db.transaction(async (tx) => {
+      return retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
         const started = await beginIdempotentCommand(tx, {
           actorUserId: command.applicantUserId,
           commandScope: "payments.verification_deposit.report_sent",
@@ -537,6 +545,14 @@ export function createVerificationDepositService(input: VerificationDepositServi
         if (started.kind !== "acquired") {
           throw new VerificationDepositServiceError("Deposit report conflicts");
         }
+        const [candidate] = await tx.select({ accountVersionId: paymentsReceivingAccountOnboarding.id,
+          fingerprint: paymentsReceivingAccountOnboarding.accountFingerprint })
+          .from(paymentsVerificationDepositChallenges).innerJoin(paymentsReceivingAccountOnboarding,
+            eq(paymentsReceivingAccountOnboarding.id, paymentsVerificationDepositChallenges.accountVersionId))
+          .where(and(eq(paymentsVerificationDepositChallenges.id, command.challengeId),
+            eq(paymentsReceivingAccountOnboarding.applicantUserId, command.applicantUserId))).limit(1);
+        if (!candidate) throw new VerificationDepositServiceError("Active challenge required");
+        await lockPaymentAccountFingerprints(tx, [candidate.fingerprint]);
         const [challenge] = await tx
           .select({
             id: paymentsVerificationDepositChallenges.id,
@@ -560,6 +576,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
           )
           .limit(1)
           .for("update");
+        if (challenge?.accountVersionId !== candidate?.accountVersionId) throw new PaymentAccountChangedError();
         if (!challenge || !["issued", "sent_reported"].includes(challenge.state)) {
           throw new VerificationDepositServiceError("Active challenge required");
         }
@@ -587,7 +604,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
           .where(eq(paymentsReceivingAccountOnboarding.id, challenge.accountVersionId));
         await completeCommand(tx, started.recordId, `payments-report-v1:${challenge.id}`, at);
         return { state: "sent_reported" };
-      });
+      }));
     },
 
     async reconcile(command: {
@@ -672,7 +689,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
         lookupHmacKey: input.lookupHmacKey,
       });
 
-      return input.db.transaction(async (tx) => {
+      return retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`payments-reconcile:${bankTransactionFingerprint}`}, 0))`,
         );
@@ -717,52 +734,31 @@ export function createVerificationDepositService(input: VerificationDepositServi
           throw new VerificationDepositServiceError("Reconciliation conflicts");
         }
 
-        let [challenge] = await tx
-          .select()
-          .from(paymentsVerificationDepositChallenges)
-          .where(eq(paymentsVerificationDepositChallenges.referenceHash, actualReferenceHash))
-          .orderBy(desc(paymentsVerificationDepositChallenges.createdAt))
-          .limit(1)
-          .for("update");
-        if (!challenge && sourceAccountFingerprint) {
-          [challenge] = await tx
-            .select({
-              id: paymentsVerificationDepositChallenges.id,
-              applicationId: paymentsVerificationDepositChallenges.applicationId,
-              revisionId: paymentsVerificationDepositChallenges.revisionId,
-              accountVersionId: paymentsVerificationDepositChallenges.accountVersionId,
-              amountVnd: paymentsVerificationDepositChallenges.amountVnd,
-              referenceHash: paymentsVerificationDepositChallenges.referenceHash,
-              state: paymentsVerificationDepositChallenges.state,
-              issuedByOwnerUserId: paymentsVerificationDepositChallenges.issuedByOwnerUserId,
-              stepUpProofId: paymentsVerificationDepositChallenges.stepUpProofId,
-              issuedAt: paymentsVerificationDepositChallenges.issuedAt,
-              expiresAt: paymentsVerificationDepositChallenges.expiresAt,
-              verifiedAt: paymentsVerificationDepositChallenges.verifiedAt,
-              createdAt: paymentsVerificationDepositChallenges.createdAt,
-              updatedAt: paymentsVerificationDepositChallenges.updatedAt,
-            })
-            .from(paymentsVerificationDepositChallenges)
-            .innerJoin(
-              paymentsReceivingAccountOnboarding,
-              and(
-                eq(
-                  paymentsReceivingAccountOnboarding.id,
-                  paymentsVerificationDepositChallenges.accountVersionId,
-                ),
-                eq(
-                  paymentsReceivingAccountOnboarding.accountFingerprint,
-                  sourceAccountFingerprint,
-                ),
-              ),
-            )
-            .where(
-              sql`${paymentsVerificationDepositChallenges.state} in ('issued', 'sent_reported', 'verified')`,
-            )
-            .orderBy(desc(paymentsVerificationDepositChallenges.createdAt))
-            .limit(1)
-            .for("update");
-        }
+        const findCandidate = async () => {
+          const query = () => tx.select({ challenge: paymentsVerificationDepositChallenges,
+            fingerprint: paymentsReceivingAccountOnboarding.accountFingerprint })
+            .from(paymentsVerificationDepositChallenges).innerJoin(paymentsReceivingAccountOnboarding,
+              eq(paymentsReceivingAccountOnboarding.id, paymentsVerificationDepositChallenges.accountVersionId));
+          const [exact] = await query().where(eq(paymentsVerificationDepositChallenges.referenceHash, actualReferenceHash))
+            .orderBy(desc(paymentsVerificationDepositChallenges.createdAt), desc(paymentsVerificationDepositChallenges.id)).limit(1);
+          if (exact || !sourceAccountFingerprint) return exact;
+          const [source] = await query().where(and(eq(paymentsReceivingAccountOnboarding.accountFingerprint, sourceAccountFingerprint),
+            sql`${paymentsVerificationDepositChallenges.state} in ('issued', 'sent_reported', 'verified')`))
+            .orderBy(desc(paymentsVerificationDepositChallenges.createdAt), desc(paymentsVerificationDepositChallenges.id)).limit(1);
+          return source;
+        };
+        const candidate = await findCandidate();
+        await lockPaymentAccountFingerprints(tx, [...(candidate ? [candidate.fingerprint] : []),
+          ...(sourceAccountFingerprint ? [sourceAccountFingerprint] : [])]);
+        // A challenge can appear/change while the fingerprint fence is waiting.
+        // Retry from a fresh transaction rather than acquiring another physical
+        // account fence after row locks, which would invert the lock order.
+        const current = await findCandidate();
+        if (candidate?.challenge.id !== current?.challenge.id || candidate?.fingerprint !== current?.fingerprint ||
+          candidate?.challenge.accountVersionId !== current?.challenge.accountVersionId) throw new PaymentAccountChangedError();
+        const [challenge] = current ? await tx.select().from(paymentsVerificationDepositChallenges)
+          .where(eq(paymentsVerificationDepositChallenges.id, current.challenge.id)).limit(1).for("update") : [];
+        if (challenge?.accountVersionId !== current?.challenge.accountVersionId) throw new PaymentAccountChangedError();
 
         await requireOwnerStepUp(
           input,
@@ -782,6 +778,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
               .from(paymentsReceivingAccountOnboarding)
               .where(eq(paymentsReceivingAccountOnboarding.id, challenge.accountVersionId))
               .limit(1)
+              .for("update")
           : [];
         let unmatchedReason:
           | "amount_mismatch"
@@ -981,7 +978,7 @@ export function createVerificationDepositService(input: VerificationDepositServi
           at,
         );
         return { kind: "matched", receiptId, obligationId };
-      });
+      }));
     },
 
     async revealRefundDestination(command: {

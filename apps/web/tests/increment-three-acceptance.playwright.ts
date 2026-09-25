@@ -534,6 +534,8 @@ async function verifyOperationalEvidence(
     poll: "up",
     refundScan: "up",
     tipExpiryScan: "not_configured",
+    sepay: "disabled",
+    sepayRecoveryScan: "not_configured",
     publicMediaCleanupScan: "up",
     revision: candidateRevision,
     buildRevision: candidateRevision,

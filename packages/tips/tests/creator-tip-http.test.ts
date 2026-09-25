@@ -7,7 +7,7 @@ const actor = { userId: "authenticated-creator", sessionId: "authoritative-sessi
 const reference = `PW${"0".repeat(20)}`;
 const body = { observedAmountVnd: 50_000, observedTransferReference: reference, observedBankTransactionId: "bank-private-transaction", attestedReceived: true };
 const completed: CreatorTipProjection = { id: intentId, reference, amountVnd: requireIntegerVnd(50_000), state: "confirmed", expiresAt: "2026-09-13T00:00:00.000Z",
-  confirmedAt: "2026-09-12T00:00:00.000Z", transferClaimedAt: null, guestContent: { name: "Guest", message: "Thank you" } };
+  confirmedAt: "2026-09-12T00:00:00.000Z", transferClaimedAt: null, settlementLane: "manual_attested", confirmationSource: "creator_manual", guestContent: { name: "Guest", message: "Thank you" } };
 function setup(overrides: Partial<Parameters<typeof createCreatorTipHttpHandlers>[0]> = {}) {
   const service = { listQueue: vi.fn(async (): Promise<CreatorTipQueue> => ({ items: [], nextCursor: null })), confirm: vi.fn(async (): Promise<CreatorTipProjection> => completed) };
   const authenticate = vi.fn(async (): Promise<typeof actor | null> => actor); const throttle = vi.fn(async () => true);

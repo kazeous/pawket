@@ -45,6 +45,14 @@ const testEnv = parseServerEnv({
 });
 
 describe("createLogger", () => {
+  it("redacts configured SePay credentials and OAuth callback URLs even in free text", () => {
+    const records: string[] = [];
+    const secret = "synthetic-sepay-client-secret-for-logging";
+    const logger = createLogger({ service: "web", env: { ...testEnv, SEPAY_OAUTH_CLIENT_SECRET: secret }, destination: { write: (record) => { records.push(record); } } });
+    logger.info({ detail: `credential ${secret}`, callback: "https://pawket.test/api/v1/creator/tips/sepay/callback?code=synthetic-authorization-code&state=synthetic-state" }, "callback handled");
+    expect(records.join("")).not.toMatch(/synthetic-sepay-client-secret|synthetic-authorization-code|synthetic-state/u);
+    expect(records.join("")).toContain("[Redacted]");
+  });
   it("serializes service metadata and request context while redacting sensitive values", () => {
     // Catches log records without correlation metadata or with secrets exposed by serialization.
     const records: string[] = [];

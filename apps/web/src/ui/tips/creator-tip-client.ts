@@ -1,6 +1,6 @@
 import type { CreatorTipProjection, CreatorTipQueue, PaymentIntentState } from "@pawket/payments";
 import type { CreatorTipSettingsSnapshot } from "@pawket/catalog";
-import { isRecord, TipRequestError } from "./tip-client";
+import { isRecord, readTipSettlement, TipRequestError } from "./tip-client";
 import { readTipPolicy } from "./tip-policy-client";
 
 export const tipStateLabels: Record<PaymentIntentState, string> = {
@@ -27,7 +27,7 @@ export function readCreatorTip(v: unknown): CreatorTipProjection {
   if (!isRecord(v) || typeof v.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(v.id) ||
     typeof v.reference !== "string" || !/^PW[A-F0-9]{20}$/u.test(v.reference) || typeof v.amountVnd !== "number" || !Number.isSafeInteger(v.amountVnd) || v.amountVnd < 10_000 || v.amountVnd > 5_000_000 ||
     typeof v.state !== "string" || !Object.hasOwn(tipStateLabels, v.state) || !validTime(v.expiresAt) || (v.transferClaimedAt !== null && !validTime(v.transferClaimedAt))) throw new TipRequestError("dependency_unavailable");
-  const common = { id: v.id, reference: v.reference, amountVnd: v.amountVnd as CreatorTipProjection["amountVnd"], expiresAt: v.expiresAt, transferClaimedAt: v.transferClaimedAt as string | null };
+  const common = { id: v.id, reference: v.reference, amountVnd: v.amountVnd as CreatorTipProjection["amountVnd"], expiresAt: v.expiresAt, transferClaimedAt: v.transferClaimedAt as string | null, ...readTipSettlement(v) };
   if (v.state === "confirmed") {
     const text = (t: unknown, maximum: number): t is string | null => t === null || (typeof t === "string" && Array.from(t).length <= maximum);
     if (!validTime(v.confirmedAt) || !isRecord(v.guestContent) || !text(v.guestContent.name, 80) || !text(v.guestContent.message, 280)) throw new TipRequestError("dependency_unavailable");

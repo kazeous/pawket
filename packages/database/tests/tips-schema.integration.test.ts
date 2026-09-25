@@ -362,7 +362,10 @@ describe("Increment 4 additive payment/tip schema", () => {
       const beforeId = await user(upgradeDb);
       const beforeColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
       await migrate(upgradeDb, { migrationsFolder, migrationsSchema: upgradeJournal });
-      const newTables = ["platform_tip_policy_current", "platform_tip_policy_revisions", "creator_tip_settings", "creator_tip_setting_revisions", "tips", "payment_intents", "payment_guest_capabilities", "payment_transfer_claims", "payment_confirmations"];
+      const newTables = ["platform_tip_policy_current", "platform_tip_policy_revisions", "creator_tip_settings", "creator_tip_setting_revisions", "tips", "payment_intents", "payment_guest_capabilities", "payment_transfer_claims", "payment_confirmations",
+        "payments_sepay_connections", "payments_sepay_connection_revisions", "payments_sepay_oauth_attempts",
+        "payments_sepay_account_cutovers", "payments_sepay_inbox", "payments_sepay_inbox_conflicts",
+        "payments_sepay_processing", "payments_sepay_transactions", "payments_sepay_decisions", "payments_sepay_provider_budgets"];
       const afterColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
       expect(afterColumns.filter((row) => !newTables.includes(row.table_name))).toEqual(beforeColumns);
       const afterId = await user(upgradeDb);

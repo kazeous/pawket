@@ -32,7 +32,7 @@ describe("private tip browser boundary", () => {
   });
   test("requires creator, amount and pending-state binding before displaying a destination", () => {
     const instruction = { reference: "PW0123456789ABCDEF0123", creator: { displayName: "Artist", handle: "test-artist" }, amountVnd: 50_000, currency: "VND", state: "awaiting_transfer",
-      expiresAt: "2026-10-01T00:00:00.000Z", confirmedAt: null, transferClaimedAt: null,
+      expiresAt: "2026-10-01T00:00:00.000Z", confirmedAt: null, transferClaimedAt: null, settlementLane: "manual_attested", confirmationSource: null,
       destination: { bankBin: "970436", bankName: "Vietcombank", accountNumber: "0000001234567", accountName: "TEST ARTIST" }, qrPayload: "0".repeat(100) };
     expect(readCreatedInstruction({ instruction: { ...instruction, privateField: "never kept" } }, "test-artist", 50_000)).toEqual(instruction);
     for (const changed of [{ creator: { handle: "other-artist", displayName: "Other" } }, { amountVnd: 100_000 }, { state: "confirmed" }, { reference: "invalid" }]) {

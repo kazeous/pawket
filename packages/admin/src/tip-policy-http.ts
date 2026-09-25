@@ -7,7 +7,7 @@ type Actor = Readonly<{ userId: string; sessionId: string }>;
 type Input = Readonly<{
   appBaseUrl: string;
   lookupHmacKey: Uint8Array;
-  paymentsMode: "disabled" | "manual_only";
+  paymentsMode: "disabled" | "manual_only" | "sepay_optional";
   publishingMode: "disabled" | "general_audience";
   authenticate(headers: Headers): Promise<Actor | null>;
   authorizeOwner(headers: Headers): Promise<"authorized" | "forbidden" | "unauthenticated">;
@@ -97,7 +97,7 @@ export function createTipPolicyHttpHandlers(input: Input) {
           input.service.getPolicy({ actor }),
           input.service.getHistory({ actor, ...(before === null ? {} : { beforeRevision: Number(before) }), limit: 25 }),
         ]);
-        return json(200, { policy, history, paymentsEnabled: input.paymentsMode === "manual_only", publishingEnabled: input.publishingMode === "general_audience" });
+        return json(200, { policy, history, paymentsEnabled: input.paymentsMode !== "disabled", publishingEnabled: input.publishingMode === "general_audience" });
       } catch (error) { return failure(error); }
     },
     async save(request: Request): Promise<Response> {

@@ -8,7 +8,7 @@ const integerSetting = (minimum: number, maximum: number) => z.preprocess(
 );
 
 export const incrementFourEnvShape = {
-  TIP_PAYMENTS_MODE: z.enum(["disabled", "manual_only"]).default("disabled"),
+  TIP_PAYMENTS_MODE: z.enum(["disabled", "manual_only", "sepay_optional"]).default("disabled"),
   TIP_INTENT_TTL_SECONDS: integerSetting(300, 604_800).default(86_400),
   TIP_GUEST_RECEIPT_TTL_SECONDS: integerSetting(3_600, 2_592_000).default(604_800),
   TIP_RECENT_AUTH_SECONDS: integerSetting(60, 900).default(900),
@@ -27,6 +27,9 @@ export const incrementFourEnvShape = {
 type ParsedIncrementFourEnv = z.infer<z.ZodObject<typeof incrementFourEnvShape>>;
 export type TipPaymentsMode = ParsedIncrementFourEnv["TIP_PAYMENTS_MODE"];
 export type IncrementFourServerEnv = ParsedIncrementFourEnv;
+
+export const isTipPaymentsEnabled = (mode: TipPaymentsMode): boolean => mode === "manual_only" || mode === "sepay_optional";
+export const isSePayAutomationEnabled = (mode: TipPaymentsMode): boolean => mode === "sepay_optional";
 
 type PaymentDependencies = {
   PII_ACTIVE_KEY_ID?: string;
@@ -55,7 +58,7 @@ export function resolveIncrementFourEnv(
   if (resolved.TIP_GUEST_RECEIPT_TTL_SECONDS < resolved.TIP_INTENT_TTL_SECONDS) {
     failures.push({ field: "TIP_GUEST_RECEIPT_TTL_SECONDS", reason: "must cover the intent lifetime" });
   }
-  if (resolved.TIP_PAYMENTS_MODE === "manual_only") {
+  if (isTipPaymentsEnabled(resolved.TIP_PAYMENTS_MODE)) {
     if (!parsed.PII_ACTIVE_KEY_ID || !parsed.PII_KEYRING_JSON?.[parsed.PII_ACTIVE_KEY_ID] || !parsed.PII_LOOKUP_HMAC_KEY) {
       failures.push({ field: "TIP_PAYMENTS_MODE", reason: "requires the validated encryption keyring and lookup HMAC key" });
     }

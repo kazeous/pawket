@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { paymentGuestCapabilities, paymentIntents, paymentTransferClaims, type PawketTransaction } from "@pawket/database";
 import { createLookupHmac, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import { and, count, eq, gt, sql } from "drizzle-orm";
 
 import { TipPaymentError, type GuestTipCapability, type IntegerVnd, type TipInstructionProjection } from "./tip-contracts.js";
 import { tipInstructionProjection as projection, readTipIntentSnapshot, type Snapshot } from "./tip-snapshot.js";
-import { lockTipReceivingDestination } from "./tip-receiving-account.js";
+import { lockTipReceivingDestination, lockTipSettlementBinding } from "./tip-receiving-account.js";
 import { createVietQrTransferInstruction } from "./vietqr.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -18,6 +19,7 @@ function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { t
 export type TipCreationPaymentResult = Readonly<{ instruction: TipInstructionProjection; guestCapability: GuestTipCapability | null }>;
 type Input = Readonly<{
   keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
+  paymentsMode: TipPaymentsMode;
   intentTtlMs: number; guestReceiptTtlMs: number; openIpLimit: number; openCreatorLimit: number;
   idFactory?: () => string; referenceFactory?: () => string;
   onQrOutcome?: (outcome: "produced" | "failed") => void;
@@ -52,10 +54,13 @@ export function createTipPaymentIntentPort(input: Input) {
       tipId: string; creatorUserId: string; accountVersionId: string; amountVnd: IntegerVnd;
       creator: { displayName: string; handle: string }; guestContext: string | null; abuseKeyHash: string; requestId: string; at: Date;
     }): Promise<TipCreationPaymentResult> {
+      if (!isTipPaymentsEnabled(input.paymentsMode)) fail("payments_disabled");
       const intentId = id();
       if (!valid(intentId, UUID)) fail("invalid_request");
       const destination = await lockTipReceivingDestination(tx, command.creatorUserId, command.at, { keyring: input.keyring, lookupHmacKey: key });
       if (!destination || destination.accountVersionId !== command.accountVersionId) fail("not_available");
+      const settlement = await lockTipSettlementBinding(tx, destination, command.creatorUserId, input.paymentsMode);
+      if (!settlement) fail("not_available");
       const snapshot: Snapshot = { version: 1, bankBin: destination.bankBin, bankName: destination.bankName,
         accountNumber: destination.accountNumber, accountName: destination.accountName, creator: { ...command.creator } };
       const destinationEnvelope = encryptSensitiveField({ keyring: input.keyring, plaintext: JSON.stringify(snapshot),
@@ -72,7 +77,7 @@ export function createTipPaymentIntentPort(input: Input) {
           amountVnd: command.amountVnd, referenceHash: digest("tip-transfer-reference", transferReference),
           referenceEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: transferReference,
             binding: { recordType: "payment_intents", recordId: intentId, fieldName: "transfer_reference" } }), destinationEnvelope,
-          accountVersionId: destination.accountVersionId, abuseKeyHash: command.abuseKeyHash, requestId: command.requestId,
+          accountVersionId: destination.accountVersionId, ...settlement, abuseKeyHash: command.abuseKeyHash, requestId: command.requestId,
           createdAt: command.at, updatedAt: command.at, expiresAt: new Date(command.at.getTime() + input.intentTtlMs),
         }).onConflictDoNothing({ target: paymentIntents.referenceHash }).returning();
         if (!intent) continue;
@@ -92,10 +97,16 @@ export function createTipPaymentIntentPort(input: Input) {
     // Internal replay port: caller must first authorize the completed idempotency
     // record and the owning Tips aggregate. It is not a public receipt lookup.
     async replayIntent(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; accountVersionId: string; guestContext: string | null; at: Date }): Promise<TipCreationPaymentResult> {
+      if (!isTipPaymentsEnabled(input.paymentsMode)) fail("payments_disabled");
+      const destination = await lockTipReceivingDestination(tx, command.creatorUserId, command.at, { keyring: input.keyring, lookupHmacKey: key });
+      if (!destination || destination.accountVersionId !== command.accountVersionId) fail("not_available");
+      const settlement = await lockTipSettlementBinding(tx, destination, command.creatorUserId, input.paymentsMode);
+      if (!settlement) fail("not_available");
       const [intent] = await tx.select().from(paymentIntents).where(and(eq(paymentIntents.tipId, command.tipId), eq(paymentIntents.creatorUserId, command.creatorUserId))).limit(1).for("update");
       if (!intent) fail("not_available");
       if (intent.state !== "awaiting_transfer" || intent.expiresAt <= command.at) fail("intent_not_pending");
       if (intent.accountVersionId !== command.accountVersionId) fail("not_available");
+      if (intent.settlementLane !== settlement.settlementLane || intent.cutoverId !== settlement.cutoverId) fail("not_available");
       const [stored] = await tx.select().from(paymentGuestCapabilities).where(eq(paymentGuestCapabilities.paymentIntentId, intent.id)).limit(1);
       let guestCapability: GuestTipCapability | null = null;
       if (command.guestContext !== null) {

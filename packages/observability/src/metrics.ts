@@ -8,7 +8,7 @@ import {
 export const metricsRegistry = new Registry();
 
 const tipOperationsTotal = new Counter({ name: "pawket_tip_operations_total", help: "Tip operation attempts by fixed operation and outcome; not proof of bank settlement.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
-const tipPaymentsEnabled = new Gauge({ name: "pawket_tip_payments_enabled", help: "Whether manual tip payment operations are enabled in this process.", registers: [metricsRegistry] });
+const tipPaymentsEnabled = new Gauge({ name: "pawket_tip_payments_enabled", help: "Whether tip payment operations are enabled in this process.", registers: [metricsRegistry] });
 const tipOutcomes: Readonly<Record<string, readonly string[]>> = {
   create: ["accepted", "replayed", "rejected", "rate_limited", "disabled", "failed"],
   qr: ["produced", "failed"], claim: ["recorded", "replayed", "rejected", "rate_limited", "disabled", "failed"],
@@ -23,6 +23,36 @@ export function recordTipOperation(input: { operation: string; outcome: string; 
 export function setTipPaymentsEnabledMetric(enabled: boolean): void {
   if (typeof enabled !== "boolean") rejectUnsafeMetric();
   tipPaymentsEnabled.set(enabled ? 1 : 0);
+}
+
+const sepayOperationsTotal = new Counter({ name: "pawket_sepay_operations_total", help: "SePay operations by fixed operation and outcome, without payment identifiers.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const sepayLookupDurationSeconds = new Histogram({ name: "pawket_sepay_lookup_duration_seconds", help: "Scoped provider readback latency in seconds.", registers: [metricsRegistry] });
+const sepayBacklog = new Gauge({ name: "pawket_sepay_inbox_total", help: "Current SePay inbox backlog by fixed state.", labelNames: ["state"], registers: [metricsRegistry] });
+const sepayInboxOldestAgeSeconds = new Gauge({ name: "pawket_sepay_inbox_oldest_age_seconds", help: "Age of the oldest pending SePay receipt in seconds.", registers: [metricsRegistry] });
+const sepayRecoveryEnabled = new Gauge({ name: "pawket_sepay_recovery_enabled", help: "Whether SePay reconciliation recovery is configured in this worker.", registers: [metricsRegistry] });
+const sepayOutcomes: Readonly<Record<string, readonly string[]>> = {
+  ingress: ["accepted", "ignored", "duplicate", "conflict", "auth_failed", "rate_limited", "disabled", "failed"],
+  lookup: ["complete", "inconclusive", "rate_limited", "failed"],
+  reconcile: ["confirmed", "review_required", "deferred", "unchanged", "retry_exhausted", "failed"],
+  recovery: ["completed", "failed"],
+};
+export function recordSePayOperation(input: { operation: string; outcome: string; durationSeconds?: number }): void {
+  assertSafeStructuredData(input, "metric");
+  if (!Object.hasOwn(sepayOutcomes, input.operation) || !sepayOutcomes[input.operation]?.includes(input.outcome) ||
+    (input.durationSeconds !== undefined && (input.operation !== "lookup" || !Number.isFinite(input.durationSeconds) || input.durationSeconds < 0))) rejectUnsafeMetric();
+  sepayOperationsTotal.inc({ operation: input.operation, outcome: input.outcome });
+  if (input.durationSeconds !== undefined) sepayLookupDurationSeconds.observe(input.durationSeconds);
+}
+export function setSePayBacklogMetrics(input: { pending: number; reviewRequired: number; oldestAgeSeconds: number }): void {
+  assertSafeStructuredData(input, "metric");
+  if (![input.pending, input.reviewRequired].every((value) => Number.isSafeInteger(value) && value >= 0) || !Number.isFinite(input.oldestAgeSeconds) || input.oldestAgeSeconds < 0) rejectUnsafeMetric();
+  sepayBacklog.set({ state: "pending" }, input.pending);
+  sepayBacklog.set({ state: "review_required" }, input.reviewRequired);
+  sepayInboxOldestAgeSeconds.set(input.oldestAgeSeconds);
+}
+export function setSePayRecoveryEnabledMetric(enabled: boolean): void {
+  if (typeof enabled !== "boolean") rejectUnsafeMetric();
+  sepayRecoveryEnabled.set(enabled ? 1 : 0);
 }
 
 const httpRequestsTotal = new Counter({
@@ -243,6 +273,17 @@ const allowedHttpRoutes = new Set([
   "/api/v1/me",
   "/api/v1/tips/guest-context",
   "/api/v1/creator/tips",
+  "/api/v1/creator/tips/sepay",
+  "/api/v1/creator/tips/sepay/start",
+  "/api/v1/creator/tips/sepay/callback",
+  "/api/v1/creator/tips/sepay/reviews",
+  "/api/v1/creator/tips/sepay/[connectionId]/accounts",
+  "/api/v1/creator/tips/sepay/[connectionId]/bind",
+  "/api/v1/creator/tips/sepay/[connectionId]/change",
+  "/api/v1/creator/tips/sepay/reviews/[inboxId]/confirm",
+  "/api/v1/creator/tips/sepay/reviews/[inboxId]/decide",
+  "/api/v1/admin/sepay",
+  "/api/v1/webhooks/sepay/[connectionId]",
   "/api/v1/creator/tip-settings",
   "/api/v1/creator/tips/[id]/confirm",
   "/api/v1/tips/[reference]",
@@ -322,7 +363,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",

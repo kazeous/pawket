@@ -22,6 +22,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:ui-regression": "playwright test --config apps/web/playwright.ui-regression.config.ts",
     "test:browser:increment-four": "playwright test --config apps/web/playwright.increment-four.config.ts",
+    "test:browser:increment-five": "playwright test --config apps/web/playwright.increment-five.config.ts",
     "test:browser": "pnpm --filter @pawket/web build && pnpm --filter @pawket/worker build && playwright test --config apps/web/playwright.config.ts && playwright test --config apps/web/playwright.increment-three-disabled.config.ts && playwright test --config apps/web/playwright.increment-three.config.ts",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
