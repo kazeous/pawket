@@ -6,6 +6,7 @@ import {
   createCatalogMediaOwnershipPort,
   createCatalogService,
   createCreatorTipSettingsService,
+  createCommissionPackageService,
   createPlatformTipPolicyService,
   createPublicCatalogQuery,
   type VisibilityReadPort,
@@ -18,6 +19,7 @@ import {
   createIdentityCreatorTipAccountPort,
   createIdentityTipBuyerAccountPort,
   createIdentityTipAssurancePort,
+  createIdentityCommissionAssurancePort,
   createIdentitySePayAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
@@ -44,6 +46,7 @@ import {
   createTipReceiptService,
   createTipReceivingAccountEligibilityPort,
   createCreatorTipPaymentService,
+  createCommissionPaymentIntentPort, createCreatorCommissionPaymentService,
   createSePayConnectionService, createSePayInboxService, createSePayReconciliationService, createSePayReviewService,
   createSePayOAuthProvider, createSePayBudgetedProvider, createSePayHttpHandlers,
 } from "@pawket/payments";
@@ -55,15 +58,18 @@ import {
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
-import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation } from "@pawket/observability";
+import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation } from "@pawket/observability";
+import { createCommissionOrderService, createCommissionPolicyReadPort } from "@pawket/orders";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
   createTriageService,
   createTrustHttpHandlers,
+  createCommissionTrustPort,
 } from "@pawket/trust";
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
+import { createCommissionHttpHandlers } from "./commission-http.js";
 
 type WebPlatformRuntime = {
   auth: ReturnType<typeof createPawketAuth>;
@@ -83,6 +89,9 @@ type WebPlatformRuntime = {
   tipPolicyHandlers: ReturnType<typeof createTipPolicyHttpHandlers>;
   creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
   sepayHandlers: ReturnType<typeof createSePayHttpHandlers>;
+  commissionHandlers: ReturnType<typeof createCommissionHttpHandlers>;
+  commissions: ReturnType<typeof createCommissionOrderService>;
+  commissionCatalog: ReturnType<typeof createCommissionPackageService>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
@@ -539,18 +548,47 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
     assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }),
   });
+  const commissionIdentity = createIdentityCommissionAssurancePort();
+  const commissionPolicy = createCommissionPolicyReadPort({ environment: env.APP_ENV });
+  const commissionCommon = { db: database.db, applicationRevision: env.APP_REVISION, keyring, lookupHmacKey,
+    intakeMode: env.COMMISSION_INTAKE_MODE, paymentsMode: env.COMMISSION_PAYMENTS_MODE };
+  const commissionCatalog = createCommissionPackageService({ ...commissionCommon, identity: commissionIdentity, policy: commissionPolicy,
+    visibility: publicCatalog, publishingMode: env.CREATOR_PUBLISHING_MODE,
+    receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.COMMISSION_PAYMENTS_MODE }) });
+  const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
+    policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon) });
+  const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
+    totpAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
+    onCommitted: (replayed) => recordCommissionOperation({ operation: "confirm", outcome: replayed ? "replayed" : "creator_manual" }) });
+  const commissionHandlers = createCommissionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, intakeMode: env.COMMISSION_INTAKE_MODE,
+    paymentsMode: env.COMMISSION_PAYMENTS_MODE, authenticate, orders: commissions, catalog: commissionCatalog, manual: commissionManual,
+    onOperation: recordCommissionOperation,
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const maximumAttempts = operation === "read" ? env.COMMISSION_READ_LIMIT : operation === "request" ? env.COMMISSION_REQUEST_LIMIT : env.COMMISSION_COMMAND_LIMIT;
+      const policy = { action: `commission_${operation}`, now: new Date(), windowMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, blockMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, maximumAttempts };
+      const results = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
+        ...(actorUserId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) })] : []),
+      ]);
+      return results.every((result) => result.allowed);
+    },
+  });
   const sepayEnvironment = env.SEPAY_ENVIRONMENT ?? (env.APP_ENV === "production" ? "live" : "test");
+  const sharedSePayMode = env.TIP_PAYMENTS_MODE === "sepay_optional" || env.COMMISSION_PAYMENTS_MODE === "sepay_optional" ? "sepay_optional"
+    : env.TIP_PAYMENTS_MODE === "manual_only" || env.COMMISSION_PAYMENTS_MODE === "manual_only" ? "manual_only" : "disabled";
   const sepayProvider = createSePayBudgetedProvider({ db: database.db, provider: createSePayOAuthProvider(sepayEnvironment) });
   const sepayAssurance = createIdentitySePayAssurancePort();
-  const sepayConnections = createSePayConnectionService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE,
+  const sepayConnections = createSePayConnectionService({ db: database.db, keyring, lookupHmacKey, paymentsMode: sharedSePayMode,
     environment: sepayEnvironment, appBaseUrl: env.APP_BASE_URL, redirectUri: env.SEPAY_OAUTH_REDIRECT_URI ?? new URL("/api/v1/creator/tips/sepay/callback", env.APP_BASE_URL).href,
     applicationRevision: env.APP_REVISION, assurance: sepayAssurance, provider: sepayProvider });
   const sepayReconciliation = createSePayReconciliationService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE,
     environment: sepayEnvironment, applicationRevision: env.APP_REVISION, workerIdentity: "web-reviewed-sepay", provider: sepayProvider, connections: sepayConnections,
+    commissions: commissions.paymentsLifecycle, commissionPaymentsMode: env.COMMISSION_PAYMENTS_MODE,
+    onCommissionConfirmed: (outcome) => recordCommissionOperation({ operation: "confirm", outcome }),
     assurance: sepayAssurance, tips: createTipLifecyclePort({ keyring }), maxAttempts: env.SEPAY_PROCESSING_MAX_ATTEMPTS, onOperation: recordSePayOperation });
-  const sepayReviews = createSePayReviewService({ db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, environment: sepayEnvironment,
+  const sepayReviews = createSePayReviewService({ db: database.db, keyring, lookupHmacKey, paymentsMode: sharedSePayMode, environment: sepayEnvironment,
     applicationRevision: env.APP_REVISION, assurance: sepayAssurance, authorizeOwner: async (tx, actor) => Boolean(await resolveOwnerSessionPermission(tx, { ...actor, now: new Date() })) });
-  const sepayHandlers = createSePayHttpHandlers({ appBaseUrl: env.APP_BASE_URL, paymentsMode: env.TIP_PAYMENTS_MODE, ingressEnabled: env.SEPAY_INGRESS_MODE === "enabled",
+  const sepayHandlers = createSePayHttpHandlers({ appBaseUrl: env.APP_BASE_URL, paymentsMode: sharedSePayMode, ingressEnabled: env.SEPAY_INGRESS_MODE === "enabled",
     lookupHmacKey, authenticate, connections: sepayConnections, reviews: sepayReviews, reconciliation: sepayReconciliation, onOperation: recordSePayOperation,
     inbox: createSePayInboxService({ db: database.db, keyring, lookupHmacKey, enabled: env.SEPAY_INGRESS_MODE === "enabled", environment: sepayEnvironment }),
     async throttle({ actorUserId, networkKeyHash, operation }) {
@@ -658,6 +696,9 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     tipPolicyHandlers,
     creatorTips,
     sepayHandlers,
+    commissionHandlers,
+    commissions,
+    commissionCatalog,
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,

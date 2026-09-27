@@ -4,6 +4,7 @@ import { types as nodeTypes } from "node:util";
 
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
+import type { CommissionOrderMaintenanceService } from "@pawket/orders";
 
 import {
   acknowledgeOutboxEvent,
@@ -26,6 +27,9 @@ import {
   recordSecurityEmailMetrics,
   recordRetentionMetrics,
   recordTipOperation,
+  recordCommissionOperation,
+  setCommissionOperationalMetrics,
+  setCommissionCleanupConfiguredMetric,
   recordSePayOperation,
   setSePayBacklogMetrics,
   setSePayRecoveryEnabledMetric,
@@ -73,6 +77,7 @@ import {
 import type { WorkerHealthState } from "./worker-health.js";
 import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-email.js";
 import { materializeTipNotification } from "./tip-notification.js";
+import { COMMISSION_OUTBOX_EVENTS, validateCommissionOutboxEvent } from "./commission-events.js";
 
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
@@ -140,9 +145,16 @@ export type SePayWorkerService = {
   processInbox(inboxId: string): Promise<"confirmed" | "review_required" | "deferred" | "unchanged">;
   recoverDue(limit: number): Promise<number>;
 };
+export type CommissionWorkerConfiguration = {
+  paymentsMode?: TipPaymentsMode;
+  batchSize: number;
+  scanIntervalMs: number;
+  createService(db: DatabaseResource["db"]): CommissionOrderMaintenanceService;
+};
 export type SePayWorkerConfiguration = {
   environment: "test" | "live";
   mode: TipPaymentsMode;
+  commissionMode?: TipPaymentsMode;
   providerContractReady: boolean;
   batchSize: number;
   scanIntervalMs: number;
@@ -185,6 +197,7 @@ export type StartWorkerOptions = {
   revision?: string;
   tipPayments?: { mode: TipPaymentsMode; batchSize: number; scanIntervalMs: number; tips: TipExpiryPort };
   sepay?: SePayWorkerConfiguration;
+  commissions?: CommissionWorkerConfiguration;
   concurrency: number;
   batchSize: number;
   leaseMs: number;
@@ -283,7 +296,7 @@ export function createWorkerJobProcessor(input: {
   database: DatabaseResource["db"];
   acknowledge: typeof acknowledgeOutboxEvent;
   mediaQueue?: MediaQueuePublisher;
-  sepay?: { environment: "test" | "live"; mode: TipPaymentsMode; service: SePayWorkerService; resolveSource?: typeof resolveSePayWorkerSource };
+  sepay?: { environment: "test" | "live"; mode: TipPaymentsMode; commissionMode?: TipPaymentsMode; service: SePayWorkerService; resolveSource?: typeof resolveSePayWorkerSource };
   securityEmail?: {
     keyring: EncryptionKeyring;
     sender: SecurityEmailSender;
@@ -319,7 +332,7 @@ export function createWorkerJobProcessor(input: {
             const inboxId = await (input.sepay.resolveSource ?? resolveSePayWorkerSource)(input.database, job.data, input.sepay.environment);
             // Ingress is independent from automatic settlement. The durable inbox
             // remains recoverable after this delivery is acknowledged while paused.
-            if (input.sepay.mode === "sepay_optional") await input.sepay.service.processInbox(inboxId);
+            if (input.sepay.mode === "sepay_optional" || input.sepay.commissionMode === "sepay_optional") await input.sepay.service.processInbox(inboxId);
           } else if (job.data.eventType === "identity.security_email.requested.v1") {
             const handoffId = job.data.payload.handoffId;
             const purpose = job.data.payload.purpose;
@@ -374,6 +387,9 @@ export function createWorkerJobProcessor(input: {
                 outcome: "attention_required",
               });
             }
+          } else if (COMMISSION_OUTBOX_EVENTS.has(job.data.eventType)) {
+            try { await validateCommissionOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
+            catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Commission event validation failed"); }
           } else if ((TIP_NOTIFICATION_EVENTS as readonly string[]).includes(job.data.eventType)) {
             try {
               if (!input.securityEmail) throw new Error("Security email delivery unavailable");
@@ -550,9 +566,15 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.tipPayments && (!["disabled", "manual_only", "sepay_optional"].includes(options.tipPayments.mode) || !Number.isInteger(options.tipPayments.batchSize) || options.tipPayments.batchSize < 1 || options.tipPayments.batchSize > 500 ||
     !Number.isSafeInteger(options.tipPayments.scanIntervalMs) || options.tipPayments.scanIntervalMs < 5_000 || options.tipPayments.scanIntervalMs > 300_000 || typeof options.tipPayments.tips?.expireTip !== "function")) throw new Error("Invalid tip expiry configuration");
   if (options.sepay && (!["test", "live"].includes(options.sepay.environment) || !["disabled", "manual_only", "sepay_optional"].includes(options.sepay.mode) ||
+    (options.sepay.commissionMode !== undefined && !["disabled", "manual_only", "sepay_optional"].includes(options.sepay.commissionMode)) ||
     typeof options.sepay.providerContractReady !== "boolean" || !Number.isInteger(options.sepay.batchSize) || options.sepay.batchSize < 1 || options.sepay.batchSize > 100 ||
     !Number.isInteger(options.sepay.scanIntervalMs) || options.sepay.scanIntervalMs < 5_000 || options.sepay.scanIntervalMs > 300_000 || typeof options.sepay.createService !== "function" ||
-    (options.tipPayments && options.tipPayments.mode !== options.sepay.mode))) throw new Error("Invalid SePay worker configuration");
+    (options.tipPayments && options.tipPayments.mode !== options.sepay.mode) ||
+    (options.commissions?.paymentsMode !== undefined && options.commissions.paymentsMode !== (options.sepay.commissionMode ?? "disabled")))) throw new Error("Invalid SePay worker configuration");
+  if (options.commissions && (!Number.isInteger(options.commissions.batchSize) || options.commissions.batchSize < 1 || options.commissions.batchSize > 500 ||
+    (options.commissions.paymentsMode !== undefined && !["disabled", "manual_only", "sepay_optional"].includes(options.commissions.paymentsMode)) ||
+    !Number.isInteger(options.commissions.scanIntervalMs) || options.commissions.scanIntervalMs < 5_000 || options.commissions.scanIntervalMs > 300_000 ||
+    typeof options.commissions.createService !== "function")) throw new Error("Invalid commission worker configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -573,6 +595,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let mediaQueue: MediaQueueResource | undefined;
   let mediaWorker: MediaWorkerResource | undefined;
   let sepayService: SePayWorkerService | undefined;
+  let commissionService: CommissionOrderMaintenanceService | undefined;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -619,6 +642,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   try {
     database = dependencies.createDatabase(options.databaseUrl);
     sepayService = options.sepay?.createService(database.db, workerId);
+    commissionService = options.commissions?.createService(database.db);
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -634,7 +658,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         acknowledge: dependencies.acknowledge,
         mediaQueue,
         securityEmail: options.securityEmail,
-        ...(options.sepay && sepayService ? { sepay: { environment: options.sepay.environment, mode: options.sepay.mode, service: sepayService } } : {}),
+        ...(options.sepay && sepayService ? { sepay: { environment: options.sepay.environment, mode: options.sepay.mode, commissionMode: options.sepay.commissionMode, service: sepayService } } : {}),
       }),
       workerConnection,
       options.concurrency,
@@ -671,6 +695,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let currentDispatch: Promise<void> | undefined;
   let currentSePayScan: Promise<void> | undefined;
+  let currentCommissionScan: Promise<void> | undefined;
+  let lastCommissionScanAt = 0;
+  let commissionScanCursor: string | null = null;
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
   let lastTipExpiryScanAt = 0;
@@ -686,15 +713,20 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
 
   setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
   const tipExpiryEnabled = options.tipPayments !== undefined && isTipPaymentsEnabled(options.tipPayments.mode);
-  const sepayRecoveryEnabled = options.sepay?.mode === "sepay_optional";
+  const sepayRecoveryEnabled = options.sepay?.mode === "sepay_optional" || options.sepay?.commissionMode === "sepay_optional";
+  setCommissionCleanupConfiguredMetric(options.commissions !== undefined);
   setSePayRecoveryEnabledMetric(sepayRecoveryEnabled);
   setTipPaymentsEnabledMetric(tipExpiryEnabled);
   if (options.healthState) {
+    options.healthState.commissionCleanupConfigured = options.commissions !== undefined;
+    options.healthState.commissionCleanupMaximumAgeMs = options.commissions ? options.commissions.scanIntervalMs * 3 : null;
+    options.healthState.lastCommissionCleanupSucceededAt = null;
     options.healthState.tipExpiryConfigured = tipExpiryEnabled;
     options.healthState.tipExpiryMaximumAgeMs = tipExpiryEnabled ? options.tipPayments!.scanIntervalMs * 3 : null;
     options.healthState.sepayRecoveryConfigured = sepayRecoveryEnabled;
     options.healthState.sepayRecoveryMaximumAgeMs = sepayRecoveryEnabled ? options.sepay!.scanIntervalMs * 3 + 120_000 : null;
-    options.healthState.sepayStatus = options.sepay?.mode === "disabled" || !tipExpiryEnabled ? "disabled" : !options.sepay ? "not_configured" : !options.sepay.providerContractReady ? "contract_pending" : "configured";
+    const paymentPurposeEnabled = tipExpiryEnabled || isTipPaymentsEnabled(options.commissions?.paymentsMode ?? options.sepay?.commissionMode ?? "disabled");
+    options.healthState.sepayStatus = !paymentPurposeEnabled ? "disabled" : !options.sepay ? "not_configured" : !options.sepay.providerContractReady ? "contract_pending" : "configured";
     options.healthState.lastSePayRecoverySucceededAt = null;
   }
   if (sepayRecoveryEnabled) setWorkerScanHealthMetric({ scan: "sepay_recovery", healthy: false });
@@ -906,9 +938,36 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanCommissionsIfDue = async (scanAt: number): Promise<void> => {
+    const config = options.commissions;
+    if (!running || !config || !commissionService || scanAt - lastCommissionScanAt < config.scanIntervalMs) return;
+    lastCommissionScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "commission_cleanup", healthy: false });
+    try {
+      const expiry = await commissionService.expireDue(config.batchSize);
+      const recovery = await commissionService.recoverInvalidations({ limit: config.batchSize, afterId: commissionScanCursor });
+      if (![expiry.scanned, expiry.expired, recovery.scanned, recovery.invalidated, recovery.deferred].every((n) => Number.isInteger(n) && n >= 0 && n <= config.batchSize) ||
+        expiry.expired > expiry.scanned || recovery.invalidated + recovery.deferred > recovery.scanned ||
+        (recovery.nextAfterId !== null && (!/^[0-9a-f-]{36}$/iu.test(recovery.nextAfterId) || recovery.scanned !== config.batchSize))) throw new Error("Invalid commission cleanup result");
+      commissionScanCursor = recovery.nextAfterId;
+      recordCommissionOperation({ operation: "cleanup", outcome: "expired", count: expiry.expired });
+      recordCommissionOperation({ operation: "cleanup", outcome: "invalidated", count: recovery.invalidated });
+      recordCommissionOperation({ operation: "cleanup", outcome: "deferred", count: recovery.deferred });
+      setCommissionOperationalMetrics(await commissionService.readOperationalReport());
+      recordCommissionOperation({ operation: "cleanup", outcome: "completed" });
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "commission_cleanup", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "commission_cleanup", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastCommissionCleanupSucceededAt = succeededAt;
+    } catch {
+      recordCommissionOperation({ operation: "cleanup", outcome: "failed" });
+      logger.error({ category: "commission_cleanup_failed" }, "Commission cleanup failed");
+    }
+  };
+
   const scanSePayIfDue = async (scanAt: number): Promise<void> => {
     const config = options.sepay;
-    if (!running || !config || !sepayService || config.mode !== "sepay_optional" || scanAt - lastSePayScanAt < config.scanIntervalMs) return;
+    if (!running || !config || !sepayService || (config.mode !== "sepay_optional" && config.commissionMode !== "sepay_optional") || scanAt - lastSePayScanAt < config.scanIntervalMs) return;
     lastSePayScanAt = scanAt;
     setWorkerScanHealthMetric({ scan: "sepay_recovery", healthy: false });
     try {
@@ -1005,6 +1064,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       );
     } finally {
       await scanTipExpiryIfDue(Date.now());
+      if (!currentCommissionScan) {
+        currentCommissionScan = scanCommissionsIfDue(Date.now()).finally(() => { currentCommissionScan = undefined; });
+      }
       // Provider readback has its own bounded network budget. Keep one scan in
       // flight without delaying outbox dispatch, notification handoff or health.
       if (!currentSePayScan) {
@@ -1050,6 +1112,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     const gracefulClose = async (): Promise<void> => {
       await currentDispatch;
       await currentSePayScan;
+      await currentCommissionScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       await attemptClose("worker", () => worker.close());
       if (mediaQueue) await attemptClose("media-queue", () => mediaQueue.close());

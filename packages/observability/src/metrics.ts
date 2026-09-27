@@ -7,6 +7,52 @@ import {
 
 export const metricsRegistry = new Registry();
 
+const commissionOperationsTotal = new Counter({ name: "pawket_commission_operations_total", help: "Commission operations by fixed operation and outcome, without private order or payment fields.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const commissionOutcomes: Readonly<Record<string, readonly string[]>> = {
+  cleanup: ["completed", "expired", "invalidated", "deferred", "failed"],
+  request: ["accepted", "replayed", "capacity_full", "rejected", "rate_limited", "disabled", "failed"],
+  command: ["accepted", "replayed", "version_conflict", "rejected", "rate_limited", "disabled", "failed"],
+  confirm: ["creator_manual", "sepay_automatic", "creator_reviewed_sepay", "replayed", "conflict", "rejected", "failed"],
+  event: ["validated", "failed"],
+};
+const commissionCleanupConfigured = new Gauge({ name: "pawket_commission_cleanup_configured", help: "Commission cleanup is configured independently of intake and payment pauses.", registers: [metricsRegistry] });
+const commissionOrdersCurrent = new Gauge({ name: "pawket_commission_orders_current", help: "Current commission orders by fixed lifecycle state.", labelNames: ["state"], registers: [metricsRegistry] });
+const commissionExpiryBacklog = new Gauge({ name: "pawket_commission_expiry_backlog", help: "Commission orders past their closing deadline by fixed state.", labelNames: ["state"], registers: [metricsRegistry] });
+const commissionExpiryLag = new Gauge({ name: "pawket_commission_expiry_oldest_lag_seconds", help: "Seconds since the oldest pending commission closing deadline.", registers: [metricsRegistry] });
+const commissionOverdue = new Gauge({ name: "pawket_commission_overdue_orders", help: "Paid commission orders past their immutable delivery deadline; not proof of delivery failure.", registers: [metricsRegistry] });
+const commissionRetentionInventory = new Gauge({ name: "pawket_commission_retention_inventory", help: "Protected commission retention inventory. Report only; no deletion policy is authorized.", labelNames: ["dataset"], registers: [metricsRegistry] });
+export function setCommissionCleanupConfiguredMetric(configured: boolean): void {
+  if (typeof configured !== "boolean") rejectUnsafeMetric();
+  commissionCleanupConfigured.set(configured ? 1 : 0);
+}
+export function setCommissionOperationalMetrics(input: {
+  requested: number; quoted: number; awaitingPayment: number; inProgress: number;
+  expiredRequests: number; expiredQuotes: number; expiredPayments: number;
+  oldestExpiryLagSeconds: number; overdue: number;
+  retentionUnacceptedClosed: number; retentionAccepted: number;
+}): void {
+  assertSafeStructuredData(input, "metric");
+  const counts = [input.requested, input.quoted, input.awaitingPayment, input.inProgress, input.expiredRequests, input.expiredQuotes, input.expiredPayments, input.overdue, input.retentionUnacceptedClosed, input.retentionAccepted];
+  if (!counts.every((n) => Number.isSafeInteger(n) && n >= 0) || !Number.isFinite(input.oldestExpiryLagSeconds) || input.oldestExpiryLagSeconds < 0 ||
+    input.expiredRequests > input.requested || input.expiredQuotes > input.quoted || input.expiredPayments > input.awaitingPayment || input.overdue > input.inProgress) rejectUnsafeMetric();
+  commissionOrdersCurrent.set({ state: "requested" }, input.requested);
+  commissionOrdersCurrent.set({ state: "quoted" }, input.quoted);
+  commissionOrdersCurrent.set({ state: "awaiting_payment" }, input.awaitingPayment);
+  commissionOrdersCurrent.set({ state: "in_progress" }, input.inProgress);
+  commissionExpiryBacklog.set({ state: "requested" }, input.expiredRequests);
+  commissionExpiryBacklog.set({ state: "quoted" }, input.expiredQuotes);
+  commissionExpiryBacklog.set({ state: "awaiting_payment" }, input.expiredPayments);
+  commissionExpiryLag.set(input.oldestExpiryLagSeconds);
+  commissionOverdue.set(input.overdue);
+  commissionRetentionInventory.set({ dataset: "unaccepted_closed_90d" }, input.retentionUnacceptedClosed);
+  commissionRetentionInventory.set({ dataset: "accepted" }, input.retentionAccepted);
+}
+export function recordCommissionOperation(input: { operation: string; outcome: string; count?: number }): void {
+  assertSafeStructuredData(input, "metric"); const count = input.count ?? 1;
+  if (!Object.hasOwn(commissionOutcomes, input.operation) || !commissionOutcomes[input.operation]?.includes(input.outcome) || !Number.isSafeInteger(count) || count < 0 || count > 500) rejectUnsafeMetric();
+  commissionOperationsTotal.inc({ operation: input.operation, outcome: input.outcome }, count);
+}
+
 const tipOperationsTotal = new Counter({ name: "pawket_tip_operations_total", help: "Tip operation attempts by fixed operation and outcome; not proof of bank settlement.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
 const tipPaymentsEnabled = new Gauge({ name: "pawket_tip_payments_enabled", help: "Whether tip payment operations are enabled in this process.", registers: [metricsRegistry] });
 const tipOutcomes: Readonly<Record<string, readonly string[]>> = {
@@ -273,6 +319,9 @@ const allowedHttpRoutes = new Set([
   "/api/v1/me",
   "/api/v1/tips/guest-context",
   "/api/v1/creator/tips",
+  "/api/v1/commissions", "/api/v1/creator/commissions", "/api/v1/creator/commissions/packages", "/api/v1/creator/commissions/packages/change", "/api/v1/creator/commissions/settings",
+  "/api/v1/public/creators/[handle]/commissions",
+  ...["/api/v1/commissions/[orderId]", "/api/v1/creator/commissions/[orderId]"].flatMap((path) => [path, ...["accept", "quote", "close", "claim", "confirm", "quotes", "timeline"].map((action) => `${path}/${action}`)]),
   "/api/v1/creator/tips/sepay",
   "/api/v1/creator/tips/sepay/start",
   "/api/v1/creator/tips/sepay/callback",
@@ -363,7 +412,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",

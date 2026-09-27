@@ -27,9 +27,9 @@ export default async function CreatorSePayPage({ searchParams }: { searchParams:
     if (results[0].status === "fulfilled" && results[0].value.ok) initial = readSePaySnapshot(await results[0].value.json());
     if (results[1].status === "fulfilled" && results[1].value.ok) queue = readSePayQueue(await results[1].value.json());
   } catch { error = "Chưa tải được thông tin SePay. Vui lòng thử tải lại."; }
-  return <AppShell context="Đối soát SePay" action={{ href: "/creator/tips", label: "Quản lý tip" }}>
-    <section className="flex min-w-0 flex-col gap-6"><header className="workspace-header"><div><p className="eyebrow">Tip</p><h1>Đối soát qua SePay</h1><p className="lede">Quản lý kết nối nhận tiền và kiểm tra các giao dịch cần đối chiếu.</p></div></header>
-      <CreatorSePay initial={initial} initialQueue={queue} actorUserId={actor.userId} paymentsEnabled={env.TIP_PAYMENTS_MODE !== "disabled"} initialError={error} oauthResult={typeof params.oauth === "string" ? params.oauth : null} />
+  return <AppShell context="Đối soát SePay" action={{ href: "/creator", label: "Trang nghệ sĩ" }}>
+    <section className="flex min-w-0 flex-col gap-6"><header className="workspace-header"><div><p className="eyebrow">Thanh toán tip và commission</p><h1>Đối soát qua SePay</h1><p className="lede">Quản lý kết nối nhận tiền và kiểm tra các giao dịch cần đối chiếu.</p></div></header>
+      <CreatorSePay initial={initial} initialQueue={queue} actorUserId={actor.userId} paymentsEnabled={env.TIP_PAYMENTS_MODE !== "disabled" || env.COMMISSION_PAYMENTS_MODE !== "disabled"} initialError={error} oauthResult={typeof params.oauth === "string" ? params.oauth : null} />
     </section>
   </AppShell>;
 }

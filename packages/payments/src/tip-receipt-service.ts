@@ -9,6 +9,7 @@ import { readTipIntentSnapshot, tipInstructionProjection } from "./tip-snapshot.
 import { readTipPortRecord } from "./tip-port-boundary.js";
 import { lockTipReceivingDestination, lockTipSettlementBinding } from "./tip-receiving-account.js";
 import { retryPaymentAccountChange } from "./payment-account-fence.js";
+import { isTipPayment } from "./payment-purpose.js";
 
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
@@ -49,10 +50,11 @@ export function createTipReceiptService(input: Input) {
   async function find(tx: PawketTransaction, reference: string) {
     if (!referenceValid(reference)) fail("not_authorized");
     const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.referenceHash, digest("tip-transfer-reference", reference))).limit(1);
-    if (!intent || intent.purpose !== "tip") fail("not_authorized");
+    if (!intent || !isTipPayment(intent)) fail("not_authorized");
     return intent;
   }
   async function authorize(tx: PawketTransaction, intent: Intent, access: TipAccess, at: Date, verifyActiveBuyer = true): Promise<{ buyerUserId: string | null; capabilityId: string | null }> {
+    if (!isTipPayment(intent)) fail("not_authorized");
     if (!access || (access.kind !== "buyer" && access.kind !== "guest")) fail("not_authorized");
     const ownership = readTipPortRecord(await input.tips.getTipOwnership(tx, intent.tipId), ["buyerUserId"]);
     if (!ownership) fail("not_authorized");

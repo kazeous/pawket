@@ -25,7 +25,7 @@ async function syntheticUi(page: Page, options: { totp?: boolean; uncertain?: bo
     if (request.method() === "GET") {
       if (url.pathname === endpoint) return send({ snapshot: { available: true, blockReason: null, connection: connection() } });
       if (url.pathname === `${endpoint}/reviews`) return send({ queue: { nextCursor: null, items: confirmed ? [] : [{ id: inboxId, connectionId, version: 3,
-        status: "review_required", reason: "amount_mismatch", amountVnd: 50_000, reference: "PW0123456789ABCDEF0123", receivedAt: "2026-09-24T01:00:00.000Z" }] } });
+        status: "review_required", reason: "amount_mismatch", amountVnd: 50_000, reference: "PW0123456789ABCDEF0123", receivedAt: "2026-09-24T01:00:00.000Z", payment: { purpose: "tip", resourceId: "14000000-0000-4000-8000-000000000003" } }] } });
     }
     commands.push({ path: url.pathname, key: request.headers()["idempotency-key"], body: request.postDataJSON() });
     if (url.pathname.endsWith("/change")) {

@@ -47,6 +47,9 @@ import { createWorkerHealthState } from "../src/worker-health.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const valkeyUrl = process.env.TEST_VALKEY_URL;
+const emptyCommissionReport = async () => ({ requested: 0, quoted: 0, awaitingPayment: 0, inProgress: 0,
+  expiredRequests: 0, expiredQuotes: 0, expiredPayments: 0, oldestExpiryLagSeconds: 0, overdue: 0,
+  retentionUnacceptedClosed: 0, retentionAccepted: 0 });
 
 const incrementThreeTerminalEvents = [
   "creator.page_initialized.v1",
@@ -1332,6 +1335,45 @@ describe("worker shutdown", () => {
     };
   }
 
+  test("commission cleanup runs through pauses and queue failure, retries, and advances its fair scan cursor", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const state = createWorkerHealthState(); const logger = { info: vi.fn(), error: vi.fn() };
+    const cursor = randomUUID(); const expireDue = vi.fn().mockRejectedValueOnce(new Error("private synthetic order detail")).mockResolvedValue({ scanned: 0, expired: 0 });
+    const recoverInvalidations = vi.fn().mockResolvedValueOnce({ scanned: 2, invalidated: 1, deferred: 1, nextAfterId: cursor })
+      .mockResolvedValue({ scanned: 0, invalidated: 0, deferred: 0, nextAfterId: null });
+    const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger, healthState: state,
+      tipPayments: { mode: "disabled", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      commissions: { batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) },
+      dependencies: { ...doubles.dependencies, dispatch: vi.fn().mockRejectedValue(new Error("queue unavailable")) } });
+    try {
+      await vi.advanceTimersByTimeAsync(0); expect(state.lastCommissionCleanupSucceededAt).toBeNull();
+      await vi.advanceTimersByTimeAsync(5_000); expect(state.lastCommissionCleanupSucceededAt).not.toBeNull();
+      expect(recoverInvalidations).toHaveBeenLastCalledWith({ limit: 2, afterId: null });
+      await vi.advanceTimersByTimeAsync(5_000); expect(recoverInvalidations).toHaveBeenLastCalledWith({ limit: 2, afterId: cursor });
+      await vi.advanceTimersByTimeAsync(5_000); expect(recoverInvalidations).toHaveBeenLastCalledWith({ limit: 2, afterId: null });
+      expect(logger.error).toHaveBeenCalledWith({ category: "commission_cleanup_failed" }, "Commission cleanup failed");
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private synthetic order detail");
+    } finally { await handle.stop(); }
+    const calls = expireDue.mock.calls.length; await vi.advanceTimersByTimeAsync(10_000); expect(expireDue).toHaveBeenCalledTimes(calls);
+  });
+
+  test("commission scans do not overlap or stall polling, and shutdown drains the current scan", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const scan = deferred<{ scanned: number; expired: number }>();
+    const expireDue = vi.fn(() => scan.promise); const recoverInvalidations = vi.fn().mockResolvedValue({ scanned: 0, invalidated: 0, deferred: 0, nextAfterId: null });
+    const options = { databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger: { info: vi.fn(), error: vi.fn() },
+      commissions: { batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) }, dependencies: doubles.dependencies };
+    await expect(startWorker({ ...options, commissions: { ...options.commissions, batchSize: 501 } })).rejects.toThrow("Invalid commission worker configuration");
+    expect(doubles.acquisitions).toHaveLength(0); const handle = await startWorker(options);
+    try {
+      await vi.advanceTimersByTimeAsync(15_000); expect(expireDue).toHaveBeenCalledTimes(1); expect(doubles.dispatch.mock.calls.length).toBeGreaterThanOrEqual(15);
+      let stopped = false; const stopping = handle.stop().then(() => { stopped = true; });
+      await vi.advanceTimersByTimeAsync(1_000); expect(stopped).toBe(false); expect(doubles.calls).not.toContain("postgres");
+      scan.resolve({ scanned: 0, expired: 0 }); await stopping; expect(doubles.calls).toContain("postgres");
+      expect(recoverInvalidations).toHaveBeenCalledTimes(1);
+    } finally { scan.resolve({ scanned: 0, expired: 0 }); await handle.stop(); }
+  });
+
   test.each(["manual_only", "sepay_optional"] as const)("%s tip expiry retries independently of outbox failure and logs only fixed categories", async (mode) => {
     vi.useFakeTimers(); const doubles = runtimeDoubles(); const healthState = createWorkerHealthState();
     const logger = { info: vi.fn(), error: vi.fn() };
@@ -1359,6 +1401,21 @@ describe("worker shutdown", () => {
     const handle = await startWorker(options);
     try { await vi.advanceTimersByTimeAsync(10_000); expect(expireTipIntents).not.toHaveBeenCalled(); expect(healthState.tipExpiryConfigured).toBe(false); }
     finally { await handle.stop(); }
+  });
+
+  test("one shared SePay recovery runs for commission while tip payments are disabled", async () => {
+    vi.useFakeTimers(); const doubles = runtimeDoubles(); const state = createWorkerHealthState(); const recoverDue = vi.fn().mockResolvedValue(0);
+    const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
+      concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, healthState: state, logger: { info: vi.fn(), error: vi.fn() },
+      tipPayments: { mode: "disabled", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
+      sepay: { environment: "test", mode: "disabled", commissionMode: "sepay_optional", providerContractReady: false, batchSize: 5, scanIntervalMs: 5_000,
+        createService: () => ({ recoverDue, processInbox: vi.fn() }) },
+      dependencies: { ...doubles.dependencies, readSePayBacklog: vi.fn().mockResolvedValue({ pending: 0, reviewRequired: 0, oldestAgeSeconds: 0 }) } });
+    try {
+      await vi.advanceTimersByTimeAsync(0); expect(recoverDue).toHaveBeenCalledTimes(1);
+      expect(state).toMatchObject({ tipExpiryConfigured: false, sepayRecoveryConfigured: true, sepayStatus: "contract_pending" });
+      await vi.advanceTimersByTimeAsync(5_000); expect(recoverDue).toHaveBeenCalledTimes(2);
+    } finally { await handle.stop(); }
   });
 
   test("SePay DB recovery survives outbox failure, records freshness and stops scheduling on shutdown", async () => {

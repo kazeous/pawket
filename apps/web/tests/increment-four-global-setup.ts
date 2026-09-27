@@ -20,7 +20,10 @@ export const tipPolicyOwnerUserId = "tip-policy-browser-owner";
 export const tipPolicyOwnerSessionId = "tip-policy-browser-owner-session";
 export const tipPolicyOwnerSessionToken = "tip-policy-browser-owner-token-000000000000000";
 export default async function setup() {
-  if (browserDatabaseConfiguration.targetDatabaseName !== "pawket_increment4_tips_browser") throw new Error("Unexpected tip browser database");
+  await seedCreatorPaymentBrowserFixture("pawket_increment4_tips_browser");
+}
+export async function seedCreatorPaymentBrowserFixture(expectedDatabase: "pawket_increment4_tips_browser" | "pawket_increment6_commissions_browser") {
+  if (browserDatabaseConfiguration.targetDatabaseName !== expectedDatabase) throw new Error("Unexpected creator payment browser database");
   await prepareIncrementThreeDatabase();
   const database = createDatabase(browserDatabaseUrl); const { db } = database; const at = new Date();
   const key = new Uint8Array(32).fill(2);

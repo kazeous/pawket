@@ -34,6 +34,9 @@ const nextConfig: NextConfig = {
         source: "/api/v1/creator/tip-settings",
         headers: [{ key: "Cache-Control", value: "private, no-store, max-age=0" }, { key: "Referrer-Policy", value: "no-referrer" }],
       },
+      ...["/commissions/:path*", "/creators/:handle/commissions/:path*", "/api/v1/commissions/:path*", "/api/v1/creator/commissions/:path*", "/api/v1/public/creators/:handle/commissions"].map((source) => ({
+        source, headers: [{ key: "Cache-Control", value: "private, no-store, max-age=0" }, { key: "Referrer-Policy", value: "no-referrer" }],
+      })),
       ...["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*", "/tips/:path*", "/api/v1/tips/:path*", "/api/v1/creator/tips/:path*", "/api/v1/public/creators/:handle/tips"].map((source) => ({
         source,
         headers: [

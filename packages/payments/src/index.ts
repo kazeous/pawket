@@ -74,3 +74,6 @@ export { resolveSePayWorkerSource, readSePayBacklog, type SePayOutboxSource } fr
 export { createSePayBudgetedProvider } from "./sepay-provider-budget.js";
 export { createSePayReviewService, type SePayReviewItem, type SePayReviewQueue } from "./sepay-review-service.js";
 export { createSePayHttpHandlers } from "./sepay-http.js";
+export { readPaymentPurpose, isTipPayment, type PaymentPurpose, type CommissionPaymentLifecyclePort, type CommissionSettlementCommand } from "./payment-purpose.js";
+export { createCommissionPaymentIntentPort, type CommissionPaymentIntentPort, type CommissionPaymentProjection, type CommissionPaymentMode } from "./commission-intent-port.js";
+export { createCreatorCommissionPaymentService, type ConfirmCreatorCommissionCommand } from "./creator-commission-service.js";

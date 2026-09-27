@@ -10,7 +10,7 @@ import {
 } from "@pawket/database";
 import { createCreatorTipSettingsService, createPublicCatalogQuery, createPlatformTipPolicyReadPort, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, createIdentityTipAssurancePort } from "@pawket/identity";
-import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService, createCreatorTipPaymentService, expireTipPaymentIntents } from "@pawket/payments";
+import { createTipReceivingAccountEligibilityPort, fingerprintReceivingAccount, createTipPaymentIntentPort, createTipReceiptService, createCreatorTipPaymentService, expireTipPaymentIntents, isTipPayment } from "@pawket/payments";
 import { createEncryptionKeyring, encryptSensitiveField, createLookupHmac } from "@pawket/security";
 import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
 import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
@@ -150,7 +150,7 @@ function creatorService(overrides: Partial<Parameters<typeof createCreatorTipPay
 async function pending(options: Parameters<typeof session>[1] = {}, creation: Partial<Parameters<typeof createTipService>[0]> = {}) {
   const f = await optedIn(); const actor = await session(f, options); const c = command(f); const created = await createService(creation).createTip(c);
   const [intent] = (await evidence(f)).intents;
-  if (!intent) throw new Error("Missing synthetic intent");
+  if (!intent || !isTipPayment(intent)) throw new Error("Missing synthetic tip intent");
   const confirm = { actor, paymentIntentId: intent.id, observedAmountVnd: 50_000, observedTransferReference: created.instruction.reference,
     observedBankTransactionId: `txn-${randomUUID()}`, attestedReceived: true, idempotencyKey: randomUUID(), requestId: randomUUID() };
   return { f, actor, created, intent, confirm };

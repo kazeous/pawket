@@ -13,6 +13,7 @@ import { SePayProviderError, type SePayProviderPort } from "./sepay-provider.js"
 import { parseAuthenticatedSePayWebhook } from "./sepay-webhook.js";
 import { readTipIntentSnapshot } from "./tip-snapshot.js";
 import { lockTipReceivingDestination } from "./tip-receiving-account.js";
+import { readPaymentPurpose, type CommissionPaymentLifecyclePort } from "./payment-purpose.js";
 import { createSePayCryptography, requireSePayAssurance, sepayFail, sepayIdentifier, sepayUuid, validateSePayCommand, SePayServiceError, type SePayActor, type SePayAssurancePort } from "./sepay-service-support.js";
 
 type ReviewCommand = { actor: SePayActor; inboxId: string; expectedVersion: number; idempotencyKey: string; requestId: string; attestedReceived: true; reason: string };
@@ -23,9 +24,12 @@ type Input = Readonly<{
   connections: Pick<ReturnType<typeof createSePayConnectionService>, "getReadbackAccess">;
   assurance: SePayAssurancePort;
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean> };
+  commissions?: CommissionPaymentLifecyclePort;
+  commissionPaymentsMode?: "disabled" | "manual_only" | "sepay_optional";
   now?: () => Date;
   maxAttempts?: number;
   onOperation?: (event: { operation: string; outcome: string; durationSeconds?: number }) => void;
+  onCommissionConfirmed?: (source: "sepay_automatic" | "creator_reviewed_sepay") => void;
 }>;
 
 export function createSePayReconciliationService(input: Input) {
@@ -36,7 +40,7 @@ export function createSePayReconciliationService(input: Input) {
   const metric = (event: { operation: string; outcome: string; durationSeconds?: number }) => { try { input.onOperation?.(event); } catch { /* Financial results are independent of telemetry. */ } };
   async function process(inboxId: string, review?: ReviewCommand): Promise<"confirmed" | "review_required" | "deferred" | "unchanged"> {
     if (!sepayUuid(inboxId)) sepayFail("invalid_request");
-    if (input.paymentsMode === "disabled") sepayFail("payments_disabled");
+    if (input.paymentsMode === "disabled" && (input.commissionPaymentsMode ?? "disabled") === "disabled") sepayFail("payments_disabled");
     if (review) { validateSePayCommand(review); if (review.attestedReceived !== true || !Number.isSafeInteger(review.expectedVersion) || review.expectedVersion < 1 || typeof review.reason !== "string" || review.reason.trim() !== review.reason || review.reason.length < 1 || review.reason.length > 500 || /[\u0000-\u001f\u007f]/u.test(review.reason)) sepayFail("invalid_request"); }
     const owner = randomUUID();
     const claim = await input.db.transaction(async (tx) => {
@@ -80,7 +84,7 @@ export function createSePayReconciliationService(input: Input) {
       return retry ? "deferred" : "review_required";
     }
     try {
-      if (!review && (input.paymentsMode !== "sepay_optional" || !claim.connection.automationEnabled)) return disposition("automation_paused");
+      if (!review && !claim.connection.automationEnabled) return disposition("automation_paused");
       if (claim.connection.status !== "ready") return disposition("connection_not_ready");
       if (!claim.inbox.rawEnvelope) return disposition("invalid_evidence");
       const raw = Buffer.from(crypt.decrypt("sepay_inbox", inboxId, "raw_body", claim.inbox.rawEnvelope), "utf8");
@@ -91,6 +95,10 @@ export function createSePayReconciliationService(input: Input) {
       const referenceHash = createLookupHmac({ key: input.lookupHmacKey, context: "tip-transfer-reference", value: event.reference! });
       const [candidate] = await input.db.select().from(paymentIntents).where(and(eq(paymentIntents.referenceHash, referenceHash), eq(paymentIntents.creatorUserId, claim.connection.creatorUserId))).limit(1);
       if (!candidate) return disposition("not_found");
+      const purpose = readPaymentPurpose(candidate);
+      if (!purpose) return disposition("invalid_evidence");
+      const purposeMode = purpose.kind === "tip" ? input.paymentsMode : input.commissionPaymentsMode ?? "disabled";
+      if (purposeMode === "disabled" || ((!review || purpose.kind === "commission") && purposeMode !== "sepay_optional") || (purpose.kind === "commission" && !input.commissions)) return disposition("automation_paused");
       if (candidate.settlementLane !== "provider_bound" || !candidate.cutoverId) return disposition("manual_lane");
       if (candidate.state !== "awaiting_transfer" || candidate.expiresAt <= now()) return disposition("intent_not_pending");
       const access = await input.connections.getReadbackAccess(claim.connection.id);
@@ -109,11 +117,12 @@ export function createSePayReconciliationService(input: Input) {
       const matched = matchSePayTip({ ...matchInput, now: now() });
       if (matched.kind !== "matched") return disposition(matched.reason);
       const transaction = matched.transaction;
-      return await input.db.transaction(async (tx) => {
+      const result = await input.db.transaction(async (tx) => {
         const keyHash = review ? crypt.hash("review-key", review.idempotencyKey) : crypt.hash("automatic-confirm", inboxId);
         const started = review ? await beginIdempotentCommand(tx, { actorUserId: review.actor.userId, commandScope: "payments.sepay_confirm", keyHash,
           requestFingerprint: crypt.hash("review-confirm", JSON.stringify([inboxId, review.expectedVersion, true, review.reason])), now: now(), expiresAt: new Date(now().getTime() + 86_400_000) }) : null;
         if (started && started.kind !== "acquired") sepayFail("idempotency_conflict");
+        if (purpose.kind === "commission" && !await input.commissions?.lockSettlement(tx, { orderId: purpose.orderId, creatorUserId: candidate.creatorUserId, at: now() })) sepayFail("not_available");
         const proof = review ? requireSePayAssurance(await input.assurance.getTipSessionAssurance(tx, review.actor, now()), now(), true) : null;
         const destination = await lockTipReceivingDestination(tx, candidate.creatorUserId, now(), input);
         if (!destination || destination.accountVersionId !== candidate.accountVersionId || destination.accountFingerprint !== access.connection.accountFingerprint) sepayFail("evidence_mismatch");
@@ -142,19 +151,25 @@ export function createSePayReconciliationService(input: Input) {
           actorSessionId: review?.actor.sessionId ?? null, primaryAuthenticatedAt: proof?.primaryAuthenticatedAt ?? null, totpVerifiedAt: proof?.totpEnrolled ? proof.totpVerifiedAt : null,
           idempotencyKeyHash: review ? keyHash : null, requestId, confirmedAt: at });
         const [confirmed] = await tx.update(paymentIntents).set({ state: "confirmed", closedAt: at, updatedAt: at }).where(and(eq(paymentIntents.id, intent.id), eq(paymentIntents.state, "awaiting_transfer"), gt(paymentIntents.expiresAt, at))).returning();
-        if (!confirmed || !await input.tips.completeTip(tx, { tipId: intent.tipId, creatorUserId: intent.creatorUserId, amountVnd: intent.amountVnd, at })) sepayFail("intent_not_pending");
+        if (!confirmed) sepayFail("intent_not_pending");
+        const completed = purpose.kind === "tip"
+          ? await input.tips.completeTip(tx, { tipId: purpose.tipId, creatorUserId: intent.creatorUserId, amountVnd: intent.amountVnd, at })
+          : await input.commissions?.confirmPayment(tx, { orderId: purpose.orderId, creatorUserId: intent.creatorUserId, paymentIntentId: intent.id, amountVnd: intent.amountVnd, at, actor: review?.actor ?? null, requestId });
+        if (completed !== true) sepayFail("intent_not_pending");
         await tx.update(paymentsSepayProcessing).set({ status: "confirmed", version: state.version + 1, leaseOwner: null, leaseExpiresAt: null, lastErrorCode: null, updatedAt: at }).where(eq(paymentsSepayProcessing.inboxId, inboxId));
         await tx.insert(paymentsSepayDecisions).values({ id: randomUUID(), inboxId, action: "confirmed", reason: review?.reason ?? "exact_provider_readback", expectedVersion: state.version,
           actorUserId: review?.actor.userId ?? null, actorSessionId: review?.actor.sessionId ?? null, idempotencyKeyHash: review ? keyHash : null, createdAt: at });
         await appendAdminAuditEvent(tx, { actorUserId: review?.actor.userId ?? `system:${input.workerIdentity}`, actorSessionId: review?.actor.sessionId ?? null,
-          subjectType: "payment_intent", subjectId: intent.id, action: "tip.confirmed", outcome: "succeeded", beforeState: { state: "awaiting_transfer" },
+          subjectType: "payment_intent", subjectId: intent.id, action: `${purpose.kind}.confirmed`, outcome: "succeeded", beforeState: { state: "awaiting_transfer" },
           afterState: { state: "confirmed", confirmationId }, assurance: { method: review ? "creator_attestation_provider_readback" : "worker_provider_readback" },
           applicationRevision: input.applicationRevision, requestId, occurredAt: at });
-        await insertOutboxEvent(tx, { eventType: "tip.confirmed.v1", eventVersion: 1, aggregateType: "payment_intent", aggregateId: intent.id,
-          payload: { paymentIntentId: intent.id, tipId: intent.tipId, creatorUserId: intent.creatorUserId, confirmationId, correlationId: requestId }, occurredAt: at });
+        await insertOutboxEvent(tx, { eventType: `${purpose.kind}.confirmed.v1`, eventVersion: 1, aggregateType: "payment_intent", aggregateId: intent.id,
+          payload: { paymentIntentId: intent.id, ...(purpose.kind === "tip" ? { tipId: purpose.tipId } : { orderId: purpose.orderId }), creatorUserId: intent.creatorUserId, confirmationId, correlationId: requestId }, occurredAt: at });
         if (started?.kind === "acquired" && !await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `sepay-confirmed:${confirmationId}`, completedAt: at })) sepayFail("idempotency_conflict");
         return "confirmed" as const;
       });
+      if (purpose.kind === "commission") { try { input.onCommissionConfirmed?.(review ? "creator_reviewed_sepay" : "sepay_automatic"); } catch { /* Financial commit is independent of telemetry. */ } }
+      return result;
     } catch (error) {
       if (error instanceof SePayProviderError) {
         metric({ operation: "lookup", outcome: error.code === "rate_limited" ? "rate_limited" : "failed" });
@@ -169,7 +184,7 @@ export function createSePayReconciliationService(input: Input) {
     async processInbox(inboxId: string) { const outcome = await process(inboxId); metric({ operation: "reconcile", outcome }); return outcome; },
     async confirmReviewed(command: ReviewCommand) { const outcome = await process(command.inboxId, command); metric({ operation: "reconcile", outcome }); return outcome; },
     async recoverDue(limit = 20): Promise<number> {
-      if (input.paymentsMode === "disabled") return 0;
+      if (input.paymentsMode === "disabled" && (input.commissionPaymentsMode ?? "disabled") === "disabled") return 0;
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) sepayFail("invalid_request");
       const rows = await input.db.select({ id: paymentsSepayProcessing.inboxId }).from(paymentsSepayProcessing)
         .innerJoin(paymentsSepayInbox, eq(paymentsSepayInbox.id, paymentsSepayProcessing.inboxId))

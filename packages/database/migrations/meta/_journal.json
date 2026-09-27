@@ -204,6 +204,20 @@
       "when": 1790235775654,
       "tag": "0028_increment_5_provider_budget",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1790342546768,
+      "tag": "0029_increment_6_commissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1790385025090,
+      "tag": "0030_increment_6_payment_purpose",
+      "breakpoints": true
     }
   ]
 }

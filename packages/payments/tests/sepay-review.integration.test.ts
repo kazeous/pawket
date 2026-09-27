@@ -25,7 +25,7 @@ describe("private SePay exception review and owner diagnostics", () => {
     const other = await fixture.creator(); const foreign = await exception(other);
     const service = reviews(creator); const result = await service.list({ actor: creator.actor });
     expect(result.items).toEqual([{ id: own.inbox.id, connectionId: own.connected.connection.id, version: own.state.version, status: "review_required",
-      reason: "automation_paused", amountVnd: 50_000, reference: own.intent.reference, receivedAt: own.inbox.receivedAt.toISOString() }]);
+      reason: "automation_paused", amountVnd: 50_000, reference: own.intent.reference, receivedAt: own.inbox.receivedAt.toISOString(), payment: { purpose: "tip", resourceId: own.intent.tipId } }]);
     expect(JSON.stringify(result)).not.toMatch(/accountNumber|secret|envelope|guest|synthetic-access/iu);
     await expect(service.list({ actor: creator.actor, cursor: foreign.inbox.id })).rejects.toMatchObject({ code: "invalid_request" });
     await expect(service.list({ actor: { ...creator.actor, sessionId: "revoked-session" } })).rejects.toMatchObject({ code: "not_authorized" });

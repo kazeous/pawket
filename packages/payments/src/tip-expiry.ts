@@ -24,6 +24,7 @@ export async function expireTipPaymentIntents(input: Readonly<{
         .from(paymentIntents).where(and(eq(paymentIntents.purpose, "tip"), eq(paymentIntents.state, "awaiting_transfer"), lte(paymentIntents.expiresAt, at)))
         .orderBy(asc(paymentIntents.expiresAt), asc(paymentIntents.id)).limit(input.batchSize).for("update", { skipLocked: true });
       for (const row of rows) {
+        if (!row.tipId) throw new TipPaymentError("dependency_unavailable");
         const [expired] = await tx.update(paymentIntents).set({ state: "expired", closedAt: at, updatedAt: at }).where(and(eq(paymentIntents.id, row.id), eq(paymentIntents.state, "awaiting_transfer"), lte(paymentIntents.expiresAt, at))).returning({ id: paymentIntents.id });
         if (!expired || await input.tips.expireTip(tx, { tipId: row.tipId, creatorUserId: row.creatorUserId, amountVnd: row.amountVnd, at }) !== true) throw new TipPaymentError("dependency_unavailable");
         await appendAdminAuditEvent(tx, { actorUserId: "system:tip-expiry", subjectType: "payment_intent", subjectId: row.id, action: "tip.expired", outcome: "succeeded",

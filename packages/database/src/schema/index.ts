@@ -1,5 +1,12 @@
 export { systemOutbox } from "./system-outbox.js";
 export {
+  COMMISSION_POLICY_BOOTSTRAP_ID, commissionPolicyRevisions, commissionPolicyCurrent,
+  creatorCommissionSettings, commissionPackages, commissionPackageRevisions,
+  commissionOrders, commissionBriefs, commissionQuoteRevisions, commissionTermsSnapshots,
+  commissionAcceptances, commissionReservations, commissionEvents,
+  type CommissionPublicTerms, type CommissionDraftDocument,
+} from "./commissions.js";
+export {
   paymentsSepayConnections, paymentsSepayConnectionRevisions, paymentsSepayOAuthAttempts,
   paymentsSepayAccountCutovers, paymentsSepayInbox, paymentsSepayInboxConflicts,
   paymentsSepayProcessing, paymentsSepayDecisions, paymentsSepayTransactions,

@@ -8,7 +8,8 @@
     "./increment-two": "./src/increment-two.ts",
     "./increment-three": "./src/increment-three.ts",
     "./increment-four": "./src/increment-four.ts",
-    "./increment-five": "./src/increment-five.ts"
+    "./increment-five": "./src/increment-five.ts",
+    "./increment-six": "./src/increment-six.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

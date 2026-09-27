@@ -42,6 +42,10 @@ const reportTriageRoute = /^\/api\/v1\/admin\/content-reports\/[^/]+$/u;
 const mediaDeliveryRoute = /^\/media\/[^/]+\/[^/]+$/u;
 
 export function boundedRoute(pathname: string): string {
+  if (["/api/v1/commissions", "/api/v1/creator/commissions", "/api/v1/creator/commissions/packages", "/api/v1/creator/commissions/packages/change", "/api/v1/creator/commissions/settings"].includes(pathname)) return pathname;
+  if (/^\/api\/v1\/public\/creators\/[^/]+\/commissions$/u.test(pathname)) return "/api/v1/public/creators/[handle]/commissions";
+  const commission = /^(\/api\/v1\/(?:creator\/)?commissions)\/[^/]+(\/(?:accept|quote|close|claim|confirm|quotes|timeline))?$/u.exec(pathname);
+  if (commission) return `${commission[1]}/[orderId]${commission[2] ?? ""}`;
   if (pathname === "/" || pathname === "/api/metrics") return pathname;
   if (pathname === "/api/health/live" || pathname === "/api/health/ready") return pathname;
   if (pathname === "/api/v1/creator-page") return pathname;

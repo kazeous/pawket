@@ -25,3 +25,4 @@ export * from "./auth-candidate/session-assurance.js";
 export * from "./auth-candidate/session-fields.js";
 export * from "./auth-candidate/session-token-adapter.js";
 export * from "./auth-candidate/totp-replay.js";
+export * from "./commission-assurance-port.js";

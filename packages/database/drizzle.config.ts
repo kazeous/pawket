@@ -22,5 +22,6 @@ export default defineConfig({
     schemaPath("sepay.ts"),
     schemaPath("sepay-budget.ts"),
     schemaPath("platform-tip-policy.ts"),
+    schemaPath("commissions.ts"),
   ],
 });

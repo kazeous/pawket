@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { loadServerEnv } from "@pawket/config";
+import Link from "next/link";
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
@@ -42,6 +43,7 @@ export default async function CreatorShellPage() {
           <h1>Góc làm việc trang nhà sáng tạo</h1>
           <p className="lede">Chỉnh sửa bản nháp, xem trước riêng tư và chỉ xuất bản khi bạn sẵn sàng.</p>
           <a className="text-link" href="/creator/tips">Quản lý tip</a>
+          <Link prefetch={false} className="text-link" href="/creator/commissions">Quản lý commission</Link>
         </div>
       </header>
       <CreatorPageWorkbench initialWorkspace={workspace} />

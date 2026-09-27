@@ -542,3 +542,82 @@ tests:
             exp_annotations:
               summary: Worker public media cleanup scan has stopped completing
               runbook: ops/runbooks/creator-publication.md
+
+  - name: commission cleanup must run with payments disabled and missing first success
+    interval: 1m
+    input_series:
+      - series: pawket_commission_cleanup_configured
+        values: '1x6'
+      - series: pawket_tip_payments_enabled
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketCommissionCleanupUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketCommissionCleanupUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Commission cleanup is missing unhealthy or stale even during payment pauses
+              runbook: ops/runbooks/commission-operations.md
+
+  - name: fresh commission cleanup stays quiet and overdue work needs an hour
+    interval: 1m
+    input_series:
+      - series: pawket_commission_cleanup_configured
+        values: '1x61'
+      - series: 'pawket_worker_scan_healthy{scan="commission_cleanup"}'
+        values: '1x61'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="commission_cleanup"}'
+        values: '0+60x61'
+      - series: pawket_commission_overdue_orders
+        values: '1x61'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: PawketCommissionCleanupUnhealthy
+        exp_alerts: []
+      - eval_time: 59m
+        alertname: PawketCommissionDeliveryOverdue
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PawketCommissionDeliveryOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Paid commissions have passed their recorded delivery deadline
+              runbook: ops/runbooks/commission-operations.md
+
+  - name: stale commission success and unpaid expiry backlog are actionable
+    interval: 1m
+    input_series:
+      - series: pawket_commission_cleanup_configured
+        values: '1x21'
+      - series: 'pawket_worker_scan_healthy{scan="commission_cleanup"}'
+        values: '1x21'
+      - series: 'pawket_worker_last_success_timestamp_seconds{scan="commission_cleanup"}'
+        values: '0x21'
+      - series: pawket_commission_expiry_oldest_lag_seconds
+        values: '1000x21'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: PawketCommissionCleanupUnhealthy
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PawketCommissionCleanupUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Commission cleanup is missing unhealthy or stale even during payment pauses
+              runbook: ops/runbooks/commission-operations.md
+      - eval_time: 5m
+        alertname: PawketCommissionExpiryDelayed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Commission closing deadlines are more than fifteen minutes behind
+              runbook: ops/runbooks/commission-operations.md

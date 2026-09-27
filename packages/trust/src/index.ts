@@ -28,3 +28,4 @@ export type {
   ReportTarget,
 } from "./trust-ports.js";
 export { createTrustHttpHandlers, type TrustHttpHandlers } from "./trust-http.js";
+export { createCommissionTrustPort } from "./commission-trust-port.js";

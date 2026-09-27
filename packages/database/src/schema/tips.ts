@@ -14,6 +14,9 @@ import { platformTipPolicyRevisions } from "./platform-tip-policy";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
 import { paymentsSepayAccountCutovers, paymentsSepayTransactions } from "./sepay";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { commissionOrders } from "./commissions";
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
@@ -91,7 +94,8 @@ export const tips = pgTable("tips", {
 export const paymentIntents = pgTable("payment_intents", {
   id: uuid("id").primaryKey(),
   purpose: text("purpose").notNull().default("tip"),
-  tipId: uuid("tip_id").notNull(),
+  tipId: uuid("tip_id"),
+  commissionOrderId: uuid("commission_order_id"),
   creatorUserId: text("creator_user_id").notNull(),
   amountVnd: vnd("amount_vnd").notNull(),
   currency: text("currency").notNull().default("VND"),
@@ -111,13 +115,17 @@ export const paymentIntents = pgTable("payment_intents", {
   updatedAt: time("updated_at").notNull(),
 }, (table) => [
   uniqueIndex("payment_intents_tip_uidx").on(table.tipId),
+  uniqueIndex("payment_intents_commission_uidx").on(table.commissionOrderId),
   uniqueIndex("payment_intents_reference_uidx").on(table.referenceHash),
   uniqueIndex("payment_intents_confirmation_binding_uidx").on(table.id, table.creatorUserId, table.amountVnd, table.referenceHash, table.accountVersionId),
   index("payment_intents_creator_queue_idx").on(table.creatorUserId, table.state, table.createdAt, table.id),
   index("payment_intents_expiry_idx").on(table.expiresAt, table.id).where(sql`${table.state} = 'awaiting_transfer'`),
   index("payment_intents_open_abuse_idx").on(table.abuseKeyHash, table.createdAt).where(sql`${table.state} = 'awaiting_transfer'`),
   foreignKey({ name: "payment_intents_tip_binding_fk", columns: [table.tipId, table.creatorUserId, table.amountVnd], foreignColumns: [tips.id, tips.creatorUserId, tips.amountVnd] }).onDelete("restrict").onUpdate("restrict"),
-  check("payment_intents_purpose_check", sql`${table.purpose} = 'tip' and ${table.currency} = 'VND'`),
+  foreignKey({ name: "payment_intents_commission_binding_fk", columns: [table.commissionOrderId, table.creatorUserId, table.amountVnd], foreignColumns: [commissionOrders.id, commissionOrders.creatorUserId, commissionOrders.amountVnd] }).onDelete("restrict").onUpdate("restrict"),
+  check("payment_intents_purpose_check", sql`${table.currency} = 'VND' and (
+    (${table.purpose} = 'tip' and ${table.tipId} is not null and ${table.commissionOrderId} is null)
+    or (${table.purpose} = 'commission' and ${table.commissionOrderId} is not null and ${table.tipId} is null))`),
   check("payment_intents_settlement_lane_check", sql`(${table.settlementLane} = 'manual_attested' and ${table.cutoverId} is null)
     or (${table.settlementLane} = 'provider_bound' and ${table.cutoverId} is not null)`),
   check("payment_intents_amount_check", sql`${table.amountVnd} between 1 and 9999999999999`),
@@ -131,7 +139,9 @@ export const paymentIntents = pgTable("payment_intents", {
     (${table.state} <> 'awaiting_transfer' and ${table.closedAt} is not null and ${table.closedAt} >= ${table.createdAt} and ${table.updatedAt} = ${table.closedAt}))
     and (${table.state} <> 'confirmed' or ${table.closedAt} < ${table.expiresAt})
     and (${table.state} <> 'expired' or ${table.closedAt} >= ${table.expiresAt})`),
-  check("payment_intents_rejection_check", sql`(${table.state} = 'rejected' and ${table.rejectionReason} is not null and ${table.rejectionReason} in ('policy_invalidated','security_invalidated'))
+  check("payment_intents_rejection_check", sql`(${table.state} = 'rejected' and ${table.rejectionReason} is not null and (
+    ${table.rejectionReason} in ('policy_invalidated','security_invalidated')
+    or (${table.purpose} = 'commission' and ${table.rejectionReason} in ('buyer_cancelled','creator_cancelled','eligibility_invalidated'))))
     or (${table.state} <> 'rejected' and ${table.rejectionReason} is null)`),
 ]);
 
