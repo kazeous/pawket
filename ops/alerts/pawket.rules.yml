@@ -213,3 +213,27 @@ groups:
         annotations:
           summary: SePay reconciliation retries require creator review
           runbook: ops/runbooks/sepay-reconciliation.md
+      - alert: PawketCommissionCleanupUnhealthy
+        expr: (pawket_commission_cleanup_configured == 1) unless on(job, instance) (pawket_worker_scan_healthy{scan="commission_cleanup"} == 1 and on(job, instance) (time() - pawket_worker_last_success_timestamp_seconds{scan="commission_cleanup"} < 900))
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commission cleanup is missing unhealthy or stale even during payment pauses
+          runbook: ops/runbooks/commission-operations.md
+      - alert: PawketCommissionExpiryDelayed
+        expr: pawket_commission_expiry_oldest_lag_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commission closing deadlines are more than fifteen minutes behind
+          runbook: ops/runbooks/commission-operations.md
+      - alert: PawketCommissionDeliveryOverdue
+        expr: pawket_commission_overdue_orders > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: Paid commissions have passed their recorded delivery deadline
+          runbook: ops/runbooks/commission-operations.md

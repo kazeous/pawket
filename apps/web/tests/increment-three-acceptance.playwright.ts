@@ -537,6 +537,7 @@ async function verifyOperationalEvidence(
     sepay: "disabled",
     sepayRecoveryScan: "not_configured",
     publicMediaCleanupScan: "up",
+    commissionCleanupScan: "up",
     revision: candidateRevision,
     buildRevision: candidateRevision,
     revisionMatch: true,

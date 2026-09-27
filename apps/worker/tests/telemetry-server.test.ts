@@ -53,11 +53,23 @@ describe("worker telemetry server", () => {
       poll: "up",
       refundScan: "up",
       tipExpiryScan: "not_configured",
+      commissionCleanupScan: "not_configured",
       sepay: "disabled",
       sepayRecoveryScan: "not_configured",
       publicMediaCleanupScan: "not_configured",
       ...revision,
     });
+  });
+
+  test("commission cleanup remains a readiness dependency while payment controls are paused", () => {
+    const state = createWorkerHealthState();
+    Object.assign(state, { initializedAt: 1_000, lastPollSucceededAt: 1_000, lastRefundScanSucceededAt: 1_000,
+      publicMediaCleanupConfigured: true, lastPublicMediaCleanupScanSucceededAt: 1_000,
+      commissionCleanupConfigured: true, commissionCleanupMaximumAgeMs: 1_000 });
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "not_ready", commissionCleanupScan: "down" });
+    state.lastCommissionCleanupSucceededAt = 1_000;
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", commissionCleanupScan: "up" });
+    expect(workerReadiness({ state, revision, now: 2_001 })).toMatchObject({ status: "not_ready", commissionCleanupScan: "down" });
   });
 
   test("includes configured public-media cleanup freshness in readiness", () => {

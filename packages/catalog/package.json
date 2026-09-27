@@ -8,6 +8,7 @@
   "dependencies": {
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
+    "@pawket/orders": "workspace:*",
     "@pawket/security": "workspace:*",
     "drizzle-orm": "0.45.2",
     "zod": "4.4.3"

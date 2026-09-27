@@ -7,6 +7,9 @@ export type WorkerHealthState = {
   tipExpiryConfigured: boolean;
   tipExpiryMaximumAgeMs: number | null;
   lastTipExpiryScanSucceededAt: number | null;
+  commissionCleanupConfigured: boolean;
+  commissionCleanupMaximumAgeMs: number | null;
+  lastCommissionCleanupSucceededAt: number | null;
   sepayStatus: "disabled" | "not_configured" | "contract_pending" | "configured";
   sepayRecoveryConfigured: boolean;
   sepayRecoveryMaximumAgeMs: number | null;
@@ -26,6 +29,9 @@ export function createWorkerHealthState(): WorkerHealthState {
     tipExpiryConfigured: false,
     tipExpiryMaximumAgeMs: null,
     lastTipExpiryScanSucceededAt: null,
+    commissionCleanupConfigured: false,
+    commissionCleanupMaximumAgeMs: null,
+    lastCommissionCleanupSucceededAt: null,
     sepayStatus: "disabled",
     sepayRecoveryConfigured: false,
     sepayRecoveryMaximumAgeMs: null,
@@ -44,6 +50,7 @@ export type WorkerReadinessResult = RevisionAttestation & {
   poll: "up" | "down";
   refundScan: "up" | "down";
   tipExpiryScan: "up" | "down" | "not_configured";
+  commissionCleanupScan: "up" | "down" | "not_configured";
   sepay: WorkerHealthState["sepayStatus"];
   sepayRecoveryScan: "up" | "down" | "not_configured";
   publicMediaCleanupScan: "up" | "down" | "not_configured";
@@ -89,12 +96,14 @@ export function workerReadiness(input: {
       ? "up"
       : "down";
   const tipExpiryScan = !input.state.tipExpiryConfigured ? "not_configured" : isFresh(input.state.lastTipExpiryScanSucceededAt, now, input.state.tipExpiryMaximumAgeMs ?? 180_000) ? "up" : "down";
+  const commissionCleanupScan = !input.state.commissionCleanupConfigured ? "not_configured" : isFresh(input.state.lastCommissionCleanupSucceededAt, now, input.state.commissionCleanupMaximumAgeMs ?? 180_000) ? "up" : "down";
   const sepayRecoveryScan = !input.state.sepayRecoveryConfigured ? "not_configured" : isFresh(input.state.lastSePayRecoverySucceededAt, now, input.state.sepayRecoveryMaximumAgeMs ?? 180_000) ? "up" : "down";
   const ready =
     initialized &&
     poll === "up" &&
     refundScan === "up" &&
     tipExpiryScan !== "down" &&
+    commissionCleanupScan !== "down" &&
     sepayRecoveryScan !== "down" &&
     publicMediaCleanupScan === "up" &&
     input.revision.revisionMatch;
@@ -105,6 +114,7 @@ export function workerReadiness(input: {
     poll,
     refundScan,
     tipExpiryScan,
+    commissionCleanupScan,
     sepay: input.state.sepayStatus,
     sepayRecoveryScan,
     publicMediaCleanupScan,

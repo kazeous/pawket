@@ -18,6 +18,7 @@ COPY packages/config/package.json packages/config/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/identity/package.json packages/identity/package.json
 COPY packages/observability/package.json packages/observability/package.json
+COPY packages/orders/package.json packages/orders/package.json
 COPY packages/payments/package.json packages/payments/package.json
 COPY packages/public-media/package.json packages/public-media/package.json
 COPY packages/queue/package.json packages/queue/package.json

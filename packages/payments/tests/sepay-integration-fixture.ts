@@ -50,6 +50,13 @@ export function syntheticProvider(binding: SePayProviderBinding, now: () => Date
   };
 }
 
+/** One connection for migration rehearsals that must preserve SET search_path. */
+export function createSePayTestConnection() {
+  const url = process.env.TEST_DATABASE_URL;
+  if (!url) throw new Error("TEST_DATABASE_URL is required for SePay test connections");
+  return postgres(url, { max: 1, onnotice: () => undefined });
+}
+
 export function createSePayIntegrationFixture(label: string) {
   const url = process.env.TEST_DATABASE_URL;
   if (!url) throw new Error("TEST_DATABASE_URL is required for SePay service integration tests");

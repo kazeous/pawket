@@ -82,11 +82,11 @@ function countQuery(dataset: RetentionDataset, cutoff: Date, now: Date): SQL {
     case "tip_guest_content":
       return sql`select count(*)::int candidate_count, 0::int eligible_count from tips`;
     case "tip_instructions":
-      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_intents`;
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_intents where purpose = 'tip'`;
     case "tip_claims":
-      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_transfer_claims`;
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_transfer_claims c join payment_intents i on i.id = c.payment_intent_id where i.purpose = 'tip'`;
     case "tip_confirmations":
-      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_confirmations`;
+      return sql`select count(*)::int candidate_count, 0::int eligible_count from payment_confirmations c join payment_intents i on i.id = c.payment_intent_id where i.purpose = 'tip'`;
     case "provisional_accounts":
       return sql`
         with candidates as (

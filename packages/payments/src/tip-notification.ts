@@ -2,6 +2,7 @@ import { paymentConfirmations, paymentIntents, systemOutbox, type PawketTransact
 import { and, eq } from "drizzle-orm";
 import { TipPaymentError } from "./tip-contracts.js";
 import { readTipPortRecord } from "./tip-port-boundary.js";
+import { isTipPayment } from "./payment-purpose.js";
 
 export type TipNotificationSource = Readonly<{ outboxEventId: string; eventType: string; eventVersion: number; aggregateType: string; aggregateId: string }>;
 export const TIP_NOTIFICATION_EVENTS = ["tip.created.v1", "tip.confirmed.v1", "tip.expired.v1"] as const;
@@ -16,9 +17,9 @@ export async function resolveTipNotificationContext(tx: PawketTransaction, event
   const created = source.eventType === "tip.created.v1"; const confirmed = source.eventType === "tip.confirmed.v1";
   const payload = readTipPortRecord(source.payload, created ? ["tipId", "creatorUserId", "correlationId"] : confirmed ? ["paymentIntentId", "tipId", "creatorUserId", "confirmationId", "correlationId"] : ["paymentIntentId", "tipId", "creatorUserId", "correlationId"]);
   if (!payload || typeof payload.tipId !== "string" || typeof payload.creatorUserId !== "string" || source.aggregateType !== (created ? "tip" : "payment_intent") || source.aggregateId !== (created ? payload.tipId : payload.paymentIntentId)) return fail();
-  const [intent] = await tx.select({ id: paymentIntents.id, tipId: paymentIntents.tipId, creatorUserId: paymentIntents.creatorUserId, state: paymentIntents.state, createdAt: paymentIntents.createdAt, closedAt: paymentIntents.closedAt })
+  const [intent] = await tx.select({ id: paymentIntents.id, purpose: paymentIntents.purpose, commissionOrderId: paymentIntents.commissionOrderId, tipId: paymentIntents.tipId, creatorUserId: paymentIntents.creatorUserId, state: paymentIntents.state, createdAt: paymentIntents.createdAt, closedAt: paymentIntents.closedAt })
     .from(paymentIntents).where(created ? eq(paymentIntents.tipId, source.aggregateId) : eq(paymentIntents.id, source.aggregateId)).limit(1);
-  if (!intent || intent.creatorUserId !== payload.creatorUserId || intent.tipId !== payload.tipId) return fail();
+  if (!intent || !isTipPayment(intent) || intent.creatorUserId !== payload.creatorUserId || intent.tipId !== payload.tipId) return fail();
   if (created && intent.createdAt.getTime() !== source.occurredAt.getTime()) return fail();
   if (!created && (intent.state !== (confirmed ? "confirmed" : "expired") || intent.closedAt?.getTime() !== source.occurredAt.getTime())) return fail();
   if (confirmed) {

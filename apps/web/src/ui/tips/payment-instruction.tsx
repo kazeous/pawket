@@ -18,7 +18,8 @@ class QrBoundary extends Component<{ children: ReactNode }, { failed: boolean }>
   static getDerivedStateFromError() { return { failed: true }; }
   render() { return this.state.failed ? <Alert><AlertTitle>Chưa hiển thị được QR</AlertTitle><AlertDescription>Bạn có thể nhập thông tin chuyển khoản bên cạnh trong ứng dụng ngân hàng.</AlertDescription></Alert> : this.props.children; }
 }
-export function PaymentInstruction({ instruction, footer }: Readonly<{ instruction: TipInstructionProjection; footer?: ReactNode }>) {
+type Instruction = Pick<TipInstructionProjection, "creator" | "reference" | "expiresAt" | "qrPayload" | "destination" | "settlementLane"> & { amountVnd: number };
+export function PaymentInstruction({ instruction, footer }: Readonly<{ instruction: Instruction; footer?: ReactNode }>) {
   const [copyStatus, setCopyStatus] = useState("");
   const [expired, setExpired] = useState(false);
   useEffect(() => {
@@ -42,7 +43,7 @@ export function PaymentInstruction({ instruction, footer }: Readonly<{ instructi
     <CardHeader><CardTitle id="tip-instruction-title" role="heading" aria-level={2}>Chuyển khoản cho {instruction.creator.displayName}</CardTitle>
       <CardDescription>Hết hạn lúc {formatTipTime(instruction.expiresAt)} (giờ Việt Nam).</CardDescription></CardHeader>
     <CardContent className="flex flex-col gap-5">
-      <Badge variant="secondary">Chờ nghệ sĩ xác nhận</Badge>
+      <Badge variant="secondary">{instruction.settlementLane === "provider_bound" ? "Chờ đối soát ngân hàng" : "Chờ nghệ sĩ xác nhận"}</Badge>
       <Alert role="note"><AlertTitle>Tiền đến trực tiếp nghệ sĩ</AlertTitle><AlertDescription>Pawket không giữ tiền. Kiểm tra tên người nhận, số tiền và nội dung trong ứng dụng ngân hàng trước khi chuyển. Tạo QR chưa có nghĩa là đã thanh toán.</AlertDescription></Alert>
       <div className="grid gap-6 md:grid-cols-[15rem_minmax(0,1fr)]">
         <QrBoundary><LocalQr payload={instruction.qrPayload} /></QrBoundary>

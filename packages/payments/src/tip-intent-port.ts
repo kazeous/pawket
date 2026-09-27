@@ -1,17 +1,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import { paymentGuestCapabilities, paymentIntents, paymentTransferClaims, type PawketTransaction } from "@pawket/database";
-import { createLookupHmac, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
+import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
 import { and, count, eq, gt, sql } from "drizzle-orm";
 
 import { TipPaymentError, type GuestTipCapability, type IntegerVnd, type TipInstructionProjection } from "./tip-contracts.js";
-import { tipInstructionProjection as projection, readTipIntentSnapshot, type Snapshot } from "./tip-snapshot.js";
+import { tipInstructionProjection as projection, readTipIntentSnapshot } from "./tip-snapshot.js";
 import { lockTipReceivingDestination, lockTipSettlementBinding } from "./tip-receiving-account.js";
-import { createVietQrTransferInstruction } from "./vietqr.js";
+import { insertTransferPaymentIntent } from "./payment-intent-write.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const hmacPattern = /^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u;
-const referencePattern = /^PW[A-F0-9]{20}$/u;
 const secretPattern = /^[A-Za-z0-9_-]{43}$/u;
 const valid = (value: string, pattern: RegExp) => typeof value === "string" && value.trim() === value && pattern.test(value);
 function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { throw new TipPaymentError(code); }
@@ -57,42 +56,19 @@ export function createTipPaymentIntentPort(input: Input) {
       if (!isTipPaymentsEnabled(input.paymentsMode)) fail("payments_disabled");
       const intentId = id();
       if (!valid(intentId, UUID)) fail("invalid_request");
-      const destination = await lockTipReceivingDestination(tx, command.creatorUserId, command.at, { keyring: input.keyring, lookupHmacKey: key });
-      if (!destination || destination.accountVersionId !== command.accountVersionId) fail("not_available");
-      const settlement = await lockTipSettlementBinding(tx, destination, command.creatorUserId, input.paymentsMode);
-      if (!settlement) fail("not_available");
-      const snapshot: Snapshot = { version: 1, bankBin: destination.bankBin, bankName: destination.bankName,
-        accountNumber: destination.accountNumber, accountName: destination.accountName, creator: { ...command.creator } };
-      const destinationEnvelope = encryptSensitiveField({ keyring: input.keyring, plaintext: JSON.stringify(snapshot),
-        binding: { recordType: "payment_intents", recordId: intentId, fieldName: "destination" } });
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const transferReference = reference();
-        if (!valid(transferReference, referencePattern)) fail("dependency_unavailable");
-        // Validate the complete locked QR contract before persisting any intent.
-        try {
-          createVietQrTransferInstruction({ bankBin: destination.bankBin, accountNumber: destination.accountNumber, amountVnd: command.amountVnd, transferReference });
-        } catch (error) { try { input.onQrOutcome?.("failed"); } catch { /* Metric only. */ } throw error; }
-        try { input.onQrOutcome?.("produced"); } catch { /* Metric only; does not establish a committed intent. */ }
-        const [intent] = await tx.insert(paymentIntents).values({ id: intentId, tipId: command.tipId, creatorUserId: command.creatorUserId,
-          amountVnd: command.amountVnd, referenceHash: digest("tip-transfer-reference", transferReference),
-          referenceEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: transferReference,
-            binding: { recordType: "payment_intents", recordId: intentId, fieldName: "transfer_reference" } }), destinationEnvelope,
-          accountVersionId: destination.accountVersionId, ...settlement, abuseKeyHash: command.abuseKeyHash, requestId: command.requestId,
-          createdAt: command.at, updatedAt: command.at, expiresAt: new Date(command.at.getTime() + input.intentTtlMs),
-        }).onConflictDoNothing({ target: paymentIntents.referenceHash }).returning();
-        if (!intent) continue;
-        let guestCapability: GuestTipCapability | null = null;
-        if (command.guestContext !== null) {
-          const secret = receiptSecret(intent.id, command.guestContext);
-          const expiresAt = new Date(command.at.getTime() + input.guestReceiptTtlMs);
-          const capabilityId = id(); if (!valid(capabilityId, UUID)) fail("invalid_request");
-          await tx.insert(paymentGuestCapabilities).values({ id: capabilityId, paymentIntentId: intent.id,
-            capabilityHash: digest("tip-guest-capability", secret), createdAt: command.at, expiresAt });
-          guestCapability = Object.freeze({ secret, expiresAt });
-        }
-        return Object.freeze({ instruction: projection(intent, snapshot, transferReference), guestCapability });
+      const { intent, snapshot, transferReference } = await insertTransferPaymentIntent(tx,
+        { ...input, lookupHmacKey: key, referenceFactory: reference },
+        { ...command, intentId, purpose: { kind: "tip", tipId: command.tipId }, expiresAt: new Date(command.at.getTime() + input.intentTtlMs) });
+      let guestCapability: GuestTipCapability | null = null;
+      if (command.guestContext !== null) {
+        const secret = receiptSecret(intent.id, command.guestContext);
+        const expiresAt = new Date(command.at.getTime() + input.guestReceiptTtlMs);
+        const capabilityId = id(); if (!valid(capabilityId, UUID)) fail("invalid_request");
+        await tx.insert(paymentGuestCapabilities).values({ id: capabilityId, paymentIntentId: intent.id,
+          capabilityHash: digest("tip-guest-capability", secret), createdAt: command.at, expiresAt });
+        guestCapability = Object.freeze({ secret, expiresAt });
       }
-      return fail("dependency_unavailable");
+      return Object.freeze({ instruction: projection(intent, snapshot, transferReference), guestCapability });
     },
     // Internal replay port: caller must first authorize the completed idempotency
     // record and the owning Tips aggregate. It is not a public receipt lookup.

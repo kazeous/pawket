@@ -1,14 +1,14 @@
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
-import { randomUUID, timingSafeEqual } from "node:crypto";
-import { appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent, paymentConfirmations, paymentIntents, paymentTransferClaims, type PawketDatabase, type PawketTransaction } from "@pawket/database";
+import { timingSafeEqual } from "node:crypto";
+import { paymentConfirmations, paymentIntents, paymentTransferClaims, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
-import { and, desc, eq, gt, inArray, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, lte, or } from "drizzle-orm";
 
 import { requireIntegerVnd, TipPaymentError, type CreatorTipProjection, type PaymentIntentState } from "./tip-contracts.js";
-import { lockTipReceivingDestination } from "./tip-receiving-account.js";
 import { readTipIntentSnapshot } from "./tip-snapshot.js";
 import { readTipPortRecord } from "./tip-port-boundary.js";
-import { retryPaymentAccountChange } from "./payment-account-fence.js";
+import { createManualPaymentConfirmationService } from "./manual-payment-service.js";
+import { isTipPayment } from "./payment-purpose.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
 type Assurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date }>;
@@ -32,19 +32,14 @@ const identifier = (v: unknown): v is string => typeof v === "string" && v.trim(
 const validDate = (v: unknown): v is Date => v instanceof Date && Number.isFinite(v.getTime());
 function fail(code: ConstructorParameters<typeof TipPaymentError>[0]): never { throw new TipPaymentError(code); }
 
-export function normalizeTipBankTransactionId(value: unknown): string {
-  if (typeof value !== "string" || value.length > 120) fail("invalid_request");
-  const normalized = value.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/u.test(normalized)) fail("invalid_request");
-  return normalized.toUpperCase();
-}
+export { normalizeTipBankTransactionId } from "./manual-payment-service.js";
 
 export function createCreatorTipPaymentService(input: Input) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100 ||
     !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
     !Number.isSafeInteger(input.totpAuthMs) || input.totpAuthMs < 30_000 || input.totpAuthMs > 300_000) fail("invalid_request");
-  const key = new Uint8Array(input.lookupHmacKey); const id = input.idFactory ?? randomUUID; const clock = input.now ?? (() => new Date());
+  const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date());
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };
   const actorValid = (actor: Actor) => { if (!actor || !identifier(actor.userId) || !identifier(actor.sessionId)) fail("not_authorized"); };
@@ -81,6 +76,7 @@ export function createCreatorTipPaymentService(input: Input) {
     } catch { return fail("invalid_request"); }
   }
   async function project(tx: PawketTransaction, row: Intent, at: Date, claimedAt: Date | null): Promise<CreatorTipProjection> {
+    if (!isTipPayment(row)) fail("not_authorized");
     const { transferReference } = readTipIntentSnapshot(row, { keyring: input.keyring, lookupHmacKey: key });
     const state = row.state === "awaiting_transfer" && row.expiresAt <= at ? "expired" : row.state;
     const settlementLane = row.settlementLane;
@@ -104,6 +100,12 @@ export function createCreatorTipPaymentService(input: Input) {
     const [claim] = await tx.select({ at: paymentTransferClaims.claimedAt }).from(paymentTransferClaims).where(eq(paymentTransferClaims.paymentIntentId, intentId)).limit(1);
     return claim?.at ?? null;
   }
+  const confirmation = createManualPaymentConfirmationService<CreatorTipProjection>({ ...input, purpose: "tip",
+    lockAggregate: async () => true,
+    completeAggregate: (tx, { intent, at }) => isTipPayment(intent)
+      ? input.tips.completeTip(tx, { tipId: intent.tipId, creatorUserId: intent.creatorUserId, amountVnd: intent.amountVnd, at }) : Promise.resolve(false),
+    project: async (tx, intent, at) => project(tx, intent, at, await claimedAt(tx, intent.id)),
+  });
   return {
     async listQueue(command: { actor: Actor; state?: PaymentIntentState; cursor?: string }): Promise<CreatorTipQueue> {
       return boundary(() => input.db.transaction(async (tx) => {
@@ -126,65 +128,6 @@ export function createCreatorTipPaymentService(input: Input) {
         return Object.freeze({ items: Object.freeze(items), nextCursor: rows.length > input.pageSize ? encodeCursor(page[page.length - 1]!, command.actor.userId, state) : null });
       }), true);
     },
-    async confirm(command: ConfirmCreatorTipCommand): Promise<CreatorTipProjection> {
-      return boundary(async () => {
-        actorValid(command.actor);
-        if (!isUuid(command.paymentIntentId) || !identifier(command.requestId) || typeof command.idempotencyKey !== "string" || command.idempotencyKey.trim() !== command.idempotencyKey || !/^[A-Za-z0-9._-]{8,200}$/u.test(command.idempotencyKey) || command.attestedReceived !== true) fail("invalid_request");
-        const amountVnd = requireIntegerVnd(command.observedAmountVnd);
-        const reference = command.observedTransferReference;
-        if (typeof reference !== "string" || reference.trim() !== reference || !/^PW[A-F0-9]{20}$/u.test(reference)) fail("evidence_mismatch");
-        const bankTransactionId = normalizeTipBankTransactionId(command.observedBankTransactionId);
-        const actor = { ...command.actor }; const intentId = command.paymentIntentId; const requestId = command.requestId;
-        const keyHash = digest("tip-confirm-command-key", command.idempotencyKey);
-        const fingerprint = digest("tip-confirm-command", JSON.stringify([actor.userId, intentId, amountVnd, reference, bankTransactionId, true]));
-        let replayed = false;
-        const committed = await retryPaymentAccountChange(() => input.db.transaction(async (tx) => {
-          const [candidate] = await tx.select().from(paymentIntents).where(and(eq(paymentIntents.id, intentId), eq(paymentIntents.creatorUserId, actor.userId), eq(paymentIntents.purpose, "tip"))).limit(1);
-          if (!candidate) fail("not_authorized");
-          if (candidate.settlementLane !== "manual_attested") fail("evidence_mismatch");
-          const startedAt = now();
-          const started = await beginIdempotentCommand(tx, { actorUserId: actor.userId, commandScope: "payments.tip_confirm", keyHash, requestFingerprint: fingerprint, now: startedAt, expiresAt: new Date(startedAt.getTime() + 86_400_000) });
-          if (started.kind !== "acquired" && started.kind !== "replay") fail("idempotency_conflict");
-          const proof = validateAssurance(await input.assurance.getTipSessionAssurance(tx, actor, now()), now(), true);
-          const destination = await lockTipReceivingDestination(tx, actor.userId, now(), { keyring: input.keyring, lookupHmacKey: key });
-          if (!destination || destination.accountVersionId !== candidate.accountVersionId) fail("evidence_mismatch");
-          const bankTransactionFingerprint = digest("tip-bank-transaction", JSON.stringify([destination.bankBin, destination.accountFingerprint, bankTransactionId]));
-          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`tip-bank:${bankTransactionFingerprint}`}, 0))`);
-          const [intent] = await tx.select().from(paymentIntents).where(eq(paymentIntents.id, intentId)).limit(1).for("update");
-          if (!intent || intent.creatorUserId !== actor.userId) fail("not_authorized");
-          if (intent.settlementLane !== "manual_attested" || intent.cutoverId !== null) fail("evidence_mismatch");
-          const at = now(); validateAssurance(proof, at, true);
-          if (at < startedAt) fail("dependency_unavailable");
-          const snapshot = readTipIntentSnapshot(intent, { keyring: input.keyring, lookupHmacKey: key });
-          if (intent.amountVnd !== amountVnd || snapshot.transferReference !== reference || intent.accountVersionId !== destination.accountVersionId ||
-            snapshot.snapshot.bankBin !== destination.bankBin || snapshot.snapshot.accountNumber !== destination.accountNumber) fail("evidence_mismatch");
-          if (started.kind === "replay") {
-            replayed = true;
-            const [confirmation] = await tx.select().from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, intentId)).limit(1);
-            if (intent.state !== "confirmed" || !confirmation || started.resultReference !== `tip-confirmed-v1:${confirmation.id}` || confirmation.idempotencyKeyHash !== keyHash || confirmation.bankTransactionFingerprint !== bankTransactionFingerprint) fail("idempotency_conflict");
-            return project(tx, intent, at, await claimedAt(tx, intentId));
-          }
-          if (intent.state !== "awaiting_transfer" || intent.expiresAt <= at) fail("intent_not_pending");
-          const confirmationId = id(); if (!isUuid(confirmationId)) fail("dependency_unavailable");
-          const [confirmation] = await tx.insert(paymentConfirmations).values({ id: confirmationId, paymentIntentId: intentId, creatorUserId: actor.userId,
-            accountVersionId: intent.accountVersionId, observedAmountVnd: amountVnd, referenceHash: intent.referenceHash, bankTransactionFingerprint,
-            source: "creator_manual", attestedReceived: true, actorSessionId: actor.sessionId, primaryAuthenticatedAt: proof.primaryAuthenticatedAt,
-            totpVerifiedAt: proof.totpEnrolled ? proof.totpVerifiedAt : null, idempotencyKeyHash: keyHash, requestId, confirmedAt: at,
-          }).onConflictDoNothing({ target: paymentConfirmations.bankTransactionFingerprint }).returning({ id: paymentConfirmations.id });
-          if (!confirmation) fail("bank_transaction_conflict");
-          const [confirmed] = await tx.update(paymentIntents).set({ state: "confirmed", closedAt: at, updatedAt: at }).where(and(eq(paymentIntents.id, intentId), eq(paymentIntents.state, "awaiting_transfer"), gt(paymentIntents.expiresAt, at))).returning();
-          if (!confirmed || !await input.tips.completeTip(tx, { tipId: intent.tipId, creatorUserId: actor.userId, amountVnd, at })) fail("intent_not_pending");
-          await appendAdminAuditEvent(tx, { actorUserId: actor.userId, actorSessionId: actor.sessionId, subjectType: "payment_intent", subjectId: intentId,
-            action: "tip.confirmed", outcome: "succeeded", beforeState: { state: "awaiting_transfer" }, afterState: { state: "confirmed", confirmationId },
-            assurance: { method: proof.totpEnrolled ? "recent_primary_and_totp" : "recent_primary_auth" }, applicationRevision: input.applicationRevision, requestId, occurredAt: at });
-          await insertOutboxEvent(tx, { eventType: "tip.confirmed.v1", eventVersion: 1, aggregateType: "payment_intent", aggregateId: intentId,
-            payload: { paymentIntentId: intentId, tipId: intent.tipId, creatorUserId: actor.userId, confirmationId, correlationId: requestId }, occurredAt: at });
-          if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `tip-confirmed-v1:${confirmationId}`, completedAt: at })) fail("idempotency_conflict");
-          return project(tx, confirmed, at, await claimedAt(tx, intentId));
-        }));
-        try { input.onCommitted?.(replayed); } catch { /* A metric failure never changes the committed result. */ }
-        return committed;
-      });
-    },
+    confirm: confirmation.confirm,
   };
 }

@@ -17,7 +17,8 @@ const base = "/api/v1/creator/tips/sepay";
 function ReviewItem({ item, busy, enabled, submit }: { item: SePayReviewItem; busy: boolean; enabled: boolean; submit(item: SePayReviewItem, action: string, reason: string, attested: boolean): void }) {
   const [reason, setReason] = useState(""); const [attested, setAttested] = useState(false);
   return <article className="flex flex-col gap-3 rounded-lg border p-4"><div className="flex flex-wrap items-center gap-3"><Badge variant="secondary">{sepayStatusLabels[item.status]}</Badge><strong>{item.amountVnd === null ? "Chưa rõ số tiền" : formatVnd(item.amountVnd)}</strong></div>
-    <p className="break-all font-mono text-sm">{item.reference ?? "Chưa có mã tip đầy đủ"}</p><p className="text-sm text-muted-foreground">Nhận thông tin: {formatTipTime(item.receivedAt)}</p>
+    <p className="break-all font-mono text-sm">{item.reference ?? "Chưa có mã thanh toán đầy đủ"}</p><p className="text-sm text-muted-foreground">Nhận thông tin: {formatTipTime(item.receivedAt)}</p>
+    <p className="text-sm">{item.payment?.purpose === "commission" ? <a href={`/creator/commissions/${item.payment.resourceId}`} className="underline">Xem đơn commission liên quan</a> : item.payment?.purpose === "tip" ? "Thanh toán tip" : "Chưa tìm thấy thanh toán liên quan"}</p>
     {item.reason ? <p>{sepayErrorText(item.reason)}</p> : null}
     {["review_required", "dismissed"].includes(item.status) ? <FieldGroup><Field data-disabled={busy || !enabled}><FieldLabel htmlFor={`reason-${item.id}`}>Lý do xử lý</FieldLabel><Input id={`reason-${item.id}`} value={reason} maxLength={500} disabled={busy || !enabled} onChange={(event) => setReason(event.target.value)} /></Field>
       {item.status === "review_required" ? <Field orientation="horizontal" data-disabled={busy || !enabled}><Checkbox id={`attest-${item.id}`} checked={attested} onCheckedChange={setAttested} disabled={busy || !enabled} /><FieldLabel htmlFor={`attest-${item.id}`}>Tôi đã kiểm tra và nhận được đúng khoản tiền này.</FieldLabel></Field> : null}
@@ -25,7 +26,7 @@ function ReviewItem({ item, busy, enabled, submit }: { item: SePayReviewItem; bu
         <Button disabled={busy || !enabled || !attested || reason.trim().length < 3} onClick={() => submit(item, "confirm", reason.trim(), attested)}>Đối chiếu lại và xác nhận</Button>
         <Button variant="outline" disabled={busy || !enabled || reason.trim().length < 3} onClick={() => submit(item, "retry", reason.trim(), false)}>Thử đối soát lại</Button>
         <Button variant="ghost" disabled={busy || !enabled || reason.trim().length < 3} onClick={() => submit(item, "dismiss", reason.trim(), false)}>Đóng kiểm tra</Button></>}</div>
-      <p className="text-sm text-muted-foreground">Xác nhận luôn cần dữ liệu mới từ SePay khớp đầy đủ với tip. Đóng hoặc mở lại kiểm tra không đổi trạng thái thanh toán.</p>
+      <p className="text-sm text-muted-foreground">Xác nhận luôn cần dữ liệu mới từ SePay khớp đầy đủ với thanh toán. Đóng hoặc mở lại kiểm tra không đổi trạng thái thanh toán.</p>
     </FieldGroup> : null}
   </article>;
 }

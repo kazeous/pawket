@@ -1,17 +1,19 @@
 import { randomUUID } from "node:crypto";
 import {
   appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, paymentsReceivingAccountOnboarding,
-  paymentsSepayConnections, paymentsSepayDecisions, paymentsSepayInbox, paymentsSepayProcessing,
+  paymentsSepayConnections, paymentsSepayDecisions, paymentsSepayInbox, paymentsSepayProcessing, paymentIntents,
   type PawketDatabase, type PawketTransaction,
 } from "@pawket/database";
-import type { EncryptionKeyring } from "@pawket/security";
+import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
 import { and, count, desc, eq, inArray, lt, or } from "drizzle-orm";
 import { parseAuthenticatedSePayWebhook } from "./sepay-webhook.js";
+import { readPaymentPurpose } from "./payment-purpose.js";
 import { createSePayCryptography, requireSePayAssurance, sepayBoundary, sepayFail, sepayUuid, validateSePayActor, validateSePayCommand, type SePayActor, type SePayAssurancePort } from "./sepay-service-support.js";
 
 export type SePayReviewItem = Readonly<{
   id: string; connectionId: string; version: number; status: string; reason: string | null;
   amountVnd: number | null; reference: string | null; receivedAt: string;
+  payment: Readonly<{ purpose: "tip" | "commission"; resourceId: string }> | null;
 }>;
 export type SePayReviewQueue = Readonly<{ items: readonly SePayReviewItem[]; nextCursor: string | null }>;
 type Input = Readonly<{
@@ -38,11 +40,17 @@ export function createSePayReviewService(input: Input) {
           .innerJoin(paymentsSepayProcessing, eq(paymentsSepayProcessing.inboxId, paymentsSepayInbox.id))
           .where(and(creatorFilter, eq(paymentsSepayProcessing.status, status), cursor ? or(lt(paymentsSepayInbox.receivedAt, cursor.at), and(eq(paymentsSepayInbox.receivedAt, cursor.at), lt(paymentsSepayInbox.id, cursor.id))) : undefined))
           .orderBy(desc(paymentsSepayInbox.receivedAt), desc(paymentsSepayInbox.id)).limit(51);
-        const items = rows.slice(0, 50).map(({ inbox, state }): SePayReviewItem => {
+        const items: SePayReviewItem[] = [];
+        for (const { inbox, state } of rows.slice(0, 50)) {
           const evidence = inbox.rawEnvelope ? parseAuthenticatedSePayWebhook(Buffer.from(crypt.decrypt("sepay_inbox", inbox.id, "raw_body", inbox.rawEnvelope), "utf8")) : null;
-          return { id: inbox.id, connectionId: inbox.connectionId, version: state.version, status: state.status, reason: state.lastErrorCode,
-            amountVnd: evidence?.kind === "accepted" ? evidence.event.amountVnd : null, reference: evidence?.kind === "accepted" ? evidence.event.reference : null, receivedAt: inbox.receivedAt.toISOString() };
-        });
+          const reference = evidence?.kind === "accepted" ? evidence.event.reference : null;
+          const [intent] = reference ? await tx.select({ purpose: paymentIntents.purpose, tipId: paymentIntents.tipId, commissionOrderId: paymentIntents.commissionOrderId }).from(paymentIntents).where(and(eq(paymentIntents.creatorUserId, command.actor.userId),
+            eq(paymentIntents.referenceHash, createLookupHmac({ key: input.lookupHmacKey, context: "tip-transfer-reference", value: reference })))).limit(1) : [];
+          const purpose = intent ? readPaymentPurpose(intent) : null;
+          items.push({ id: inbox.id, connectionId: inbox.connectionId, version: state.version, status: state.status, reason: state.lastErrorCode,
+            amountVnd: evidence?.kind === "accepted" ? evidence.event.amountVnd : null, reference, receivedAt: inbox.receivedAt.toISOString(),
+            payment: purpose ? { purpose: purpose.kind, resourceId: purpose.kind === "tip" ? purpose.tipId : purpose.orderId } : null });
+        }
         return { items, nextCursor: rows.length > 50 ? items[items.length - 1]!.id : null };
       }));
     },

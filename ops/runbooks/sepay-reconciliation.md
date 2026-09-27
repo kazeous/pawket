@@ -26,7 +26,7 @@ retain expanded schema and all evidence, and never run a down migration.
 
 ## Cutover and outages
 
-The creator must resolve or allow ordinary expiry of every open manual tip on
+The creator must resolve or allow ordinary expiry of every open manual tip or commission on
 the physical receiving account before enabling automation. Shared or ambiguous
 ownership cannot be resolved by an operator overriding this check. Cutover is
 durable across reconnect and account revisions. Provider-bound tips require
