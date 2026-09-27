@@ -8,6 +8,15 @@ starting this revision. Verify embedded web/worker/migration SHA, readiness,
 outbox dispatch and legacy tip flows. Synthetic policy fixtures must never
 authorize a production order; the bootstrap policy is technical only.
 
+After migrations, replace and drain every I5 worker before routing traffic to
+I6 web instances. Confirm all active workers report the verified I6 revision
+and readiness, then replace the web fleet with both commission controls disabled.
+Package drafts and capacity settings remain writable during this pause and emit
+commission catalog events; disabled intake is not a no-event fence. I5 workers
+reject these event types. The rehearsed I5/I6 overlap applies only while no
+commission catalog, order or event records exist; it does not authorize serving
+the I6 package editor while an I5 consumer remains active.
+
 This release ends at paid / in progress. Real commission intake remains gated by
 accepted I7 delivery, I8 dispute/refund handling, owner-approved policy text,
 retention and support ownership. SePay retains all I5 provider contract gates.
@@ -83,10 +92,11 @@ release or deletion. Report-only operation continues during payment pauses.
 
 ## Rollback
 
-Before any commission rows exist, use only an I5 binary/schema combination that
-passed the rolling-overlap rehearsal. Retain the additive schema. After any
-commission rows or outbox exist, I5 is unsafe even with creation disabled: use a
-last-known-good revision that understands commission purpose, or forward fix.
+Before any commission catalog, order or event records exist, use only an I5
+binary/schema combination that passed the rolling-overlap rehearsal. Retain the
+additive schema. After any such records exist, I5 is unsafe even with intake
+disabled: use a last-known-good revision that understands commission purpose,
+or forward fix.
 Pause intake and payments, preserve evidence and drain writers. Never down-migrate,
 drop tables or delete events to make an old binary start. Production auditing is
 read-only unless a separate owner instruction authorizes mutations.
