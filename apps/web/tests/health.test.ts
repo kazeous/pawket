@@ -41,6 +41,7 @@ describe("health probes", () => {
 
   it("returns the exact ready payload when both dependencies are healthy", async () => {
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       revision,
@@ -55,6 +56,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -63,6 +65,7 @@ describe("health probes", () => {
 
   it("reports a failed database without leaking its connection details", async () => {
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => {
         throw new Error("postgresql://artist:password@db.internal:5432/pawket");
       },
@@ -80,6 +83,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -89,6 +93,7 @@ describe("health probes", () => {
 
   it("reports a failed Valkey while preserving the database result", async () => {
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => {
         throw new Error("redis://:password@cache.internal:6379/0");
@@ -105,6 +110,7 @@ describe("health probes", () => {
       valkey: "down",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -116,6 +122,7 @@ describe("health probes", () => {
     let observedAbort = false;
     let cleanupComplete = false;
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: (signal) =>
         new Promise<void>((_resolve, reject) => {
           signal.addEventListener(
@@ -145,6 +152,7 @@ describe("health probes", () => {
     vi.useFakeTimers();
     let observedAbort = false;
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: (signal) =>
         new Promise<void>(() => {
           signal.addEventListener(
@@ -171,6 +179,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -180,6 +189,7 @@ describe("health probes", () => {
 
   it("fails readiness when build and runtime revisions do not match", async () => {
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       revision: {
@@ -198,6 +208,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "runtime-revision",
       buildRevision: "build-revision",
       revisionMatch: false,
@@ -288,6 +299,7 @@ describe("health probes", () => {
   it("reports storage diagnostically without gating readiness while publishing is disabled", async () => {
     // Catches a disabled-mode deployment that goes unready because Increment 3 buckets are absent.
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       publishingMode: "disabled",
@@ -306,6 +318,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "down",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -315,6 +328,7 @@ describe("health probes", () => {
   it("fails readiness when a public media bucket is unavailable and publishing is enabled", async () => {
     // Catches an enabled publishing surface serving pages while object storage is unreachable.
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       publishingMode: "general_audience",
@@ -333,6 +347,7 @@ describe("health probes", () => {
       valkey: "up",
       publicMediaStorage: "down",
       publicMediaWorkerScan: "not_configured",
+      identityConfiguration: "valid",
       revision: "revision-123",
       buildRevision: "revision-123",
       revisionMatch: true,
@@ -342,6 +357,7 @@ describe("health probes", () => {
   it("reports worker scan health diagnostically without gating disabled mode", async () => {
     // Catches Increment 3 diagnostics accidentally taking down the disabled Increment 2 surface.
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       publishingMode: "disabled",
@@ -363,6 +379,7 @@ describe("health probes", () => {
   it("requires a fresh worker scan when publishing is general audience", async () => {
     // Catches web readiness serving a general audience while worker scan health is stale or absent.
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       publishingMode: "general_audience",
@@ -492,6 +509,7 @@ describe("health probes", () => {
     vi.useFakeTimers();
     let observedAbort = false;
     const probe = createReadinessProbe({
+      identityConfigurationValid: true,
       checkDatabase: async () => undefined,
       checkValkey: async () => undefined,
       publishingMode: "general_audience",

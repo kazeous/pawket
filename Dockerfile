@@ -44,6 +44,8 @@ WORKDIR /app
 
 COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /app/dist/ops/bootstrap-owner.mjs ./bootstrap-owner.mjs
+COPY --from=build --chown=node:node /app/dist/ops/link-owner-oidc.mjs ./dist/ops/link-owner-oidc.mjs
+COPY --from=build --chown=node:node /app/dist/ops/cutover-oidc.mjs ./dist/ops/cutover-oidc.mjs
 
 USER node
 EXPOSE 3000

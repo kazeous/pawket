@@ -27,6 +27,7 @@ type Input = Readonly<{
   intakeMode: "disabled" | "enabled"; paymentsMode: "disabled" | "manual_only" | "sepay_optional";
   identity: CommissionIdentityPort; catalog: CommissionCatalogPort; payments: CommissionPaymentsPort; policy: CommissionPolicyReadPort;
   trust: { lockCommissionPage(tx: PawketTransaction, creatorUserId: string): Promise<boolean> };
+  authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   now?: () => Date; idFactory?: () => string;
 }>;
 type Change = { orderId: string; at: Date; guardUntil?: Date };
@@ -85,12 +86,14 @@ export function createCommissionOrderService(input: Input) {
       if (started.kind === "replay") {
         await owned(tx, started.resultReference, command.actor);
         if (sessionExpiresAt <= now()) commissionFail("not_authorized");
+        await input.authorizeCommand?.(tx, command.actor);
         return started.resultReference;
       }
       const changed = await apply(tx); const completedAt = now();
       if (completedAt < startedAt || completedAt < changed.at || completedAt >= sessionExpiresAt) commissionFail("not_authorized");
       if (changed.guardUntil) requireCommissionBeforeDeadline(completedAt, changed.guardUntil);
       if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: changed.orderId, completedAt })) commissionFail("idempotency_conflict");
+      await input.authorizeCommand?.(tx, command.actor);
       return changed.orderId;
     }));
   }

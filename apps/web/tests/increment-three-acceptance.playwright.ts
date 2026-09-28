@@ -32,7 +32,7 @@ import {
 import {
   acceptanceCreatorApprovedRevisionId,
   acceptanceCreatorUserId,
-  currentOwnerTotp,
+
   signInAsAcceptanceCreator,
   signInAsOwner,
   syntheticPng,
@@ -395,11 +395,6 @@ async function reportTriageHideRestore(page: Page) {
 
   const guestReport = page.locator("article").filter({ hasText: guestReportDetail });
   await guestReport.getByRole("button", { name: "Bỏ qua báo cáo" }).click();
-  await expect(
-    page.getByRole("dialog", { name: "Xác nhận TOTP mới" }),
-  ).toBeVisible();
-  await page.getByLabel("Mã TOTP").fill(currentOwnerTotp());
-  await page.getByRole("button", { name: "Xác minh và thử lại" }).click();
   await expect(page.getByText("Đã đóng báo cáo và ghi audit event.")).toBeVisible();
 
   const authenticatedReport = page
@@ -517,6 +512,7 @@ async function verifyOperationalEvidence(
   const webReady = await request.get("/api/health/ready");
   expect(webReady).toBeOK();
   expect(await webReady.json()).toEqual({
+    identityConfiguration: "valid",
     status: "ready",
     database: "up",
     valkey: "up",
@@ -529,6 +525,7 @@ async function verifyOperationalEvidence(
   const workerReady = await request.get("http://127.0.0.1:9464/health/ready");
   expect(workerReady).toBeOK();
   expect(await workerReady.json()).toEqual({
+    oidcCleanupScan: "up",
     status: "ready",
     initialized: true,
     poll: "up",

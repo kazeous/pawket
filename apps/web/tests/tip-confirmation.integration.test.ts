@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vite
 import {
   adminAuditEvents, createDatabase, creatorDiscoveryProjections, creatorHandleClaims, creatorPages,
   creatorPublicationRevisions, identityUsers, identityEmailHandoffs, runRetentionSweep, systemRetentionRuns,
-  paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentConfirmations, identitySessions, identityTotpAuthenticators, identityRoleGrants, type PawketDatabase,
+  paymentsReceivingAccountOnboarding, systemCommandIdempotency, systemOutbox, tips, paymentIntents, paymentGuestCapabilities, paymentConfirmations, identitySessions, identityOidcSessions, identityRoleGrants, type PawketDatabase,
 } from "@pawket/database";
 import { createCreatorTipSettingsService, createPublicCatalogQuery, createPlatformTipPolicyReadPort, type CreatorSeed } from "@pawket/catalog";
 import { createIdentityCreatorTipAccountPort, createIdentityTipBuyerAccountPort, createIdentityTipAssurancePort } from "@pawket/identity";
@@ -16,6 +16,7 @@ import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-e
 import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
 import { materializeTipNotification } from "../../worker/src/tip-notification.js";
 import { narrowerTipPolicy, setTipPolicy } from "./owner-tip-policy-test-support.js";
+import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-support.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for creator tip integration tests");
@@ -133,19 +134,12 @@ async function session(f: Fixture, options: { primaryAt?: Date; mfaAt?: Date | n
     primaryAuthenticatedAt: primaryAt, mfaVerifiedAt: options.mfaAt ?? null, assuranceState: "active", authorizationVersion: 1,
     expiresAt: new Date(at.getTime() + 86_400_000), idleExpiresAt: new Date(at.getTime() + 86_400_000), absoluteExpiresAt: new Date(at.getTime() + 86_400_000),
   });
-  if (options.enrolled) {
-    const factorId = `tip-factor-${randomUUID()}`;
-    await db.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, f.userId));
-    await db.insert(identityTotpAuthenticators).values({ id: factorId, userId: f.userId, verified: true, lastUsedStep: Math.floor(at.getTime() / 30_000),
-      createdAt: new Date(at.getTime() - 3_600_000), updatedAt: at,
-      secret: encryptSensitiveField({ keyring, plaintext: "SYNTHETIC-TOTP-SECRET", binding: { recordType: "identity_totp_authenticator", recordId: factorId, fieldName: "secret" } }),
-    });
-  }
+  await attachSyntheticOidcSession(db, { userId: f.userId, sessionId, now: at, totpStatus: options.enrolled ? "enrolled" : "not_enrolled" });
   return { userId: f.userId, sessionId };
 }
 function creatorService(overrides: Partial<Parameters<typeof createCreatorTipPaymentService>[0]> = {}) {
   return createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, totpAuthMs: 300_000,
-    assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }), now: () => at, ...overrides });
+    assurance: createIdentityTipAssurancePort(syntheticOidcProvider, () => at), tips: createTipLifecyclePort({ keyring }), now: () => at, ...overrides });
 }
 async function pending(options: Parameters<typeof session>[1] = {}, creation: Partial<Parameters<typeof createTipService>[0]> = {}) {
   const f = await optedIn(); const actor = await session(f, options); const c = command(f); const created = await createService(creation).createTip(c);
@@ -219,7 +213,7 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
 
   test("the authoritative user/session fence is retained until confirmation commits", async () => {
     const p = await pending({ enrolled: true, mfaAt: at }); const ready = Promise.withResolvers<number>(); const hold = Promise.withResolvers<void>();
-    const real = createIdentityTipAssurancePort();
+    const real = createIdentityTipAssurancePort(syntheticOidcProvider, () => at);
     const svc = creatorService({ assurance: { async getTipSessionAssurance(tx, actor, time) {
       const proof = await real.getTipSessionAssurance(tx, actor, time);
       const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
@@ -272,7 +266,7 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
   test("stale/future primary authentication is rejected using stored session facts", async () => {
     for (const primaryAt of [new Date(at.getTime() - 900_001), new Date(at.getTime() + 1)]) {
       const p = await pending({ primaryAt });
-      await expect(creatorService().confirm({ ...p.confirm, actor: { ...p.actor, primaryAuthenticatedAt: at } } as typeof p.confirm)).rejects.toMatchObject({ code: "recent_auth_required" });
+      await expect(creatorService().confirm({ ...p.confirm, actor: { ...p.actor, primaryAuthenticatedAt: at } } as typeof p.confirm)).rejects.toMatchObject({ code: primaryAt > at ? "not_authorized" : "recent_auth_required" });
       expect((await confirmationFacts(p.f)).confirmations).toHaveLength(0);
     }
     const p = await pending({ primaryAt: new Date(at.getTime() - 300_001) });
@@ -290,15 +284,17 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
     expect((await confirmationFacts(p.f)).confirmations[0]?.totpVerifiedAt).toEqual(at);
   });
 
-  test("enrollment flags cannot bypass missing authenticator evidence or a replaced factor", async () => {
+  test("OIDC evidence governs enrollment; a local flag cannot supply missing or unknown MFA evidence", async () => {
     const p = await pending({ enrolled: true, mfaAt: at });
-    await db.update(identityUsers).set({ twoFactorEnabled: false }).where(eq(identityUsers.id, p.f.userId));
-    await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
     await db.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, p.f.userId));
-    await db.update(identityTotpAuthenticators).set({ createdAt: new Date(at.getTime() + 1) }).where(eq(identityTotpAuthenticators.userId, p.f.userId));
+    await db.update(identityOidcSessions).set({ totpStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
+    await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "not_authorized" });
+    await db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
+    await db.update(identitySessions).set({ mfaVerifiedAt: null }).where(eq(identitySessions.id, p.actor.sessionId));
     await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
-    await db.delete(identityTotpAuthenticators).where(eq(identityTotpAuthenticators.userId, p.f.userId));
-    await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
+    await db.update(identityUsers).set({ twoFactorEnabled: false }).where(eq(identityUsers.id, p.f.userId));
+    await db.update(identitySessions).set({ mfaVerifiedAt: at }).where(eq(identitySessions.id, p.actor.sessionId));
+    expect((await creatorService().confirm(p.confirm)).state).toBe("confirmed");
   });
 
   test("a narrower configured TOTP window is enforced independently of the primary-authentication window", async () => {
@@ -360,8 +356,10 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
     expect((await creatorService({ paymentsMode: "disabled" }).listQueue({ actor: p.actor })).items).toHaveLength(1);
     const expiredAt = new Date(at.getTime() + 86_400_000);
     await db.update(identitySessions).set({ primaryAuthenticatedAt: expiredAt, expiresAt: new Date(expiredAt.getTime() + 900_000), idleExpiresAt: new Date(expiredAt.getTime() + 900_000), absoluteExpiresAt: new Date(expiredAt.getTime() + 900_000) }).where(eq(identitySessions.id, p.actor.sessionId));
+    await db.update(identityOidcSessions).set({ leaseStartedAt: expiredAt, evidenceVerifiedAt: expiredAt, idpValidUntil: new Date(expiredAt.getTime() + 300_000) }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
     await expect(creatorService({ now: () => expiredAt }).confirm(p.confirm)).rejects.toMatchObject({ code: "intent_not_pending" });
     await db.update(identitySessions).set({ primaryAuthenticatedAt: at }).where(eq(identitySessions.id, p.actor.sessionId));
+    await db.update(identityOidcSessions).set({ leaseStartedAt: at, evidenceVerifiedAt: at, idpValidUntil: new Date(at.getTime() + 300_000) }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
     await db.update(paymentsReceivingAccountOnboarding).set({ retiredAt: at, updatedAt: at }).where(eq(paymentsReceivingAccountOnboarding.id, p.f.accountVersionId));
     await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "evidence_mismatch" });
     const rows = await confirmationFacts(p.f); expect(rows.confirmations).toHaveLength(0); expect(rows.tips[0]?.state).toBe("awaiting_payment");

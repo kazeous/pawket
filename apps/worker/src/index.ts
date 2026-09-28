@@ -1,4 +1,4 @@
-import { loadServerEnv, resolveRevisionAttestation } from "@pawket/config";
+import { loadServerEnv, parseOidcSessionEnv, resolveRevisionAttestation } from "@pawket/config";
 import {
   createLogger,
   metricsRegistry,
@@ -18,6 +18,7 @@ import { createWorkerHealthState } from "./worker-health.js";
 import { startWorker } from "./worker-runtime.js";
 
 const env = loadServerEnv();
+const identityProvider = parseOidcSessionEnv(process.env);
 const logger = createLogger({ service: "worker", env });
 const healthState = createWorkerHealthState();
 const revision = resolveRevisionAttestation(env.APP_REVISION, env.APP_BUILD_REVISION);
@@ -46,6 +47,7 @@ const publicMediaStorage = env.PUBLIC_MEDIA_S3_ENDPOINT &&
   : undefined;
 const publicMediaConfiguration = createWorkerPublicMediaConfiguration(env, publicMediaStorage);
 const worker = await startWorker({
+  oidcCleanup: true,
   databaseUrl: env.DATABASE_URL,
   valkeyUrl: env.VALKEY_URL,
   revision: env.APP_REVISION,
@@ -53,8 +55,8 @@ const worker = await startWorker({
   batchSize: env.OUTBOX_BATCH_SIZE,
   leaseMs: env.OUTBOX_LEASE_MS,
   tipPayments: { mode: env.TIP_PAYMENTS_MODE, batchSize: env.TIP_EXPIRY_BATCH_SIZE, scanIntervalMs: env.TIP_EXPIRY_SCAN_INTERVAL_MS, tips: createTipExpiryPort() },
-  sepay: createWorkerSePayConfiguration(env, keyring),
-  commissions: createWorkerCommissionConfiguration(env, keyring),
+  sepay: createWorkerSePayConfiguration(env, keyring, identityProvider),
+  commissions: createWorkerCommissionConfiguration(env, keyring, identityProvider),
   ...publicMediaConfiguration,
   securityEmail: {
     keyring,

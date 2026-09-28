@@ -71,31 +71,12 @@ function isCompleteSmtpConfig(
   );
 }
 
-function challengePath(purpose: SecurityEmailMessage["purpose"]): string | null {
-  switch (purpose) {
-    case "email_verification":
-      return "/verify-email";
-    case "email_change":
-      return "/settings/security/confirm-email";
-    case "password_reset":
-      return "/reset-password";
-    case "security_notice":
-    case "application_outcome":
-    case "creator_status":
-    case "refund_status":
-    case "tip_status":
-      return null;
-  }
-}
-
 function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
   switch (purpose) {
     case "email_verification":
-      return "Xác minh email Pawket";
     case "password_reset":
-      return "Đặt lại mật khẩu Pawket";
     case "email_change":
-      return "Xác nhận email Pawket mới";
+      throw new Error("AUTH_MOVED");
     case "security_notice":
       return "Thông báo bảo mật Pawket";
     case "application_outcome":
@@ -182,8 +163,6 @@ function refundStatusText(
 }
 
 function renderText(appBaseUrl: string, message: SecurityEmailMessage): string {
-  const path = challengePath(message.purpose);
-  if (path === null) {
     switch (message.purpose) {
       case "security_notice":
         return noticeText(message.templateData.event);
@@ -205,19 +184,8 @@ function renderText(appBaseUrl: string, message: SecurityEmailMessage): string {
       case "email_verification":
       case "password_reset":
       case "email_change":
-        throw new Error("Invalid security email message");
+        throw new Error("AUTH_MOVED");
     }
-  }
-  if (!message.secret) throw new Error("Invalid security email message");
-
-  const link = new URL(path, appBaseUrl);
-  link.searchParams.set("token", message.secret);
-  return (
-    `${subjectFor(message.purpose)}\n\n` +
-    "Mở liên kết Pawket này để tiếp tục:\n" +
-    `${link.toString()}\n\n` +
-    "Liên kết hết hạn sau 30 phút. Nếu bạn không yêu cầu thao tác này, hãy bỏ qua email."
-  );
 }
 
 class SmtpSecurityEmailSender implements SecurityEmailSender {

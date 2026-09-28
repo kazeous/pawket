@@ -1,5 +1,6 @@
 import type { AuthorizedTipReceipt, TipInstructionProjection, TipReceiptProjection } from "@pawket/payments";
 import type { PublicTipOffering } from "@pawket/tips";
+import { redirectToOidcReview } from "../../auth/oidc-review-redirect";
 
 export const formatVnd = (value: number) => `${new Intl.NumberFormat("vi-VN").format(value)} ₫`;
 export const formatTipTime = (value: string) => new Intl.DateTimeFormat("vi-VN", {
@@ -22,7 +23,10 @@ export async function tipRequest(path: string, init: RequestInit = {}, maximumBy
     } finally { reader.releaseLock(); }
     const bytes = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-    if (!response.ok) throw new TipRequestError(isRecord(payload) && typeof payload.code === "string" ? payload.code : "dependency_unavailable");
+    if (!response.ok) {
+      redirectToOidcReview(payload);
+      throw new TipRequestError(isRecord(payload) && typeof payload.code === "string" ? payload.code : "dependency_unavailable");
+    }
     return payload;
   } catch (error) {
     if (error instanceof TipRequestError) throw error;
@@ -38,10 +42,13 @@ export function readTipSettlement(value: Record<string, unknown>) {
 }
 // Drafts live only in this mounted form. Reauthentication can replace the
 // shared session cookie, so verify the account before using any saved intent.
-export async function requireTipDraftActor(expectedUserId: string): Promise<void> {
+export async function requireTipDraftActor(expectedUserId: string, allowExpiredLeaseForCommand = false): Promise<void> {
   let value: unknown;
   try { value = await tipRequest("/api/v1/me"); }
   catch (error) {
+    // A command may be saved for SSO renewal. The POST must also send
+    // x-pawket-actor, which the server compares before preserving any bytes.
+    if (allowExpiredLeaseForCommand && error instanceof TipRequestError && error.code === "OIDC_LEASE_REQUIRED") return;
     if (error instanceof TipRequestError && error.code === "AUTHENTICATION_REQUIRED") throw new TipRequestError("authentication_required");
     if (error instanceof TipRequestError && error.code === "IDENTITY_UNAVAILABLE") throw new TipRequestError("dependency_unavailable");
     throw error;

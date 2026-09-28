@@ -72,7 +72,7 @@ for (const width of [375, 1440]) {
       await assertAccessible(page);
       await snapshot(page, `home-${width}`);
       await page.goto("/sign-in");
-      const email = page.getByLabel("Email bắt buộc");
+      const email = page.getByRole("button", { name: "Đăng nhập với reyuuGAMES" });
       await tabTo(page, email);
       await assertAccessible(page);
       await snapshot(page, `sign-in-focus-${width}`);
@@ -81,10 +81,9 @@ for (const width of [375, 1440]) {
     test("security and creator application", async ({ page }) => {
       await signInAsCreator(page);
       await mockAccountSummary(page, "creator");
-      await page.route("**/api/auth/list-accounts", (route) => route.fulfill({ json: [{ id: "synthetic-password", providerId: "credential" }] }));
       await page.route("**/api/v1/me/sessions", (route) => route.fulfill({ json: { sessions: [{ id: "synthetic-session", deviceLabel: "Chromium", isCurrent: true, lastUsedAt: "2026-09-12T00:00:00.000Z" }] } }));
       await page.goto("/settings/security");
-      await expect(page.getByRole("button", { name: "Thu hồi phiên này" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Thu hồi phiên Chromium hiện tại" })).toBeVisible();
       await expect(page.getByText("Đã đăng nhập", { exact: true })).toBeVisible();
       await assertAccessible(page);
       await snapshot(page, `security-${width}`);
@@ -119,55 +118,40 @@ for (const width of [375, 1440]) {
       await snapshot(page, `public-disabled-${width}`);
     });
 
-    test("sign-in loading, invalid submission, and service error", async ({ page }) => {
+    test("SSO loading and service error preserve public navigation", async ({ page }) => {
       let releaseResponse!: () => void;
       const pendingResponse = new Promise<void>((resolve) => { releaseResponse = resolve; });
       let submissions = 0;
-      await page.route("**/api/auth/sign-in/email", async (route) => {
-        submissions++;
-        await pendingResponse;
-        await route.fulfill({ status: 401, json: { code: "AUTHENTICATION_FAILED" } });
+      await page.route("**/api/v1/auth/oidc/start", async (route) => {
+        submissions++; expect(route.request().postDataJSON()).toEqual({ returnPath: "/settings/security" });
+        await pendingResponse; await route.fulfill({ status: 503, json: { code: "provider_unavailable" } });
       });
       await page.goto("/sign-in");
-      await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
-      expect(submissions).toBe(0);
-      await expect(page.getByLabel("Email bắt buộc")).toBeFocused();
-      await page.getByLabel("Email bắt buộc").fill("synthetic@example.test");
-      await page.getByLabel("Mật khẩu bắt buộc").fill("synthetic password phrase");
-      await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
-      await expect(page.getByRole("button", { name: "Đang đăng nhập…" })).toBeDisabled();
-      try {
-        await snapshot(page, `sign-in-pending-${width}`);
-      } finally {
-        releaseResponse();
-      }
-      await expect(page.getByRole("region", { name: "Đăng nhập" }).getByRole("alert")).toContainText("Email hoặc mật khẩu chưa đúng.");
-      await assertAccessible(page);
-      await snapshot(page, `sign-in-error-${width}`);
+      await page.getByRole("button", { name: "Đăng nhập với reyuuGAMES", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Đang chuyển đến trang tài khoản…" })).toBeDisabled();
+      try { await snapshot(page, 'sign-in-pending-' + width); } finally { releaseResponse(); }
+      await expect(page.getByRole("alert").filter({ hasText: "Chưa thể kết nối dịch vụ tài khoản." })).toBeVisible();
+      expect(submissions).toBe(1); await assertAccessible(page); await snapshot(page, 'sign-in-error-' + width);
     });
   });
 }
 
-test("owner step-up dialog preserves keyboard focus and Escape dismissal", async ({ page }) => {
-  await signInAsOwner(page);
-  await mockAccountSummary(page, "owner");
-  await mockOwnerQueue(page);
+test("owner SSO review preserves keyboard access, cancel and draft privacy", async ({ page }) => {
+  await signInAsOwner(page); await mockAccountSummary(page, "owner"); await mockOwnerQueue(page);
+  const id = "a1000000-0000-4000-8000-000000000001"; let cancelled = false;
   await page.route("**/api/v1/admin/creator-capabilities", (route) => route.fulfill({ json: { capabilities: [{ userId: "synthetic-creator", artistDisplayName: "Synthetic Creator", state: "active", version: 1, updatedAt: "2026-09-12T00:00:00.000Z" }] } }));
-  await page.route("**/api/v1/admin/creator-capabilities/synthetic-creator", (route) => route.fulfill({ status: 403, json: { code: "OWNER_TOTP_REQUIRED" } }));
-  await page.goto("/admin/creator-applications");
-  await page.getByRole("button", { name: "Quyền creator (1)" }).click();
-  await tabTo(page, page.getByRole("button", { name: "Tạm dừng", exact: true }));
-  await page.keyboard.press("Enter");
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel("Mã TOTP bắt buộc")).toBeFocused();
-  await snapshot(page, "owner-step-up");
-  await page.keyboard.press("Tab");
-  await expect(dialog.getByRole("button", { name: "Xác minh & thử lại" })).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(dialog.getByRole("button", { name: "Hủy", exact: true })).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(dialog.getByRole("button", { name: "Xác minh & thử lại" })).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(dialog).not.toBeVisible();
+  await page.route("**/api/v1/admin/creator-capabilities/synthetic-creator", (route) => route.fulfill({ status: 403, json: { code: "OIDC_STEP_UP_REQUIRED", reviewPath: '/auth/review/' + id } }));
+  await page.route('**/api/v1/auth/commands/' + id, (route) => {
+    if (route.request().method() === "DELETE") { cancelled = true; return route.fulfill({ json: {} }); }
+    return route.fulfill({ json: { title: "Tạm dừng quyền creator", body: '{"reason":"Synthetic review only"}', ready: false, returnPath: "/admin/creator-applications", expiresAt: "2099-01-01T00:00:00Z" } });
+  });
+  await page.goto("/admin/creator-applications"); await page.getByRole("button", { name: "Quyền creator (1)" }).click();
+  await tabTo(page, page.getByRole("button", { name: "Tạm dừng", exact: true })); await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(new RegExp('/auth/review/' + id + '$'));
+  await expect(page.getByText("Synthetic review only", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
+  await assertAccessible(page); await snapshot(page, "owner-step-up");
+  await tabTo(page, page.getByRole("button", { name: "Hủy thao tác", exact: true })); await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/admin\/creator-applications$/u); expect(cancelled).toBe(true);
+  await expect(page.getByText("Synthetic review only", { exact: true })).toHaveCount(0);
 });

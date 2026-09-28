@@ -1,12 +1,5 @@
-import { validatePasswordLength } from "./auth-candidate/password.js";
 export { canonicalizeEmailAddress } from "./email-address.js";
 
-const commonPasswords = new Set([
-  "123456789012345",
-  "letmeinletmein",
-  "passwordpassword",
-  "qwertyuiopqwerty",
-]);
 
 const SESSION_LIFETIMES_MS = {
   user: { absolute: 30 * 24 * 60 * 60_000, idle: 7 * 24 * 60 * 60_000 },
@@ -14,6 +7,8 @@ const SESSION_LIFETIMES_MS = {
   provisional: { absolute: 10 * 60_000, idle: 10 * 60_000 },
   mfa_pending: { absolute: 10 * 60_000, idle: 10 * 60_000 },
 } as const;
+
+export type SessionLifetimes = Partial<Record<keyof typeof SESSION_LIFETIMES_MS, { absolute: number; idle: number }>>;
 
 const allowedReturnPathPrefixes = [
   "/",
@@ -23,45 +18,14 @@ const allowedReturnPathPrefixes = [
   "/verify-email",
 ] as const;
 
-export type CompromisedPasswordChecker = {
-  isCompromised(password: string): Promise<boolean>;
-};
-
-export type PasswordDecision =
-  | { accepted: true }
-  | { accepted: false; reason: "length" | "common" | "context" | "compromised" };
-
-function normalizedPasswordValue(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase("en-US");
-}
-
-export async function evaluatePassword(input: {
-  password: string;
-  contextTerms?: readonly string[];
-  compromisedPasswordChecker: CompromisedPasswordChecker;
-}): Promise<PasswordDecision> {
-  if (!validatePasswordLength(input.password)) return { accepted: false, reason: "length" };
-
-  const normalized = normalizedPasswordValue(input.password);
-  if (commonPasswords.has(normalized)) return { accepted: false, reason: "common" };
-
-  const contextual = (input.contextTerms ?? []).some((term) => {
-    const normalizedTerm = normalizedPasswordValue(term.trim());
-    return normalizedTerm.length >= 4 && normalized.includes(normalizedTerm);
-  });
-  if (contextual) return { accepted: false, reason: "context" };
-
-  if (await input.compromisedPasswordChecker.isCompromised(input.password)) {
-    return { accepted: false, reason: "compromised" };
-  }
-  return { accepted: true };
-}
-
 export function resolveSessionPolicy(input: {
   kind: keyof typeof SESSION_LIFETIMES_MS;
   now: Date;
+  lifetimes?: SessionLifetimes;
 }): { absoluteExpiresAt: Date; idleExpiresAt: Date } {
-  const lifetime = SESSION_LIFETIMES_MS[input.kind];
+  const lifetime = input.lifetimes?.[input.kind] ?? SESSION_LIFETIMES_MS[input.kind];
+  if (!Number.isSafeInteger(lifetime.absolute) || !Number.isSafeInteger(lifetime.idle) ||
+    lifetime.idle <= 0 || lifetime.absolute < lifetime.idle || !Number.isFinite(input.now.getTime())) throw new Error("Invalid session lifetime");
   return {
     absoluteExpiresAt: new Date(input.now.getTime() + lifetime.absolute),
     idleExpiresAt: new Date(input.now.getTime() + lifetime.idle),

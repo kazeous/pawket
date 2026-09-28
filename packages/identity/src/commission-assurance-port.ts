@@ -1,10 +1,11 @@
 import { identityCreatorCapabilities, identityUsers, type PawketTransaction } from "@pawket/database";
 import { asc, eq, inArray } from "drizzle-orm";
 import { createIdentityTipAssurancePort } from "./tip-assurance-port.js";
+import type { OidcSessionProvider } from "./oidc-session.js";
 
 /** Called after the commission creator fence and before account/order locks. */
-export function createIdentityCommissionAssurancePort() {
-  const sessions = createIdentityTipAssurancePort();
+export function createIdentityCommissionAssurancePort(provider: OidcSessionProvider, clock: () => Date = () => new Date()) {
+  const sessions = createIdentityTipAssurancePort(provider, clock);
   async function capability(tx: PawketTransaction, userId: string) {
     // Capability suspension takes capability -> page -> user. A session reader may
     // already hold the user share lock, so it must never wait for that capability.
@@ -29,7 +30,7 @@ export function createIdentityCommissionAssurancePort() {
     async lockCreator(tx: PawketTransaction, actor: { userId: string; sessionId: string }, at: Date) {
       const proof = await sessions.getTipSessionAssurance(tx, actor, at);
       if (!proof) return null;
-      return await capability(tx, actor.userId) ? proof : null;
+      return await capability(tx, actor.userId) && proof.sessionExpiresAt > clock() ? proof : null;
     },
   };
 }

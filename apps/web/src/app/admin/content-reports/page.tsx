@@ -8,8 +8,11 @@ import { ContentReportWorkbench } from "./content-report-workbench";
 export const dynamic = "force-dynamic";
 
 export default async function ContentReportsPage() {
-  const decision = await getPlatformRuntime().authorizeOwner(await headers());
+  const runtime = getPlatformRuntime(); const incoming = await headers();
+  const decision = await runtime.authorizeOwner(incoming);
   if (decision === "unauthenticated") redirect("/sign-in");
   if (decision !== "authorized") notFound();
-  return <AppShell context="Owner workspace" action={{ href: "/admin/creator-applications", label: "Vận hành creator" }}><header className="workspace-header reveal"><div><p className="eyebrow">Owner-only · audited</p><h1>Báo cáo nội dung công khai</h1><p className="lede">Xem snapshot an toàn và xử lý bằng TOTP step-up, version hiện tại, lý do và idempotency key.</p></div></header><ContentReportWorkbench /></AppShell>;
+  const actor = await runtime.authenticate(incoming);
+  if (!actor) redirect("/sign-in");
+  return <AppShell context="Owner workspace" action={{ href: "/admin/creator-applications", label: "Vận hành creator" }}><header className="workspace-header reveal"><div><p className="eyebrow">Owner-only · audited</p><h1>Báo cáo nội dung công khai</h1><p className="lede">Xem báo cáo và xác nhận danh tính qua tài khoản chung trước khi xử lý.</p></div></header><ContentReportWorkbench initialActorUserId={actor.userId} /></AppShell>;
 }

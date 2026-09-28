@@ -53,7 +53,7 @@ export default async function CreatorTipsPage({ searchParams }: Readonly<{ searc
     <section data-tip-surface className="flex min-w-0 flex-col gap-6"><header className="workspace-header"><div><p className="eyebrow">Tip</p><h1>Quản lý tip của bạn</h1><p className="lede">Cài đặt nhận tip và đối chiếu tiền vào tài khoản ngân hàng của bạn.</p></div></header>
       {settingsError ? <Alert variant="destructive"><AlertTitle>Chưa tải được cài đặt nhận tip</AlertTitle><AlertDescription>Tải lại trang để kiểm tra. Bạn vẫn có thể thử xem danh sách tip bên dưới.</AlertDescription></Alert> : <CreatorTipSettings key={`${settings?.revisionNumber ?? "none"}:${settings?.available}:${paymentsEnabled}`} initial={settings} editable={paymentsEnabled && env.CREATOR_PUBLISHING_MODE === "general_audience"} initialActorUserId={actor.userId} />}
       <a href="/creator/tips/sepay" className="text-sm underline">Quản lý kết nối và đối soát SePay</a>
-      <CreatorTipQueue queue={queue} state={state} paymentsEnabled={paymentsEnabled} error={queueError} />
+      <CreatorTipQueue queue={queue} state={state} paymentsEnabled={paymentsEnabled} error={queueError} actorUserId={actor.userId} />
     </section>
   </AppShell>;
 }

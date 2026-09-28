@@ -5,6 +5,7 @@ import { types as nodeTypes } from "node:util";
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import type { CommissionOrderMaintenanceService } from "@pawket/orders";
+import { expireOidcTransientData } from "@pawket/identity/oidc-cleanup";
 
 import {
   acknowledgeOutboxEvent,
@@ -93,6 +94,7 @@ const SAFE_PAYMENTS_EVENTS = new Set([
   "payments.verification_deposit_refund_attention_required.v1",
 ]);
 const SAFE_DOMAIN_EVENTS = new Set([
+  "identity.credential_email_retired.v1",
   "creator.tip_settings_updated.v1",
   "tip.transfer_claimed.v1",
   "tip.notification_available.v1",
@@ -186,12 +188,14 @@ export type WorkerRuntimeDependencies = {
   readBacklogMetrics: typeof readOperationalBacklogMetrics;
   runRetention: typeof runRetentionSweep;
   runMediaCleanup: typeof runPublicMediaCleanup;
+  expireOidcTransientData: typeof expireOidcTransientData;
   writePublicMediaWorkerHealth: typeof writePublicMediaWorkerHealth;
   hostname(): string;
   randomUUID(): string;
 };
 
 export type StartWorkerOptions = {
+  oidcCleanup?: boolean;
   databaseUrl: string;
   valkeyUrl: string;
   revision?: string;
@@ -285,6 +289,7 @@ const defaultDependencies: WorkerRuntimeDependencies = {
   readSePayBacklog,
   readBacklogMetrics: readOperationalBacklogMetrics,
   runRetention: runRetentionSweep,
+  expireOidcTransientData,
   runMediaCleanup: runPublicMediaCleanup,
   writePublicMediaWorkerHealth,
   hostname,
@@ -700,6 +705,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let commissionScanCursor: string | null = null;
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
+  let lastOidcCleanupAt = 0;
   let lastTipExpiryScanAt = 0;
   let lastSePayScanAt = 0;
   let lastMediaCleanupScanAt = 0;
@@ -712,6 +718,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   });
 
   setWorkerScanHealthMetric({ scan: "outbox", healthy: false });
+  if (options.oidcCleanup) {
+    setWorkerScanHealthMetric({ scan: "oidc_cleanup", healthy: false });
+    if (options.healthState) options.healthState.oidcCleanupConfigured = true;
+  }
   const tipExpiryEnabled = options.tipPayments !== undefined && isTipPaymentsEnabled(options.tipPayments.mode);
   const sepayRecoveryEnabled = options.sepay?.mode === "sepay_optional" || options.sepay?.commissionMode === "sepay_optional";
   setCommissionCleanupConfiguredMetric(options.commissions !== undefined);
@@ -986,6 +996,20 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanOidcIfDue = async (scanAt: number): Promise<void> => {
+    if (!running || !options.oidcCleanup || scanAt - lastOidcCleanupAt < 60_000) return;
+    lastOidcCleanupAt = scanAt;
+    try {
+      const expired = await dependencies.expireOidcTransientData(database.db, new Date(scanAt), 100);
+      setWorkerScanHealthMetric({ scan: "oidc_cleanup", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "oidc_cleanup", timestampSeconds: scanAt / 1_000 });
+      if (options.healthState) options.healthState.lastOidcCleanupSucceededAt = scanAt;
+      if (expired) logger.info({ category: "oidc_cleanup_completed", expired }, "Expired authentication material erased");
+    } catch {
+      setWorkerScanHealthMetric({ scan: "oidc_cleanup", healthy: false });
+      logger.error({ category: "oidc_cleanup_failed" }, "OIDC cleanup failed");
+    }
+  };
   const poll = async (): Promise<void> => {
     if (!running) {
       return;
@@ -1076,6 +1100,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       }
       await scanMediaCleanupIfDue(Date.now());
       await scanRetentionIfDue(Date.now());
+      await scanOidcIfDue(Date.now());
       await publishPublicMediaWorkerHealthIfDue(Date.now());
       currentDispatch = undefined;
       if (running) {

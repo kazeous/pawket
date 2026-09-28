@@ -13,6 +13,7 @@ export default defineConfig({
     schemaPath("system-outbox.ts"),
     schemaPath("shared-controls.ts"),
     schemaPath("identity-core.ts"),
+    schemaPath("identity-oidc.ts"),
     schemaPath("creator-applications.ts"),
     schemaPath("creator-catalog.ts"),
     schemaPath("public-media.ts"),

@@ -1,0 +1,2 @@
+ALTER TABLE "identity_oidc_revocations" DROP CONSTRAINT "identity_oidc_revocations_kind_check";--> statement-breakpoint
+ALTER TABLE "identity_oidc_revocations" ADD CONSTRAINT "identity_oidc_revocations_kind_check" CHECK ("identity_oidc_revocations"."kind" in ('sid', 'sub', 'local_sub'));

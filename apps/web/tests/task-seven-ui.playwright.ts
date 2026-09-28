@@ -47,7 +47,7 @@ test("creator workbench remains accessible and narrow-screen safe", async ({ pag
   expect(results.violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical")).toEqual([]);
 });
 
-test("challenge tokens leave the visible URL and are sent only in the POST body", async ({ page }) => {
+test("retired challenge links discard tokens without submitting credentials", async ({ page }) => {
   const token = "challenge-token-that-is-long-enough";
   let submittedToken: unknown;
   await page.route("**/api/v1/auth/email-verification/complete", async (route) => {
@@ -55,27 +55,24 @@ test("challenge tokens leave the visible URL and are sent only in the POST body"
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ verified: true }) });
   });
   await page.goto(`/verify-email?token=${token}`);
-  await expect(page).toHaveURL(/\/verify-email$/);
-  await page.getByRole("button", { name: "Xác minh email" }).click();
-  await expect(page.getByText("Email đã được xác minh.", { exact: false })).toBeVisible();
-  expect(submittedToken).toBe(token);
+  await expect(page).toHaveURL(/\/sign-in\?notice=auth_moved$/);
+  await expect(page.getByRole("button", { name: "Đăng nhập với reyuuGAMES" })).toBeVisible();
+  expect(submittedToken).toBeUndefined();
   await expect(page.locator("body")).not.toContainText(token);
 });
 
-test("registration explains a temporary password-check outage without leaking internals", async ({ page }) => {
-  await page.route("**/api/v1/auth/register", async (route) => {
+test("SSO outage is actionable and public pages remain available", async ({ page }) => {
+  await page.route("**/api/v1/auth/oidc/start", async (route) => {
     await route.fulfill({
       status: 503,
       contentType: "application/json",
-      body: JSON.stringify({ code: "PASSWORD_CHECK_UNAVAILABLE" }),
+      body: JSON.stringify({ code: "provider_unavailable" }),
     });
   });
   await page.goto("/register");
-  await page.getByLabel("Tên hiển thị bắt buộc").fill("Nghệ sĩ thử nghiệm");
-  await page.getByLabel("Email bắt buộc").fill("artist@example.com");
-  await page.getByLabel("Mật khẩu bắt buộc").fill("a unique password phrase");
-  await page.getByRole("button", { name: "Tạo tài khoản" }).click();
+  await page.getByRole("button", { name: "Đăng nhập với reyuuGAMES" }).click();
 
-  await expect(page.getByText("Pawket chưa thể kiểm tra độ an toàn của mật khẩu.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Chưa thể kết nối dịch vụ tài khoản.", { exact: false })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/HIBP|SHA-1|provider|IDENTITY_/iu);
+  expect((await page.goto("/"))?.status()).toBe(200);
 });

@@ -11,6 +11,10 @@ const KEY_LENGTH_BYTES = 32;
 const NONCE_LENGTH_BYTES = 12;
 const TAG_LENGTH_BYTES = 16;
 const MAX_PLAINTEXT_BYTES = 16_384;
+function plaintextLimit(limit = MAX_PLAINTEXT_BYTES): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 140_000) fail();
+  return limit;
+}
 const MAX_KEY_COUNT = 8;
 const keyIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const bindingNamePattern = /^[a-z][a-z0-9_]{0,63}$/;
@@ -125,13 +129,14 @@ export function encryptSensitiveField<
   FieldName extends string,
 >(input: {
   plaintext: string;
+  maximumPlaintextBytes?: number;
   binding: SensitiveFieldBinding<RecordType, FieldName>;
   keyring: EncryptionKeyring;
 }): EncryptionEnvelope<RecordType, FieldName> {
   try {
     if (
       input.plaintext.length === 0 ||
-      Buffer.byteLength(input.plaintext, "utf8") > MAX_PLAINTEXT_BYTES
+      Buffer.byteLength(input.plaintext, "utf8") > plaintextLimit(input.maximumPlaintextBytes)
     ) {
       fail();
     }
@@ -163,6 +168,7 @@ export function decryptSensitiveField<
   FieldName extends string,
 >(input: {
   envelope: EncryptionEnvelope<RecordType, FieldName>;
+  maximumPlaintextBytes?: number;
   binding: SensitiveFieldBinding<RecordType, FieldName>;
   keyring: EncryptionKeyring;
 }): string {
@@ -186,7 +192,7 @@ export function decryptSensitiveField<
     );
     return Buffer.concat([
       decipher.update(
-        decodeEnvelopePart(input.envelope.ciphertext, { maximumLength: MAX_PLAINTEXT_BYTES }),
+        decodeEnvelopePart(input.envelope.ciphertext, { maximumLength: plaintextLimit(input.maximumPlaintextBytes) }),
       ),
       decipher.final(),
     ]).toString("utf8");

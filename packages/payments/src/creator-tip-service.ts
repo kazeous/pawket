@@ -19,6 +19,7 @@ type Input = Readonly<{
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; paymentsMode: TipPaymentsMode;
   pageSize: number; recentAuthMs: number; totpAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
+  authorizeCommand?: (tx: PawketTransaction, actor: Actor) => Promise<void>;
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean>;
     getConfirmedGuestContent(tx: PawketTransaction, command: { tipId: string; creatorUserId: string }): Promise<GuestContent | null> };
   now?: () => Date; idFactory?: () => string;

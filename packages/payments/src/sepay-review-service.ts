@@ -20,6 +20,7 @@ type Input = Readonly<{
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; assurance: SePayAssurancePort;
   paymentsMode: "disabled" | "manual_only" | "sepay_optional"; environment: "test" | "live"; applicationRevision: string;
   authorizeOwner(tx: PawketTransaction, actor: SePayActor): Promise<boolean>; now?: () => Date;
+  authorizeCommand?: (tx: PawketTransaction, actor: SePayActor) => Promise<void>;
 }>;
 const statuses = ["pending", "processing", "review_required", "confirmed", "dismissed"] as const;
 export function createSePayReviewService(input: Input) {
@@ -69,6 +70,7 @@ export function createSePayReviewService(input: Input) {
           .innerJoin(paymentsSepayConnections, eq(paymentsSepayConnections.id, paymentsSepayInbox.connectionId))
           .where(and(eq(paymentsSepayInbox.id, command.inboxId), eq(paymentsSepayConnections.creatorUserId, command.actor.userId), eq(paymentsSepayConnections.providerEnvironment, input.environment))).limit(1);
         if (!source || source.inbox.disposition !== "accepted") sepayFail("not_available");
+        await input.authorizeCommand?.(tx, command.actor);
         if (started.kind === "replay") return;
         const [state] = await tx.select().from(paymentsSepayProcessing).where(eq(paymentsSepayProcessing.inboxId, command.inboxId)).limit(1).for("update");
         if (!state || state.version !== command.expectedVersion) sepayFail("version_conflict");

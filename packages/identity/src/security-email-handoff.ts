@@ -1,4 +1,4 @@
-import { and, eq, gte, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 
 import {
   identityEmailHandoffs,
@@ -185,6 +185,24 @@ export async function deliverSecurityEmailHandoff(
   | "attention_required"
   | "already_attention_required"
 > {
+  // Legacy links no longer have a credential endpoint. Record their retirement
+  // atomically without decrypting or transmitting the destination/token.
+  const retired = await db.transaction(async (tx) => {
+    const [handoff] = await tx.update(identityEmailHandoffs).set({ status: "attention_required",
+      failureCode: "auth_moved", destinationEnvelope: null, secretEnvelope: null,
+      lockedAt: null, lockedBy: null, leaseExpiresAt: null, updatedAt: input.now,
+    }).where(and(eq(identityEmailHandoffs.id, input.handoffId),
+      inArray(identityEmailHandoffs.purpose, ["email_verification", "password_reset", "email_change"]),
+      isNull(identityEmailHandoffs.sentAt), ne(identityEmailHandoffs.status, "attention_required"),
+      or(isNull(identityEmailHandoffs.leaseExpiresAt), lte(identityEmailHandoffs.leaseExpiresAt, input.now)),
+    )).returning({ id: identityEmailHandoffs.id, purpose: identityEmailHandoffs.purpose });
+    if (!handoff) return false;
+    await insertOutboxEvent(tx, { eventType: "identity.credential_email_retired.v1", eventVersion: 1,
+      aggregateType: "security_email_handoff", aggregateId: handoff.id,
+      payload: { handoffId: handoff.id, purpose: handoff.purpose, reason: "auth_moved" }, occurredAt: input.now });
+    return true;
+  });
+  if (retired) return "attention_required";
   const recovered = await db
     .update(identityEmailHandoffs)
     .set({

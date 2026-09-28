@@ -5,7 +5,7 @@ export default defineConfig({
     js: 'import { createRequire as createBundleRequire } from "node:module"; const require = createBundleRequire(import.meta.url);',
   },
   clean: true,
-  entry: { "bootstrap-owner": "scripts/bootstrap-owner.ts" },
+  entry: { "bootstrap-owner": "scripts/bootstrap-owner.ts", "link-owner-oidc": "scripts/link-owner-oidc.ts", "cutover-oidc": "scripts/cutover-oidc.ts" },
   format: ["esm"],
   noExternal: [/.*/],
   outDir: "dist/ops",

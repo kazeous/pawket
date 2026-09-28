@@ -1,13 +1,12 @@
+import { attachSyntheticOidcSession } from "./oidc-test-support";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 
 import { createCatalogMediaOwnershipPort, createCatalogService } from "@pawket/catalog";
-import { createDatabase, creatorApplications, creatorApplicationRevisions, creatorPages, identityCreatorCapabilities, identityRoleGrants, identitySessions, identityTotpAuthenticators, identityUsers } from "@pawket/database";
+import { createDatabase, creatorApplications, creatorApplicationRevisions, creatorPages, identityCreatorCapabilities, identityRoleGrants, identitySessions, identityUsers } from "@pawket/database";
 import { createIdentityCreatorSeedPort, hashSessionToken } from "@pawket/identity";
 import { createPublicMediaService, createS3ObjectStorage, processPublicMediaAsset } from "@pawket/public-media";
 import { connectQueueProducer, createQueueConnection } from "@pawket/queue";
-import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
+
 import { eq, sql } from "drizzle-orm";
 
 import {
@@ -79,14 +78,6 @@ async function resetWorkerHealth() {
   }
 }
 
-async function encryptBetterAuthSecret(data: string) {
-  const requireFromIdentity = createRequire(new URL("../../../packages/identity/package.json", import.meta.url));
-  const cryptoModule = await import(pathToFileURL(requireFromIdentity.resolve("better-auth/crypto")).href) as {
-    symmetricEncrypt(input: { key: string; data: string }): Promise<string>;
-  };
-  return cryptoModule.symmetricEncrypt({ key: "playwright-only-better-auth-secret-000000000000", data });
-}
-
 export async function resetIncrementThreeState() {
   await resetWorkerHealth();
   await prepareMediaBuckets();
@@ -106,6 +97,7 @@ export async function resetIncrementThreeState() {
     const [creatorUser] = await db.select({ authorizationVersion: identityUsers.authorizationVersion }).from(identityUsers).where(eq(identityUsers.id, creatorUserId));
     await db.delete(identitySessions).where(eq(identitySessions.id, "task15-creator-session"));
     await db.insert(identitySessions).values({ id: "task15-creator-session", token: hashSessionToken(creatorSessionToken), userId: creatorUserId, expiresAt: new Date(now.getTime() + 60 * 60_000), createdAt: now, updatedAt: now, assuranceState: "active", primaryAuthenticatedAt: now, mfaVerifiedAt: null, lastUsedAt: now, absoluteExpiresAt: new Date(now.getTime() + 24 * 60 * 60_000), idleExpiresAt: new Date(now.getTime() + 60 * 60_000), authorizationVersion: creatorUser!.authorizationVersion });
+    await attachSyntheticOidcSession(db, { userId: creatorUserId, sessionId: "task15-creator-session", now });
 
     const [existingPage] = await db.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, creatorUserId)).limit(1);
     const seedPort = createIdentityCreatorSeedPort();
@@ -147,17 +139,11 @@ export async function resetIncrementThreeState() {
     const ownerUserId = "task15-owner";
     await db.insert(identityUsers).values({ id: ownerUserId, name: "Task 15 Owner", email: "task15-owner@example.test", canonicalEmail: "task15-owner@example.test", emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge", twoFactorEnabled: true, accessStatus: "active", authorizationVersion: 1, createdAt: now, updatedAt: now }).onConflictDoNothing();
     await db.insert(identityRoleGrants).values({ id: "15000000-0000-4000-8000-000000000004", userId: ownerUserId, role: "owner", state: "active", grantSource: "bootstrap_cli", version: 1, grantedAt: now, createdAt: now, updatedAt: now }).onConflictDoNothing();
-    const [authenticator] = await db.select({ id: identityTotpAuthenticators.id }).from(identityTotpAuthenticators).where(eq(identityTotpAuthenticators.userId, ownerUserId)).limit(1);
-    const authenticatorId = authenticator?.id ?? randomUUID();
-    const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": Buffer.from("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "base64") } });
-    const libraryTotpSecret = await encryptBetterAuthSecret("3132333435363738393031323334353637383930");
-    const encryptedTotpSecret = encryptSensitiveField({ plaintext: libraryTotpSecret, binding: { recordType: "identity_totp_authenticator", recordId: authenticatorId, fieldName: "secret" }, keyring });
     await db.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, ownerUserId));
-    if (authenticator) await db.update(identityTotpAuthenticators).set({ secret: encryptedTotpSecret, verified: true, updatedAt: now }).where(eq(identityTotpAuthenticators.id, authenticatorId));
-    else await db.insert(identityTotpAuthenticators).values({ id: authenticatorId, userId: ownerUserId, secret: encryptedTotpSecret, verified: true, createdAt: now, updatedAt: now });
     const [ownerUser] = await db.select({ authorizationVersion: identityUsers.authorizationVersion }).from(identityUsers).where(eq(identityUsers.id, ownerUserId));
     await db.delete(identitySessions).where(eq(identitySessions.id, "task15-owner-session"));
-    await db.insert(identitySessions).values({ id: "task15-owner-session", token: hashSessionToken(ownerSessionToken), userId: ownerUserId, expiresAt: new Date(now.getTime() + 30 * 60_000), createdAt: now, updatedAt: now, assuranceState: "active", primaryAuthenticatedAt: now, mfaVerifiedAt: new Date(now.getTime() - 10 * 60_000), lastUsedAt: now, absoluteExpiresAt: new Date(now.getTime() + 12 * 60 * 60_000), idleExpiresAt: new Date(now.getTime() + 30 * 60_000), authorizationVersion: ownerUser!.authorizationVersion });
+    await db.insert(identitySessions).values({ id: "task15-owner-session", token: hashSessionToken(ownerSessionToken), userId: ownerUserId, expiresAt: new Date(now.getTime() + 30 * 60_000), createdAt: now, updatedAt: now, assuranceState: "active", primaryAuthenticatedAt: now, mfaVerifiedAt: now, lastUsedAt: now, absoluteExpiresAt: new Date(now.getTime() + 12 * 60 * 60_000), idleExpiresAt: new Date(now.getTime() + 30 * 60_000), authorizationVersion: ownerUser!.authorizationVersion });
+    await attachSyntheticOidcSession(db, { userId: ownerUserId, sessionId: "task15-owner-session", now, totpStatus: "enrolled" });
   } finally { await database.close(); }
 }
 

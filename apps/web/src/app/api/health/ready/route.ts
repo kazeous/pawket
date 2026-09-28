@@ -1,4 +1,4 @@
-import { loadServerEnv, resolveRevisionAttestation } from "@pawket/config";
+import { loadServerEnv, parseOidcEnv, resolveRevisionAttestation } from "@pawket/config";
 import { checkDatabaseReadiness } from "@pawket/database/readiness";
 import { createS3ObjectStorage } from "@pawket/public-media";
 
@@ -60,6 +60,15 @@ function storageReadinessCheck(
 export function GET(request: Request): Promise<Response> {
   return withRouteContext(request, async () => {
     const environment = loadServerEnv();
+    // Validate local configuration only. An IdP outage must not remove public
+    // pages from service or require a confidential runtime during health probes.
+    let identityConfigurationValid = false;
+    try {
+      parseOidcEnv(process.env, environment.APP_BASE_URL);
+      identityConfigurationValid = true;
+    } catch {
+      // Configuration errors and secrets never enter the public health payload.
+    }
     const checkPublicMediaStorage = storageReadinessCheck(environment);
     const checkPublicMediaWorkerScan = createPublicMediaWorkerScanReadinessCheck(
       environment.VALKEY_URL,
@@ -69,6 +78,7 @@ export function GET(request: Request): Promise<Response> {
       },
     );
     const probe = createReadinessProbe({
+      identityConfigurationValid,
       checkDatabase: (signal) => checkDatabaseReadiness(environment.DATABASE_URL, signal),
       checkValkey: createValkeyReadinessCheck(environment.VALKEY_URL),
       publishingMode: environment.CREATOR_PUBLISHING_MODE,

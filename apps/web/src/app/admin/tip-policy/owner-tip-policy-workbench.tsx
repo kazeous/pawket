@@ -8,7 +8,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/c
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatTipTime, formatVnd, isRecord, requireTipDraftActor, tipRequest, TipRequestError } from "@/ui/tips/tip-client";
+import { formatTipTime, formatVnd, isRecord, requireTipDraftActor, TipRequestError } from "@/ui/tips/tip-client";
 import { readTipPolicy, tipPolicyDraft, validateTipPolicyDraft, type TipPolicyCommand, type TipPolicyDraft, type TipPolicyDraftErrors, type TipPolicyView } from "@/ui/tips/tip-policy-client";
 import { ownerTipPolicyError, ownerTipPolicyRequest, readOwnerTipPolicyData, type OwnerTipPolicyData } from "./owner-tip-policy-client";
 
@@ -18,7 +18,7 @@ const describePolicy = (policy: Pick<TipPolicyView, "minimumVnd" | "maximumVnd" 
   `${formatVnd(policy.minimumVnd)} – ${formatVnd(policy.maximumVnd)}; gợi ý: ${policy.allowedPresetsVnd.map(formatVnd).join(", ")}`;
 
 export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initialActorUserId: string }>) {
-  const id = useId(); const form = useRef<HTMLFormElement>(null); const totpInput = useRef<HTMLInputElement>(null); const busy = useRef(false);
+  const id = useId(); const form = useRef<HTMLFormElement>(null); const busy = useRef(false);
   const attempt = useRef<{ key: string; body: TipPolicyCommand } | null>(null);
   const [data, setData] = useState<OwnerTipPolicyData | null>(null);
   const [draft, setDraft] = useState<TipPolicyDraft | null>(null);
@@ -26,7 +26,7 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
   const [pending, setPending] = useState(false); const [locked, setLocked] = useState(false);
   const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const [conflict, setConflict] = useState(false); const [reviewRequired, setReviewRequired] = useState(false);
-  const [totpRequired, setTotpRequired] = useState(false); const [totp, setTotp] = useState(""); const [totpInvalid, setTotpInvalid] = useState(false);
+
   const [historyCursors, setHistoryCursors] = useState<(number | undefined)[]>([undefined]);
   useEffect(() => {
     let active = true;
@@ -35,7 +35,6 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
     }).catch((failure: unknown) => { if (active) setError(ownerTipPolicyError(failure instanceof TipRequestError ? failure.code : "dependency_unavailable")); });
     return () => { active = false; };
   }, [initialActorUserId]);
-  useEffect(() => { if (totpRequired) totpInput.current?.focus(); }, [totpRequired]);
 
   async function reload() {
     if (busy.current) return; busy.current = true; setPending(true); setError("");
@@ -44,7 +43,7 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
       const value = readOwnerTipPolicyData(await ownerTipPolicyRequest(query()));
       setData(value); setDraft((previous) => previous ?? (value.policy ? tipPolicyDraft(value.policy) : null));
       setHistoryCursors([undefined]); setConflict(false); setReviewRequired(Boolean(draft && value.policy));
-      attempt.current = null; setLocked(false); setTotpRequired(false); setTotp("");
+      attempt.current = null; setLocked(false);
       setNotice("Đã tải chính sách mới nhất. Nội dung bạn đang nhập được giữ lại để đối chiếu.");
     } catch (failure) { setError(ownerTipPolicyError(failure instanceof TipRequestError ? failure.code : "dependency_unavailable")); }
     finally { busy.current = false; setPending(false); }
@@ -62,18 +61,11 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
     event.preventDefault(); if (!draft || !data?.policy || busy.current || conflict || reviewRequired) return;
     const validation = validateTipPolicyDraft(draft, data.policy.revisionNumber); setErrors(validation.errors);
     if (!validation.command) { requestAnimationFrame(() => form.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus()); return; }
-    if (totpRequired && !/^\d{6}$/u.test(totp)) { setTotpInvalid(true); totpInput.current?.focus(); return; }
     busy.current = true; setPending(true); setLocked(true); setError(""); setNotice("");
     if (!attempt.current) attempt.current = { key: crypto.randomUUID(), body: validation.command };
     try {
-      await requireTipDraftActor(initialActorUserId);
-      if (totpRequired) {
-        try { await tipRequest("/api/auth/two-factor/verify-totp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: totp, trustDevice: false }) }); }
-        catch { setTotpInvalid(true); setError("Chưa xác minh được mã TOTP. Kiểm tra mã mới trong ứng dụng xác thực rồi thử lại."); return; }
-        finally { setTotp(""); }
-        setTotpRequired(false); setTotpInvalid(false);
-      }
-      const result = await ownerTipPolicyRequest(endpoint, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": attempt.current.key }, body: JSON.stringify(attempt.current.body) });
+      await requireTipDraftActor(initialActorUserId, true);
+      const result = await ownerTipPolicyRequest(endpoint, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": attempt.current.key, "x-pawket-actor": initialActorUserId }, body: JSON.stringify(attempt.current.body) });
       const policy = readTipPolicy(isRecord(result) ? result.policy : null); const command = attempt.current.body;
       if (policy.revisionNumber !== command.expectedRevision + 1 || policy.minimumVnd !== command.minimumVnd || policy.maximumVnd !== command.maximumVnd || JSON.stringify(policy.allowedPresetsVnd) !== JSON.stringify(command.allowedPresetsVnd)) throw new TipRequestError("dependency_unavailable");
       attempt.current = null; setLocked(false); setData({ ...data, policy }); setDraft(tipPolicyDraft(policy)); setHistoryCursors([undefined]);
@@ -82,9 +74,8 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
       catch { setNotice(`Đã lưu chính sách phiên bản ${policy.revisionNumber}. Chưa tải được lịch sử mới; tải lại để kiểm tra.`); }
     } catch (failure) {
       const code = failure instanceof TipRequestError ? failure.code : "dependency_unavailable"; setError(ownerTipPolicyError(code));
-      if (code === "owner_totp_required") setTotpRequired(true);
-      if (["version_conflict", "idempotency_conflict"].includes(code)) { setConflict(true); attempt.current = null; setLocked(false); setTotpRequired(false); }
-      if (code === "invalid_request") { attempt.current = null; setLocked(false); setTotpRequired(false); }
+      if (["version_conflict", "idempotency_conflict"].includes(code)) { setConflict(true); attempt.current = null; setLocked(false); }
+      if (code === "invalid_request") { attempt.current = null; setLocked(false); }
     } finally { busy.current = false; setPending(false); }
   }
   const preview = draft && data?.policy ? validateTipPolicyDraft(draft, data.policy.revisionNumber).command : null;
@@ -108,9 +99,8 @@ export function OwnerTipPolicyWorkbench({ initialActorUserId }: Readonly<{ initi
             <Field data-invalid={!!errors.reason} data-disabled={disabled || undefined}><FieldLabel htmlFor={`${id}-reason`}>Lý do thay đổi</FieldLabel><Input id={`${id}-reason`} value={draft.reason} maxLength={1000} disabled={disabled} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} aria-invalid={!!errors.reason} aria-describedby={`${id}-reason-error`} /><FieldDescription>3–500 ký tự. Lý do được lưu trong lịch sử dành riêng cho owner.</FieldDescription><FieldError id={`${id}-reason-error`}>{errors.reason}</FieldError></Field>
           </FieldGroup>
           <Alert role="note"><AlertTitle>Đối chiếu trước khi lưu</AlertTitle><AlertDescription><p>Trước: {describePolicy(data.policy)}</p><p>Sau: {preview ? describePolicy(preview) : "Hoàn tất các trường hợp lệ để xem thay đổi."}</p><p>Creator có mức gợi ý không còn hợp lệ sẽ dùng ba mức mặc định mới và có thể chọn lại. Số tiền, thông tin nhận tiền và thời hạn của phiếu tip đã tạo giữ nguyên.</p></AlertDescription></Alert>
-          {totpRequired ? <Field data-invalid={totpInvalid} data-disabled={pending || undefined}><FieldLabel htmlFor={`${id}-totp`}>Mã từ ứng dụng xác thực</FieldLabel><Input ref={totpInput} id={`${id}-totp`} inputMode="numeric" autoComplete="one-time-code" maxLength={6} disabled={pending} value={totp} onChange={(event) => { setTotp(event.target.value); setTotpInvalid(false); }} aria-invalid={totpInvalid} aria-describedby={`${id}-totp-help`} /><FieldDescription id={`${id}-totp-help`}>Nhập mã TOTP gồm 6 chữ số để xác nhận đúng thay đổi đang hiển thị.</FieldDescription><FieldError>{totpInvalid ? "Kiểm tra mã TOTP gồm 6 chữ số." : null}</FieldError></Field> : null}
           <noscript>Bật JavaScript để chỉnh sửa chính sách tip.</noscript>
-        </CardContent><CardFooter className="flex flex-wrap gap-3"><Button type="submit" disabled={pending || conflict || reviewRequired}>{pending ? <Spinner data-icon="inline-start" /> : null}{pending ? "Đang kiểm tra…" : totpRequired ? "Xác thực và lưu chính sách" : locked ? "Thử lại lần lưu này" : "Lưu chính sách"}</Button>{reviewRequired ? <Button type="button" variant="outline" onClick={() => { setReviewRequired(false); setNotice("Đã đối chiếu. Bạn có thể sửa nội dung hoặc lưu thay đổi."); }}>Đã đối chiếu chính sách mới</Button> : null}</CardFooter>
+        </CardContent><CardFooter className="flex flex-wrap gap-3"><Button type="submit" disabled={pending || conflict || reviewRequired}>{pending ? <Spinner data-icon="inline-start" /> : null}{pending ? "Đang kiểm tra…" : locked ? "Thử lại lần lưu này" : "Lưu chính sách"}</Button>{reviewRequired ? <Button type="button" variant="outline" onClick={() => { setReviewRequired(false); setNotice("Đã đối chiếu. Bạn có thể sửa nội dung hoặc lưu thay đổi."); }}>Đã đối chiếu chính sách mới</Button> : null}</CardFooter>
       </Card>
     </form> : null}
     {error ? <Alert variant="destructive"><AlertTitle>Chưa hoàn tất yêu cầu</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}

@@ -14,7 +14,7 @@ const securityHeaders = {
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(configDirectory, "../.."),
-  serverExternalPackages: ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner", "@node-rs/argon2"],
+  serverExternalPackages: ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"],
   webpack(config) {
     config.resolve.extensionAlias = {
       ...config.resolve.extensionAlias,
@@ -37,7 +37,7 @@ const nextConfig: NextConfig = {
       ...["/commissions/:path*", "/creators/:handle/commissions/:path*", "/api/v1/commissions/:path*", "/api/v1/creator/commissions/:path*", "/api/v1/public/creators/:handle/commissions"].map((source) => ({
         source, headers: [{ key: "Cache-Control", value: "private, no-store, max-age=0" }, { key: "Referrer-Policy", value: "no-referrer" }],
       })),
-      ...["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*", "/tips/:path*", "/api/v1/tips/:path*", "/api/v1/creator/tips/:path*", "/api/v1/public/creators/:handle/tips"].map((source) => ({
+      ...["/", "/auth/:path*", "/api/v1/auth/:path*", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*", "/tips/:path*", "/api/v1/tips/:path*", "/api/v1/creator/tips/:path*", "/api/v1/public/creators/:handle/tips"].map((source) => ({
         source,
         headers: [
           { key: "Cache-Control", value: "private, no-store, max-age=0" },

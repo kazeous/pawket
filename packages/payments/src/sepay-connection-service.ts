@@ -32,6 +32,7 @@ type Input = Readonly<{
   paymentsMode: "disabled" | "manual_only" | "sepay_optional";
   environment: "test" | "live"; appBaseUrl: string; redirectUri: string;
   applicationRevision: string; assurance: SePayAssurancePort; provider: SePayProviderPort;
+  authorizeCommand?: (tx: PawketTransaction, actor: SePayActor) => Promise<void>;
   now?: () => Date;
 }>;
 
@@ -204,6 +205,7 @@ export function createSePayConnectionService(input: Input) {
       return sepayBoundary(() => input.db.transaction(async (tx) => {
         const started = await startCommand(tx, command, "oauth_start", [command.actor.userId, command.actor.sessionId]);
         await assurance(tx, command.actor);
+        await input.authorizeCommand?.(tx, command.actor);
         if (started.kind === "replay") return { authorizationUrl: null, restartRequired: true };
         const destination = await lockTipReceivingDestination(tx, command.actor.userId, now(), input); if (!destination) sepayFail("not_available");
         const [active] = await tx.select().from(paymentsSepayConnections).where(and(eq(paymentsSepayConnections.creatorUserId, command.actor.userId), eq(paymentsSepayConnections.providerEnvironment, input.environment), ne(paymentsSepayConnections.status, "disconnected"))).limit(1).for("update");
@@ -275,6 +277,7 @@ export function createSePayConnectionService(input: Input) {
           eq(systemCommandIdempotency.commandScope, "payments.sepay_bind"), eq(systemCommandIdempotency.keyHash, crypt.hash("command-key", command.idempotencyKey)))).limit(1);
         if (replay) {
           if (replay.status !== "completed" || replay.expiresAt <= now() || replay.requestFingerprint !== crypt.hash("command", JSON.stringify([command.connectionId, command.expectedVersion, command.providerAccountId])) || replay.resultReference !== `sepay-connection:${connection.id}`) sepayFail("idempotency_conflict");
+          await input.authorizeCommand?.(tx, command.actor);
           return { replay: true as const, connection: await view(tx, connection) };
         }
         if (connection.version !== command.expectedVersion || connection.status !== "setup_pending") sepayFail("version_conflict");
@@ -291,6 +294,7 @@ export function createSePayConnectionService(input: Input) {
       return sepayBoundary(() => input.db.transaction(async (tx) => {
         const started = await startCommand(tx, command, "bind", [command.connectionId, command.expectedVersion, command.providerAccountId]);
         await assurance(tx, command.actor); const { connection, destination } = await current(tx, command.actor, command.connectionId);
+        await input.authorizeCommand?.(tx, command.actor);
         if (started.kind === "replay") return { connection: await view(tx, connection), webhookSecret: null };
         if (connection.version !== candidate.connection.version || connection.currentRevisionId !== candidate.rev.id || connection.status !== "setup_pending" || connection.refreshLeaseOwner) sepayFail("version_conflict");
         if (binding.environment !== input.environment || binding.bankBin !== destination.bankBin || (binding.subAccount ?? binding.accountNumber) !== destination.accountNumber ||
@@ -309,6 +313,7 @@ export function createSePayConnectionService(input: Input) {
       return sepayBoundary(() => input.db.transaction(async (tx) => {
         const started = await startCommand(tx, command, command.action, [command.connectionId, command.expectedVersion, command.action]);
         const proof = await assurance(tx, command.actor);
+        await input.authorizeCommand?.(tx, command.actor);
         const { connection, destination } = await (["pause", "disconnect"].includes(command.action)
           ? connectionForStop(tx, command.actor, command.connectionId) : current(tx, command.actor, command.connectionId));
         if (started.kind === "replay") return { connection: await view(tx, connection), webhookSecret: null };

@@ -12,8 +12,6 @@ const completeProductionEnv = {
   METRICS_TOKEN: "12345678901234567890123456789012",
   APP_BASE_URL: "https://pawket.example",
   AUTH_TRUSTED_ORIGINS: "https://pawket.example,https://admin.pawket.example",
-  BETTER_AUTH_SECRETS:
-    "2:production-auth-secret-value-000000000002,1:production-auth-secret-value-000000000001",
   PII_ACTIVE_KEY_ID: "pii-2026-08",
   PII_KEYRING_JSON: JSON.stringify({
     "pii-2026-08": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -31,12 +29,8 @@ const completeProductionEnv = {
   AUTH_USER_IDLE_TTL_SECONDS: "604800",
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: "43200",
   AUTH_OWNER_IDLE_TTL_SECONDS: "1800",
-  AUTH_MFA_PENDING_TTL_SECONDS: "600",
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: "900",
   AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: "300",
-  AUTH_TOTP_MAX_FAILED_ATTEMPTS: "5",
-  AUTH_TOTP_LOCKOUT_SECONDS: "900",
-  AUTH_PASSWORD_RESET_TTL_SECONDS: "1800",
 } as const;
 
 const numericFields = [
@@ -123,15 +117,11 @@ describe("parseServerEnv", () => {
         RETENTION_ENFORCEMENT_PAUSED: true,
         RETENTION_BATCH_SIZE: 100,
         RETENTION_SCAN_INTERVAL_MS: 21_600_000,
-        OWNER_MFA_RECOVERY_MODE: "disabled",
+        OIDC_OWNER_RECOVERY_MODE: "disabled",
         APP_BASE_URL: "https://pawket.example",
         AUTH_TRUSTED_ORIGINS: [
           "https://pawket.example",
           "https://admin.pawket.example",
-        ],
-        BETTER_AUTH_SECRETS: [
-          { version: 2, value: "production-auth-secret-value-000000000002" },
-          { version: 1, value: "production-auth-secret-value-000000000001" },
         ],
         PII_ACTIVE_KEY_ID: "pii-2026-08",
         PII_KEYRING_JSON: {
@@ -213,7 +203,7 @@ describe("parseServerEnv", () => {
     // available without an explicit external-control activation.
     expect(parseServerEnv(completeProductionEnv)).toEqual(
       expect.objectContaining({
-        OWNER_MFA_RECOVERY_MODE: "disabled",
+        OIDC_OWNER_RECOVERY_MODE: "disabled",
       }),
     );
   });
@@ -224,29 +214,29 @@ describe("parseServerEnv", () => {
     expect(() =>
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
       }),
-    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    ).toThrow("OIDC_OWNER_RECOVERY_MODE external_manual requires");
     expect(() =>
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
       }),
-    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    ).toThrow("OIDC_OWNER_RECOVERY_MODE external_manual requires");
     expect(() =>
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
       }),
-    ).toThrow("OWNER_MFA_RECOVERY_MODE external_manual requires");
+    ).toThrow("OIDC_OWNER_RECOVERY_MODE external_manual requires");
     expect(() =>
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
       }),
-    ).toThrow("OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE must be configured as a complete pair");
+    ).toThrow("OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE must be configured as a complete pair");
   });
 
   it("parses a complete bounded external-manual owner MFA recovery gate", () => {
@@ -255,15 +245,15 @@ describe("parseServerEnv", () => {
     expect(
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
       }),
     ).toEqual(
       expect.objectContaining({
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: "owner-acceptance-2026-08",
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
       }),
     );
 
@@ -271,11 +261,11 @@ describe("parseServerEnv", () => {
     expectSafeValidationError(
       {
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: oversizedReference,
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: oversizedReference,
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
       },
-      "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+      "OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE",
       "is too long or too large",
       oversizedReference,
     );
@@ -294,11 +284,11 @@ describe("parseServerEnv", () => {
     expectSafeValidationError(
       {
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: rejectedReference,
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: rejectedReference,
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
       },
-      "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+      "OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE",
       "has an invalid format",
       rejectedReference,
     );
@@ -312,10 +302,10 @@ describe("parseServerEnv", () => {
     expect(
       parseServerEnv({
         ...completeProductionEnv,
-        OWNER_MFA_RECOVERY_MODE: "external_manual",
-        OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: acceptedReference,
-        OWNER_MFA_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
-      }).OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE,
+        OIDC_OWNER_RECOVERY_MODE: "external_manual",
+        OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: acceptedReference,
+        OIDC_OWNER_RECOVERY_REHEARSED_AT: "2026-08-25T09:30:00+07:00",
+      }).OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE,
     ).toBe(acceptedReference);
   });
 
@@ -377,31 +367,9 @@ describe("parseServerEnv", () => {
     ).toThrow("APP_BASE_URL must use HTTPS when deployed");
   });
 
-  it("requires OAuth credentials as an all-or-nothing provider pair", () => {
-    const clientSecret = "provider-secret-that-must-not-leak";
-    expect(() =>
-      parseServerEnv({ ...completeProductionEnv, GOOGLE_CLIENT_SECRET: clientSecret }),
-    ).toThrow("GOOGLE_CLIENT_ID must be configured as a complete provider pair");
-    try {
-      parseServerEnv({ ...completeProductionEnv, GOOGLE_CLIENT_SECRET: clientSecret });
-    } catch (error) {
-      expect((error as Error).message).not.toContain(clientSecret);
-    }
-  });
-
-  it("treats blank optional OAuth variables from Compose as disabled providers", () => {
-    const parsed = parseServerEnv({
-      ...completeProductionEnv,
-      GOOGLE_CLIENT_ID: "",
-      GOOGLE_CLIENT_SECRET: "   ",
-      DISCORD_CLIENT_ID: "",
-      DISCORD_CLIENT_SECRET: "",
-    });
-
-    expect(parsed.GOOGLE_CLIENT_ID).toBeUndefined();
-    expect(parsed.GOOGLE_CLIENT_SECRET).toBeUndefined();
-    expect(parsed.DISCORD_CLIENT_ID).toBeUndefined();
-    expect(parsed.DISCORD_CLIENT_SECRET).toBeUndefined();
+  it("does not expose retired password or social-provider secrets in runtime config", () => {
+    const parsed = parseServerEnv({ ...completeProductionEnv, BETTER_AUTH_SECRETS: "retired", GOOGLE_CLIENT_SECRET: "retired", DISCORD_CLIENT_SECRET: "retired" });
+    for (const name of ["BETTER_AUTH_SECRETS", "GOOGLE_CLIENT_SECRET", "DISCORD_CLIENT_SECRET"]) expect(parsed).not.toHaveProperty(name);
   });
 
   it("rejects a metrics token shorter than 32 characters without echoing it", () => {

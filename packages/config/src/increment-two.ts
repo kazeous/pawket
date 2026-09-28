@@ -47,41 +47,6 @@ const trustedOriginsSchema = z.string().max(2_048).transform((value, context) =>
   return origins;
 });
 
-const authSecretsSchema = z.string().max(2_048).transform((value, context) => {
-  const entries = value.split(",").map((entry) => entry.trim());
-  if (entries.length < 1 || entries.length > 3 || entries.some((entry) => !entry)) {
-    return addInvalidFormatIssue(context);
-  }
-
-  const parsed: Array<{ version: number; value: string }> = [];
-  for (const entry of entries) {
-    const colonIndex = entry.indexOf(":");
-    if (colonIndex < 1) return addInvalidFormatIssue(context);
-
-    const versionText = entry.slice(0, colonIndex).trim();
-    const secretValue = entry.slice(colonIndex + 1).trim();
-    const version = Number(versionText);
-    if (
-      !/^\d+$/.test(versionText) ||
-      !Number.isSafeInteger(version) ||
-      version < 0 ||
-      [...secretValue].length < 32 ||
-      [...secretValue].length > 512
-    ) {
-      return addInvalidFormatIssue(context);
-    }
-    parsed.push({ version, value: secretValue });
-  }
-
-  if (
-    new Set(parsed.map(({ version }) => version)).size !== parsed.length ||
-    new Set(parsed.map(({ value: secretValue }) => secretValue)).size !== parsed.length
-  ) {
-    return addInvalidFormatIssue(context);
-  }
-  return parsed;
-});
-
 const piiKeyringSchema = z.string().max(16_384).transform((value, context) => {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -139,14 +104,9 @@ const optionalEmailAddress = z.preprocess(
 export const incrementTwoEnvShape = {
   APP_BASE_URL: z.string().max(2_048).url().optional(),
   AUTH_TRUSTED_ORIGINS: trustedOriginsSchema.optional(),
-  BETTER_AUTH_SECRETS: authSecretsSchema.optional(),
   PII_ACTIVE_KEY_ID: z.string().regex(keyIdPattern).optional(),
   PII_KEYRING_JSON: piiKeyringSchema.optional(),
   PII_LOOKUP_HMAC_KEY: z.string().max(128).refine(isCanonicalBase64Key).optional(),
-  GOOGLE_CLIENT_ID: optionalProviderValue(512),
-  GOOGLE_CLIENT_SECRET: optionalProviderValue(2048),
-  DISCORD_CLIENT_ID: optionalProviderValue(512),
-  DISCORD_CLIENT_SECRET: optionalProviderValue(2048),
   SECURITY_EMAIL_ADAPTER: z.enum(["disabled", "local", "smtp"]).optional(),
   SMTP_HOST: optionalProviderValue(253),
   SMTP_PORT: optionalBoundedInteger(1, 65_535),
@@ -166,12 +126,8 @@ export const incrementTwoEnvShape = {
   AUTH_USER_IDLE_TTL_SECONDS: optionalBoundedInteger(3_600, 2_592_000),
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: optionalBoundedInteger(3_600, 86_400),
   AUTH_OWNER_IDLE_TTL_SECONDS: optionalBoundedInteger(300, 7_200),
-  AUTH_MFA_PENDING_TTL_SECONDS: optionalBoundedInteger(120, 1_800),
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: optionalBoundedInteger(60, 3_600),
   AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: optionalBoundedInteger(30, 900),
-  AUTH_TOTP_MAX_FAILED_ATTEMPTS: optionalBoundedInteger(3, 10),
-  AUTH_TOTP_LOCKOUT_SECONDS: optionalBoundedInteger(300, 3_600),
-  AUTH_PASSWORD_RESET_TTL_SECONDS: optionalBoundedInteger(300, 3_600),
 };
 
 type ParsedIncrementTwoEnv = {
@@ -181,14 +137,9 @@ type ParsedIncrementTwoEnv = {
 export type IncrementTwoServerEnv = {
   APP_BASE_URL: string;
   AUTH_TRUSTED_ORIGINS: string[];
-  BETTER_AUTH_SECRETS: Array<{ version: number; value: string }>;
   PII_ACTIVE_KEY_ID: string;
   PII_KEYRING_JSON: Record<string, string>;
   PII_LOOKUP_HMAC_KEY: string;
-  GOOGLE_CLIENT_ID?: string;
-  GOOGLE_CLIENT_SECRET?: string;
-  DISCORD_CLIENT_ID?: string;
-  DISCORD_CLIENT_SECRET?: string;
   SECURITY_EMAIL_ADAPTER: "disabled" | "local" | "smtp";
   SMTP_HOST?: string;
   SMTP_PORT?: number;
@@ -208,18 +159,13 @@ export type IncrementTwoServerEnv = {
   AUTH_USER_IDLE_TTL_SECONDS: number;
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: number;
   AUTH_OWNER_IDLE_TTL_SECONDS: number;
-  AUTH_MFA_PENDING_TTL_SECONDS: number;
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: number;
   AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: number;
-  AUTH_TOTP_MAX_FAILED_ATTEMPTS: number;
-  AUTH_TOTP_LOCKOUT_SECONDS: number;
-  AUTH_PASSWORD_RESET_TTL_SECONDS: number;
 };
 
 const localDefaults: IncrementTwoServerEnv = {
   APP_BASE_URL: "http://localhost:3000",
   AUTH_TRUSTED_ORIGINS: ["http://localhost:3000"],
-  BETTER_AUTH_SECRETS: [{ version: 1, value: "local-only-better-auth-secret-000000000000" }],
   PII_ACTIVE_KEY_ID: "local-pii-v1",
   PII_KEYRING_JSON: { "local-pii-v1": localPiiKey },
   PII_LOOKUP_HMAC_KEY: localLookupKey,
@@ -235,18 +181,13 @@ const localDefaults: IncrementTwoServerEnv = {
   AUTH_USER_IDLE_TTL_SECONDS: 604_800,
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: 43_200,
   AUTH_OWNER_IDLE_TTL_SECONDS: 1_800,
-  AUTH_MFA_PENDING_TTL_SECONDS: 600,
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 900,
   AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 300,
-  AUTH_TOTP_MAX_FAILED_ATTEMPTS: 5,
-  AUTH_TOTP_LOCKOUT_SECONDS: 900,
-  AUTH_PASSWORD_RESET_TTL_SECONDS: 1_800,
 };
 
 const deployedRequiredFields: (keyof IncrementTwoServerEnv)[] = [
   "APP_BASE_URL",
   "AUTH_TRUSTED_ORIGINS",
-  "BETTER_AUTH_SECRETS",
   "PII_ACTIVE_KEY_ID",
   "PII_KEYRING_JSON",
   "PII_LOOKUP_HMAC_KEY",
@@ -262,12 +203,8 @@ const deployedRequiredFields: (keyof IncrementTwoServerEnv)[] = [
   "AUTH_USER_IDLE_TTL_SECONDS",
   "AUTH_OWNER_ABSOLUTE_TTL_SECONDS",
   "AUTH_OWNER_IDLE_TTL_SECONDS",
-  "AUTH_MFA_PENDING_TTL_SECONDS",
   "AUTH_PRIMARY_STEP_UP_TTL_SECONDS",
   "AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS",
-  "AUTH_TOTP_MAX_FAILED_ATTEMPTS",
-  "AUTH_TOTP_LOCKOUT_SECONDS",
-  "AUTH_PASSWORD_RESET_TTL_SECONDS",
 ];
 
 export class IncrementTwoConfigError extends Error {
@@ -308,13 +245,6 @@ export function resolveIncrementTwoEnv(
   }
   if (!resolved.PII_KEYRING_JSON[resolved.PII_ACTIVE_KEY_ID]) {
     failures.push({ field: "PII_ACTIVE_KEY_ID", reason: "must exist in PII_KEYRING_JSON" });
-  }
-  for (const provider of ["GOOGLE", "DISCORD"] as const) {
-    const clientId = parsed[`${provider}_CLIENT_ID`];
-    const clientSecret = parsed[`${provider}_CLIENT_SECRET`];
-    if ((clientId && !clientSecret) || (!clientId && clientSecret)) {
-      failures.push({ field: `${provider}_CLIENT_ID`, reason: "must be configured as a complete provider pair" });
-    }
   }
   if (deployed && resolved.SECURITY_EMAIL_ADAPTER === "local") {
     failures.push({ field: "SECURITY_EMAIL_ADAPTER", reason: "cannot use the local sink when deployed" });

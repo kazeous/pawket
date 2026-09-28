@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { currentOwnerTotp, signInAsCreator, signInAsOwner } from "./increment-three-fixture";
+import { signInAsCreator, signInAsOwner } from "./increment-three-fixture";
 import { resetIncrementThreeState } from "./increment-three-global-setup";
 
 test.beforeEach(async () => resetIncrementThreeState());
@@ -66,9 +66,6 @@ test("owner report queue hides and restores the target with fresh TOTP without r
 
   const report = page.locator("article").filter({ hasText: "Synthetic Task 15 privacy detail" }).first();
   await report.getByRole("button", { name: "Ẩn mục tiêu" }).click();
-  await expect(page.getByRole("dialog", { name: "Xác nhận TOTP mới" })).toBeVisible();
-  await page.getByLabel("Mã TOTP").fill(currentOwnerTotp());
-  await page.getByRole("button", { name: "Xác minh và thử lại" }).click();
   await expect(page.getByText("Đã ẩn mục tiêu và ghi audit event.")).toBeVisible();
 
   const hidden = await page.goto("/creators/artist-one");
@@ -96,8 +93,6 @@ test("suspension and reinstatement never republish until the creator explicitly 
   await page.getByRole("button", { name: /Quyền creator/u }).click();
   const creator = page.locator(".item-row").filter({ hasText: "task15-creator" });
   await creator.getByRole("button", { name: "Tạm dừng" }).click();
-  await page.getByLabel("Mã TOTP").fill(currentOwnerTotp());
-  await page.getByRole("button", { name: "Xác minh & thử lại" }).click();
   await expect(page.getByText("Đã tạm dừng quyền creator.")).toBeVisible();
 
   expect((await page.goto("/creators/artist-one"))?.status()).toBe(404);
