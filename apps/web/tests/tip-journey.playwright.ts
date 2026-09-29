@@ -24,8 +24,26 @@ async function createBrowserTip(page: Page) {
   await page.getByLabel("Lời nhắn (không bắt buộc)").fill("<script>window.syntheticTipScript = true</script>");
   const created = page.waitForResponse((r) => new URL(r.url()).pathname === creationPath);
   await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-  const response = await created; expect(response.status()).toBe(201);
-  return (await response.json()).instruction.reference as string;
+  expect((await created).status()).toBe(201);
+  // Chromium does not always retain this streamed response body for CDP; read the reference from the page.
+  const href = await page.getByRole("button", { name: "Mở phiếu tip", exact: true }).getAttribute("href");
+  const reference = /^\/tips\/(PW[0-9A-F]{20})$/u.exec(href ?? "")?.[1];
+  expect(reference, `receipt link ${href}`).toBeDefined();
+  return reference!;
+}
+/** Capture a creation response at the route, before the page consumes and CDP may drop its streamed body. */
+async function captureCreation(page: Page) {
+  let captured: { status: number; body: Record<string, unknown> } | undefined;
+  await page.route((url) => url.pathname === creationPath, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const response = await route.fetch(); captured = { status: response.status(), body: await response.json() };
+    await route.fulfill({ response });
+  });
+  return async () => {
+    await expect.poll(() => captured?.status, { timeout: 15_000 }).toBe(201);
+    await page.unroute((url) => url.pathname === creationPath);
+    return captured!.body;
+  };
 }
 async function receiptFacts(reference: string) {
   const database = createDatabase(browserDatabaseUrl);
@@ -74,10 +92,9 @@ for (const width of [375, 1440]) {
     await page.getByLabel("Lời nhắn (không bắt buộc)").fill("Cảm ơn bạn <script>test</script>");
     const formAxe = await new AxeBuilder({ page }).analyze();
     expect(formAxe.violations.filter((v) => ["serious", "critical"].includes(v.impact ?? ""))).toEqual([]);
-    const created = page.waitForResponse((r) => new URL(r.url()).pathname === creationPath);
+    const creation = await captureCreation(page);
     await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-    const creation = await created; expect(creation.status()).toBe(201);
-    const body = await creation.json(); const reference = body.instruction.reference as string;
+    const body = await creation(); const reference = (body.instruction as { reference: string }).reference;
     expect(JSON.stringify(body)).not.toMatch(/guestCapability|capability|secret|guestContent|Khách/u);
     await expect(page.getByRole("img", { name: "VietQR chuyển khoản trực tiếp cho nghệ sĩ" })).toBeVisible();
     await expect(page.getByText(tipBrowserAccount, { exact: true })).toBeVisible();
