@@ -8,6 +8,11 @@ does not assert that production acceptance, backup or recovery has already passe
 - Verify actual email inbox/signed callback, primary/TOTP, silent checks,
   backchannel revocation, disable/recovery, outage and two-client SSO. Synthetic
   tests do not satisfy these provider gates.
+- Verify that every authentik user type admitted by the Pawket application can
+  open the configured account portal and manage credentials and TOTP. Authentik
+  2025.10.3 rejected an External fixture at /if/user/#/settings with an
+  internal-users-only message; the current policy admits External users. Resolve
+  this mismatch and test a fresh buyer before activation.
 - Rehearse additive migrations, backup restore, owner pin, cutover and recovery on
   isolated synthetic data. Keep IDs, roles and all commerce/audit references.
 - Record operator, acceptance, backup/restore and recovery evidence references,
@@ -18,6 +23,34 @@ does not assert that production acceptance, backup or recovery has already passe
   provider, or a completed mapping. Use `link-owner-oidc.mjs` to dry-run then create
   an exclusive 0600 invitation in a private Linux ephemeral directory. Submit it
   at `/auth/owner-link`; never print it or place it in a URL.
+
+## Consistent cutover backup
+
+The dedicated Coolify Pawket volume backup is
+`6l6bns9ntlazj6zczumwlz4m` for `u1uutbkhr7anco5v9mzmroh5_postgres-data`.
+Its yearly schedule is disabled. It is configured to stop containers during
+archive, keep a local copy, upload to the connected AWS S3 Backup destination
+(`coolify-vm-kazeous`), and retain local and S3 copies for 31 days. No cutover
+archive exists merely because this configuration is saved.
+
+After draining authenticated writes and stopping old issuers/workers, trigger
+this backup manually. Coolify's stopped-container archive can restart services
+afterward: recheck and stop every old web issuer and delivery worker again
+before migration or starting the new binary. Verify the execution completed,
+the local archive and the S3 object are present, and record their time,
+size/checksum, immutable
+storage references and actual retention deadline without exposing archive
+contents. Restore a copy into an isolated database/volume and check migration
+count, user/owner and commerce row counts before citing it in the cutover
+marker. The volume archive is not a pg_dump; never restore it over the live
+production volume for a rehearsal. Keep writes stopped through the archive's
+consistency window, then proceed with the controlled migration.
+
+Set rollback-until to an actual UTC timestamp seven days after cutover and
+backup-retained-until to the verified archive's retention date at least 30
+days after archive creation. If upload, restore or retention cannot be proven,
+do not apply the cutover marker or merge a binary that can start the new SSO
+runtime without these gates.
 
 ## Commands and order
 
