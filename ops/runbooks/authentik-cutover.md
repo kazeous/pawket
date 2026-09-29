@@ -112,6 +112,33 @@ Verify public routes, login, logout/revoke-all, owner/admin, lease expiry and
 pending-action review. Callback must never perform business work. Record deployed
 source/build SHA and keep production evidence separate from local results.
 
+## Approved Coolify order
+
+A Coolify compose deploy always runs `migrate`, then `web`, then `worker`; it has no
+build-only or migrate-only step. The owner approved deploying first and applying
+the pin and marker immediately afterwards. The SSO runtime never accepts legacy
+sessions (it requires the OIDC session sidecar), never sends legacy credential
+email (the worker retires those purposes), and the owner cannot sign in before
+the pin. The only pre-marker exposure is new-buyer sign-in, whose sessions the
+marker revokes. Rehearsed on isolated linux/arm64 images in both orders.
+
+1. Set the Pawket application's Auto deploy to "Manual deployments only" and
+   confirm it saved. Merge the PR and confirm Coolify started no deployment.
+2. Drain and back up as above. If the backup restarts the old containers, stop
+   them again. Keep the application stopped until the isolated restore check
+   passes.
+3. Deploy the release (merge) commit manually. Confirm `migrate` exited 0, 37
+   migrations, and web readiness reports the release SHA as `revision`.
+4. Straight away, in the web container terminal, run the owner-link dry run and
+   apply (invitation file under `/tmp`, mode 0600, never printed), then the
+   cutover dry run and apply. `--revision` and both confirmations use the
+   release SHA, which is the deployed `APP_REVISION`, not the PR head.
+5. Complete the owner browser link, then R6 acceptance.
+
+Rollback before the marker: deploy `891244f` (or the current baseline) manually;
+the baseline was rehearsed on the expanded schema. Coolify keeps no rollback
+images for this application, so this is a rebuild of about 3–4 minutes.
+
 ## Rollback and retention
 
 Before cutover use only a rehearsed preparation binary with expanded schema and
