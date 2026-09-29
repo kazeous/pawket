@@ -15,8 +15,14 @@ does not assert that production acceptance, backup or recovery has already passe
   this mismatch and test a fresh buyer before activation.
 - Apply `deploy/authentik/pawket-enrollment-v1.yaml` after `pawket-flows-v1.yaml`.
   It adds Pawket-only sign-up and password reset to the Pawket login stage.
-  Enter the Turnstile secret in the `pawket-turnstile-v1` captcha stage in
-  authentik (never in Git); until then captcha fails closed. Verify a fresh
+  Set the Turnstile secret on the `pawket-turnstile-v1` captcha stage (never in
+  Git); until then captcha fails closed. On 2025.10.3 the admin edit form saves
+  the stage but silently drops the private key, so set it in the authentik
+  server container with a hidden prompt:
+  `ak shell -c "import getpass; from authentik.stages.captcha.models import CaptchaStage as C; s=C.objects.get(name='pawket-turnstile-v1'); s.private_key=getpass.getpass('Turnstile secret: ').strip(); s.save(); print('saved len', len(s.private_key))"`
+  (expect 35). A dummy token posted to the flow must then fail with "Invalid
+  captcha response", not "Failed to validate token" (siteverify rejected the
+  secret or was unreachable). Verify a fresh
   sign-up (inactive until the email link, Internal, no groups, one buyer in
   Pawket, one verification mail) and a reset that ends the user's other IdP
   sessions and Pawket sessions before activation.
