@@ -32,6 +32,16 @@ does not assert that production acceptance, backup or recovery has already passe
   UTC rollback deadline and backup retention deadline (at least as long).
 - Configure exact issuer/client/revision, callback, logout URL and web secret;
   worker receives public provider metadata only. Keep commerce modes unchanged.
+- Sign with an RSA-2048 key (`pawket-oidc-signing-rsa2048-v1`), not authentik's
+  generated RSA-4096 default. Authentik 2025.10.3 loads and validates the key on
+  every token, JWKS and discovery request; on the aarch64 host that took
+  1284 ms for 4096 bits against 179 ms for 2048, and under load token requests
+  crossed Pawket's 5 s OIDC timeout. Pawket pins RS256, so an EC key needs a
+  code change first. The admin UI only generates RSA-4096; create the key in
+  the authentik server container:
+  `ak shell -c "from authentik.crypto.builder import CertificateBuilder; from cryptography.hazmat.primitives.asymmetric import rsa; b=CertificateBuilder('pawket-oidc-signing-rsa2048-v1'); b.generate_private_key=lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048); b.build(validity_days=3650); c=b.save(); print('created', c.name, 'bits', c.private_key.key_size)"`
+  Then set it as the provider's signing key and check that JWKS lists one
+  2048-bit RS256 key.
 - A verified active owner must have a pinned, unexpired link invitation for this
   provider, or a completed mapping. Use `link-owner-oidc.mjs` to dry-run then create
   an exclusive 0600 invitation in a private Linux ephemeral directory. Submit it
