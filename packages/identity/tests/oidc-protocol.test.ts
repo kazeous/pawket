@@ -58,8 +58,19 @@ describe("OIDC protocol boundary", () => {
     expect(url.searchParams.get("state")).toBe(h.material.state);
     expect(url.searchParams.get("prompt")).toBe("login");
     expect(url.searchParams.get("scope")).toBe("openid email pawket_assurance");
-    expect(url.searchParams.has("max_age")).toBe(false);
     expect(new URL(await h.protocol.authorizationUrl(h.material, "lease_check")).searchParams.get("prompt")).toBe("none");
+  });
+  test("forces re-authentication with prompt=login plus a non-zero max_age only when fresh proof is needed", async () => {
+    const h = harness();
+    for (const purpose of ["step_up", "owner_link"] as const) {
+      const params = new URL(await h.protocol.authorizationUrl(h.material, purpose)).searchParams;
+      // authentik ignores max_age=0 and keeps prompt=login once per IdP session, so both are sent.
+      expect(params.get("prompt")).toBe("login");
+      expect(params.get("max_age")).toBe("10");
+    }
+    for (const purpose of ["login", "lease_check"] as const) {
+      expect(new URL(await h.protocol.authorizationUrl(h.material, purpose)).searchParams.has("max_age")).toBe(false);
+    }
   });
   test("verifies signed ID token, sends PKCE verifier only to token endpoint, returns no provider tokens", async () => {
     const h = harness(); const result = await h.protocol.exchange(h.callback, h.material);

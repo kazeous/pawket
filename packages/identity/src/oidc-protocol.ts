@@ -10,6 +10,11 @@ export type OidcAuthorizationMaterial = Readonly<{ state: string; nonce: string;
 export type OidcLogout = Readonly<{ jti: string; issuedAt: Date; sid?: string; subject?: string }>;
 const logoutEvent = "http://schemas.openid.net/event/backchannel-logout";
 const maxResponseBytes = 128 * 1024;
+// authentik honours prompt=login only once per IdP session: the login uid it stores to
+// detect the re-login is never cleared. max_age makes it re-prompt whenever the session's
+// login is older than this, which also covers later step-ups. Freshness is still enforced
+// by assertOidcStepUp, never by this value.
+const reauthenticationMaxAgeSeconds = 10;
 
 function validateUrl(value: string, allowLoopback = false): URL {
   const url = new URL(value);
@@ -101,7 +106,8 @@ export function createOidcProtocol(config: OidcProviderConfig, dependencies: {
         redirect_uri: config.redirectUri, scope: "openid email pawket_assurance", response_type: "code",
         state: material.state, nonce: material.nonce,
         code_challenge: await oidc.calculatePKCECodeChallenge(material.verifier), code_challenge_method: "S256",
-        ...(purpose === "lease_check" ? { prompt: "none" } : purpose === "step_up" || purpose === "owner_link" ? { prompt: "login" } : {}),
+        ...(purpose === "lease_check" ? { prompt: "none" } : purpose === "step_up" || purpose === "owner_link"
+          ? { prompt: "login", max_age: String(reauthenticationMaxAgeSeconds) } : {}),
       }).href;
     },
     async exchange(callback: URL, material: OidcAuthorizationMaterial): Promise<Record<string, unknown>> {
