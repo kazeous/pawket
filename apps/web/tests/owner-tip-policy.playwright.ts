@@ -236,9 +236,15 @@ for (const failRefresh of [false, true]) test(`stale buyer amount refresh preser
     await expect(page.getByLabel("Lời nhắn (không bắt buộc)")).toHaveValue("Keep buyer message <script>literal</script>");
     await expect(page.getByRole("region", { name: "Hướng dẫn chuyển khoản" })).toHaveCount(0);
     await page.getByRole("button", { name: "Tip 50.000 ₫", exact: true }).click();
-    const creation = page.waitForResponse((r) => new URL(r.url()).pathname === offeringEndpoint && r.request().method() === "POST");
+    // Creation navigates to the receipt, which evicts the response body; capture it at the route instead.
+    let created: { status: number; amountVnd: number } | undefined;
+    await page.route(`**${offeringEndpoint}`, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch(); created = { status: response.status(), amountVnd: (await response.json()).instruction?.amountVnd };
+      await route.fulfill({ response });
+    });
     await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-    const result = await creation; expect(result.status()).toBe(201); expect((await result.json()).instruction.amountVnd).toBe(50_000);
+    await expect.poll(() => created?.status, { timeout: 15_000 }).toBe(201); expect(created?.amountVnd).toBe(50_000);
   } finally { await owner.context().close(); }
 });
 
