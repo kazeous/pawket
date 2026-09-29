@@ -232,5 +232,8 @@ entries:
   - model: authentik_stages_identification.identificationstage
     identifiers: {name: pawket-identification-v1}
     attrs:
+      # Unchanged from pawket-flows-v1.yaml. The 2025.10 serializer rejects even a
+      # partial update that omits both user_fields and sources.
+      user_fields: [email, username]
       enrollment_flow: !KeyOf pawket-enrollment
       recovery_flow: !KeyOf pawket-recovery
