@@ -9,6 +9,13 @@ const schema = z.object({
   OIDC_ACCOUNT_PORTAL_URL: endpoint,
 });
 
+/** Sign-up flow installed by deploy/authentik/pawket-enrollment-v1.yaml on the account origin. */
+export const OIDC_SIGN_UP_FLOW_SLUG = "pawket-enrollment-v1";
+
+export function oidcSignUpUrl(accountPortalUrl: string): string {
+  return new URL(`/if/flow/${OIDC_SIGN_UP_FLOW_SLUG}/`, new URL(accountPortalUrl).origin).href;
+}
+
 /** Workers need the public trust boundary, never the confidential client secret. */
 export function parseOidcSessionEnv(input: NodeJS.ProcessEnv | Record<string, string | undefined>) {
   const parsed = schema.pick({ OIDC_ISSUER: true, OIDC_CLIENT_ID: true, OIDC_PROVIDER_REVISION: true }).safeParse(input);

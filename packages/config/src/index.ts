@@ -1,5 +1,5 @@
 import { z } from "zod";
-export { parseOidcEnv, parseOidcSessionEnv } from "./oidc.js";
+export { OIDC_SIGN_UP_FLOW_SLUG, oidcSignUpUrl, parseOidcEnv, parseOidcSessionEnv } from "./oidc.js";
 
 import {
   incrementTwoEnvShape,

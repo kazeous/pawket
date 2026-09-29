@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseOidcEnv, parseOidcSessionEnv } from "../src/oidc.js";
+import { oidcSignUpUrl, parseOidcEnv, parseOidcSessionEnv } from "../src/oidc.js";
 
 const env = { OIDC_ISSUER: "https://idp.example/application/o/pawket/", OIDC_CLIENT_ID: "pawket-production",
   OIDC_CLIENT_SECRET: "synthetic-secret-only-".repeat(3), OIDC_PROVIDER_REVISION: "pawket-v1",
@@ -29,5 +29,9 @@ describe("OIDC environment", () => {
     expect(() => parseOidcEnv(env, "http://remote.example")).toThrow();
     expect(() => parseOidcEnv(env, "https://pawket.example/path")).toThrow();
     expect(parseOidcEnv(env, "http://127.0.0.1:3000").redirectUri).toBe("http://127.0.0.1:3000/api/v1/auth/oidc/callback");
+  });
+  test("sign-up stays on the validated account origin", () => {
+    expect(oidcSignUpUrl(env.OIDC_ACCOUNT_PORTAL_URL)).toBe("https://idp.example/if/flow/pawket-enrollment-v1/");
+    expect(oidcSignUpUrl("https://idp.example:8443/nested/if/user/")).toBe("https://idp.example:8443/if/flow/pawket-enrollment-v1/");
   });
 });

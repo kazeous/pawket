@@ -1,0 +1,236 @@
+# Target: authentik 2025.10.3. Apply after pawket-flows-v1.yaml.
+# Pawket-scoped self-service sign-up and password reset. The only existing
+# object changed is Pawket's own identification stage, which gains both flows,
+# so the links appear on the Pawket login page and nowhere else on the instance.
+# Email stages use the instance's global SMTP settings; no secret is stored here.
+# The Turnstile secret is entered by the operator in authentik. The captcha stage
+# is created once with a placeholder (state: created), so reapplying this
+# blueprint never overwrites the real secret; until it is set, captcha fails closed.
+version: 1
+metadata:
+  name: Pawket - sign-up and password reset v1
+entries:
+  - model: authentik_stages_captcha.captchastage
+    id: pawket-captcha
+    identifiers: {name: pawket-turnstile-v1}
+    state: created
+    attrs:
+      public_key: "0x4AAAAAAFI0Rbl7XMveNL4N"
+      private_key: SET-IN-AUTHENTIK-UI
+      js_url: https://challenges.cloudflare.com/turnstile/v0/api.js
+      api_url: https://challenges.cloudflare.com/turnstile/v0/siteverify
+      interactive: true
+      error_on_invalid_score: true
+  - model: authentik_policies_password.passwordpolicy
+    id: pawket-password-policy
+    identifiers: {name: pawket-password-policy-v1}
+    attrs:
+      password_field: password
+      error_message: Use at least 12 characters and avoid common or easily guessed passwords.
+      check_static_rules: true
+      length_min: 12
+      amount_digits: 0
+      amount_uppercase: 0
+      amount_lowercase: 0
+      amount_symbols: 0
+      check_zxcvbn: true
+      # A zxcvbn score equal to or below the threshold fails, so 2 requires >= 3.
+      zxcvbn_score_threshold: 2
+      check_have_i_been_pwned: false
+  - model: authentik_stages_redirect.redirectstage
+    id: pawket-return
+    identifiers: {name: pawket-return-to-sign-in-v1}
+    attrs:
+      mode: static
+      target_static: https://pawket.kazeous.com/sign-in
+      keep_context: false
+
+  - model: authentik_stages_prompt.prompt
+    id: pawket-field-name
+    identifiers: {name: pawket-field-name-v1}
+    attrs: {field_key: name, label: Display name, type: text, required: true, placeholder: Display name, placeholder_expression: false, order: 0}
+  - model: authentik_stages_prompt.prompt
+    id: pawket-field-email
+    identifiers: {name: pawket-field-email-v1}
+    attrs: {field_key: email, label: Email, type: email, required: true, placeholder: Email, placeholder_expression: false, order: 1}
+  - model: authentik_stages_prompt.prompt
+    id: pawket-field-password
+    identifiers: {name: pawket-field-password-v1}
+    attrs: {field_key: password, label: Password, type: password, required: true, placeholder: Password, placeholder_expression: false, order: 2}
+  - model: authentik_stages_prompt.prompt
+    id: pawket-field-password-repeat
+    identifiers: {name: pawket-field-password-repeat-v1}
+    attrs: {field_key: password_repeat, label: Password (repeat), type: password, required: true, placeholder: Password (repeat), placeholder_expression: false, order: 3}
+
+  - model: authentik_flows.flow
+    id: pawket-enrollment
+    identifiers: {slug: pawket-enrollment-v1}
+    attrs:
+      name: Pawket sign-up
+      title: Create your Pawket account
+      designation: enrollment
+      authentication: require_unauthenticated
+  - model: authentik_policies_expression.expressionpolicy
+    id: pawket-signup-identity
+    identifiers: {name: pawket-signup-identity-v1}
+    attrs:
+      expression: |
+        from authentik.core.models import User
+        data = request.context.get("prompt_data", {})
+        name = str(data.get("name") or "").strip()
+        email = str(data.get("email") or "").strip()
+        if not name or len(name) > 100:
+            ak_message("Enter a display name of up to 100 characters.")
+            return False
+        if not email or len(email) > 150:
+            ak_message("Enter a valid email address.")
+            return False
+        if User.objects.filter(email__iexact=email).exists() or User.objects.filter(username__iexact=email).exists():
+            ak_message("This email cannot be used to sign up. Sign in or reset your password instead.")
+            return False
+        # The username is derived from the email and never shown to the user.
+        data["name"] = name
+        data["email"] = email
+        data["username"] = email
+        return True
+  - model: authentik_stages_prompt.promptstage
+    id: pawket-signup-prompt
+    identifiers: {name: pawket-signup-prompt-v1}
+    attrs:
+      fields: [!KeyOf pawket-field-name, !KeyOf pawket-field-email, !KeyOf pawket-field-password, !KeyOf pawket-field-password-repeat]
+      validation_policies: [!KeyOf pawket-signup-identity, !KeyOf pawket-password-policy]
+  - model: authentik_stages_user_write.userwritestage
+    id: pawket-signup-write
+    identifiers: {name: pawket-signup-write-v1}
+    attrs:
+      user_creation_mode: always_create
+      create_users_as_inactive: true
+      user_type: internal
+      user_path_template: pawket/users
+  - model: authentik_stages_email.emailstage
+    id: pawket-signup-email
+    identifiers: {name: pawket-signup-email-v1}
+    attrs:
+      use_global_settings: true
+      activate_user_on_success: true
+      token_expiry: minutes=30
+      subject: Verify your email for Pawket
+      template: email/account_confirmation.html
+  - model: authentik_policies_expression.expressionpolicy
+    id: pawket-signup-email-record
+    identifiers: {name: pawket-signup-email-record-v1}
+    attrs:
+      expression: |
+        from hashlib import sha256
+        from django.utils.timezone import now
+        from authentik.events.models import Event
+        user = request.user
+        restored = request.context.get("is_restored")
+        # Reaching this stage means the email link for this pending user was
+        # opened. Record the same evidence pawket-authorization-v1 records, so the
+        # first Pawket login does not send a second verification mail.
+        if (getattr(user, "pk", None) and user.is_active and user.email and restored
+                and restored.user_id == user.pk and restored.flow.slug == "pawket-enrollment-v1"):
+            digest = sha256((str(user.uuid) + ":" + user.email).encode("utf-8")).hexdigest()
+            if not Event.objects.filter(action="custom_pawket_email_verified_v1", user__pk=user.pk,
+                    context__address_digest=digest, expires__gt=now()).exists():
+                # Do not copy request query parameters, tokens or prompt data into audit logs.
+                event = Event(action="custom_pawket_email_verified_v1", app="pawket",
+                    context={"address_digest": digest})
+                event.set_user(user)
+                event.save()
+        return True
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-enrollment, stage: !KeyOf pawket-captcha, order: 10}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-enrollment, stage: !KeyOf pawket-signup-prompt, order: 20}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-enrollment, stage: !KeyOf pawket-signup-write, order: 30}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-enrollment, stage: !KeyOf pawket-signup-email, order: 40}
+  - model: authentik_flows.flowstagebinding
+    id: pawket-enrollment-return-binding
+    identifiers: {target: !KeyOf pawket-enrollment, stage: !KeyOf pawket-return, order: 100}
+    attrs: {evaluate_on_plan: false, re_evaluate_policies: true}
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf pawket-enrollment-return-binding, policy: !KeyOf pawket-signup-email-record, order: 10}
+    attrs: {failure_result: true}
+
+  - model: authentik_flows.flow
+    id: pawket-recovery
+    identifiers: {slug: pawket-recovery-v1}
+    attrs:
+      name: Pawket password reset
+      title: Reset your Pawket password
+      designation: recovery
+      authentication: require_unauthenticated
+  - model: authentik_stages_identification.identificationstage
+    id: pawket-recovery-identification
+    identifiers: {name: pawket-recovery-identification-v1}
+    attrs:
+      user_fields: [email]
+      # Unknown addresses continue as an unsaved user and the recovery email
+      # stage skips sending, so the page never reveals whether an account exists.
+      pretend_user_exists: true
+      show_matched_user: false
+      captcha_stage: !KeyOf pawket-captcha
+  - model: authentik_stages_email.emailstage
+    id: pawket-recovery-email
+    identifiers: {name: pawket-recovery-email-v1}
+    attrs:
+      use_global_settings: true
+      # A reset must not reactivate an account an administrator disabled.
+      activate_user_on_success: false
+      token_expiry: minutes=30
+      subject: Reset your Pawket password
+      template: email/password_reset.html
+      recovery_max_attempts: 5
+      recovery_cache_timeout: minutes=5
+  - model: authentik_stages_prompt.promptstage
+    id: pawket-recovery-prompt
+    identifiers: {name: pawket-recovery-prompt-v1}
+    attrs:
+      fields: [!KeyOf pawket-field-password, !KeyOf pawket-field-password-repeat]
+      validation_policies: [!KeyOf pawket-password-policy]
+  - model: authentik_stages_user_write.userwritestage
+    id: pawket-recovery-write
+    identifiers: {name: pawket-recovery-write-v1}
+    attrs:
+      user_creation_mode: never_create
+  - model: authentik_policies_expression.expressionpolicy
+    id: pawket-recovery-revoke-sessions
+    identifiers: {name: pawket-recovery-revoke-sessions-v1}
+    attrs:
+      expression: |
+        from authentik.core.models import AuthenticatedSession
+        user = request.user
+        restored = request.context.get("is_restored")
+        # authentik 2025.10 keeps other sessions alive after a password change.
+        # Deleting each one fires the OAuth2 pre_delete handler, which sends
+        # back-channel logout to Pawket and removes the session's access tokens.
+        if (getattr(user, "pk", None) and restored and restored.user_id == user.pk
+                and restored.flow.slug == "pawket-recovery-v1"):
+            for session in AuthenticatedSession.objects.filter(user=user):
+                session.delete()
+        return True
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-recovery, stage: !KeyOf pawket-recovery-identification, order: 10}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-recovery, stage: !KeyOf pawket-recovery-email, order: 20}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-recovery, stage: !KeyOf pawket-recovery-prompt, order: 30}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-recovery, stage: !KeyOf pawket-recovery-write, order: 40}
+  - model: authentik_flows.flowstagebinding
+    id: pawket-recovery-return-binding
+    identifiers: {target: !KeyOf pawket-recovery, stage: !KeyOf pawket-return, order: 100}
+    attrs: {evaluate_on_plan: false, re_evaluate_policies: true}
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf pawket-recovery-return-binding, policy: !KeyOf pawket-recovery-revoke-sessions, order: 10}
+    attrs: {failure_result: true}
+
+  - model: authentik_stages_identification.identificationstage
+    identifiers: {name: pawket-identification-v1}
+    attrs:
+      enrollment_flow: !KeyOf pawket-enrollment
+      recovery_flow: !KeyOf pawket-recovery

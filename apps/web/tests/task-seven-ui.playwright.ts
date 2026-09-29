@@ -61,6 +61,13 @@ test("retired challenge links discard tokens without submitting credentials", as
   await expect(page.locator("body")).not.toContainText(token);
 });
 
+test("registration sends new buyers to the Pawket sign-up flow on the account origin", async ({ page }) => {
+  await page.goto("/register");
+  await expect(page.getByRole("link", { name: "Tạo tài khoản với reyuuGAMES" }))
+    .toHaveAttribute("href", "https://idp.example.invalid/if/flow/pawket-enrollment-v1/");
+  await expect(page.getByRole("link", { name: "Đã có tài khoản? Đăng nhập" })).toHaveAttribute("href", "/sign-in");
+});
+
 test("SSO outage is actionable and public pages remain available", async ({ page }) => {
   await page.route("**/api/v1/auth/oidc/start", async (route) => {
     await route.fulfill({
@@ -69,7 +76,7 @@ test("SSO outage is actionable and public pages remain available", async ({ page
       body: JSON.stringify({ code: "provider_unavailable" }),
     });
   });
-  await page.goto("/register");
+  await page.goto("/sign-in");
   await page.getByRole("button", { name: "Đăng nhập với reyuuGAMES" }).click();
 
   await expect(page.getByText("Chưa thể kết nối dịch vụ tài khoản.", { exact: false })).toBeVisible();

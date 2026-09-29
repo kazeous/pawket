@@ -13,6 +13,13 @@ does not assert that production acceptance, backup or recovery has already passe
   2025.10.3 rejected an External fixture at /if/user/#/settings with an
   internal-users-only message; the current policy admits External users. Resolve
   this mismatch and test a fresh buyer before activation.
+- Apply `deploy/authentik/pawket-enrollment-v1.yaml` after `pawket-flows-v1.yaml`.
+  It adds Pawket-only sign-up and password reset to the Pawket login stage.
+  Enter the Turnstile secret in the `pawket-turnstile-v1` captcha stage in
+  authentik (never in Git); until then captcha fails closed. Verify a fresh
+  sign-up (inactive until the email link, Internal, no groups, one buyer in
+  Pawket, one verification mail) and a reset that ends the user's other IdP
+  sessions and Pawket sessions before activation.
 - Rehearse additive migrations, backup restore, owner pin, cutover and recovery on
   isolated synthetic data. Keep IDs, roles and all commerce/audit references.
 - Record operator, acceptance, backup/restore and recovery evidence references,
