@@ -21,7 +21,7 @@
     "@pawket/tips": "workspace:*",
     "@pawket/trust": "workspace:*",
     "bullmq": "6.2.0",
-    "nodemailer": "9.1.1",
+    "nodemailer": "10.0.12",
     "sharp": "0.35.4"
   },
   "devDependencies": {
