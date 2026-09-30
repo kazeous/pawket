@@ -6,7 +6,7 @@ export const OIDC_PRIMARY_FRESH_MS = 900_000;
 export const OIDC_TOTP_FRESH_MS = 300_000;
 
 export class OidcIdentityError extends Error {
-  constructor(readonly code: "invalid_response" | "email_unverified" | "assurance_required" | "actor_changed" | "transaction_expired" | "session_revoked" | "identity_conflict" | "provider_unavailable" | "rate_limited") {
+  constructor(readonly code: "invalid_response" | "email_unverified" | "assurance_required" | "actor_changed" | "transaction_expired" | "session_revoked" | "identity_conflict" | "provider_unavailable" | "rate_limited" | "login_required") {
     super(code);
     this.name = "OidcIdentityError";
   }
