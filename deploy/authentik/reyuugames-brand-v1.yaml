@@ -16,6 +16,9 @@ entries:
       branding_title: reyuuGAMES Account
       branding_logo: /media/public/reyuugames/reyuu-account-logo.png
       branding_favicon: /media/public/reyuugames/favicon-64.png
+      # Plain #0f172a instead of the 916 KB default photo, which every flow page
+      # prefetches. A 1x1 PNG data URL is inlined, so nothing is downloaded.
+      branding_default_flow_background: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQI12PgF9cCAACJAFHNaLbOAAAAAElFTkSuQmCC"
       # Adopted into every component's shadow root. Scoped to the flow footer
       # element so no other list loses its last item. Recheck after upgrades.
       branding_custom_css: |
