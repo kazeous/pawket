@@ -17,6 +17,18 @@ reject these event types. The rehearsed I5/I6 overlap applies only while no
 commission catalog, order or event records exist; it does not authorize serving
 the I6 package editor while an I5 consumer remains active.
 
+On Coolify this order is automatic. A deploy gracefully stops and removes every
+running container of the application before `docker compose up`, and
+`compose.prod.yaml` starts web only after migrate has completed and the new
+worker reports healthy. Two checks remain manual after every deploy. Coolify
+ignores errors while stopping old containers and names each deploy's containers
+differently, so confirm exactly one web and one worker container exist for the
+application and the deploy log has no "Error stopping container"; stop any
+leftover older worker before accepting the release. If the new worker never
+becomes healthy, `docker compose up` fails and web is not started: redeploy the
+previous revision or fix forward. Any deployment outside Coolify must follow
+the same worker-first order by hand.
+
 This release ends at paid / in progress. Real commission intake remains gated by
 accepted I7 delivery, I8 dispute/refund handling, owner-approved policy text,
 retention and support ownership. SePay retains all I5 provider contract gates.
