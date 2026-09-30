@@ -1,0 +1,11 @@
+{% load i18n humanize %}{% autoescape off %}Confirm your email
+
+Open the link below to confirm this email address for your reyuuGAMES Account.
+
+{{ url }}
+
+{% language 'en' %}This link expires {{ expires|naturaltime }}.{% endlanguage %}
+If you didn't ask for this, you can ignore this email.
+
+reyuuGAMES Account
+{% endautoescape %}

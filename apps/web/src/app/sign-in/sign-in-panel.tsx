@@ -34,7 +34,7 @@ export function SignInPanel({ accountPortalUrl, mode = "start", initialMessage =
   }, [begin, mode, initialMessage]);
   return <Card>
     <CardHeader><CardTitle>Tài khoản reyuuGAMES</CardTitle><CardDescription>Đăng nhập và xác thực hai bước tại trang tài khoản chung.</CardDescription></CardHeader>
-    <CardContent>{message ? <Alert variant="destructive"><AlertDescription>{message}</AlertDescription></Alert> : <p>Thông tin mật khẩu và mã xác thực được nhập tại authentik.</p>}</CardContent>
+    <CardContent>{message ? <Alert variant="destructive"><AlertDescription>{message}</AlertDescription></Alert> : <p>Pawket dùng tài khoản reyuuGAMES. Mật khẩu và mã xác thực chỉ được nhập tại trang tài khoản reyuuGAMES.</p>}</CardContent>
     <CardFooter><Button type="button" disabled={working} onClick={() => void begin()}>{working ? "Đang chuyển đến trang tài khoản…" : mode === "lease" ? "Tiếp tục phiên đăng nhập" : "Đăng nhập với reyuuGAMES"}</Button></CardFooter>
   </Card>;
 }

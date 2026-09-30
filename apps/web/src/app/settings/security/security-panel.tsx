@@ -41,7 +41,7 @@ export function SecurityPanel({ accountPortalUrl, totpStatus }: { accountPortalU
   return <div className="flex flex-col gap-6">
     {message ? <Alert variant="destructive"><AlertDescription>{message} <Link href="/sign-in?returnTo=/settings/security">Đăng nhập</Link></AlertDescription></Alert> : null}
     <Card><CardHeader><CardTitle>Tài khoản chung</CardTitle><CardDescription>Quản lý email, mật khẩu và ứng dụng xác thực tại reyuuGAMES.</CardDescription></CardHeader>
-      <CardContent><p>{totpStatus === "enrolled" ? "Ứng dụng xác thực đang được bật tại authentik." : totpStatus === "not_enrolled" ? "Bạn chưa bật ứng dụng xác thực tại authentik." : "Chưa xác nhận được trạng thái ứng dụng xác thực."}</p><p>Để đăng xuất các ứng dụng dùng chung tài khoản, hãy quản lý phiên tại authentik.</p></CardContent>
+      <CardContent><p>{totpStatus === "enrolled" ? "Ứng dụng xác thực đang được bật trong tài khoản reyuuGAMES." : totpStatus === "not_enrolled" ? "Bạn chưa bật ứng dụng xác thực trong tài khoản reyuuGAMES." : "Chưa xác nhận được trạng thái ứng dụng xác thực."}</p><p>Để đăng xuất các ứng dụng dùng chung tài khoản, hãy quản lý phiên tại trang tài khoản reyuuGAMES.</p></CardContent>
       <CardFooter><a className={buttonVariants({ variant: "outline" })} href={accountPortalUrl}>Quản lý tài khoản chung</a></CardFooter>
     </Card>
     <Card><CardHeader><CardTitle>Phiên Pawket</CardTitle><CardDescription>Thu hồi tại đây chỉ kết thúc quyền truy cập Pawket trên thiết bị đó.</CardDescription></CardHeader>

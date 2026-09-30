@@ -13,6 +13,8 @@ does not assert that production acceptance, backup or recovery has already passe
   2025.10.3 rejected an External fixture at /if/user/#/settings with an
   internal-users-only message; the current policy admits External users. Resolve
   this mismatch and test a fresh buyer before activation.
+- Both Pawket blueprints need the reyuuGAMES email templates in `/templates`
+  first; see `authentik-branding.md`.
 - Apply `deploy/authentik/pawket-enrollment-v1.yaml` after `pawket-flows-v1.yaml`.
   It adds Pawket-only sign-up and password reset to the Pawket login stage.
   Set the Turnstile secret on the `pawket-turnstile-v1` captcha stage (never in
