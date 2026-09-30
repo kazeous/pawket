@@ -60,9 +60,13 @@ authentik's built-in templates, so they validate even without `/templates`.
 
 ## After every authentik upgrade
 
-The footer rule `:host(ak-brand-links) li:last-child` depends on authentik's
-internal markup, and custom templates depend on the `/templates` lookup.
-Recheck the footer, the template listing and one test email. Known residue
+authentik's own default blueprints reset the default flows' titles to
+"Welcome to authentik!" whenever an upgrade changes them, so re-apply
+`reyuugames-brand-v1.yaml` and open `https://account.reyuugames.com/` in a
+private window. The footer rule `:host(ak-brand-links) li:last-child` depends
+on authentik's internal markup, and custom templates depend on the
+`/templates` lookup. Recheck the footer, the template listing and one test
+email. Known residue
 that cannot be changed without replacing authentik internals: cookie and
 storage names, the logo's alt text ("authentik Logo"), the static error page
 footer (`if/error.html`), startup/outage pages, the admin interface, and

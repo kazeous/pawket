@@ -1,8 +1,11 @@
 # Target: authentik 2025.10.3. Studio-wide branding: users see "reyuuGAMES
-# Account", never authentik. Only the branding fields of the instance's single
-# default brand change; its flows, domain, certificates and attributes are left
-# as they are. Copy deploy/authentik/media/ into the server's /media first, so
-# the logo and favicon resolve before this is applied.
+# Account", never authentik. Changes only the branding fields of the instance's
+# single default brand (its flows, domain, certificates and attributes are left
+# as they are) and the titles of authentik's default flows that say
+# "authentik". Copy deploy/authentik/media/ into the server's /media first, so
+# the logo and favicon resolve before this is applied. authentik's own default
+# blueprints set those titles back when an upgrade changes them: reapply this
+# blueprint after every upgrade.
 version: 1
 metadata:
   name: reyuuGAMES - brand v1
@@ -16,9 +19,36 @@ entries:
       branding_title: reyuuGAMES Account
       branding_logo: /media/public/reyuugames/reyuu-account-logo.png
       branding_favicon: /media/public/reyuugames/favicon-64.png
+      # Plain #0f172a instead of the 916 KB default photo, which every flow page
+      # prefetches. A 1x1 PNG data URL is inlined, so nothing is downloaded.
+      branding_default_flow_background: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQI12PgF9cCAACJAFHNaLbOAAAAAElFTkSuQmCC"
       # Adopted into every component's shadow root. Scoped to the flow footer
       # element so no other list loses its last item. Recheck after upgrades.
       branding_custom_css: |
         :host(ak-brand-links) li:last-child {
           display: none;
         }
+
+  # Default flows whose stock titles say "Welcome to authentik!". The first is
+  # the brand's sign-in for the account portal. Title only; each entry is
+  # skipped when the flow does not exist, so nothing is ever created.
+  - model: authentik_flows.flow
+    identifiers: {slug: default-authentication-flow}
+    conditions:
+      - !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+    attrs: {title: Sign in}
+  - model: authentik_flows.flow
+    identifiers: {slug: default-source-authentication}
+    conditions:
+      - !Find [authentik_flows.flow, [slug, default-source-authentication]]
+    attrs: {title: Sign in}
+  - model: authentik_flows.flow
+    identifiers: {slug: default-source-enrollment}
+    conditions:
+      - !Find [authentik_flows.flow, [slug, default-source-enrollment]]
+    attrs: {title: Choose a username}
+  - model: authentik_flows.flow
+    identifiers: {slug: initial-setup}
+    conditions:
+      - !Find [authentik_flows.flow, [slug, initial-setup]]
+    attrs: {title: Initial setup}
