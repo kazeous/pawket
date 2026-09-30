@@ -94,7 +94,11 @@ export function createOidcHttpHandlers(options: {
     ownerLink: (request: Request) => start(request, "owner_link"),
     stepUp: (request: Request) => start(request, "step_up"),
     async callback(request: Request): Promise<Response> {
-      const url = new URL(request.url);
+      // Next.js builds request.url from its own listener (HOSTNAME:PORT, 0.0.0.0:3000 in the
+      // container), not from the public host. The origin comes from APP_BASE_URL; only path and
+      // query come from the request, and the protocol still checks them against the redirect URI.
+      const incoming = new URL(request.url);
+      const url = new URL(baseURL.origin); url.pathname = incoming.pathname; url.search = incoming.search;
       const states = url.searchParams.getAll("state");
       if (request.method !== "GET" || states.length !== 1 || !/^[A-Za-z0-9_-]{32,256}$/u.test(states[0]!)) {
         return redirect("/sign-in?notice=invalid_response");
