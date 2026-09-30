@@ -59,6 +59,16 @@ describe("OIDC HTTP boundary", () => {
     expect(response.headers.get("set-cookie")).toContain(`__Host-pawket.session=${session}`);
     expect(response.headers.get("location")).not.toContain("sensitive-code");
   });
+  test("callback exchanges on the public callback URL, not the listener URL Next.js reports", async () => {
+    const h = harness(); const started = await h.handlers.login(h.post({}));
+    const browserCookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    // In the container Next.js builds request.url from HOSTNAME:PORT and x-forwarded-proto.
+    await h.handlers.callback(new Request(`https://0.0.0.0:3000/api/v1/auth/oidc/callback?state=${state}&code=sensitive-code`, {
+      headers: { cookie: browserCookie },
+    }));
+    expect(vi.mocked(h.service.callback).mock.calls[0]![0].url.href)
+      .toBe(`${origin}/api/v1/auth/oidc/callback?state=${state}&code=sensitive-code`);
+  });
   test("missing or duplicated browser binding never reaches exchange", async () => {
     const h = harness(); const started = await h.handlers.login(h.post({}));
     const c = started.headers.get("set-cookie")!.split(";")[0]!;
