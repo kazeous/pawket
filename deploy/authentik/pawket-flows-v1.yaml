@@ -9,7 +9,8 @@ entries:
     identifiers: {slug: pawket-authentication-v1}
     attrs:
       name: Pawket authentication
-      title: Sign in to your reyuuGAMES Account
+      # authentik appends " - <brand title>" in the tab, so no brand name here.
+      title: Sign in
       designation: authentication
       authentication: none
   - model: authentik_stages_identification.identificationstage

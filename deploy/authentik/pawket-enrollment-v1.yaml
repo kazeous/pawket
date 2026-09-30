@@ -69,7 +69,7 @@ entries:
     identifiers: {slug: pawket-enrollment-v1}
     attrs:
       name: Pawket sign-up
-      title: Create your reyuuGAMES Account
+      title: Create account
       designation: enrollment
       authentication: require_unauthenticated
   - model: authentik_policies_expression.expressionpolicy
@@ -163,7 +163,7 @@ entries:
     identifiers: {slug: pawket-recovery-v1}
     attrs:
       name: Pawket password reset
-      title: Reset your reyuuGAMES Account password
+      title: Reset password
       designation: recovery
       authentication: require_unauthenticated
   - model: authentik_stages_identification.identificationstage
