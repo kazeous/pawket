@@ -9,6 +9,8 @@
     "alerts:validate": "node scripts/validate-prometheus-rules.mjs",
     "compose:validate": "node scripts/validate-coolify-compose.mjs",
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
+    "link:owner-oidc": "tsx scripts/link-owner-oidc.ts",
+    "cutover:oidc": "tsx scripts/cutover-oidc.ts",
     "recover:owner-mfa": "tsx scripts/recover-owner-mfa.ts",
     "docker:context:validate": "node scripts/validate-docker-context.mjs",
     "increment-three:validate": "node scripts/validate-increment-three-release.mjs",
@@ -24,6 +26,7 @@
     "test:browser:increment-four": "playwright test --config apps/web/playwright.increment-four.config.ts",
     "test:browser:increment-five": "playwright test --config apps/web/playwright.increment-five.config.ts",
     "test:browser:increment-six": "playwright test --config apps/web/playwright.increment-six.config.ts",
+    "test:browser:auth-sso": "playwright test --config apps/web/playwright.auth-sso.config.ts",
     "test:browser": "pnpm --filter @pawket/web build && pnpm --filter @pawket/worker build && playwright test --config apps/web/playwright.config.ts && playwright test --config apps/web/playwright.increment-three-disabled.config.ts && playwright test --config apps/web/playwright.increment-three.config.ts",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },

@@ -36,9 +36,9 @@ export function CreatorTipSettings({ initial, editable, initialActorUserId }: Re
     setPresetsError("");
     busy.current = true; setPending(true); setLocked(true); setError(""); setNotice("");
     try {
-      await requireTipDraftActor(initialActorUserId);
+      await requireTipDraftActor(initialActorUserId, true);
       if (!attempt.current) attempt.current = { key: crypto.randomUUID(), body: { expectedRevision: saved.revisionNumber, expectedPolicyRevision: saved.effectivePolicy.revisionNumber, enabled, presetsVnd: [...presets] } };
-      const response = await tipRequest("/api/v1/creator/tip-settings", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": attempt.current.key }, body: JSON.stringify(attempt.current.body) });
+      const response = await tipRequest("/api/v1/creator/tip-settings", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": attempt.current.key, "x-pawket-actor": initialActorUserId }, body: JSON.stringify(attempt.current.body) });
       const result = readCreatorTipSettings(isRecord(response) ? response.settings : null);
       if (result.revisionNumber !== attempt.current.body.expectedRevision + 1 || result.enabled !== attempt.current.body.enabled || JSON.stringify(result.presetsVnd) !== JSON.stringify(attempt.current.body.presetsVnd)) throw new TipRequestError("dependency_unavailable");
       setSaved({ ...result, available: saved.available }); setEnabled(result.enabled); setPresets(result.effectivePresetsVnd); setNotice(result.enabled ? "Đã bật nhận tip và lưu ba mức gợi ý." : "Đã dừng nhận tip mới. Các tip đã tạo vẫn giữ nguyên lịch sử.");

@@ -14,17 +14,18 @@ the data services publish no host ports.
 Configure these required values in Coolify:
 
 - Non-secret variables: `APP_ENV=production`, `APP_BASE_URL`,
-  `AUTH_TRUSTED_ORIGINS`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=smtp`,
+  `AUTH_TRUSTED_ORIGINS`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+  `OIDC_PROVIDER_REVISION`, `OIDC_ACCOUNT_PORTAL_URL`, `PII_ACTIVE_KEY_ID`, `SECURITY_EMAIL_ADAPTER=smtp`,
   `SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS_MODE`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`,
   `VERIFICATION_DEPOSIT_AMOUNT_VND`, `VN_BUSINESS_CALENDAR_VERSION`,
-  `VN_BUSINESS_HOLIDAYS`, and the explicit `AUTH_*` lifetime and lockout values.
+  `VN_BUSINESS_HOLIDAYS`, and the explicit `AUTH_*` session and step-up lifetime values.
   Coolify's predefined `SOURCE_COMMIT` is the exact deployed commit SHA; enable
   **Include Source Commit in Build** and do not maintain a separate manual
   production `APP_REVISION`. The business-calendar version
   and holiday list are immutable inputs used to compute the 5–7 business-day
   verification-transfer refund window.
 - Secrets: `DATABASE_URL`, `VALKEY_URL`, `METRICS_TOKEN`, `POSTGRES_DB`,
-  `POSTGRES_USER`, `POSTGRES_PASSWORD`, `BETTER_AUTH_SECRETS`,
+  `POSTGRES_USER`, `POSTGRES_PASSWORD`, `OIDC_CLIENT_SECRET`,
   `PII_KEYRING_JSON`, `PII_LOOKUP_HMAC_KEY`, `BOOTSTRAP_OWNER_EMAIL`, and the
   `OPERATING_BANK_*` values, plus `SMTP_USERNAME` and `SMTP_PASSWORD`. The
   PostgreSQL URL and the three PostgreSQL
@@ -32,14 +33,42 @@ Configure these required values in Coolify:
   `METRICS_TOKEN` must contain at least 32 characters. Keep retired PII keys in
   the keyring until all matching envelopes have been rotated.
 
-`BETTER_AUTH_SECRETS` uses Better Auth's native comma-separated versioned format,
-with the current key first, for example `2:<current>,1:<previous>`. Versions must
-be unique non-negative integers and secret values must contain 32–512 characters.
+Pawket delegates sign-in, email verification, primary authentication and TOTP to
+its dedicated authentik client. Use the exact HTTPS per-provider issuer, callback
+`APP_BASE_URL/api/v1/auth/oidc/callback` and backchannel logout endpoint
+`APP_BASE_URL/api/v1/auth/oidc/backchannel-logout`. Use an RS256 signing key and the
+reviewed email/assurance claims contract. Web receives the confidential client
+secret; workers receive only issuer, client ID and provider revision. Pawket no
+longer has direct social, password or local MFA authentication.
 
-Google and Discord OAuth are optional. Enable either provider only by setting
-both its client ID and client secret; leaving both blank disables it. Phone and
-SMS verification are intentionally absent from Increment 2 and require a later
-system addition.
+Use `link:owner-oidc` to dry-run a pinned mapping for the existing owner. Apply
+requires exact revision/confirmation, evidence references and an exclusive0600
+invitation file in the Linux container. Fresh primary authentication and TOTP in
+the browser complete the link. It neither grants a role nor merges by email.
+The old `recover:owner-mfa` command always refuses; recover at authentik and follow
+the audited local session-revocation runbook. `OIDC_OWNER_RECOVERY_*` records the
+external recovery acceptance and rehearsal; it enables no local credential path.
+
+Before cutover, complete real provider acceptance, owner binding and rollback
+rehearsal. Record rollback deadline, responsible operator and backup retention.
+Stop and drain the old credential issuers before activating SSO. Preserve user
+IDs, roles, domain references and historical credentials during that window;
+purging old credential material is a separate authorized cleanup afterward.
+Use `cutover:oidc` for the read-only preflight and audited transition described in
+[`ops/runbooks/authentik-cutover.md`](ops/runbooks/authentik-cutover.md). The shared
+database marker prevents legacy session issuance after cutover; it does not
+replace stopping and draining old web/delivery processes.
+
+Pawket uses hashed opaque session cookies, local roles and a five-minute IdP
+lease. Sensitive drafts are encrypted and bound to the original account/session
+and exact command. Returning from authentik opens a review; explicit confirmation
+is required before a business action. Local logout affects Pawket; account-wide
+sign-out belongs to the account portal.
+
+Old reset/verification/change-email jobs are audited as `auth_moved` without
+sending or decrypting obsolete links. Drain active delivery leases at cutover.
+Business and security notices continue. Worker readiness includes a recent
+successful bounded OIDC transient-data cleanup scan.
 
 Security and domain email delivery is durable at least once. The handoff ID is
 stable at the sender boundary, but ordinary SMTP has no idempotency guarantee:

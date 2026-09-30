@@ -1,16 +1,17 @@
 import AxeBuilder from "@axe-core/playwright";
-import { createHmac } from "node:crypto";
+
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { tipBrowserSessionToken, tipBrowserUserId, tipPolicyOwnerSessionToken } from "./increment-four-global-setup";
+import { refreshBrowserSession } from "./oidc-browser-fixture";
 
 const endpoint = "/api/v1/creator/tips/sepay";
 const connectionId = "14000000-0000-4000-8000-000000000001";
 const inboxId = "14000000-0000-4000-8000-000000000002";
 const syntheticSecret = "s".repeat(43);
 async function signIn(page: Page, token = tipBrowserSessionToken) {
-  const signature = createHmac("sha256", "playwright-only-better-auth-secret-000000000000").update(token).digest("base64");
-  await page.context().addCookies([{ name: "pawket.session", value: `${token}.${signature}`, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+  await refreshBrowserSession(token);
+  await page.context().addCookies([{ name: "pawket.session", value: token, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
 }
 // Browser-only projections exercise interaction independently of the unresolved
 // external provider contract. Server/service/database tests cover authority.
@@ -35,7 +36,7 @@ async function syntheticUi(page: Page, options: { totp?: boolean; uncertain?: bo
     }
     if (url.pathname.endsWith("/confirm")) {
       confirmAttempts++;
-      if (options.totp && confirmAttempts === 1) return send({ code: "totp_required" }, 403);
+      if (options.totp && confirmAttempts === 1) return send({ code: "OIDC_STEP_UP_REQUIRED", reviewPath: "/auth/review/14000000-0000-4000-8000-000000000004" }, 403);
       confirmed = true; return send({ outcome: "confirmed" });
     }
     return send({ code: "invalid_request" }, 400);
@@ -43,7 +44,7 @@ async function syntheticUi(page: Page, options: { totp?: boolean; uncertain?: bo
   await page.goto("/creator/tips/sepay");
   await page.getByRole("button", { name: "Tải lại", exact: true }).click();
   await expect(page.getByText("Vietcombank · •••• 4567", { exact: true })).toBeVisible();
-  return { commands };
+  return { commands, complete: () => { confirmed = true; } };
 }
 
 test("runtime keeps provider contract closed and protects creator/owner surfaces", async ({ page }) => {
@@ -83,18 +84,25 @@ for (const width of [375, 1440]) {
   });
 }
 
-test("creator keeps the exact review command through TOTP verification", async ({ page }) => {
-  await signIn(page); const { commands } = await syntheticUi(page, { totp: true });
-  await page.route("**/api/auth/two-factor/verify-totp", (route) => route.fulfill({ json: { status: true } }));
+test("creator explicitly confirms the preserved SePay review after SSO", async ({ page }) => {
+  await signIn(page); const { commands, complete } = await syntheticUi(page, { totp: true });
+  let ready = false; let confirmations = 0;
+  await page.route("**/api/v1/auth/commands/14000000-0000-4000-8000-000000000004", async (route) => {
+    if (route.request().method() === "POST") { confirmations++; complete(); return route.fulfill({ json: { outcome: "confirmed" } }); }
+    return route.fulfill({ json: { title: "Xử lý giao dịch SePay", body: JSON.stringify(commands[0]?.body), ready, returnPath: "/creator/tips/sepay", expiresAt: "2099-01-01T00:00:00Z" } });
+  });
   await page.getByLabel("Lý do xử lý", { exact: true }).fill("Đã kiểm tra giao dịch tổng hợp");
   await page.getByRole("checkbox", { name: "Tôi đã kiểm tra và nhận được đúng khoản tiền này.", exact: true }).check();
   await page.getByRole("button", { name: "Đối chiếu lại và xác nhận", exact: true }).click();
-  await page.getByLabel("Mã từ ứng dụng xác thực", { exact: true }).fill("123456");
-  await page.getByRole("button", { name: "Xác thực để tiếp tục", exact: true }).click();
-  await expect(page.getByText("Đã xác thực. Kiểm tra thông tin rồi thực hiện lại thao tác vừa chọn.", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Đối chiếu lại và xác nhận", exact: true }).click();
-  await expect(page.getByText("Đã ghi nhận kết quả xử lý.", { exact: true })).toBeVisible();
-  expect(commands).toHaveLength(2); expect(commands[0]).toEqual(commands[1]); expect(commands[0]?.key).toBeTruthy();
+  await expect(page).toHaveURL(/\/auth\/review\/14000000-0000-4000-8000-000000000004$/u);
+  await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
+  expect(confirmations).toBe(0); expect(commands).toHaveLength(1);
+  ready = true; await page.reload();
+  await expect(page.getByText("Đã kiểm tra giao dịch tổng hợp", { exact: true })).toBeVisible();
+  expect(confirmations).toBe(0);
+  await page.getByRole("button", { name: "Xác nhận thực hiện", exact: true }).click();
+  await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
+  expect(confirmations).toBe(1); expect(commands[0]?.key).toBeTruthy();
 });
 
 test("ambiguous secret rotation preserves its retry key and changed accounts cannot reuse the draft", async ({ page }) => {

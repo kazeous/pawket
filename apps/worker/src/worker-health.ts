@@ -1,6 +1,8 @@
 import type { RevisionAttestation } from "@pawket/config";
 
 export type WorkerHealthState = {
+  oidcCleanupConfigured?: boolean;
+  lastOidcCleanupSucceededAt?: number | null;
   initializedAt: number | null;
   lastPollSucceededAt: number | null;
   lastRefundScanSucceededAt: number | null;
@@ -23,6 +25,8 @@ export type WorkerHealthState = {
 
 export function createWorkerHealthState(): WorkerHealthState {
   return {
+    oidcCleanupConfigured: false,
+    lastOidcCleanupSucceededAt: null,
     initializedAt: null,
     lastPollSucceededAt: null,
     lastRefundScanSucceededAt: null,
@@ -45,6 +49,7 @@ export function createWorkerHealthState(): WorkerHealthState {
 }
 
 export type WorkerReadinessResult = RevisionAttestation & {
+  oidcCleanupScan: "up" | "down" | "not_configured";
   status: "ready" | "not_ready";
   initialized: boolean;
   poll: "up" | "down";
@@ -105,10 +110,12 @@ export function workerReadiness(input: {
     tipExpiryScan !== "down" &&
     commissionCleanupScan !== "down" &&
     sepayRecoveryScan !== "down" &&
+    (!input.state.oidcCleanupConfigured || isFresh(input.state.lastOidcCleanupSucceededAt ?? null, now, 180_000)) &&
     publicMediaCleanupScan === "up" &&
     input.revision.revisionMatch;
 
   return {
+    oidcCleanupScan: !input.state.oidcCleanupConfigured ? "not_configured" : isFresh(input.state.lastOidcCleanupSucceededAt ?? null, now, 180_000) ? "up" : "down",
     status: ready ? "ready" : "not_ready",
     initialized,
     poll,

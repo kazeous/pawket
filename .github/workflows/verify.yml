@@ -50,7 +50,11 @@ jobs:
       METRICS_TOKEN: 01234567890123456789012345678901
       APP_BASE_URL: https://pawket.example
       AUTH_TRUSTED_ORIGINS: https://pawket.example
-      BETTER_AUTH_SECRETS: '1:ci-only-better-auth-secret-000000000000000'
+      OIDC_ISSUER: https://idp.example.invalid/application/o/pawket/
+      OIDC_CLIENT_ID: pawket-synthetic
+      OIDC_PROVIDER_REVISION: synthetic-v1
+      OIDC_CLIENT_SECRET: ci-oidc-secret-00000000000000000000000
+      OIDC_ACCOUNT_PORTAL_URL: https://idp.example.invalid/if/user/
       PII_ACTIVE_KEY_ID: ci-pii-v1
       PII_KEYRING_JSON: '{"ci-pii-v1":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}'
       PII_LOOKUP_HMAC_KEY: AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=
@@ -66,12 +70,8 @@ jobs:
       AUTH_USER_IDLE_TTL_SECONDS: 604800
       AUTH_OWNER_ABSOLUTE_TTL_SECONDS: 43200
       AUTH_OWNER_IDLE_TTL_SECONDS: 1800
-      AUTH_MFA_PENDING_TTL_SECONDS: 600
       AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 900
       AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 300
-      AUTH_TOTP_MAX_FAILED_ATTEMPTS: 5
-      AUTH_TOTP_LOCKOUT_SECONDS: 900
-      AUTH_PASSWORD_RESET_TTL_SECONDS: 1800
     services:
       postgres:
         image: postgres:18-bookworm
@@ -192,6 +192,11 @@ jobs:
 
       - name: Validate production Compose
         run: corepack pnpm compose:validate
+
+      - name: Synthetic SSO browser acceptance
+        env:
+          PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment4_tips_browser
+        run: corepack pnpm test:browser:auth-sso
 
       - name: Increment 5 closed-provider and synthetic reconciliation browser journeys
         env:

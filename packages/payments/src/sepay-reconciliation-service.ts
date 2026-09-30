@@ -23,6 +23,7 @@ type Input = Readonly<{
   applicationRevision: string; workerIdentity: string; provider: SePayProviderPort;
   connections: Pick<ReturnType<typeof createSePayConnectionService>, "getReadbackAccess">;
   assurance: SePayAssurancePort;
+  authorizeCommand?: (tx: PawketTransaction, actor: SePayActor) => Promise<void>;
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean> };
   commissions?: CommissionPaymentLifecyclePort;
   commissionPaymentsMode?: "disabled" | "manual_only" | "sepay_optional";
@@ -58,6 +59,7 @@ export function createSePayReconciliationService(input: Input) {
           if (!replay) sepayFail("intent_not_pending");
           if (replay.status !== "completed" || replay.expiresAt <= now() || !replay.resultReference?.startsWith("sepay-confirmed:") ||
             replay.requestFingerprint !== crypt.hash("review-confirm", JSON.stringify([inboxId, review.expectedVersion, true, review.reason]))) sepayFail("idempotency_conflict");
+          await input.authorizeCommand?.(tx, review.actor);
         }
         return { completed: true as const };
       }
@@ -124,6 +126,7 @@ export function createSePayReconciliationService(input: Input) {
         if (started && started.kind !== "acquired") sepayFail("idempotency_conflict");
         if (purpose.kind === "commission" && !await input.commissions?.lockSettlement(tx, { orderId: purpose.orderId, creatorUserId: candidate.creatorUserId, at: now() })) sepayFail("not_available");
         const proof = review ? requireSePayAssurance(await input.assurance.getTipSessionAssurance(tx, review.actor, now()), now(), true) : null;
+        if (review) await input.authorizeCommand?.(tx, review.actor);
         const destination = await lockTipReceivingDestination(tx, candidate.creatorUserId, now(), input);
         if (!destination || destination.accountVersionId !== candidate.accountVersionId || destination.accountFingerprint !== access.connection.accountFingerprint) sepayFail("evidence_mismatch");
         const [connection] = await tx.select().from(paymentsSepayConnections).where(eq(paymentsSepayConnections.id, access.connection.id)).limit(1).for("update");

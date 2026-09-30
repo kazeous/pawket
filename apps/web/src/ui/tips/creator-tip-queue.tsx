@@ -22,7 +22,7 @@ function TipDetails({ tip }: Readonly<{ tip: CreatorTipProjection }>) {
     {tip.state === "confirmed" ? <div className="flex min-w-0 flex-col gap-1 whitespace-pre-wrap text-sm"><p>Tên khách: {tip.guestContent.name ?? "Không cung cấp"}</p><p>Lời nhắn: {tip.guestContent.message ?? "Không cung cấp"}</p></div> : <p className="text-sm text-muted-foreground">Tên và lời nhắn chỉ mở sau khi xác nhận tiền thực nhận.</p>}
   </div>;
 }
-export function CreatorTipQueue({ queue, state, paymentsEnabled, error }: Readonly<{ queue: Queue | null; state: PaymentIntentState; paymentsEnabled: boolean; error: string | null }>) {
+export function CreatorTipQueue({ queue, state, paymentsEnabled, error, actorUserId }: Readonly<{ queue: Queue | null; state: PaymentIntentState; paymentsEnabled: boolean; error: string | null; actorUserId: string }>) {
   const router = useRouter(); const [refreshing, startTransition] = useTransition(); const [selected, setSelected] = useState<CreatorTipProjection | null>(null); const [notice, setNotice] = useState("");
   const refresh = () => startTransition(() => router.refresh());
   const action = (tip: CreatorTipProjection) => tip.state === "awaiting_transfer" && paymentsEnabled ? tip.settlementLane === "provider_bound"
@@ -47,6 +47,6 @@ export function CreatorTipQueue({ queue, state, paymentsEnabled, error }: Readon
       {queue?.nextCursor ? <Button variant="outline" nativeButton={false} render={<a href={creatorTipPath(state, queue.nextCursor)} referrerPolicy="no-referrer" />}>Trang tiếp theo</Button> : null}
       <Button variant="ghost" nativeButton={false} render={<a href={creatorTipPath(state)} referrerPolicy="no-referrer" />}>Về trang đầu</Button>
     </CardFooter>
-    {selected ? <CreatorTipConfirmation key={selected.id} tip={selected} onClose={() => { setSelected(null); refresh(); }} onConfirmed={() => { setSelected(null); setNotice("Đã ghi nhận xác nhận tiền thực nhận. Chọn Đã xác nhận để xem tên và lời nhắn."); refresh(); }} /> : null}
+    {selected ? <CreatorTipConfirmation key={selected.id} tip={selected} actorUserId={actorUserId} onClose={() => { setSelected(null); refresh(); }} onConfirmed={() => { setSelected(null); setNotice("Đã ghi nhận xác nhận tiền thực nhận. Chọn Đã xác nhận để xem tên và lời nhắn."); refresh(); }} /> : null}
   </Card>;
 }

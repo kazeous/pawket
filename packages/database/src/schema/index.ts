@@ -1,4 +1,5 @@
 export { systemOutbox } from "./system-outbox.js";
+export { identityOidcTransactions, identityOidcSessions, identityOidcRevocations, identityOidcLogoutEvents, identityOidcOwnerLinks, identityOidcPendingCommands, identityOidcProofBindings, identityOidcCutover } from "./identity-oidc.js";
 export {
   COMMISSION_POLICY_BOOTSTRAP_ID, commissionPolicyRevisions, commissionPolicyCurrent,
   creatorCommissionSettings, commissionPackages, commissionPackageRevisions,

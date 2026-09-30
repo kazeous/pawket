@@ -78,7 +78,7 @@ test("the shared shell identifies the signed-in account without mobile overflow"
 
 test("logout reports an in-flight state and gives an actionable failure", async ({ page }) => {
   await mockSignedInAccount(page);
-  await page.route("**/api/auth/sign-out", async (route) => {
+  await page.route("**/api/v1/auth/oidc/logout", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     await route.fulfill({
       status: 503,
@@ -104,7 +104,7 @@ test("successful logout returns to sign in and clears the account indicator", as
         : { contentType: "application/json", body: JSON.stringify(accountPayload) },
     );
   });
-  await page.route("**/api/auth/sign-out", async (route) => {
+  await page.route("**/api/v1/auth/oidc/logout", async (route) => {
     expect(await route.request().headerValue("content-type")).toContain("application/json");
     expect(route.request().postData()).toBe("{}");
     signedOut = true;

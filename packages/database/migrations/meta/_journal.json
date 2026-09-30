@@ -218,6 +218,48 @@
       "when": 1790385025090,
       "tag": "0030_increment_6_payment_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1790501728232,
+      "tag": "0031_authentik_sso",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790502248697,
+      "tag": "0032_oidc_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790505681852,
+      "tag": "0033_oidc_command_proofs",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1790510101367,
+      "tag": "0034_oidc_local_logout_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1790511465692,
+      "tag": "0035_oidc_pending_payload_bound",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1790522572396,
+      "tag": "0036_oidc_cutover",
+      "breakpoints": true
     }
   ]
 }

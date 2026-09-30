@@ -1,14 +1,19 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { commissionBuyerToken } from "./increment-six-global-setup";
-import { tipBrowserHandle, tipBrowserSessionToken } from "./increment-four-global-setup";
+import { tipBrowserHandle, tipBrowserSessionId, tipBrowserSessionToken } from "./increment-four-global-setup";
+
+import { createDatabase, identitySessions } from "@pawket/database";
+import { eq } from "drizzle-orm";
+import { browserDatabaseUrl } from "./increment-three-database";
+import { refreshBrowserSession, completeSyntheticPendingAuthentication, restoreBrowserSessionToken } from "./oidc-browser-fixture";
 
 const origin = "http://127.0.0.1:4181";
 async function signIn(page: Page, token: string) {
-  const signature = createHmac("sha256", "playwright-only-better-auth-secret-000000000000").update(token).digest("base64");
-  await page.context().addCookies([{ name: "pawket.session", value: `${token}.${signature}`, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+  await refreshBrowserSession(token);
+  await page.context().addCookies([{ name: "pawket.session", value: token, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
 }
 async function openPackage(page: Page, route: string) {
   const result = await page.request.get(`/api/v1/public/creators/${tipBrowserHandle}/commissions`); expect(result.status()).toBe(200);
@@ -156,28 +161,36 @@ test("expired instructions stay hidden after a refresh and failed reads hide sta
   await page.getByRole("button", { name: "Cập nhật trạng thái", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Chuyển khoản cho Tip Test Artist", exact: true })).toHaveCount(0);
 });
-test("confirmation preserves exact evidence and key through the TOTP UI challenge", async ({ page }) => {
+test("confirmation preserves exact evidence and key through OIDC review", async ({ page }) => {
   await signIn(page, commissionBuyerToken(9)); await openPackage(page, "fixed_immediate"); await fillBrief(page); const orderId = await submitRequest(page, "fixed_immediate");
-  const { order } = await (await page.request.get(`/api/v1/commissions/${orderId}`)).json();
-  await signIn(page, tipBrowserSessionToken); await page.goto(`/creator/commissions/${orderId}`);
-  const attempts: Array<{ key: string | undefined; body: string | null }> = [];
-  await page.route(`**/api/v1/creator/commissions/${orderId}/confirm`, async (route) => {
-    attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
-    return attempts.length === 1 ? route.fulfill({ status: 403, json: { code: "totp_required" } }) : route.continue();
-  });
-  // Only the challenge UI is synthetic; the retry executes the real confirmation transaction.
-  await page.route("**/api/auth/two-factor/verify-totp", (route) => route.fulfill({ json: { status: true } }));
-  await page.getByLabel("Số tiền thực nhận (VND)", { exact: true }).fill(String(order.payment.amountVnd));
-  await page.getByLabel("Nội dung trên giao dịch ngân hàng", { exact: true }).fill(order.payment.reference);
-  await page.getByLabel("Mã giao dịch ngân hàng", { exact: true }).fill(`SYNTH-${randomUUID()}`);
-  await page.getByRole("checkbox", { name: "Tôi đã kiểm tra đúng số tiền", exact: false }).check();
-  await page.getByRole("button", { name: "Xác nhận đã nhận tiền commission", exact: true }).click();
-  await page.getByLabel("Mã từ ứng dụng xác thực", { exact: true }).fill("123456");
-  await expect(page.getByLabel("Số tiền thực nhận (VND)", { exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Xác thực và kiểm tra kết quả", exact: true }).click();
-  await expect(page.getByText("Đã xác nhận thanh toán · đang thực hiện", { exact: true })).toBeVisible();
-  expect(attempts).toHaveLength(2); expect(attempts[0]).toEqual(attempts[1]);
+  const { order } = await (await page.request.get('/api/v1/commissions/' + orderId)).json();
+  await signIn(page, tipBrowserSessionToken); await page.goto('/creator/commissions/' + orderId);
+  const database = createDatabase(browserDatabaseUrl);
+  try {
+    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
+    const attempts: Array<{ key: string | undefined; body: string | null }> = [];
+    await page.route('**/api/v1/creator/commissions/' + orderId + '/confirm', async (route) => {
+      attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() }); await route.continue();
+    });
+    await page.getByLabel("Số tiền thực nhận (VND)", { exact: true }).fill(String(order.payment.amountVnd));
+    await page.getByLabel("Nội dung trên giao dịch ngân hàng", { exact: true }).fill(order.payment.reference);
+    await page.getByLabel("Mã giao dịch ngân hàng", { exact: true }).fill('SYNTH-' + randomUUID());
+    await page.getByRole("checkbox", { name: "Tôi đã kiểm tra đúng số tiền", exact: false }).check();
+    await page.getByRole("button", { name: "Xác nhận đã nhận tiền commission", exact: true }).click();
+    await expect(page).toHaveURL(/\/auth\/review\/[0-9a-f-]{36}$/u);
+    await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
+    const review = await completeSyntheticPendingAuthentication(database.db, new URL(page.url()).pathname.split("/").at(-1)!);
+    await page.context().addCookies([{ name: "pawket.session", value: review.sessionToken, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+    expect(attempts).toHaveLength(1); expect(review.payload.body).toBe(attempts[0]!.body); expect(review.payload.idempotencyKey).toBe(attempts[0]!.key);
+    const unchanged = await (await page.request.get('/api/v1/creator/commissions/' + orderId)).json();
+    expect(unchanged.order.state).toBe(order.state);
+    await page.reload(); await page.getByRole("button", { name: "Xác nhận thực hiện", exact: true }).click();
+    await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Quay lại xem kết quả" }).click();
+    await expect(page.getByText("Đã xác nhận thanh toán · đang thực hiện", { exact: true })).toBeVisible();
+  } finally { await restoreBrowserSessionToken(database.db, tipBrowserSessionId, tipBrowserSessionToken); await database.close(); }
 });
+
 test("a stale quote cannot open payment and the replacement requires fresh acceptance", async ({ page, browser }) => {
   await signIn(page, commissionBuyerToken(11)); await openPackage(page, "custom_quote"); await fillBrief(page); const orderId = await submitRequest(page, "custom_quote");
   const creatorContext = await browser.newContext({ baseURL: origin, extraHTTPHeaders: { "x-real-ip": "127.0.0.1" } }); const creator = await creatorContext.newPage();

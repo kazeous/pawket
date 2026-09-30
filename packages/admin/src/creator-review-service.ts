@@ -67,6 +67,7 @@ type ServiceInput = {
   commandFingerprintKey: Uint8Array;
   consumeStepUpProof: (tx: PawketTransaction, input: StepUpInput) => Promise<boolean>;
   catalogCapabilityTransition: CatalogCapabilityTransitionPort;
+  authorizeCommand?: (tx: PawketTransaction, actor: { userId: string; sessionId: string }) => Promise<void>;
   idFactory?: () => string;
   now?: () => Date;
 };
@@ -216,6 +217,7 @@ export function createCreatorReviewService(input: ServiceInput) {
         policy(application.state === "submitted" || (application.state === "under_review" && application.reviewClaimExpiresAt && application.reviewClaimExpiresAt <= at), "claim_unavailable");
         const [updated] = await tx.update(creatorApplications).set({ state: "under_review", reviewerUserId: command.ownerUserId, reviewClaimedAt: at, reviewClaimExpiresAt: new Date(at.getTime() + CLAIM_LEASE_MS), version: application.version + 1, updatedAt: at }).where(and(eq(creatorApplications.id, application.id), eq(creatorApplications.version, application.version))).returning();
         policy(updated, "stale_version");
+        await input.authorizeCommand?.(tx, { userId: command.ownerUserId, sessionId: command.ownerSessionId });
         return { version: updated.version, leaseExpiresAt: updated.reviewClaimExpiresAt! };
       });
     },

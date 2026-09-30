@@ -1,25 +1,19 @@
-import { eq } from "drizzle-orm";
-import { identitySessions, type PawketTransaction } from "@pawket/database";
-import { createStepUpProof, consumeStepUpProof } from "@pawket/identity";
-import { resolveOwnerSessionPermission } from "./owner-permission.js";
+import type { PawketTransaction } from "@pawket/database";
+import { createOidcAssurancePort, OidcIdentityError, StepUpProofError, type OidcSessionProvider } from "@pawket/identity";
 
 type Actor = { userId: string; sessionId: string; now: Date };
-export function createOwnerTipPolicyAssurancePort() {
+export function createOwnerTipPolicyAssurancePort(options: {
+  provider: OidcSessionProvider;
+  authorizeCommand: (tx: PawketTransaction, actor: Actor) => Promise<void>;
+  now?: () => Date;
+}) {
+  const assurance = createOidcAssurancePort(options.provider, options.now);
   return {
-    authorizeOwner(tx: PawketTransaction, actor: Actor) {
-      return resolveOwnerSessionPermission(tx, { ...actor, lock: true });
-    },
+    authorizeOwner: (tx: PawketTransaction, actor: Actor) => assurance.authorizeOwner(tx, actor, actor.now),
     async requireOwnerStepUp(tx: PawketTransaction, actor: Actor): Promise<boolean> {
-      const [session] = await tx.select({ primaryAt: identitySessions.primaryAuthenticatedAt, mfaAt: identitySessions.mfaVerifiedAt })
-        .from(identitySessions).where(eq(identitySessions.id, actor.sessionId)).limit(1);
-      // Do not accept future-dated assurance as recent authentication.
-      if (!session?.primaryAt || !session.mfaAt || session.primaryAt > actor.now || session.mfaAt > actor.now) return false;
-      try {
-        const actionClass = "owner.tip_policy_update";
-        const proof = await createStepUpProof(tx, { ...actor, actionClass, assuranceMethod: "totp" });
-        return consumeStepUpProof(tx, { ...actor, proofId: proof.id, actionClass });
-      } catch (error) {
-        if (error && typeof error === "object" && "code" in error && error.code === "OWNER_TOTP_REQUIRED") return false;
+      try { await options.authorizeCommand(tx, actor); return true; }
+      catch (error) {
+        if (error instanceof StepUpProofError || error instanceof OidcIdentityError) return false;
         throw error;
       }
     },

@@ -1,20 +1,25 @@
 import Link from "next/link";
-import { headers } from "next/headers";
-import { redirect } from "next/navigation";
-
+import { oidcSignUpUrl } from "@pawket/config";
+import { buttonVariants } from "@/components/ui/button";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { getIdentityRuntime } from "../../auth/runtime";
-import { authenticatedEntryRedirect, resolvePublicSession } from "../../auth/public-session";
-import { AuthJourneyForm } from "../auth-journey-form";
-import { AuthJourneyPage } from "../auth-journey-page";
+import { AppShell } from "../../ui/app-shell";
 
 export const dynamic = "force-dynamic";
-
-export default async function RegisterPage() {
-  const runtime = getIdentityRuntime();
-  const destination = authenticatedEntryRedirect(
-    await resolvePublicSession(runtime.authenticate, await headers()),
-  );
-  if (destination) redirect(destination);
-
-  return <AuthJourneyPage eyebrow="Bắt đầu" title="Tạo tài khoản Pawket" description="Một tài khoản cho bảo mật, hồ sơ nhà sáng tạo và các công cụ sắp mở."><AuthJourneyForm journey="register" /><p className="muted">Đã có tài khoản? <Link className="text-link" href="/sign-in">Đăng nhập</Link></p></AuthJourneyPage>;
+export default function RegisterPage() {
+  // Sign-up happens at the shared account service; Pawket creates the buyer on the first verified login.
+  const signUpUrl = oidcSignUpUrl(getIdentityRuntime().accountPortalUrl);
+  return <AppShell width="narrow" context="Tài khoản">
+    <div className="auth-layout reveal">
+      <div className="auth-intro"><p className="eyebrow">Bắt đầu</p><h1>Tạo tài khoản Pawket.</h1><p>Một tài khoản chung để đăng nhập Pawket và quản lý bảo mật.</p></div>
+      <Card>
+        <CardHeader><CardTitle>Tài khoản reyuuGAMES</CardTitle><CardDescription>Đăng ký và xác minh email tại trang tài khoản chung.</CardDescription></CardHeader>
+        <CardContent><p>Sau khi mở liên kết xác minh trong email, quay lại Pawket và đăng nhập.</p></CardContent>
+        <CardFooter className="flex flex-wrap gap-3">
+          <a className={buttonVariants()} href={signUpUrl} referrerPolicy="no-referrer">Tạo tài khoản với reyuuGAMES</a>
+          <Link className={buttonVariants({ variant: "ghost" })} href="/sign-in">Đã có tài khoản? Đăng nhập</Link>
+        </CardFooter>
+      </Card>
+    </div>
+  </AppShell>;
 }

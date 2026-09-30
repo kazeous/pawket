@@ -9,15 +9,18 @@ import Link from "next/link";
 export const dynamic = "force-dynamic";
 
 export default async function CreatorApplicationsAdminPage() {
-  const decision = await getIdentityRuntime().authorizeOwner(await headers());
+  const runtime = getIdentityRuntime(); const incoming = await headers();
+  const decision = await runtime.authorizeOwner(incoming);
   if (decision === "unauthenticated") redirect("/sign-in");
   if (decision !== "authorized") notFound();
+  const actor = await runtime.authenticate(incoming);
+  if (!actor) redirect("/sign-in");
 
   return (
     <AppShell context="Owner workspace" action={{ href: "/settings/security", label: "Bảo mật" }}>
       <header className="workspace-header reveal"><div><p className="eyebrow">Owner-only</p><h1>Vận hành creator</h1><p className="lede">Xét duyệt hồ sơ, đối soát khoản xác minh và quản lý quyền creator trong một workspace có audit.</p></div></header>
       <nav aria-label="Chính sách nền tảng"><Link className="text-link" href="/admin/tip-policy">Chính sách tip</Link></nav>
-      <OwnerWorkbench />
+      <OwnerWorkbench initialActorUserId={actor.userId} />
     </AppShell>
   );
 }

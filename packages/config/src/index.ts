@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { OIDC_SIGN_UP_FLOW_SLUG, oidcSignUpUrl, parseOidcEnv, parseOidcSessionEnv } from "./oidc.js";
 
 import {
   incrementTwoEnvShape,
@@ -45,6 +46,9 @@ const serverEnvSchema = z.object({
   APP_ENV: z.enum(["local", "test", "staging", "production"]),
   APP_REVISION: z.string().min(1),
   APP_BUILD_REVISION: z.string().min(1).optional(),
+  // Optional for workers/migrations; the web OIDC parser requires it. Keep the
+  // configured value available to structured-log redaction on every web path.
+  OIDC_CLIENT_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(32).max(2048).optional()),
   DATABASE_URL: z
     .string()
     .url()
@@ -82,9 +86,9 @@ const serverEnvSchema = z.object({
     .min(60_000)
     .max(86_400_000)
     .default(21_600_000),
-  OWNER_MFA_RECOVERY_MODE: z.enum(["disabled", "external_manual"]).default("disabled"),
-  OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE: optionalBoundedReference,
-  OWNER_MFA_RECOVERY_REHEARSED_AT: optionalOffsetTimestamp,
+  OIDC_OWNER_RECOVERY_MODE: z.enum(["disabled", "external_manual"]).default("disabled"),
+  OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE: optionalBoundedReference,
+  OIDC_OWNER_RECOVERY_REHEARSED_AT: optionalOffsetTimestamp,
   ...incrementTwoEnvShape,
   ...incrementThreeEnvShape,
   ...incrementFourEnvShape,
@@ -186,18 +190,18 @@ export function parseServerEnv(
       ]);
     }
     const recoveryAcceptanceConfigured =
-      parsed.data.OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE !== undefined;
+      parsed.data.OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE !== undefined;
     const recoveryRehearsalConfigured =
-      parsed.data.OWNER_MFA_RECOVERY_REHEARSED_AT !== undefined;
+      parsed.data.OIDC_OWNER_RECOVERY_REHEARSED_AT !== undefined;
     if (
-      parsed.data.OWNER_MFA_RECOVERY_MODE === "external_manual" &&
+      parsed.data.OIDC_OWNER_RECOVERY_MODE === "external_manual" &&
       (!recoveryAcceptanceConfigured || !recoveryRehearsalConfigured)
     ) {
       throw new IncrementTwoConfigError([
         {
-          field: "OWNER_MFA_RECOVERY_MODE",
+          field: "OIDC_OWNER_RECOVERY_MODE",
           reason:
-            "external_manual requires OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE and OWNER_MFA_RECOVERY_REHEARSED_AT",
+            "external_manual requires OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE and OIDC_OWNER_RECOVERY_REHEARSED_AT",
         },
       ]);
     }
@@ -207,9 +211,9 @@ export function parseServerEnv(
     ) {
       throw new IncrementTwoConfigError([
         {
-          field: "OWNER_MFA_RECOVERY_ACCEPTANCE_REFERENCE",
+          field: "OIDC_OWNER_RECOVERY_ACCEPTANCE_REFERENCE",
           reason:
-            "must be configured as a complete pair with OWNER_MFA_RECOVERY_REHEARSED_AT in production",
+            "must be configured as a complete pair with OIDC_OWNER_RECOVERY_REHEARSED_AT in production",
         },
       ]);
     }

@@ -45,6 +45,13 @@ const testEnv = parseServerEnv({
 });
 
 describe("createLogger", () => {
+  it("redacts the OIDC client secret and SMTP password even inside a message", () => {
+    const secret = "oidc-fixture-secret-00000000000000000000"; const smtp = "smtp-fixture-private-value";
+    const records: string[] = [];
+    const logger = createLogger({ service: "web", env: { ...testEnv, OIDC_CLIENT_SECRET: secret, SMTP_PASSWORD: smtp }, destination: { write: (record) => { records.push(record); } } });
+    logger.info({ nested: { detail: secret } }, "upstream failure " + secret + " " + smtp);
+    expect(records.join("")).not.toContain(secret); expect(records.join("")).not.toContain(smtp);
+  });
   it("redacts configured SePay credentials and OAuth callback URLs even in free text", () => {
     const records: string[] = [];
     const secret = "synthetic-sepay-client-secret-for-logging";

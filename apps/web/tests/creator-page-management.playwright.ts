@@ -133,13 +133,11 @@ test("true version conflicts refresh authority without replacing typed profile o
 test("suspended creator can remediate private content but cannot claim, rename, or publish", async ({ page }) => {
   // Break caught: suspension locks the creator out of private remediation or accidentally permits a public mutation.
   test.setTimeout(180_000);
-  const { currentOwnerTotp, signInAsOwner } = await import("./increment-three-fixture");
+  const { signInAsOwner } = await import("./increment-three-fixture");
   await signInAsOwner(page);
   await page.goto("/admin/creator-applications");
   await page.getByRole("button", { name: /Quyền creator/u }).click();
   await page.locator(".item-row").filter({ hasText: "task15-creator" }).getByRole("button", { name: "Tạm dừng" }).click();
-  await page.getByLabel("Mã TOTP").fill(currentOwnerTotp());
-  await page.getByRole("button", { name: "Xác minh & thử lại" }).click();
   await expect(page.getByText("Đã tạm dừng quyền creator.")).toBeVisible();
 
   await signInAsCreator(page);

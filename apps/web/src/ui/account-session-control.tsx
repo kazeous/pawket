@@ -133,7 +133,7 @@ export function AccountSessionControl({
   async function signOut() {
     setControlState("loading");
     try {
-      const response = await fetch("/api/auth/sign-out", {
+      const response = await fetch("/api/v1/auth/oidc/logout", {
         method: "POST",
         credentials: "include",
         headers: {

@@ -57,6 +57,7 @@ type Input = Readonly<{
   creatorAccount: CreatorTipAccountPort; receivingAccount: CreatorTipReceivingAccountPort;
   paymentsMode: TipPaymentsMode; publishingMode: "disabled" | "general_audience";
   platformPolicy: PlatformTipPolicyPort; recentAuthMs: number; commandFingerprintKey: Uint8Array;
+  authorizeCommand?: (tx: PawketTransaction, actor: CatalogActor) => Promise<void>;
   now?: () => Date; idFactory?: () => string;
 }>;
 
@@ -181,6 +182,7 @@ export function createCreatorTipSettingsService(input: Input) {
           if (!isUuid(revisionId)) fail("IDEMPOTENCY_CONFLICT");
           const [revision] = await tx.select().from(creatorTipSettingRevisions).where(and(eq(creatorTipSettingRevisions.id, revisionId), eq(creatorTipSettingRevisions.creatorUserId, page.userId))).limit(1);
           if (!revision) fail("IDEMPOTENCY_CONFLICT");
+          await input.authorizeCommand?.(tx, command.actor);
           return snapshot(revision, policy);
         }
         if (!policy) fail("INVALID_POLICY");
@@ -206,6 +208,7 @@ export function createCreatorTipSettingsService(input: Input) {
         await insertOutboxEvent(tx, { eventType: "creator.tip_settings_updated.v1", eventVersion: 1, aggregateType: "creator_tip_settings", aggregateId: page.userId,
           payload: { creatorUserId: page.userId, revisionId, enabled: revision.enabled, correlationId: command.requestId }, occurredAt: at });
         if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `creator-tip-settings-v1:${revisionId}`, completedAt: at })) fail("IDEMPOTENCY_CONFLICT");
+        await input.authorizeCommand?.(tx, command.actor);
         return snapshot(revision, policy);
       });
     },

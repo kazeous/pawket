@@ -8,6 +8,7 @@ import { createEncryptionKeyring } from "@pawket/security";
 import { eq } from "drizzle-orm";
 import { browserDatabaseUrl } from "./increment-three-database";
 import { seedCreatorPaymentBrowserFixture, tipBrowserSessionId, tipBrowserUserId } from "./increment-four-global-setup";
+import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-support";
 
 export const commissionBuyerToken = (index: number) => `commission-browser-buyer-token-${index}-00000000000000000000`;
 export const commissionBuyerId = (index: number) => `commission-browser-buyer-${index}`;
@@ -27,6 +28,7 @@ export default async function setup() {
         await tx.insert(identityEmailAddresses).values({ userId, displayEmail: email, canonicalEmail: email, status: "primary", verifiedAt: at, verificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
         await tx.insert(identitySessions).values({ id: `${userId}-session`, token: hashSessionToken(commissionBuyerToken(index)), userId, expiresAt, absoluteExpiresAt: expiresAt, idleExpiresAt: expiresAt,
           assuranceState: "active", authorizationVersion: 1, primaryAuthenticatedAt: at, createdAt: at, updatedAt: at, lastUsedAt: at });
+        await attachSyntheticOidcSession(tx, { userId, sessionId: `${userId}-session`, now: at });
       }
     });
     const visibility = createPublicCatalogQuery({ db, publishingMode: "general_audience", creatorSeeds: createIdentityCreatorSeedPort(),
@@ -34,7 +36,7 @@ export default async function setup() {
       mediaCatalog: { async resolveReadyAssets() { return new Map(); }, async resolveReadyAssetsBatch(_db, requests) { return new Map(requests.map((r) => [r.ownerUserId, new Map()])); } } });
     const catalog = createCommissionPackageService({ db, applicationRevision: "synthetic-increment-six-browser", lookupHmacKey: key,
       intakeMode: "enabled", paymentsMode: "manual_only", publishingMode: "general_audience", policy: createCommissionPolicyReadPort({ environment: "test" }),
-      identity: createIdentityCommissionAssurancePort(), visibility, receivingAccount: createTipReceivingAccountEligibilityPort({ paymentsMode: "manual_only", keyring, lookupHmacKey: key }) });
+      identity: createIdentityCommissionAssurancePort(syntheticOidcProvider), visibility, receivingAccount: createTipReceivingAccountEligibilityPort({ paymentsMode: "manual_only", keyring, lookupHmacKey: key }) });
     const [page] = await db.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, tipBrowserUserId));
     if (!page) throw new Error("Missing synthetic artist page");
     const actor = { userId: tipBrowserUserId, sessionId: tipBrowserSessionId }; const ids = () => ({ idempotencyKey: randomUUID(), requestId: randomUUID() });

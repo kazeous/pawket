@@ -36,7 +36,7 @@ export function CreatorSePay({ initial, initialQueue, actorUserId, paymentsEnabl
   const [snapshot, setSnapshot] = useState(initial); const [queue, setQueue] = useState(initialQueue); const [status, setStatus] = useState("review_required");
   const [busy, setBusy] = useState(false); const [error, setError] = useState(initialError); const [notice, setNotice] = useState(oauthResult === "connected" ? "Đã nhận quyền kết nối. Tiếp tục chọn tài khoản nhận tiền." : oauthResult === "failed" ? "Kết nối chưa hoàn tất. Hãy bắt đầu kết nối lại." : "");
   const [secret, setSecret] = useState<{ value: string; connectionId: string; version: number } | null>(null); const [acknowledged, setAcknowledged] = useState(false);
-  const [actorChanged, setActorChanged] = useState(false); const [totpRequired, setTotpRequired] = useState(false); const [totp, setTotp] = useState(""); const [totpInvalid, setTotpInvalid] = useState(false);
+  const [actorChanged, setActorChanged] = useState(false);
   const [accounts, setAccounts] = useState<Array<{ accountId: string; bankName: string; maskedSuffix: string; eligible: boolean }> | null>(null);
   const keys = useRef(new Map<string, string>()); const running = useRef(false);
   const connection = snapshot?.connection;
@@ -65,17 +65,16 @@ export function CreatorSePay({ initial, initialQueue, actorUserId, paymentsEnabl
     if (running.current || actorChanged) return;
     running.current = true;
     setBusy(true); setError(null); setNotice("");
-    try { await requireTipDraftActor(actorUserId); await operation(); }
+    try { await requireTipDraftActor(actorUserId, true); await operation(); }
     catch (cause) {
       const code = cause instanceof TipRequestError ? cause.code : "dependency_unavailable"; setError(sepayErrorText(code));
-      if (code === "totp_required") setTotpRequired(true);
       if (["account_changed", "authentication_required"].includes(code)) { setSecret(null); setSnapshot(null); setQueue(null); setAccounts(null); keys.current.clear(); setActorChanged(true); }
     }
     finally { running.current = false; setBusy(false); }
   }
   async function post(path: string, body: Record<string, unknown>) {
     const identity = JSON.stringify([path, body]); let key = keys.current.get(identity); if (!key) { key = crypto.randomUUID(); keys.current.set(identity, key); }
-    const result = await tipRequest(path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(body) });
+    const result = await tipRequest(path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": key, "x-pawket-actor": actorUserId }, body: JSON.stringify(body) });
     keys.current.delete(identity); return result;
   }
   async function acceptChange(result: unknown) {
@@ -91,16 +90,6 @@ export function CreatorSePay({ initial, initialQueue, actorUserId, paymentsEnabl
   });
   return <div className="flex min-w-0 flex-col gap-6">
     {error ? <Alert variant="destructive"><AlertTitle>Chưa hoàn tất thao tác</AlertTitle><AlertDescription>{error} <a className={buttonVariants({ variant: "link" })} href="/sign-in/reauth" target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Đăng nhập lại trong tab mới</a>{actorChanged ? <a href="/creator/tips/sepay" className={buttonVariants({ variant: "link" })}>Tải lại trang</a> : null}</AlertDescription></Alert> : null}
-    {totpRequired ? <form onSubmit={(event) => {
-      event.preventDefault();
-      if (!/^\d{6}$/u.test(totp)) { setTotpInvalid(true); return; }
-      void run(async () => {
-        try { await tipRequest("/api/auth/two-factor/verify-totp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: totp, trustDevice: false }) }); }
-        catch { setTotpInvalid(true); throw new TipRequestError("totp_required"); }
-        finally { setTotp(""); }
-        setTotpRequired(false); setTotpInvalid(false); setNotice("Đã xác thực. Kiểm tra thông tin rồi thực hiện lại thao tác vừa chọn.");
-      });
-    }}><FieldGroup><Field data-invalid={totpInvalid || undefined} data-disabled={busy || actorChanged}><FieldLabel htmlFor="sepay-totp">Mã từ ứng dụng xác thực</FieldLabel><Input id="sepay-totp" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totp} disabled={busy || actorChanged} aria-invalid={totpInvalid} onChange={(event) => { setTotp(event.target.value); setTotpInvalid(false); }} /></Field><Button type="submit" disabled={busy || actorChanged}>Xác thực để tiếp tục</Button></FieldGroup></form> : null}
     <p role="status" aria-live="polite">{busy ? "Đang xử lý…" : notice}</p>
     <Card><CardHeader><CardTitle>Kết nối SePay</CardTitle><CardDescription>Nhận tiền trực tiếp vào tài khoản ngân hàng của bạn. SePay giúp đối chiếu giao dịch với từng tip.</CardDescription></CardHeader>
       <CardContent className="flex flex-col gap-4">

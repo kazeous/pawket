@@ -18,6 +18,7 @@ type Input<T> = Readonly<{
   applicationRevision: string; paymentsMode: TipPaymentsMode; purpose: "tip" | "commission";
   recentAuthMs: number; totpAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
+  authorizeCommand?: (tx: PawketTransaction, actor: Actor) => Promise<void>;
   lockAggregate(tx: PawketTransaction, intent: Intent, at: Date): Promise<boolean>;
   completeAggregate(tx: PawketTransaction, command: { intent: Intent; actor: Actor; at: Date; requestId: string }): Promise<boolean>;
   project(tx: PawketTransaction, intent: Intent, at: Date): Promise<T>;
@@ -91,6 +92,7 @@ export function createManualPaymentConfirmationService<T>(input: Input<T>) {
           if (!intent || readPaymentPurpose(intent)?.kind !== input.purpose || intent.creatorUserId !== actor.userId) fail("not_authorized");
           if (intent.settlementLane !== "manual_attested" || intent.cutoverId !== null) fail("evidence_mismatch");
           const at = now(); validateAssurance(proof, at, true);
+          await input.authorizeCommand?.(tx, actor);
           if (at < startedAt) fail("dependency_unavailable");
           const snapshot = readTipIntentSnapshot(intent, { keyring: input.keyring, lookupHmacKey: key });
           if (intent.amountVnd !== amountVnd || snapshot.transferReference !== reference || intent.accountVersionId !== destination.accountVersionId ||

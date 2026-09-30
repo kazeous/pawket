@@ -7,6 +7,7 @@ import { createCreatorCommissionPaymentService } from "@pawket/payments";
 import { createCommissionTrustPort } from "@pawket/trust";
 import { commandIds, deferred, fixtureHash, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
+import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-support.js";
 
 const f = createCommissionOrderTestFixture("commission_security");
 beforeAll(f.initialize, 30_000); afterAll(f.dispose, 30_000);
@@ -19,6 +20,7 @@ async function setup() {
     await f.db.insert(schema.identitySessions).values({ id: sessionId, userId, token: fixtureHash(), createdAt: at, updatedAt: at,
       lastUsedAt: at, primaryAuthenticatedAt: at, assuranceState: "active", authorizationVersion: 1,
       expiresAt: new Date(at.getTime() + 86_400_000), idleExpiresAt: new Date(at.getTime() + 86_400_000), absoluteExpiresAt: new Date(at.getTime() + 86_400_000) });
+    await attachSyntheticOidcSession(f.db, { userId, sessionId, now: at });
   }
   const applicationId = randomUUID(); const revisionId = randomUUID();
   await f.db.insert(schema.creatorApplications).values({ id: applicationId, userId: s.creator.actor.userId, state: "approved", version: 3,
@@ -27,7 +29,7 @@ async function setup() {
     artistDisplayName: "Synthetic artist", shortIntroduction: "Synthetic approved creator", createdAt: at, updatedAt: at });
   await f.db.insert(schema.identityCreatorCapabilities).values({ id: randomUUID(), userId: s.creator.actor.userId, state: "active", version: 1,
     approvedApplicationId: applicationId, approvedRevisionId: revisionId, createdAt: at, updatedAt: at });
-  const identity = createIdentityCommissionAssurancePort();
+  const identity = createIdentityCommissionAssurancePort(syntheticOidcProvider, s.creator.now);
   const input = { ...s.input, identity, trust: createCommissionTrustPort() };
   const service = createCommissionOrderService(input);
   const manual = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only",

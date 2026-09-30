@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+
 import { readdir, readFile } from "node:fs/promises";
 
 import { eq } from "drizzle-orm";
@@ -6,17 +6,8 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import {
-  identityEmailHandoffs,
-  identityEmailAddresses,
-  identitySessions,
-  identityTotpAuthenticators,
-  identityUsers,
-  identityVerifications,
-  systemOutbox,
-  type PawketDatabase,
-} from "@pawket/database";
-import { createEncryptionKeyring, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
+import { identityEmailHandoffs, identityEmailAddresses, identityUsers, systemOutbox, type PawketDatabase } from "@pawket/database";
+import { createEncryptionKeyring, type EncryptionKeyring } from "@pawket/security";
 import * as schema from "@pawket/database";
 import * as identity from "../src/index.js";
 
@@ -115,9 +106,9 @@ type IdentityRepository = {
     input: {
       id: string;
       userId: string;
-      purpose: "password_reset";
+      purpose: "security_notice";
       destination: string;
-      secret: string;
+      secret: string | null;
       templateData: Record<string, string>;
       keyring: EncryptionKeyring;
       now: Date;
@@ -132,7 +123,7 @@ type IdentityRepository = {
       sender: {
         send(message: {
           handoffId: string;
-          purpose: "password_reset";
+          purpose: "security_notice";
           destination: string;
           secret: string | null;
           templateData: Readonly<Record<string, string>>;
@@ -196,174 +187,6 @@ afterAll(async () => {
 });
 
 describe("identity repository", () => {
-  test("stores only challenge hashes and permits exactly one concurrent consume", async () => {
-    expect(typeof repository.issueVerificationChallenge).toBe("function");
-    expect(typeof repository.consumeVerificationChallenge).toBe("function");
-    const token = "raw-verification-token-that-must-never-be-stored";
-    await db.transaction((tx) =>
-      repository.issueVerificationChallenge!(tx, {
-        id: "verification-1",
-        userId: "user-1",
-        purpose: "email_verification",
-        identifierHash: "hmac-sha256:v1:identifier",
-        token,
-        targetEmailCanonical: "artist@example.com",
-        now,
-        expiresAt: new Date(now.getTime() + 30 * 60_000),
-      }),
-    );
-
-    const [stored] = await db.select().from(identityVerifications);
-    expect(stored?.value).not.toBe(token);
-    expect(stored?.value).toMatch(/^sha256:v1:/u);
-
-    const results = await Promise.all([
-      repository.consumeVerificationChallenge!(db, {
-        purpose: "email_verification",
-        token,
-        now: new Date(now.getTime() + 1_000),
-      }),
-      repository.consumeVerificationChallenge!(db, {
-        purpose: "email_verification",
-        token,
-        now: new Date(now.getTime() + 1_000),
-      }),
-    ]);
-    expect(results.filter(Boolean)).toHaveLength(1);
-  });
-
-  test("resolves sessions from current database state and revokes by safe session id", async () => {
-    expect(typeof repository.createAuthoritativeSession).toBe("function");
-    expect(typeof repository.resolveAuthoritativeSession).toBe("function");
-    expect(typeof repository.resolveAuthoritativeSessionById).toBe("function");
-    expect(typeof repository.listUserSessions).toBe("function");
-    expect(typeof repository.revokeUserSession).toBe("function");
-    expect(typeof repository.getIdentityUserSummary).toBe("function");
-    const sessionId = randomUUID();
-    const token = "opaque-browser-session-secret";
-    await db.transaction((tx) =>
-      repository.createAuthoritativeSession!(tx, {
-        id: sessionId,
-        userId: "user-1",
-        token,
-        kind: "user",
-        authorizationVersion: 1,
-        networkKey: "hmac-sha256:v1:network",
-        userAgent: "Mozilla/5.0 Chrome/140.0.0.0",
-        now,
-      }),
-    );
-
-    const [stored] = await db.select().from(identitySessions).where(eq(identitySessions.id, sessionId));
-    expect(stored?.token).not.toBe(token);
-    await expect(repository.resolveAuthoritativeSession!(db, { token, now })).resolves.toMatchObject({
-      sessionId,
-      userId: "user-1",
-      emailVerified: true,
-      accessStatus: "active",
-      assuranceState: "active",
-    });
-    await expect(
-      repository.resolveAuthoritativeSessionById!(db, {
-        sessionId,
-        userId: "user-1",
-        now,
-      }),
-    ).resolves.toEqual({
-      sessionId,
-      userId: "user-1",
-      primaryAuthenticatedAt: now,
-    });
-    await expect(repository.getIdentityUserSummary!(db, "user-1")).resolves.toEqual({
-      id: "user-1",
-      displayName: "Artist",
-      displayEmail: "Artist@example.com",
-      emailVerified: true,
-      accessStatus: "active",
-    });
-    await expect(repository.listUserSessions!(db, { userId: "user-1", now })).resolves.toEqual([
-      {
-        id: sessionId,
-        deviceLabel: "Chrome",
-        createdAt: now,
-        lastUsedAt: now,
-      },
-    ]);
-    await expect(
-      repository.revokeUserSession!(db, {
-        userId: "user-1",
-        sessionId,
-        reason: "user_requested",
-        now: new Date(now.getTime() + 2_000),
-      }),
-    ).resolves.toBe(true);
-    await expect(repository.resolveAuthoritativeSession!(db, { token, now })).resolves.toBeNull();
-  });
-
-  test("reports TOTP as enabled only when the account flag and verified authenticator agree", async () => {
-    expect(typeof repository.getTotpSecurityState).toBe("function");
-    const userId = "totp-status-user";
-    const authenticatorId = "totp-status-authenticator";
-    const keyring = createEncryptionKeyring({
-      activeKeyId: "status-v1",
-      keys: { "status-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 11) },
-    });
-    await db.insert(identityUsers).values({
-      id: userId,
-      name: "TOTP Status Artist",
-      email: "totp-status@example.com",
-      canonicalEmail: "totp-status@example.com",
-      emailVerified: true,
-      emailVerifiedAt: now,
-      emailVerificationProvenance: "password_email_challenge",
-      twoFactorEnabled: true,
-      accessStatus: "active",
-      authorizationVersion: 1,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await db.insert(identityTotpAuthenticators).values({
-      id: authenticatorId,
-      userId,
-      secret: encryptSensitiveField({
-        plaintext: "totp-status-secret",
-        binding: {
-          recordType: "identity_totp_authenticator",
-          recordId: authenticatorId,
-          fieldName: "secret",
-        },
-        keyring,
-      }),
-      verified: false,
-    });
-
-    await expect(repository.getTotpSecurityState!(db, userId)).resolves.toEqual({ enabled: false });
-    await db
-      .update(identityTotpAuthenticators)
-      .set({ verified: true, updatedAt: now })
-      .where(eq(identityTotpAuthenticators.id, authenticatorId));
-    await expect(repository.getTotpSecurityState!(db, userId)).resolves.toEqual({ enabled: true });
-    await expect(repository.getTotpSecurityState!(db, "missing-user")).resolves.toBeNull();
-  });
-
-  test("fails closed when current access status or authorization version changes", async () => {
-    const token = "second-opaque-session-secret";
-    await db.transaction((tx) =>
-      repository.createAuthoritativeSession!(tx, {
-        id: randomUUID(),
-        userId: "user-1",
-        token,
-        kind: "user",
-        authorizationVersion: 1,
-        now,
-      }),
-    );
-    await db
-      .update(identityUsers)
-      .set({ accessStatus: "access_suspended", authorizationVersion: 2, updatedAt: now })
-      .where(eq(identityUsers.id, "user-1"));
-    await expect(repository.resolveAuthoritativeSession!(db, { token, now })).resolves.toBeNull();
-  });
 
   test("uses PostgreSQL as the authoritative account/network throttle", async () => {
     expect(typeof repository.recordSecurityThrottleAttempt).toBe("function");
@@ -395,12 +218,12 @@ describe("identity repository", () => {
     });
   });
 
-  test("queues only a purpose-bound handoff id and decrypts secrets only for delivery", async () => {
+  test("queues only a purpose-bound handoff id and decrypts the private destination only for delivery", async () => {
     expect(typeof repository.queueSecurityEmailHandoff).toBe("function");
     expect(typeof repository.deliverSecurityEmailHandoff).toBe("function");
     const handoffId = "9fed3abd-ec32-462b-ad0b-366babf979c3";
     const destination = "artist@example.com";
-    const secret = "raw-reset-token-that-must-not-enter-the-job";
+    const secret = null;
     const keyring = createEncryptionKeyring({
       activeKeyId: "test-v1",
       keys: { "test-v1": Uint8Array.from({ length: 32 }, (_, index) => index + 1) },
@@ -410,10 +233,10 @@ describe("identity repository", () => {
       repository.queueSecurityEmailHandoff!(tx, {
         id: handoffId,
         userId: "user-1",
-        purpose: "password_reset",
+        purpose: "security_notice",
         destination,
         secret,
-        templateData: { returnPath: "/reset-password" },
+        templateData: { event: "session_revoked", returnPath: "/settings/security" },
         keyring,
         now,
       }),
@@ -428,7 +251,7 @@ describe("identity repository", () => {
       .from(systemOutbox)
       .where(eq(systemOutbox.aggregateId, handoffId));
     expect(JSON.stringify(handoff)).not.toMatch(/artist@example\.com|raw-reset-token/u);
-    expect(event?.payload).toEqual({ handoffId, purpose: "password_reset" });
+    expect(event?.payload).toEqual({ handoffId, purpose: "security_notice" });
     expect(JSON.stringify(event)).not.toMatch(/artist@example\.com|raw-reset-token/u);
 
     const deliveries: unknown[] = [];
@@ -449,10 +272,10 @@ describe("identity repository", () => {
     expect(deliveries).toEqual([
       {
         handoffId,
-        purpose: "password_reset",
+        purpose: "security_notice",
         destination,
         secret,
-        templateData: { returnPath: "/reset-password" },
+        templateData: { event: "session_revoked", returnPath: "/settings/security" },
       },
     ]);
     await expect(

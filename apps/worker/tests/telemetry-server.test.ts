@@ -54,6 +54,7 @@ describe("worker telemetry server", () => {
       refundScan: "up",
       tipExpiryScan: "not_configured",
       commissionCleanupScan: "not_configured",
+      oidcCleanupScan: "not_configured",
       sepay: "disabled",
       sepayRecoveryScan: "not_configured",
       publicMediaCleanupScan: "not_configured",
@@ -70,6 +71,15 @@ describe("worker telemetry server", () => {
     state.lastCommissionCleanupSucceededAt = 1_000;
     expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", commissionCleanupScan: "up" });
     expect(workerReadiness({ state, revision, now: 2_001 })).toMatchObject({ status: "not_ready", commissionCleanupScan: "down" });
+  });
+  test("OIDC transient cleanup is a readiness dependency when configured", () => {
+    const state = createWorkerHealthState();
+    Object.assign(state, { initializedAt: 1_000, lastPollSucceededAt: 1_000, lastRefundScanSucceededAt: 1_000,
+      publicMediaCleanupConfigured: true, lastPublicMediaCleanupScanSucceededAt: 1_000, oidcCleanupConfigured: true });
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "not_ready", oidcCleanupScan: "down" });
+    state.lastOidcCleanupSucceededAt = 1_000;
+    expect(workerReadiness({ state, revision, now: 1_000 })).toMatchObject({ status: "ready", oidcCleanupScan: "up" });
+    expect(workerReadiness({ state, revision, now: 181_001 })).toMatchObject({ status: "not_ready", oidcCleanupScan: "down" });
   });
 
   test("includes configured public-media cleanup freshness in readiness", () => {

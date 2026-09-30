@@ -17,6 +17,18 @@ const oldKey = Buffer.alloc(32, 1);
 const activeKey = Buffer.alloc(32, 2);
 
 describe("versioned field encryption", () => {
+  test("larger bounded fields require an explicit limit on both encryption and decryption", () => {
+    const keyring = createEncryptionKeyring({ activeKeyId: "test", keys: { test: activeKey } });
+    const binding = { recordType: "pending", recordId: "test", fieldName: "payload" }; const plaintext = "x".repeat(60_000);
+    expect(() => encryptSensitiveField({ plaintext, binding, keyring })).toThrow();
+    const envelope = encryptSensitiveField({ plaintext, binding, keyring, maximumPlaintextBytes: 65_536 });
+    expect(() => decryptSensitiveField({ envelope, binding, keyring })).toThrow();
+    expect(decryptSensitiveField({ envelope, binding, keyring, maximumPlaintextBytes: 65_536 })).toBe(plaintext);
+    for (const maximumPlaintextBytes of [0, NaN, Infinity, 140_001]) {
+      expect(() => encryptSensitiveField({ plaintext, binding, keyring, maximumPlaintextBytes })).toThrow();
+      expect(() => decryptSensitiveField({ envelope, binding, keyring, maximumPlaintextBytes })).toThrow();
+    }
+  });
   test("round-trips with field-bound AAD and no plaintext snapshot", () => {
     const keyring = createEncryptionKeyring({
       activeKeyId: "pii-2026-08",

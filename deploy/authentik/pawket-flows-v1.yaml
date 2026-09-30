@@ -1,0 +1,184 @@
+# Target: authentik 2025.10.3. Install the dedicated flows before creating providers.
+# No existing default flow, source, user, group or application is modified.
+version: 1
+metadata:
+  name: Pawket - OIDC evidence v1
+entries:
+  - model: authentik_flows.flow
+    id: pawket-authentication
+    identifiers: {slug: pawket-authentication-v1}
+    attrs:
+      name: Pawket authentication
+      title: Sign in to Pawket
+      designation: authentication
+      authentication: none
+  - model: authentik_stages_identification.identificationstage
+    id: pawket-identification
+    identifiers: {name: pawket-identification-v1}
+    attrs:
+      user_fields: [email, username]
+  - model: authentik_stages_password.passwordstage
+    id: pawket-password
+    identifiers: {name: pawket-password-v1}
+    attrs:
+      backends: [authentik.core.auth.InbuiltBackend]
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    id: pawket-totp
+    identifiers: {name: pawket-totp-v1}
+    attrs:
+      device_classes: [totp]
+      not_configured_action: skip
+      last_auth_threshold: seconds=0
+  - model: authentik_stages_user_login.userloginstage
+    id: pawket-login
+    identifiers: {name: pawket-login-v1}
+    attrs:
+      session_duration: hours=12
+      remember_me_offset: seconds=0
+      terminate_other_sessions: false
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-authentication, stage: !KeyOf pawket-identification, order: 10}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-authentication, stage: !KeyOf pawket-password, order: 20}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-authentication, stage: !KeyOf pawket-totp, order: 30}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf pawket-authentication, stage: !KeyOf pawket-login, order: 100}
+
+  - model: authentik_flows.flow
+    id: pawket-authorization
+    identifiers: {slug: pawket-authorization-v1}
+    attrs:
+      name: Authorize Pawket
+      title: Continue to Pawket
+      designation: authorization
+      authentication: require_authenticated
+  - model: authentik_stages_email.emailstage
+    id: pawket-email
+    identifiers: {name: pawket-email-verification-v1}
+    attrs:
+      # Configure SMTP on this stage or globally outside Git. Omit connection
+      # fields so reapplying this blueprint preserves the operator's SMTP setup.
+      activate_user_on_success: false
+      token_expiry: minutes=10
+      subject: Verify your email for Pawket
+      template: email/account_confirmation.html
+  - model: authentik_stages_consent.consentstage
+    id: pawket-consent
+    identifiers: {name: pawket-consent-v1}
+    attrs: {mode: permanent}
+  - model: authentik_flows.flowstagebinding
+    id: pawket-email-binding
+    identifiers: {target: !KeyOf pawket-authorization, stage: !KeyOf pawket-email, order: 10}
+    attrs: {evaluate_on_plan: true, re_evaluate_policies: true}
+  - model: authentik_flows.flowstagebinding
+    id: pawket-consent-binding
+    identifiers: {target: !KeyOf pawket-authorization, stage: !KeyOf pawket-consent, order: 20}
+    attrs: {evaluate_on_plan: true, re_evaluate_policies: true}
+  - model: authentik_policies_expression.expressionpolicy
+    id: pawket-email-needed
+    identifiers: {name: pawket-email-needed-v1}
+    attrs:
+      expression: |
+        from hashlib import sha256
+        from django.utils.timezone import now
+        from authentik.events.models import Event
+        plan = request.context.get("flow_plan")
+        if not plan or not request.user.is_authenticated or not request.user.email:
+            return True
+        user = request.user
+        digest = sha256((str(user.uuid) + ":" + user.email).encode("utf-8")).hexdigest()
+        verified = Event.objects.filter(action="custom_pawket_email_verified_v1", user__pk=user.pk,
+            context__address_digest=digest, expires__gt=now()).exists()
+        if verified:
+            return False
+        # Never replace this snapshot when restoring a verification link.
+        plan.context.setdefault("pawket_email_snapshot_v1", user.email)
+        plan.context["pending_user"] = user
+        plan.context["email"] = plan.context["pawket_email_snapshot_v1"]
+        return True
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf pawket-email-binding, policy: !KeyOf pawket-email-needed, order: 10}
+    attrs: {failure_result: true}
+  - model: authentik_policies_expression.expressionpolicy
+    id: pawket-email-record
+    identifiers: {name: pawket-email-record-v1}
+    attrs:
+      expression: |
+        from hashlib import sha256
+        from django.utils.timezone import now
+        from authentik.events.models import Event
+        plan = request.context.get("flow_plan")
+        if not plan or not request.user.is_authenticated:
+            return True
+        user = request.user
+        current_digest = sha256((str(user.uuid) + ":" + user.email).encode("utf-8")).hexdigest()
+        if Event.objects.filter(action="custom_pawket_email_verified_v1", user__pk=user.pk,
+            context__address_digest=current_digest, expires__gt=now()).exists():
+            return True
+        snapshot = plan.context.get("pawket_email_snapshot_v1")
+        restored = plan.context.get("is_restored")
+        if (snapshot and snapshot == user.email and restored and restored.user_id == user.pk
+            and restored.flow.slug == "pawket-authorization-v1"
+            and plan.context.get("pending_user") == user):
+            digest = sha256((str(user.uuid) + ":" + snapshot).encode("utf-8")).hexdigest()
+            if not Event.objects.filter(action="custom_pawket_email_verified_v1", user__pk=user.pk,
+                context__address_digest=digest, expires__gt=now()).exists():
+                # Do not copy request query parameters, authorization codes or tokens into audit logs.
+                # Use the full custom action explicitly; Event.new otherwise adds custom_.
+                event = Event(action="custom_pawket_email_verified_v1", app="pawket",
+                    context={"address_digest": digest})
+                event.set_user(user)
+                event.save()
+            return True
+        # Recording verification must not remove the consent stage while a
+        # restored email flow is running. Consent keeps its own stable lifecycle.
+        return True
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf pawket-consent-binding, policy: !KeyOf pawket-email-record, order: 10}
+    attrs: {failure_result: false}
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers: {name: pawket-email-evidence-v1}
+    attrs:
+      scope_name: email
+      description: Email verified for Pawket
+      expression: |
+        from hashlib import sha256
+        from django.utils.timezone import now
+        from authentik.events.models import Event
+        digest = sha256((str(user.uuid) + ":" + user.email).encode("utf-8")).hexdigest()
+        verified = bool(user.is_active and user.email and Event.objects.filter(
+            action="custom_pawket_email_verified_v1", user__pk=user.pk,
+            context__address_digest=digest, expires__gt=now()).exists())
+        return {"email": user.email, "email_verified": verified}
+  - model: authentik_providers_oauth2.scopemapping
+    identifiers: {name: pawket-assurance-v1}
+    attrs:
+      scope_name: pawket_assurance
+      description: Authentication evidence for Pawket
+      expression: |
+        from authentik.events.signals import get_login_event
+        from authentik.stages.authenticator_totp.models import TOTPDevice
+        event = get_login_event(token.session)
+        if not event or event.user.get("pk") != user.pk:
+            return {}
+        method = event.context.get("auth_method")
+        if method == "password":
+            primary_method = "password"
+        elif event.context.get("source"):
+            primary_method = "source"
+        else:
+            return {}
+        devices = TOTPDevice.objects.filter(user=user, confirmed=True)
+        ids = set(devices.values_list("pk", flat=True))
+        validated = event.context.get("auth_method_args", {}).get("mfa_devices", [])
+        totp = any(isinstance(device, dict) and device.get("app") == "authentik_stages_authenticator_totp"
+            and device.get("model_name") == "totpdevice" and device.get("pk") in ids for device in validated)
+        # Both values describe completion of this session's real authentication event.
+        # They never use token issuance time or a device's mutable last-used time.
+        primary_at = int(event.created.timestamp())
+        if primary_at != int(token.auth_time.timestamp()):
+            return {}
+        return {"name": user.name, "pawket_assurance": {"version": 1, "policy": "pawket-v1",
+            "primary_at": primary_at, "primary_method": primary_method,
+            "totp_enrolled": bool(ids), "totp_at": primary_at if totp else None}}

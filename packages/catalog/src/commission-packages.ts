@@ -23,6 +23,7 @@ type Input = Readonly<{
   publishingMode: "disabled" | "general_audience";
   identity: { lockCreator(tx: PawketTransaction, actor: CommissionActor, at: Date): Promise<{ sessionExpiresAt: Date } | null> };
   policy: CommissionPolicyReadPort;
+  authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   receivingAccount: { getCurrentTipReceivingAccount(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<{ accountVersionId: string } | null> };
   now?: () => Date; idFactory?: () => string;
@@ -79,6 +80,7 @@ export function createCommissionPackageService(input: Input) {
             payload: { reference: result, actorUserId: command.actor.userId, correlationId: command.requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: result, completedAt: at })) commissionFail("idempotency_conflict");
         }
+        await input.authorizeCommand?.(tx, command.actor);
         return result;
       });
     } catch (error) { if (error instanceof CommissionError) throw error; return commissionFail("dependency_unavailable"); }

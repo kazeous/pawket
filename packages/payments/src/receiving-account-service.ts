@@ -49,6 +49,7 @@ type ReceivingAccountServiceInput = {
   supportedBanks: Readonly<Record<string, string>>;
   idFactory?: () => string;
   now?: () => Date;
+  authorizeCommand?: (tx: PawketTransaction, actor: { userId: string; sessionId: string }) => Promise<void>;
 };
 
 function projection(row: typeof paymentsReceivingAccountOnboarding.$inferSelect): ReceivingAccountProjection {
@@ -177,6 +178,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
             )
             .limit(1);
           if (!replayed) throw new ReceivingAccountServiceError("Receiving account replay is invalid");
+          await input.authorizeCommand?.(tx, { userId: command.applicantUserId, sessionId: command.sessionId });
           return projection(replayed);
         }
         if (idempotency.kind !== "acquired") {
@@ -209,6 +211,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
             resultReference: replayReference(current.id),
             completedAt: occurredAt,
           });
+          await input.authorizeCommand?.(tx, { userId: command.applicantUserId, sessionId: command.sessionId });
           return projection(current);
         }
 
@@ -271,6 +274,7 @@ export function createReceivingAccountService(input: ReceivingAccountServiceInpu
         ) {
           throw new ReceivingAccountServiceError("Receiving account command did not complete");
         }
+        await input.authorizeCommand?.(tx, { userId: command.applicantUserId, sessionId: command.sessionId });
         return projection(created);
       }));
     },

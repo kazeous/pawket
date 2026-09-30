@@ -74,7 +74,7 @@ async function queueTestPasswordReset(input: {
   await db.transaction((tx) => queueSecurityEmailHandoff(tx, {
     id: input.handoffId,
     userId: input.userId,
-    purpose: "password_reset",
+    purpose: "security_notice",
     destination: input.destination,
     secret: input.secret,
     keyring,
@@ -568,10 +568,10 @@ describe("domain email materialization", () => {
     await db.transaction((tx) => queueSecurityEmailHandoff(tx, {
       id: handoffId,
       userId,
-      purpose: "password_reset",
+      purpose: "security_notice",
       destination,
       secret,
-      templateData: { returnPath: "/reset-password" },
+      templateData: { returnPath: "/settings/security" },
       keyring,
       now: firstAttemptAt,
     }));
@@ -688,9 +688,9 @@ describe("domain email materialization", () => {
     for (const prohibited of [destination, secret, providerDetail]) {
       expect(safeSnapshot).not.toContain(prohibited);
     }
-    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 2');
-    expect(metrics).toContain('pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1');
-    expect(metrics).not.toContain('pawket_security_emails_total{purpose="password_reset",outcome="sent"}');
+    expect(metrics).toContain('pawket_security_emails_total{purpose="security_notice",outcome="retryable_failure"} 2');
+    expect(metrics).toContain('pawket_security_emails_total{purpose="security_notice",outcome="attention_required"} 1');
+    expect(metrics).not.toContain('pawket_security_emails_total{purpose="security_notice",outcome="sent"}');
 
     deliveryNow = new Date(firstAttemptAt.getTime() + 180_003);
     await expect(processor(deliveryJob as never)).resolves.toBeUndefined();
@@ -698,10 +698,10 @@ describe("domain email materialization", () => {
     expect(acknowledge).toHaveBeenCalledTimes(2);
     const metricsAfterReplay = await metricsRegistry.metrics();
     expect(metricsAfterReplay).toContain(
-      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
+      'pawket_security_emails_total{purpose="security_notice",outcome="attention_required"} 1',
     );
     expect(metricsAfterReplay).toContain(
-      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"} 2',
+      'pawket_security_emails_total{purpose="security_notice",outcome="retryable_failure"} 2',
     );
   });
 
@@ -790,10 +790,10 @@ describe("domain email materialization", () => {
     expect(acknowledge).toHaveBeenCalledOnce();
     const metrics = await metricsRegistry.metrics();
     expect(metrics).toContain(
-      'pawket_security_emails_total{purpose="password_reset",outcome="attention_required"} 1',
+      'pawket_security_emails_total{purpose="security_notice",outcome="attention_required"} 1',
     );
     expect(metrics).not.toContain(
-      'pawket_security_emails_total{purpose="password_reset",outcome="retryable_failure"}',
+      'pawket_security_emails_total{purpose="security_notice",outcome="retryable_failure"}',
     );
     const safeSnapshot = JSON.stringify({ deliveryJob, logs, metrics });
     for (const prohibited of [destination, secret, providerDetail]) {
@@ -1009,7 +1009,7 @@ describe("domain email materialization", () => {
     await db.transaction((tx) => queueSecurityEmailHandoff(tx, {
       id: handoffId,
       userId,
-      purpose: "password_reset",
+      purpose: "security_notice",
       destination,
       secret,
       keyring,

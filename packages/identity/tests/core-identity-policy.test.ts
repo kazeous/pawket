@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import * as identity from "../src/index.js";
 
@@ -7,13 +7,6 @@ type CoreIdentityPolicy = {
     display: string;
     canonical: string;
   };
-  evaluatePassword(input: {
-    password: string;
-    contextTerms?: readonly string[];
-    compromisedPasswordChecker: {
-      isCompromised(password: string): Promise<boolean>;
-    };
-  }): Promise<{ accepted: boolean; reason?: string }>;
   resolveSessionPolicy(input: {
     kind: "user" | "owner" | "provisional" | "mfa_pending";
     now: Date;
@@ -58,40 +51,6 @@ describe("core identity policy", () => {
     expect(() => policy.canonicalizeEmailAddress?.("not-an-email")).toThrow(
       "Invalid email address",
     );
-  });
-
-  test("accepts long Unicode passwords and rejects common, contextual, or compromised values", async () => {
-    expect(typeof policy.evaluatePassword).toBe("function");
-    const checker = { isCompromised: vi.fn(async () => false) };
-
-    await expect(
-      policy.evaluatePassword?.({
-        password: "mật khẩu dài 🔐 có khoảng trắng",
-        contextTerms: ["pawket", "artist@example.com"],
-        compromisedPasswordChecker: checker,
-      }),
-    ).resolves.toEqual({ accepted: true });
-    await expect(
-      policy.evaluatePassword?.({
-        password: "passwordpassword",
-        compromisedPasswordChecker: checker,
-      }),
-    ).resolves.toEqual({ accepted: false, reason: "common" });
-    await expect(
-      policy.evaluatePassword?.({
-        password: "my pawket account password",
-        contextTerms: ["Pawket"],
-        compromisedPasswordChecker: checker,
-      }),
-    ).resolves.toEqual({ accepted: false, reason: "context" });
-
-    checker.isCompromised.mockResolvedValueOnce(true);
-    await expect(
-      policy.evaluatePassword?.({
-        password: "this is otherwise unique",
-        compromisedPasswordChecker: checker,
-      }),
-    ).resolves.toEqual({ accepted: false, reason: "compromised" });
   });
 
   test("uses authoritative session lifetimes and a host-only production cookie", () => {

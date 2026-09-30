@@ -231,8 +231,8 @@ describe("production SMTP security email sender", () => {
     fromName: "Pawket Security",
   };
 
-  test("requires STARTTLS and sends a purpose-bound password reset message", async () => {
-    // Catches plaintext SMTP or sending a challenge without its Pawket URL.
+  test("requires STARTTLS and sends a purpose-bound session security notice", async () => {
+    // Business/security notices retain their SMTP guarantees after SSO retirement.
     let transportOptions: SmtpTransportOptions | undefined;
     let delivered: SmtpMail | undefined;
     const sender = createSecurityEmailSender({
@@ -252,10 +252,10 @@ describe("production SMTP security email sender", () => {
 
     await sender.send({
       handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
-      purpose: "password_reset",
+      purpose: "security_notice",
       destination: "artist@example.com",
-      secret: "one-time-secret",
-      templateData: { returnPath: "/reset-password" },
+      secret: null,
+      templateData: { event: "session_revoked", returnPath: "/settings/security" },
     });
 
     expect(transportOptions).toEqual({
@@ -271,13 +271,18 @@ describe("production SMTP security email sender", () => {
     expect(delivered).toEqual({
       from: { name: "Pawket Security", address: "security@pawket.example" },
       to: "artist@example.com",
-      subject: "Đặt lại mật khẩu Pawket",
+      subject: "Thông báo bảo mật Pawket",
       text:
-        "Đặt lại mật khẩu Pawket\n\n" +
-        "Mở liên kết Pawket này để tiếp tục:\n" +
-        "https://pawket.example/reset-password?token=one-time-secret\n\n" +
-        "Liên kết hết hạn sau 30 phút. Nếu bạn không yêu cầu thao tác này, hãy bỏ qua email.",
+        "Thông báo bảo mật Pawket\n\nMột phiên đăng nhập Pawket đã được thu hồi.\n\nNếu bạn không thực hiện thay đổi này, hãy liên hệ hỗ trợ Pawket ngay.",
     });
+  });
+  test("SMTP sender cannot emit retired credential links", async () => {
+    const sendMail = vi.fn(async () => {});
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp, createTransport: () => ({ sendMail }) });
+    for (const purpose of ["email_verification", "password_reset", "email_change"] as const) {
+      await expect(sender.send({ handoffId: "synthetic-retired", purpose, destination: "synthetic@example.invalid", secret: "synthetic-token", templateData: {} })).rejects.toThrow("AUTH_MOVED");
+    }
+    expect(sendMail).not.toHaveBeenCalled();
   });
 
   test("uses implicit TLS when the provider requires port 465", () => {
@@ -357,7 +362,7 @@ describe("production SMTP security email sender", () => {
     expect(logs.join("\n")).not.toContain("provider.invalid");
   });
 
-  test("routes authenticated email changes to the purpose-specific confirmation page", async () => {
+  test("email-change security notices no longer contain a local confirmation link", async () => {
     let delivered: SmtpMail | undefined;
     const sender = createSecurityEmailSender({
       adapter: "smtp",
@@ -370,15 +375,14 @@ describe("production SMTP security email sender", () => {
 
     await sender.send({
       handoffId: "6c81afe1-1704-4653-a7a8-89630f0c990a",
-      purpose: "email_change",
+      purpose: "security_notice",
       destination: "artist-new@example.com",
-      secret: "email-change-secret",
-      templateData: { returnPath: "/settings/security/confirm-email" },
+      secret: null,
+      templateData: { event: "primary_email_changed", returnPath: "/settings/security" },
     });
 
-    expect(delivered?.text).toContain(
-      "https://pawket.example/settings/security/confirm-email?token=email-change-secret",
-    );
+    expect(delivered?.text).toContain("Email chính của tài khoản Pawket đã được thay đổi.");
+    expect(delivered?.text).not.toContain("confirm-email");
     expect(delivered?.text).not.toContain("https://pawket.example/verify-email?");
   });
 

@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from "react";
 
 import { AppShell } from "../../../ui/app-shell";
 import { StatusBanner, StatusTag } from "../../../ui/status-banner";
+import { redirectToOidcReview } from "@/auth/oidc-review-redirect";
 
 const warning =
   "Tôi xác nhận ngày, tháng, năm sinh đã khai là đúng sự thật. Nếu sau này giấy tờ hoặc thông tin xác minh hợp lệ không khớp vì tôi đã cung cấp thông tin không trung thực khi đăng ký, Pawket sẽ không giải quyết các yêu cầu dựa trên thông tin sai lệch đó và có thể áp dụng biện pháp tài khoản theo chính sách, trừ trường hợp pháp luật bắt buộc Pawket phải tiếp nhận hoặc xử lý.";
@@ -102,6 +103,7 @@ export default function CreatorApplyPage() {
     privacyAccepted: false,
   });
   const [message, setMessage] = useState("");
+  const [actorUserId, setActorUserId] = useState<string | null>(null);
   const [account, setAccount] = useState<ReceivingAccount | null>(null);
   const [accountDraft, setAccountDraft] = useState({
     bankBin: "970436",
@@ -124,8 +126,11 @@ export default function CreatorApplyPage() {
     Promise.all([
       fetch("/api/v1/creator-application", { cache: "no-store" }),
       fetch("/api/v1/creator-application/receiving-account", { cache: "no-store" }),
+      fetch("/api/v1/me", { cache: "no-store" }),
     ])
-      .then(async ([applicationResponse, accountResponse]) => {
+      .then(async ([applicationResponse, accountResponse, meResponse]) => {
+        const me = meResponse.ok ? await meResponse.json() : null;
+        if (typeof me?.user?.id === "string") setActorUserId(me.user.id);
         const applicationValue = applicationResponse.ok ? await applicationResponse.json() : null;
         const accountValue = accountResponse.ok ? await accountResponse.json() : null;
         const item = applicationValue?.application as Application | null;
@@ -163,15 +168,18 @@ export default function CreatorApplyPage() {
     event.preventDefault();
     setMessage("");
     try {
+      if (!actorUserId) throw new Error("AUTHENTICATION_REQUIRED");
       const response = await fetch("/api/v1/creator-application/receiving-account", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "idempotency-key": crypto.randomUUID(),
+          "x-pawket-actor": actorUserId,
         },
         body: JSON.stringify(accountDraft),
       });
       const value = await response.json().catch(() => null);
+      if (!response.ok && redirectToOidcReview(value)) return;
       if (!response.ok) throw new Error(value?.code ?? "REQUEST_FAILED");
       const created = value.account as ReceivingAccount;
       setAccount(created);

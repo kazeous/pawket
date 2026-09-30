@@ -1,23 +1,22 @@
 import AxeBuilder from "@axe-core/playwright";
-import { createHmac, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
-import { createDatabase, identitySessions, identityTotpAuthenticators, identityUsers, paymentIntents, paymentTransferClaims } from "@pawket/database";
+import { createDatabase, identitySessions, identityOidcSessions, paymentIntents, paymentTransferClaims } from "@pawket/database";
 import { createIdentityTipAssurancePort } from "@pawket/identity";
 import { createCreatorTipPaymentService } from "@pawket/payments";
 import { createTipLifecyclePort } from "@pawket/tips";
-import { createEncryptionKeyring, createLookupHmac, encryptSensitiveField } from "@pawket/security";
+import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { eq } from "drizzle-orm";
 import { browserDatabaseUrl } from "./increment-three-database";
 import { tipBrowserAccount, tipBrowserHandle, tipBrowserUserId, tipBrowserSessionId, tipBrowserSessionToken } from "./increment-four-global-setup";
-import { currentOwnerTotp } from "./increment-three-fixture";
+import { completeSyntheticPendingAuthentication, restoreBrowserSessionToken, refreshBrowserSession } from "./oidc-browser-fixture";
+import { syntheticOidcProvider } from "./oidc-test-support";
 
 const creatorPath = `/creators/${tipBrowserHandle}`;
 const creationPath = `/api/v1/public/creators/${tipBrowserHandle}/tips`;
 async function signInTipCreator(page: Page) {
-  const signature = createHmac("sha256", "playwright-only-better-auth-secret-000000000000").update(tipBrowserSessionToken).digest("base64");
-  await page.context().addCookies([{ name: "pawket.session", value: `${tipBrowserSessionToken}.${signature}`, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+  await refreshBrowserSession(tipBrowserSessionToken);
+  await page.context().addCookies([{ name: "pawket.session", value: tipBrowserSessionToken, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
 }
 async function createBrowserTip(page: Page) {
   await page.goto(creatorPath);
@@ -25,8 +24,26 @@ async function createBrowserTip(page: Page) {
   await page.getByLabel("Lời nhắn (không bắt buộc)").fill("<script>window.syntheticTipScript = true</script>");
   const created = page.waitForResponse((r) => new URL(r.url()).pathname === creationPath);
   await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-  const response = await created; expect(response.status()).toBe(201);
-  return (await response.json()).instruction.reference as string;
+  expect((await created).status()).toBe(201);
+  // Chromium does not always retain this streamed response body for CDP; read the reference from the page.
+  const href = await page.getByRole("button", { name: "Mở phiếu tip", exact: true }).getAttribute("href");
+  const reference = /^\/tips\/(PW[0-9A-F]{20})$/u.exec(href ?? "")?.[1];
+  expect(reference, `receipt link ${href}`).toBeDefined();
+  return reference!;
+}
+/** Capture a creation response at the route, before the page consumes and CDP may drop its streamed body. */
+async function captureCreation(page: Page) {
+  let captured: { status: number; body: Record<string, unknown> } | undefined;
+  await page.route((url) => url.pathname === creationPath, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const response = await route.fetch(); captured = { status: response.status(), body: await response.json() };
+    await route.fulfill({ response });
+  });
+  return async () => {
+    await expect.poll(() => captured?.status, { timeout: 15_000 }).toBe(201);
+    await page.unroute((url) => url.pathname === creationPath);
+    return captured!.body;
+  };
 }
 async function receiptFacts(reference: string) {
   const database = createDatabase(browserDatabaseUrl);
@@ -42,7 +59,7 @@ async function confirmSyntheticReceipt(reference: string) {
   const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": new Uint8Array(32).fill(1) } });
   try {
     await createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db: database.db, keyring, lookupHmacKey: new Uint8Array(32).fill(2), paymentsMode: "manual_only", pageSize: 25,
-      recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: createIdentityTipAssurancePort(), tips: createTipLifecyclePort({ keyring }) }).confirm({
+      recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: createIdentityTipAssurancePort(syntheticOidcProvider), tips: createTipLifecyclePort({ keyring }) }).confirm({
       actor: { userId: tipBrowserUserId, sessionId: tipBrowserSessionId }, paymentIntentId: intent.id, observedAmountVnd: intent.amountVnd,
       observedTransferReference: reference, observedBankTransactionId: `SYNTHETIC-${randomUUID()}`, attestedReceived: true, idempotencyKey: randomUUID(), requestId: randomUUID(),
     });
@@ -75,10 +92,9 @@ for (const width of [375, 1440]) {
     await page.getByLabel("Lời nhắn (không bắt buộc)").fill("Cảm ơn bạn <script>test</script>");
     const formAxe = await new AxeBuilder({ page }).analyze();
     expect(formAxe.violations.filter((v) => ["serious", "critical"].includes(v.impact ?? ""))).toEqual([]);
-    const created = page.waitForResponse((r) => new URL(r.url()).pathname === creationPath);
+    const creation = await captureCreation(page);
     await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-    const creation = await created; expect(creation.status()).toBe(201);
-    const body = await creation.json(); const reference = body.instruction.reference as string;
+    const body = await creation(); const reference = (body.instruction as { reference: string }).reference;
     expect(JSON.stringify(body)).not.toMatch(/guestCapability|capability|secret|guestContent|Khách/u);
     await expect(page.getByRole("img", { name: "VietQR chuyển khoản trực tiếp cho nghệ sĩ" })).toBeVisible();
     await expect(page.getByText(tipBrowserAccount, { exact: true })).toBeVisible();
@@ -338,48 +354,35 @@ test("creator confirmation retries the same evidence after a lost committed resp
   expect(requests).toHaveLength(2); expect(requests[0]).toEqual(requests[1]); expect((await receiptFacts(reference)).intent.state).toBe("confirmed");
 });
 
-test("creator confirmation requires recent primary authentication and actual enrolled TOTP", async ({ page }) => {
+test("creator confirmation waits for OIDC primary and enrolled TOTP, then explicit review", async ({ page }) => {
   const reference = await createBrowserTip(page); const { intent } = await receiptFacts(reference);
-  const database = createDatabase(browserDatabaseUrl); const factorId = randomUUID();
+  const database = createDatabase(browserDatabaseUrl);
   try {
+    await signInTipCreator(page);
     await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000), mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
-    await signInTipCreator(page); await page.goto("/creator/tips");
-    const open = async () => {
-      await page.getByRole("row").filter({ hasText: reference }).getByRole("button", { name: "Đối chiếu giao dịch" }).click();
-      const dialog = page.getByRole("alertdialog");
-      await dialog.getByLabel("Số tiền thực nhận (VND)").fill(String(intent.amountVnd)); await dialog.getByLabel("Nội dung trên giao dịch ngân hàng").fill(reference);
-      await dialog.getByLabel("Mã giao dịch ngân hàng").fill(`SYNTHETIC-TOTP-${intent.id}`); await dialog.getByRole("button", { name: "Tôi xác nhận đã nhận tiền", exact: true }).click();
-      await dialog.getByRole("button", { name: "Xác nhận đã nhận tiền", exact: true }).click(); return dialog;
-    };
-    const stale = await open(); await expect(stale.getByRole("button", { name: "Đăng nhập lại" })).toHaveAttribute("href", "/sign-in");
+    await database.db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
+    await page.goto("/creator/tips");
+    await page.getByRole("row").filter({ hasText: reference }).getByRole("button", { name: "Đối chiếu giao dịch" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await dialog.getByLabel("Số tiền thực nhận (VND)").fill(String(intent.amountVnd));
+    await dialog.getByLabel("Nội dung trên giao dịch ngân hàng").fill(reference);
+    await dialog.getByLabel("Mã giao dịch ngân hàng").fill('SYNTHETIC-SSO-' + intent.id);
+    await dialog.getByRole("button", { name: "Tôi xác nhận đã nhận tiền", exact: true }).click();
+    await dialog.getByRole("button", { name: "Xác nhận đã nhận tiền", exact: true }).click();
+    await expect(page).toHaveURL(/\/auth\/review\/[0-9a-f-]{36}$/u);
+    await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
     expect((await receiptFacts(reference)).intent.state).toBe("awaiting_transfer");
-    await stale.getByRole("button", { name: "Đóng đối chiếu" }).click(); await expect(stale).toBeHidden();
-    const requireFromIdentity = createRequire(new URL("../../../packages/identity/package.json", import.meta.url));
-    const cryptoModule = await import(pathToFileURL(requireFromIdentity.resolve("better-auth/crypto")).href) as { symmetricEncrypt(input: { key: string; data: string }): Promise<string> };
-    const encryptedSecret = await cryptoModule.symmetricEncrypt({ key: "playwright-only-better-auth-secret-000000000000", data: "3132333435363738393031323334353637383930" });
-    const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": new Uint8Array(32).fill(1) } });
-    const at = new Date();
-    await database.db.transaction(async (tx) => {
-      await tx.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, tipBrowserUserId));
-      await tx.insert(identityTotpAuthenticators).values({ id: factorId, userId: tipBrowserUserId, secret: encryptSensitiveField({ keyring, plaintext: encryptedSecret, binding: { recordType: "identity_totp_authenticator", recordId: factorId, fieldName: "secret" } }), verified: true, createdAt: at, updatedAt: at });
-      await tx.update(identitySessions).set({ primaryAuthenticatedAt: at, mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
-    });
-    await page.reload(); const stepped = await open();
-    await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toBeVisible(); expect((await receiptFacts(reference)).intent.state).toBe("awaiting_transfer");
-    const verification = page.waitForResponse((r) => r.url().endsWith("/api/auth/two-factor/verify-totp"));
-    await stepped.getByLabel("Mã từ ứng dụng xác thực").fill("12345");
-    await stepped.getByRole("button", { name: "Xác thực và xác nhận", exact: true }).click();
-    await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toHaveAttribute("aria-invalid", "true");
-    await expect(stepped.getByLabel("Mã từ ứng dụng xác thực")).toBeFocused();
-    await stepped.getByLabel("Mã từ ứng dụng xác thực").fill(currentOwnerTotp()); await stepped.getByRole("button", { name: "Xác thực và xác nhận", exact: true }).click();
-    expect((await verification).status()).toBe(200); await expect(stepped).toBeHidden(); expect((await receiptFacts(reference)).intent.state).toBe("confirmed");
+    const review = await completeSyntheticPendingAuthentication(database.db, new URL(page.url()).pathname.split("/").at(-1)!);
+    await page.context().addCookies([{ name: "pawket.session", value: review.sessionToken, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+    expect(review.ready).toBe(true);
+    expect(JSON.parse(review.payload.body)).toMatchObject({ observedAmountVnd: intent.amountVnd, observedTransferReference: reference });
+    expect((await receiptFacts(reference)).intent.state).toBe("awaiting_transfer");
+    await page.reload(); await page.getByRole("button", { name: "Xác nhận thực hiện", exact: true }).click();
+    await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
+    expect((await receiptFacts(reference)).intent.state).toBe("confirmed");
   } finally {
-    // Only this suite's isolated, synthetic creator/factor/session are reset.
-    await database.db.transaction(async (tx) => {
-      await tx.delete(identityTotpAuthenticators).where(eq(identityTotpAuthenticators.id, factorId));
-      await tx.update(identityUsers).set({ twoFactorEnabled: false }).where(eq(identityUsers.id, tipBrowserUserId));
-      await tx.update(identitySessions).set({ primaryAuthenticatedAt: new Date(), mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
-    });
-    await database.close();
+    await database.db.update(identityOidcSessions).set({ totpStatus: "not_enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
+    await restoreBrowserSessionToken(database.db, tipBrowserSessionId, tipBrowserSessionToken);
+    await database.close(); await refreshBrowserSession(tipBrowserSessionToken);
   }
 });

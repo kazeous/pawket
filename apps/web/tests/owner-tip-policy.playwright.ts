@@ -1,13 +1,14 @@
+import { syntheticOidcCommandHarness, syntheticOidcProvider } from "./oidc-test-support";
 import AxeBuilder from "@axe-core/playwright";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { createDatabase, identitySessions } from "@pawket/database";
 import { eq } from "drizzle-orm";
 import { createPlatformTipPolicyService } from "@pawket/catalog";
 import { createOwnerTipPolicyAssurancePort } from "@pawket/admin";
 import { browserDatabaseUrl } from "./increment-three-database";
-import { currentOwnerTotp } from "./increment-three-fixture";
-import { tipBrowserHandle, tipBrowserPassword, tipBrowserSessionId, tipBrowserSessionToken, tipPolicyOwnerSessionId, tipPolicyOwnerSessionToken, tipPolicyOwnerUserId } from "./increment-four-global-setup";
+import { completeSyntheticPendingAuthentication, restoreBrowserSessionToken, refreshBrowserSession } from "./oidc-browser-fixture";
+import { tipBrowserHandle, tipBrowserSessionId, tipBrowserSessionToken, tipPolicyOwnerSessionId, tipPolicyOwnerSessionToken, tipPolicyOwnerUserId } from "./increment-four-global-setup";
 
 const baseURL = "http://127.0.0.1:4177";
 const endpoint = "/api/v1/admin/tip-policy";
@@ -16,8 +17,8 @@ const launch = { minimumVnd: 10_000, maximumVnd: 5_000_000, allowedPresetsVnd: [
 const narrower = { minimumVnd: 30_000, maximumVnd: 500_000, allowedPresetsVnd: [30_000, 50_000, 100_000, 200_000] };
 type Amounts = typeof launch;
 async function signIn(page: Page, token: string) {
-  const signature = createHmac("sha256", "playwright-only-better-auth-secret-000000000000").update(token).digest("base64");
-  await page.context().addCookies([{ name: "pawket.session", value: `${token}.${signature}`, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+  await refreshBrowserSession(token);
+  await page.context().addCookies([{ name: "pawket.session", value: token, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
 }
 async function ownerPage(browser: Browser) {
   const context = await browser.newContext({ baseURL, extraHTTPHeaders: { "x-real-ip": "127.0.0.1" } });
@@ -30,13 +31,8 @@ async function currentPolicy(page: Page) {
 async function savePolicy(page: Page, amounts: Amounts, reason = "Synthetic browser policy change") {
   const previous = await currentPolicy(page);
   const body = { ...amounts, expectedRevision: previous.revisionNumber, reason };
-  const headers = { origin: baseURL, "idempotency-key": randomUUID() };
-  let response = await page.request.post(endpoint, { data: body, headers });
-  if (response.status() === 403 && (await response.json()).code === "owner_totp_required") {
-    const proof = await page.request.post("/api/auth/two-factor/verify-totp", { data: { code: currentOwnerTotp(), trustDevice: false }, headers: { origin: baseURL } });
-    expect(proof.status()).toBe(200);
-    response = await page.request.post(endpoint, { data: body, headers });
-  }
+  const headers = { origin: baseURL, "idempotency-key": randomUUID(), "x-pawket-actor": tipPolicyOwnerUserId };
+  const response = await page.request.post(endpoint, { data: body, headers });
   expect(response.status(), await response.text()).toBe(200);
   const result = (await response.json()).policy; expect(result.revisionNumber).toBe(previous.revisionNumber + 1); return result;
 }
@@ -79,7 +75,7 @@ async function restoreLaunch(browser: Browser) {
 test.describe.configure({ mode: "serial" });
 test.afterEach(async ({ browser }) => { await restoreLaunch(browser); });
 
-test("owner reviews, validates, completes real TOTP and saves with history at 375px", async ({ page }) => {
+test("owner with synthetic OIDC TOTP reviews, validates and saves with history at 375px", async ({ page }) => {
   await signIn(page, tipPolicyOwnerSessionToken); await page.setViewportSize({ width: 375, height: 1000 });
   await page.goto("/admin/tip-policy"); await expect(page.getByRole("heading", { name: "Chính sách tip", exact: true })).toBeVisible();
   await expect(page.getByLabel("Số tiền tối thiểu (VND)", { exact: true })).toHaveValue("10000");
@@ -90,13 +86,6 @@ test("owner reviews, validates, completes real TOTP and saves with history at 37
   await expect(page.getByLabel("Số tiền tối thiểu (VND)", { exact: true })).toHaveAttribute("aria-invalid", "true");
   await page.getByLabel("Số tiền tối thiểu (VND)", { exact: true }).fill("30000");
   await page.getByRole("button", { name: "Lưu chính sách", exact: true }).click();
-  await expect(page.getByLabel("Mã từ ứng dụng xác thực")).toBeFocused();
-  await expect(page.getByLabel("Lý do thay đổi")).toHaveValue("Synthetic owner changes defaults");
-  await page.getByLabel("Mã từ ứng dụng xác thực").fill("12345");
-  await page.getByRole("button", { name: "Xác thực và lưu chính sách" }).click();
-  await expect(page.getByLabel("Mã từ ứng dụng xác thực")).toHaveAttribute("aria-invalid", "true");
-  await page.getByLabel("Mã từ ứng dụng xác thực").fill(currentOwnerTotp());
-  await page.getByRole("button", { name: "Xác thực và lưu chính sách" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Đã lưu chính sách phiên bản" })).toBeVisible();
   await expect(page.getByRole("row").filter({ hasText: "Synthetic owner changes defaults" })).toContainText(tipPolicyOwnerUserId);
   expect(await currentPolicy(page)).toMatchObject(narrower);
@@ -145,7 +134,7 @@ test("lost owner save response retries identical command and creates one policy 
   expect((await currentPolicy(page)).revisionNumber).toBe(before.revisionNumber + 1);
 });
 
-test("creator reauthenticates in a new tab and replays the original uncertain save", async ({ page, context }) => {
+test("creator SSO review preserves an uncertain save and confirms it only once", async ({ page }) => {
   const database = createDatabase(browserDatabaseUrl);
   try {
     await signIn(page, tipBrowserSessionToken); await page.goto("/creator/tips");
@@ -162,27 +151,21 @@ test("creator reauthenticates in a new tab and replays the original uncertain sa
     await expect(page.getByRole("button", { name: "Thử lại lần lưu này" })).toBeVisible();
     await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
     await page.getByRole("button", { name: "Thử lại lần lưu này" }).click();
-    await expect(page.getByText("Đăng nhập lại đúng tài khoản trong tab mới", { exact: false })).toBeVisible();
-    const opened = context.waitForEvent("page");
-    await page.getByRole("link", { name: "Đăng nhập lại trong tab mới" }).click();
-    const reauth = await opened; await reauth.waitForURL("**/sign-in/reauth");
-    await expect(reauth.getByLabel(/^Email/u)).toBeVisible();
-    await reauth.getByLabel(/^Email/u).fill("tip-artist@example.invalid");
-    await reauth.getByLabel(/^Mật khẩu/u).fill(tipBrowserPassword);
-    await reauth.getByRole("button", { name: "Đăng nhập", exact: true }).click();
-    await reauth.waitForURL("**/settings/security");
-    await expect(page).toHaveURL(/\/creator\/tips$/u);
-    await expect(page.getByRole("button", { name: "Dừng nhận tip mới", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByRole("button", { name: "Dừng nhận tip mới", exact: true })).toBeDisabled();
-    await page.getByRole("button", { name: "Thử lại lần lưu này" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "Đã dừng nhận tip mới" })).toBeVisible();
-    expect(attempts).toHaveLength(3); expect(attempts[0]).toEqual(attempts[1]); expect(attempts[0]).toEqual(attempts[2]);
+    await expect(page).toHaveURL(/\/auth\/review\/[0-9a-f-]{36}$/u);
+    await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
+    const id = new URL(page.url()).pathname.split("/").at(-1)!;
+    const review = await completeSyntheticPendingAuthentication(database.db, id);
+    await page.context().addCookies([{ name: "pawket.session", value: review.sessionToken, domain: "127.0.0.1", path: "/", httpOnly: true, sameSite: "Lax" }]);
+    expect(review.ready).toBe(true); expect(review.payload.body).toBe(attempts[0]!.body);
+    expect(review.payload.idempotencyKey).toBe(attempts[0]!.key);
+    expect(attempts).toHaveLength(2); expect(attempts[0]).toEqual(attempts[1]);
     expect((await (await page.request.get("/api/v1/creator/tip-settings")).json()).settings.revisionNumber).toBe(before + 1);
-    await reauth.close();
-  } finally {
-    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date() }).where(eq(identitySessions.id, tipBrowserSessionId));
-    await database.close();
-  }
+    await page.reload(); await page.getByRole("button", { name: "Xác nhận thực hiện", exact: true }).click();
+    await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
+    expect((await (await page.request.get("/api/v1/creator/tip-settings")).json()).settings.revisionNumber).toBe(before + 1);
+    await page.getByRole("button", { name: "Quay lại xem kết quả" }).click();
+    await expect(page).toHaveURL(/\/creator\/tips$/u);
+  } finally { await restoreBrowserSessionToken(database.db, tipBrowserSessionId, tipBrowserSessionToken); await database.close(); }
 });
 
 test("stale owner draft reloads and requires review without discarding input", async ({ page }) => {
@@ -253,9 +236,15 @@ for (const failRefresh of [false, true]) test(`stale buyer amount refresh preser
     await expect(page.getByLabel("Lời nhắn (không bắt buộc)")).toHaveValue("Keep buyer message <script>literal</script>");
     await expect(page.getByRole("region", { name: "Hướng dẫn chuyển khoản" })).toHaveCount(0);
     await page.getByRole("button", { name: "Tip 50.000 ₫", exact: true }).click();
-    const creation = page.waitForResponse((r) => new URL(r.url()).pathname === offeringEndpoint && r.request().method() === "POST");
+    // Creation navigates to the receipt, which evicts the response body; capture it at the route instead.
+    let created: { status: number; amountVnd: number } | undefined;
+    await page.route(`**${offeringEndpoint}`, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch(); created = { status: response.status(), amountVnd: (await response.json()).instruction?.amountVnd };
+      await route.fulfill({ response });
+    });
     await page.getByRole("button", { name: "Tạo hướng dẫn chuyển khoản" }).click();
-    const result = await creation; expect(result.status()).toBe(201); expect((await result.json()).instruction.amountVnd).toBe(50_000);
+    await expect.poll(() => created?.status, { timeout: 15_000 }).toBe(201); expect(created?.amountVnd).toBe(50_000);
   } finally { await owner.context().close(); }
 });
 
@@ -275,10 +264,12 @@ test("owner history pages through immutable actual revisions", async ({ page }) 
   // owner/proof ports. No revision rows or current pointer are rewritten/deleted.
   const db = createDatabase(browserDatabaseUrl);
   try {
-    const service = createPlatformTipPolicyService({ db: db.db, applicationRevision: "synthetic-history-pagination", commandFingerprintKey: new Uint8Array(32).fill(2), ...createOwnerTipPolicyAssurancePort() });
+    const harness = syntheticOidcCommandHarness(db.db);
+    const service = createPlatformTipPolicyService({ db: db.db, applicationRevision: "synthetic-history-pagination", commandFingerprintKey: new Uint8Array(32).fill(2), ...createOwnerTipPolicyAssurancePort({ provider: syntheticOidcProvider, authorizeCommand: harness.context.authorize }) });
     for (let i = 0; i < 26; i++) {
       const previous = await currentPolicy(page);
-      await service.savePolicy({ actor: { userId: tipPolicyOwnerUserId, sessionId: tipPolicyOwnerSessionId }, expectedRevision: previous.revisionNumber, ...launch, reason: `Synthetic history entry ${i}`, idempotencyKey: randomUUID(), requestId: randomUUID() });
+      const input = { actor: { userId: tipPolicyOwnerUserId, sessionId: tipPolicyOwnerSessionId }, expectedRevision: previous.revisionNumber, ...launch, reason: `Synthetic history entry ${i}`, idempotencyKey: randomUUID(), requestId: randomUUID() };
+      await harness.run(input.actor, { method: "POST", path: "/api/v1/admin/tip-policy", body: JSON.stringify(input), idempotencyKey: input.idempotencyKey, ifMatch: String(input.expectedRevision), returnPath: "/admin/tip-policy" }, () => service.savePolicy(input));
     }
   } finally { await db.close(); }
   await page.goto("/admin/tip-policy");

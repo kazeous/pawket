@@ -11,6 +11,7 @@ export type ReadinessResult = RevisionAttestation & {
   valkey: DependencyStatus;
   publicMediaStorage: OptionalDependencyStatus;
   publicMediaWorkerScan: OptionalDependencyStatus;
+  identityConfiguration: "valid" | "invalid";
 };
 
 export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
@@ -18,6 +19,7 @@ export type ReadinessCheck = (signal: AbortSignal) => Promise<void>;
 export type ReadinessDependencies = {
   checkDatabase: ReadinessCheck;
   checkValkey: ReadinessCheck;
+  identityConfigurationValid: boolean;
   publishingMode?: "disabled" | "general_audience";
   checkPublicMediaStorage?: ReadinessCheck;
   checkPublicMediaWorkerScan?: ReadinessCheck;
@@ -84,6 +86,7 @@ export function createReadinessProbe(
       status:
         database === "up" &&
         valkey === "up" &&
+        dependencies.identityConfigurationValid &&
         incrementThreeReady &&
         dependencies.revision.revisionMatch
           ? "ready"
@@ -92,6 +95,7 @@ export function createReadinessProbe(
       valkey,
       publicMediaStorage,
       publicMediaWorkerScan,
+      identityConfiguration: dependencies.identityConfigurationValid ? "valid" : "invalid",
       ...dependencies.revision,
     };
   };

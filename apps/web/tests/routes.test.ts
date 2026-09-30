@@ -5,6 +5,7 @@ const routeDependencies = vi.hoisted(() => ({
   closeReadinessConnection: vi.fn(),
   createReadinessConnection: vi.fn(),
   loadServerEnv: vi.fn(),
+  parseOidcEnv: vi.fn(),
   resolveRevisionAttestation: vi.fn((revision: string | undefined, buildRevision: string | undefined) => {
     const normalizedRevision = revision?.trim() || "unknown";
     const normalizedBuildRevision = buildRevision?.trim() || "unknown";
@@ -21,6 +22,7 @@ const routeDependencies = vi.hoisted(() => ({
 
 vi.mock("@pawket/config", () => ({
   loadServerEnv: routeDependencies.loadServerEnv,
+  parseOidcEnv: routeDependencies.parseOidcEnv,
   resolveRevisionAttestation: routeDependencies.resolveRevisionAttestation,
 }));
 vi.mock("@pawket/database/readiness", () => ({
@@ -106,6 +108,7 @@ describe("operational route wiring", () => {
       valkey: "up",
       publicMediaStorage: "not_configured",
       publicMediaWorkerScan: "up",
+      identityConfiguration: "valid",
       revision,
       buildRevision: revision,
       revisionMatch: true,
@@ -116,6 +119,12 @@ describe("operational route wiring", () => {
     );
     expect(routeDependencies.createReadinessConnection).toHaveBeenCalledTimes(2);
     expect(routeDependencies.createReadinessConnection).toHaveBeenCalledWith("redis://localhost:6379");
+    routeDependencies.parseOidcEnv.mockImplementationOnce(() => { throw new Error("private client secret must not leak"); });
+    const invalid = await GET(new Request("http://localhost/api/health/ready"));
+    expect(invalid.status).toBe(503);
+    const invalidBody = await invalid.text();
+    expect(JSON.parse(invalidBody)).toMatchObject({ status: "not_ready", identityConfiguration: "invalid" });
+    expect(invalidBody).not.toContain("private client secret");
   }, 15_000);
 
   it("uses the metrics route handler for bearer authorization", async () => {

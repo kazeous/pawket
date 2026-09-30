@@ -133,12 +133,14 @@ export const identityAccounts = pgTable(
   },
   (table) => [
     uniqueIndex("identity_accounts_issuer_account_uidx").on(table.issuer, table.accountId),
+    uniqueIndex("identity_accounts_user_id_uidx").on(table.userId, table.id),
     index("identity_accounts_user_idx").on(table.userId),
     check(
       "identity_accounts_provider_issuer_check",
       sql`(${table.providerId} = 'credential' and ${table.issuer} = 'local:credential')
         or (${table.providerId} = 'google' and ${table.issuer} = 'https://accounts.google.com')
-        or (${table.providerId} = 'discord' and ${table.issuer} = 'https://discord.com')`,
+        or (${table.providerId} = 'discord' and ${table.issuer} = 'https://discord.com')
+        or (${table.providerId} = 'authentik' and ${table.issuer} like 'https://%' and ${table.password} is null and ${table.passwordHashVersion} is null)`,
     ),
     check(
       "identity_accounts_no_provider_tokens_check",
@@ -192,6 +194,7 @@ export const identitySessions = pgTable(
   },
   (table) => [
     uniqueIndex("identity_sessions_token_hash_uidx").on(table.token),
+    uniqueIndex("identity_sessions_user_id_uidx").on(table.userId, table.id),
     index("identity_sessions_user_idx").on(table.userId),
     index("identity_sessions_expiry_idx").on(table.expiresAt),
     check(
