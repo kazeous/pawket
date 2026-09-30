@@ -7,19 +7,25 @@ const provider: OidcProviderConfig = { issuer: "https://idp.example/application/
   providerRevision: "pawket-v1", accountPortalUrl: "https://idp.example/if/user/" };
 let key: Awaited<ReturnType<typeof generateKeyPair>>;
 let attacker: Awaited<ReturnType<typeof generateKeyPair>>;
+let rs512: Awaited<ReturnType<typeof generateKeyPair>>;
 let jwk: JWK;
 beforeAll(async () => {
-  key = await generateKeyPair("RS256"); attacker = await generateKeyPair("RS256");
+  key = await generateKeyPair("RS256"); attacker = await generateKeyPair("RS256"); rs512 = await generateKeyPair("RS512");
   jwk = { ...await exportJWK(key.publicKey), kid: "key-1", alg: "RS256", use: "sig" };
 });
 
 function harness(options: { token?: (material: OidcAuthorizationMaterial) => Promise<string>; metadata?: Record<string, unknown>;
-  tokenError?: string; onExchangeFailure?: (diagnostic: { code: string; claim?: string; providerError?: string }) => void;
+  tokenError?: string; tokenFailure?: "network" | "timeout" | "unavailable" | "oversized";
+  onExchangeFailure?: (diagnostic: { code: string; claim?: string; providerError?: string }) => void;
 } = {}) {
   const requests: Array<{ url: string; body: string; redirect?: string }> = [];
   const fetcher: typeof fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : input.toString();
     requests.push({ url, body: init?.body?.toString() ?? "", redirect: init?.redirect });
+    if (url.endsWith("/token") && options.tokenFailure === "network") throw new TypeError("fetch failed");
+    if (url.endsWith("/token") && options.tokenFailure === "timeout") throw new DOMException("The operation timed out", "TimeoutError");
+    if (url.endsWith("/token") && options.tokenFailure === "unavailable") return new Response("bad gateway", { status: 502 });
+    if (url.endsWith("/token") && options.tokenFailure === "oversized") return Response.json({ padding: "x".repeat(200_000) });
     if (url.includes(".well-known")) return Response.json({ issuer: provider.issuer,
       authorization_endpoint: "https://idp.example/authorize", token_endpoint: "https://idp.example/token",
       jwks_uri: "https://idp.example/jwks", response_types_supported: ["code"], subject_types_supported: ["public"],
@@ -89,7 +95,8 @@ describe("OIDC protocol boundary", () => {
   test.each(["issuer", "audience", "nonce", "expiry", "algorithm", "future_iat"])("rejects invalid ID token %s", async (kind) => {
     const at = Math.floor(Date.now() / 1000);
     const changes = { issuer: { iss: "https://wrong.example/" }, audience: { aud: "other-project" }, nonce: { nonce: "wrong" }, expiry: { exp: at - 1 }, algorithm: {}, future_iat: { iat: at + 300 } }[kind]!;
-    const h = harness({ token: (m) => signId(m, changes, key.privateKey, kind === "algorithm" ? "RS512" : "RS256") });
+    // A real RS512 key: signing RS512 with the RS256 key throws inside the fake token endpoint instead.
+    const h = harness({ token: (m) => kind === "algorithm" ? signId(m, changes, rs512.privateKey, "RS512") : signId(m, changes) });
     await expect(h.protocol.exchange(h.callback, h.material)).rejects.toThrow("invalid_response");
   });
   test("state mismatch stops before exchanging authorization code", async () => {
@@ -119,6 +126,25 @@ describe("OIDC protocol boundary", () => {
     expect(diagnostics).toEqual([{ code: "OAUTH_RESPONSE_BODY_ERROR",
       ...(tokenError === "invalid_client" ? { providerError: "invalid_client" } : {}) }]);
   });
+  test.each(["network", "timeout", "unavailable"] as const)("a token endpoint that is down (%s) is reported as provider unavailable", async (tokenFailure) => {
+    const h = harness({ tokenFailure });
+    await expect(h.protocol.exchange(h.callback, h.material)).rejects.toThrow("provider_unavailable");
+  });
+  test("an oversized token response stays a rejected login, not an outage", async () => {
+    const h = harness({ tokenFailure: "oversized" });
+    await expect(h.protocol.exchange(h.callback, h.material)).rejects.toThrow("invalid_response");
+  });
+  test("a temporary IdP error from the token endpoint is reported as provider unavailable", async () => {
+    const h = harness({ tokenError: "temporarily_unavailable" });
+    await expect(h.protocol.exchange(h.callback, h.material)).rejects.toThrow("provider_unavailable");
+  });
+  test.each([["login_required", "login_required"], ["interaction_required", "login_required"], ["access_denied", "invalid_response"]])(
+    "IdP callback error %s becomes %s without a token request", async (idpError, code) => {
+      const h = harness(); const callback = new URL(provider.redirectUri);
+      callback.searchParams.set("state", h.material.state); callback.searchParams.set("error", idpError);
+      await expect(h.protocol.exchange(callback, h.material)).rejects.toThrow(code);
+      expect(h.requests.some((r) => r.url.endsWith("/token"))).toBe(false);
+    });
   test("a failing diagnostic callback cannot change the authentication rejection", async () => {
     const h = harness({ tokenError: "invalid_client", onExchangeFailure: () => { throw new Error("probe failure"); } });
     await expect(h.protocol.exchange(h.callback, h.material)).rejects.toThrow("invalid_response");

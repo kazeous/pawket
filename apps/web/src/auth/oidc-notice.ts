@@ -6,7 +6,8 @@ const notices: Record<string, string> = {
   actor_changed: "Tài khoản hoặc phiên đã thay đổi. Hãy quay lại thao tác ban đầu bằng đúng tài khoản.",
   assurance_required: "Thao tác cần xác thực lại bằng tài khoản chung và mã ứng dụng xác thực nếu đã bật.",
   session_revoked: "Phiên đã kết thúc. Hãy đăng nhập lại.",
-  provider_unavailable: "Dịch vụ tài khoản đang tạm gián đoạn. Bạn vẫn có thể xem các trang công khai.",
+  provider_unavailable: "Hệ thống tài khoản đang gặp sự cố. Hãy thử lại sau. Bạn vẫn có thể xem các trang công khai.",
+  login_required: "Phiên tài khoản reyuuGAMES đã kết thúc. Hãy đăng nhập lại.",
   rate_limited: "Có quá nhiều lượt đăng nhập. Hãy đợi một lúc rồi thử lại.",
   invalid_response: "Chưa thể xác nhận lượt đăng nhập này. Hãy bắt đầu lại.",
 };

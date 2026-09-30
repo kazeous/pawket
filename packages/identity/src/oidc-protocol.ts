@@ -15,6 +15,22 @@ const maxResponseBytes = 128 * 1024;
 // login is older than this, which also covers later step-ups. Freshness is still enforced
 // by assertOidcStepUp, never by this value.
 const reauthenticationMaxAgeSeconds = 10;
+/** A provider request that got no HTTP response, so an IdP outage is not reported as a bad login. */
+class OidcTransportError extends Error {}
+const idpSessionEndedErrors = new Set(["login_required", "interaction_required", "consent_required", "account_selection_required"]);
+const idpTemporaryErrors = new Set(["server_error", "temporarily_unavailable"]);
+
+/** Every case still rejects the login; this only picks the label the user sees. */
+function exchangeFailureCode(error: unknown): "provider_unavailable" | "login_required" | "invalid_response" {
+  for (let cause = error, depth = 0; cause && depth < 4; cause = (cause as { cause?: unknown }).cause, depth++) {
+    if (cause instanceof OidcTransportError) return "provider_unavailable";
+  }
+  const e = error as { code?: string; error?: string; cause?: unknown };
+  if (e?.code === "OAUTH_TIMEOUT" || e?.code === "OAUTH_ABORT" || idpTemporaryErrors.has(e?.error ?? "") ||
+    (e?.code === "OAUTH_RESPONSE_IS_NOT_CONFORM" && e.cause instanceof Response && e.cause.status >= 500)) return "provider_unavailable";
+  if (e?.code === "OAUTH_AUTHORIZATION_RESPONSE_ERROR" && idpSessionEndedErrors.has(e.error ?? "")) return "login_required";
+  return "invalid_response";
+}
 
 function validateUrl(value: string, allowLoopback = false): URL {
   const url = new URL(value);
@@ -50,14 +66,15 @@ export function createOidcProtocol(config: OidcProviderConfig, dependencies: {
     if (url.origin !== allowedOrigin || url.username || url.password || url.protocol !== "https:") {
       throw new Error("OIDC endpoint origin mismatch");
     }
-    const response = await fetcher(input, { ...init, redirect: "error" });
+    const transport = (cause: unknown) => new OidcTransportError("OIDC provider unreachable", { cause });
+    const response = await fetcher(input, { ...init, redirect: "error" }).catch((cause: unknown) => { throw transport(cause); });
     const reader = response.body?.getReader();
     if (!reader) return response;
     const chunks: Uint8Array[] = [];
     let length = 0;
     try {
       while (true) {
-        const part = await reader.read();
+        const part = await reader.read().catch((cause: unknown) => { throw transport(cause); });
         if (part.done) break;
         length += part.value.length;
         if (length > maxResponseBytes) throw new Error("OIDC response too large");
@@ -138,7 +155,7 @@ export function createOidcProtocol(config: OidcProviderConfig, dependencies: {
             ...(["invalid_client", "invalid_grant", "invalid_request", "unauthorized_client", "unsupported_grant_type", "invalid_scope"].includes(e?.error ?? "") ? { providerError: e.error } : {}) };
           try { dependencies.onExchangeFailure(diagnostic); } catch { /* Diagnostics never change rejection. */ }
         }
-        throw new OidcIdentityError("invalid_response");
+        throw new OidcIdentityError(exchangeFailureCode(error));
       }
     },
     async verifyLogout(token: string, now: Date): Promise<OidcLogout> {

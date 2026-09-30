@@ -99,7 +99,9 @@ function factoryInput() {
   };
 }
 
-describe("contextual report submission", () => {
+// Guest tests solve a real difficulty-18 proof of work over a random token: about 262k hashes on
+// average with a long tail, synchronously. The default 5 s timeout failed on a slow CI runner.
+describe("contextual report submission", { timeout: 30_000 }, () => {
   beforeAll(async () => {
     await admin.unsafe(`create schema "${schemaName}"`);
     connection = createDatabase(`${databaseUrl}?options=-csearch_path%3D${schemaName}%2Cpublic`);
