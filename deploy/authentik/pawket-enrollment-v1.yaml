@@ -3,6 +3,8 @@
 # object changed is Pawket's own identification stage, which gains both flows,
 # so the links appear on the Pawket login page and nowhere else on the instance.
 # Email stages use the instance's global SMTP settings; no secret is stored here.
+# Their templates come from deploy/authentik/templates/ and must be in the
+# server's /templates before this is applied, or the import is rejected.
 # The Turnstile secret is entered by the operator in authentik. The captcha stage
 # is created once with a placeholder (state: created), so reapplying this
 # blueprint never overwrites the real secret; until it is set, captcha fails closed.
@@ -67,7 +69,7 @@ entries:
     identifiers: {slug: pawket-enrollment-v1}
     attrs:
       name: Pawket sign-up
-      title: Create your Pawket account
+      title: Create your reyuuGAMES Account
       designation: enrollment
       authentication: require_unauthenticated
   - model: authentik_policies_expression.expressionpolicy
@@ -114,8 +116,8 @@ entries:
       use_global_settings: true
       activate_user_on_success: true
       token_expiry: minutes=30
-      subject: Verify your email for Pawket
-      template: email/account_confirmation.html
+      subject: Verify your email for your reyuuGAMES Account
+      template: reyuugames/account_confirmation.html
   - model: authentik_policies_expression.expressionpolicy
     id: pawket-signup-email-record
     identifiers: {name: pawket-signup-email-record-v1}
@@ -161,7 +163,7 @@ entries:
     identifiers: {slug: pawket-recovery-v1}
     attrs:
       name: Pawket password reset
-      title: Reset your Pawket password
+      title: Reset your reyuuGAMES Account password
       designation: recovery
       authentication: require_unauthenticated
   - model: authentik_stages_identification.identificationstage
@@ -182,8 +184,8 @@ entries:
       # A reset must not reactivate an account an administrator disabled.
       activate_user_on_success: false
       token_expiry: minutes=30
-      subject: Reset your Pawket password
-      template: email/password_reset.html
+      subject: Reset your reyuuGAMES Account password
+      template: reyuugames/password_reset.html
       recovery_max_attempts: 5
       recovery_cache_timeout: minutes=5
   - model: authentik_stages_prompt.promptstage

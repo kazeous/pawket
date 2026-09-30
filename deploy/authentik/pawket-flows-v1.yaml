@@ -9,7 +9,7 @@ entries:
     identifiers: {slug: pawket-authentication-v1}
     attrs:
       name: Pawket authentication
-      title: Sign in to Pawket
+      title: Sign in to your reyuuGAMES Account
       designation: authentication
       authentication: none
   - model: authentik_stages_identification.identificationstage
@@ -61,8 +61,9 @@ entries:
       # fields so reapplying this blueprint preserves the operator's SMTP setup.
       activate_user_on_success: false
       token_expiry: minutes=10
-      subject: Verify your email for Pawket
-      template: email/account_confirmation.html
+      subject: Verify your email for your reyuuGAMES Account
+      # From deploy/authentik/templates/; copy it to /templates before applying.
+      template: reyuugames/account_confirmation.html
   - model: authentik_stages_consent.consentstage
     id: pawket-consent
     identifiers: {name: pawket-consent-v1}

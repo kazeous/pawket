@@ -1,0 +1,24 @@
+# Target: authentik 2025.10.3. Studio-wide branding: users see "reyuuGAMES
+# Account", never authentik. Only the branding fields of the instance's single
+# default brand change; its flows, domain, certificates and attributes are left
+# as they are. Copy deploy/authentik/media/ into the server's /media first, so
+# the logo and favicon resolve before this is applied.
+version: 1
+metadata:
+  name: reyuuGAMES - brand v1
+entries:
+  - model: authentik_brands.brand
+    identifiers: {default: true}
+    # Never create a second brand: without an existing default this entry is skipped.
+    conditions:
+      - !Find [authentik_brands.brand, [default, true]]
+    attrs:
+      branding_title: reyuuGAMES Account
+      branding_logo: /media/public/reyuugames/reyuu-account-logo.png
+      branding_favicon: /media/public/reyuugames/favicon-64.png
+      # Adopted into every component's shadow root. Scoped to the flow footer
+      # element so no other list loses its last item. Recheck after upgrades.
+      branding_custom_css: |
+        :host(ak-brand-links) li:last-child {
+          display: none;
+        }
