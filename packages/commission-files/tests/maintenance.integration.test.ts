@@ -38,12 +38,21 @@ describe("commission file maintenance", () => {
     const row = await fixture.read(stuck);
     await fixture.db.update(commissionFiles).set({ scanLeaseExpiresAt: new Date(fixtureAt.getTime() + 60_000), version: row.version + 1 }).where(eq(commissionFiles.id, stuck));
     const late = await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "scanning", at: new Date(fixtureAt.getTime() - DAY) });
+    const live = await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "scanning" });
+    const liveRow = await fixture.read(live);
+    const liveLeaseExpiresAt = new Date(fixtureAt.getTime() + 10 * 60_000);
+    await fixture.db.update(commissionFiles).set({ scanLeaseExpiresAt: liveLeaseExpiresAt, version: liveRow.version + 1 }).where(eq(commissionFiles.id, live));
     const { enqueueScan, report } = run(new Date(fixtureAt.getTime() + 120_000));
     expect(await report).toMatchObject({ recovered: 1 });
     expect(enqueueScan).toHaveBeenCalledWith(due, 0);
     expect(enqueueScan).toHaveBeenCalledWith(stuck, 1);
+    expect(enqueueScan).not.toHaveBeenCalledWith(live, expect.anything());
     expect(await fixture.read(stuck)).toMatchObject({ scanAttempts: 1, scanLeaseExpiresAt: null });
     expect(await fixture.read(late)).toMatchObject({ state: "scan_failed" });
+    // A live (not yet expired) lease must never be recovered or enqueued: it means a scan is
+    // genuinely in flight, possibly claimed by the real processor after this sweep's own
+    // candidate selection ran.
+    expect(await fixture.read(live)).toMatchObject({ state: "scanning", scanLeaseExpiresAt: liveLeaseExpiresAt, scanAttempts: 0 });
   });
   test("reports, then enforces, 30-day deletion for references of unpaid closed orders", async () => {
     const o = await fixture.order(); const fileId = await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId });
@@ -64,5 +73,39 @@ describe("commission file maintenance", () => {
       batchSize: 100, enqueueScan: async () => undefined, now: () => new Date(fixtureAt.getTime() + 40 * DAY) });
     expect(report.expired).toBeGreaterThan(0);
     expect(report.purgeFailures).toBeGreaterThan(0);
+  });
+  test("keyset-paginates retention past a backlog of attached files that never become eligible", async () => {
+    const open = await fixture.order();
+    const closed = await fixture.order();
+    const fillerIds: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const fileId = await fixture.file({ ownerUserId: open.buyerUserId, packageId: open.packageId });
+      await fixture.attach(fileId, open.orderId, i, new Date(fixtureAt.getTime() + i));
+      fillerIds.push(fileId);
+    }
+    // Never registered in `facts` (not closed), and the order-level filter can't see it at the SQL
+    // level: these three stay `attached` forever, exactly the backlog the retention sweep must
+    // page past instead of starving on.
+    const eligibleId = await fixture.file({ ownerUserId: closed.buyerUserId, packageId: closed.packageId });
+    await fixture.attach(eligibleId, closed.orderId, 0, new Date(fixtureAt.getTime() + 10));
+    facts.set(closed.orderId, { state: "closed", confirmedAt: null, closedAt: fixtureAt });
+    const at = new Date(fixtureAt.getTime() + 30 * DAY);
+
+    const page1 = await run(at, { batchSize: 2 }).report;
+    expect(page1).toMatchObject({ retentionDue: 0 });
+    expect(page1.retentionNextAfter).not.toBeNull();
+
+    const page2 = await run(at, { batchSize: 2, retentionMode: "enforce", retentionAfter: page1.retentionNextAfter }).report;
+    expect(page2).toMatchObject({ retentionDue: 1, retentionDeleted: 1 });
+    expect(page2.retentionNextAfter).not.toBeNull();
+    expect(await fixture.read(eligibleId)).toMatchObject({ state: "deleted" });
+
+    const page3 = await run(at, { batchSize: 2, retentionAfter: page2.retentionNextAfter }).report;
+    expect(page3).toMatchObject({ retentionDue: 0, retentionNextAfter: null });
+
+    // Restarting from the top (no cursor) still sees the never-eligible backlog and nothing else
+    // (the eligible file is `deleted` now, not `attached`, so it is gone from every future page).
+    const restarted = await run(at, { batchSize: 2 }).report;
+    expect(restarted).toMatchObject({ retentionDue: 0 });
   });
 });
