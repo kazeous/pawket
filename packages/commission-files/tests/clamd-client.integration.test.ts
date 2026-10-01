@@ -26,4 +26,10 @@ describe("real clamd", () => {
   test("flags an encrypted archive instead of skipping it", async () => {
     await expect(client.scan(once(storedZip([{ name: "secret.txt", data: new Uint8Array(64).fill(1), encrypted: true }])))).resolves.toMatchObject({ kind: "found", reason: "encrypted_archive" });
   });
+  test("flags an archive nested beyond MaxRecursion instead of skipping it", async () => {
+    // ops/clamav/clamd.conf sets `MaxRecursion 16`; 20 wrapping levels exceeds it with margin.
+    let payload: Uint8Array = new TextEncoder().encode("harmless nested payload");
+    for (let level = 0; level < 20; level += 1) payload = storedZip([{ name: `level-${level}.zip`, data: payload }]);
+    await expect(client.scan(once(payload))).resolves.toMatchObject({ kind: "found", reason: "limits_exceeded" });
+  });
 });
