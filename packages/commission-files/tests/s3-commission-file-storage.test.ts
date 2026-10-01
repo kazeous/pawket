@@ -17,6 +17,7 @@ describe("commission file storage boundary", () => {
     expect(url.pathname).toBe(`/${options.quarantineBucket}/${key}`);
     expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("content-length;content-type;host");
     expect(url.searchParams.get("X-Amz-Expires")).toBe("900");
+    expect([...url.searchParams.keys()].some((name) => /^x-amz-checksum-/iu.test(name) || name === "x-amz-sdk-checksum-algorithm")).toBe(false);
     expect(grant.requiredHeaders).toEqual({ "content-type": "application/octet-stream", "content-length": "1234" });
     expect(grant.expiresAt.toISOString()).toBe("2026-10-01T00:15:00.000Z");
     expect(grant.url).not.toContain(options.secretAccessKey);

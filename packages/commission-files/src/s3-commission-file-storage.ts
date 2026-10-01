@@ -21,6 +21,11 @@ export function createS3CommissionFileStorage(options: S3CommissionFileStorageOp
     !isBoundedS3Text(options.secretAccessKey, 512) || !isValidS3Bucket(options.quarantineBucket) || !isValidS3Bucket(options.cleanBucket) ||
     options.quarantineBucket === options.cleanBucket || (options.forcePathStyle !== undefined && typeof options.forcePathStyle !== "boolean")) invalid();
   const client = new S3Client({ endpoint: options.endpoint, region: options.region, forcePathStyle: options.forcePathStyle ?? true,
+    // Default WHEN_SUPPORTED adds x-amz-checksum-* / x-amz-sdk-checksum-algorithm to the signed
+    // PUT, which a real S3-compatible provider can reject (BadDigest) for a non-empty body signed
+    // against an empty CRC32; WHEN_REQUIRED keeps presigned PUT/GET/HEAD/copy independent of the
+    // provider's own checksum header support.
+    requestChecksumCalculation: "WHEN_REQUIRED", responseChecksumValidation: "WHEN_REQUIRED",
     credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey } });
   const now = options.now ?? (() => new Date());
   const bucket = (area: CommissionObjectArea) => area === "quarantine" ? options.quarantineBucket : area === "clean" ? options.cleanBucket : invalid();
