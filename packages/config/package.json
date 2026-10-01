@@ -10,6 +10,7 @@
     "./increment-four": "./src/increment-four.ts",
     "./increment-five": "./src/increment-five.ts",
     "./increment-six": "./src/increment-six.ts",
+    "./increment-seven": "./src/increment-seven.ts",
     "./oidc": "./src/oidc.ts"
   },
   "scripts": {

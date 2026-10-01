@@ -1,5 +1,6 @@
 import { z } from "zod";
 export { OIDC_SIGN_UP_FLOW_SLUG, oidcSignUpUrl, parseOidcEnv, parseOidcSessionEnv } from "./oidc.js";
+export type { CommissionFilesMode, CommissionFileRetentionMode } from "@pawket/config/increment-seven";
 
 import {
   incrementTwoEnvShape,
@@ -21,6 +22,12 @@ import {
 } from "@pawket/config/increment-four";
 import { incrementFiveEnvShape, IncrementFiveConfigError, resolveIncrementFiveEnv, type IncrementFiveServerEnv } from "@pawket/config/increment-five";
 import { incrementSixEnvShape, IncrementSixConfigError, resolveIncrementSixEnv, type IncrementSixServerEnv } from "@pawket/config/increment-six";
+import {
+  incrementSevenEnvShape,
+  IncrementSevenConfigError,
+  resolveIncrementSevenEnv,
+  type IncrementSevenServerEnv,
+} from "@pawket/config/increment-seven";
 
 const operationalIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 
@@ -94,14 +101,15 @@ const serverEnvSchema = z.object({
   ...incrementFourEnvShape,
   ...incrementFiveEnvShape,
   ...incrementSixEnvShape,
+  ...incrementSevenEnvShape,
 });
 
 type ParsedServerEnv = z.infer<typeof serverEnvSchema>;
 export type ServerEnv = Omit<
   ParsedServerEnv,
-  keyof IncrementTwoServerEnv | keyof IncrementThreeServerEnv | keyof IncrementFourServerEnv | keyof IncrementFiveServerEnv | keyof IncrementSixServerEnv | "APP_BUILD_REVISION"
+  keyof IncrementTwoServerEnv | keyof IncrementThreeServerEnv | keyof IncrementFourServerEnv | keyof IncrementFiveServerEnv | keyof IncrementSixServerEnv | keyof IncrementSevenServerEnv | "APP_BUILD_REVISION"
 > &
-  IncrementTwoServerEnv & IncrementThreeServerEnv & IncrementFourServerEnv & IncrementFiveServerEnv & IncrementSixServerEnv & { APP_BUILD_REVISION: string };
+  IncrementTwoServerEnv & IncrementThreeServerEnv & IncrementFourServerEnv & IncrementFiveServerEnv & IncrementSixServerEnv & IncrementSevenServerEnv & { APP_BUILD_REVISION: string };
 
 const exactSourceRevision = /^[0-9a-f]{40}$/u;
 
@@ -169,6 +177,7 @@ export function parseServerEnv(
     const incrementFour = resolveIncrementFourEnv({ ...parsed.data, ...incrementTwo }, parsed.data.APP_ENV);
     const incrementFive = resolveIncrementFiveEnv({ ...parsed.data, ...incrementTwo }, parsed.data.APP_ENV);
     const incrementSix = resolveIncrementSixEnv({ ...parsed.data, ...incrementTwo });
+    const incrementSeven = resolveIncrementSevenEnv({ ...parsed.data, ...incrementTwo, APP_ENV: parsed.data.APP_ENV });
     if (
       (parsed.data.APP_ENV === "production" || parsed.data.APP_ENV === "staging") &&
       parsed.data.NODE_ENV !== "production"
@@ -248,10 +257,11 @@ export function parseServerEnv(
       ...incrementFour,
       ...incrementFive,
       ...incrementSix,
+      ...incrementSeven,
       APP_BUILD_REVISION: buildRevision,
     } as ServerEnv;
   } catch (error) {
-    if (error instanceof IncrementTwoConfigError || error instanceof IncrementThreeConfigError || error instanceof IncrementFourConfigError || error instanceof IncrementFiveConfigError || error instanceof IncrementSixConfigError) {
+    if (error instanceof IncrementTwoConfigError || error instanceof IncrementThreeConfigError || error instanceof IncrementFourConfigError || error instanceof IncrementFiveConfigError || error instanceof IncrementSixConfigError || error instanceof IncrementSevenConfigError) {
       throw new Error(`Invalid server environment: ${error.message}`);
     }
     throw error;
