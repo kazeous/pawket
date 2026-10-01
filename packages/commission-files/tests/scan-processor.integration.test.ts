@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { commissionFiles, systemOutbox } from "@pawket/database";
@@ -20,20 +21,23 @@ async function scanning(bytes: Uint8Array | null, declaredBytes = PNG.byteLength
   return { fileId, storage, buyerUserId };
 }
 
-/** An async iterable that records whether its iterator was closed, standing in for the S3 SDK body stream the processor must always release. */
-function trackedStream(chunks: readonly Uint8Array[]): { iterable: AsyncIterable<Uint8Array>; returned: () => boolean } {
-  let returned = false; let index = 0;
-  const iterable: AsyncIterable<Uint8Array> = {
-    [Symbol.asyncIterator]() {
-      return {
-        async next(): Promise<IteratorResult<Uint8Array>> {
-          return index < chunks.length ? { done: false, value: chunks[index++]! } : { done: true, value: undefined };
-        },
-        async return(value?: unknown): Promise<IteratorResult<Uint8Array>> { returned = true; return { done: true, value: value as Uint8Array }; },
-      };
-    },
-  };
-  return { iterable, returned: () => returned };
+// Real node:stream Readables stand in for the S3 SDK body stream here — a plain-object async
+// iterable would let a processor bug that never calls destroy() pass unnoticed, since only a
+// real stream's own release semantics (a stream's async iterator queues .return() behind an
+// already-pending .next(), but .destroy() tears it down synchronously) can expose that bug.
+/** A Readable yielding the given chunks then ending normally. */
+function readableOf(chunks: readonly Uint8Array[]): Readable {
+  return Readable.from(chunks);
+}
+/** A Readable that pushes one chunk, then errors on the next read — a dropped connection mid-stream. */
+function readableThatErrorsAfter(chunk: Uint8Array, error: Error): Readable {
+  let pushed = false;
+  return new Readable({ read() { if (!pushed) { pushed = true; this.push(chunk); return; } this.destroy(error); } });
+}
+/** A Readable that pushes one chunk and then stalls forever — never ends, never errors — until destroyed. */
+function stalledReadable(chunk: Uint8Array): Readable {
+  let pushed = false;
+  return new Readable({ read() { if (!pushed) { pushed = true; this.push(chunk); } /* else: stall, simulating a dropped connection that never sends FIN/RST */ } });
 }
 
 describe("commission file scan", () => {
@@ -58,7 +62,7 @@ describe("commission file scan", () => {
     const short = await scanning(PNG.subarray(0, 8));
     await expect(processCommissionFileScan({ db: fixture.db, storage: short.storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId: short.fileId, now })).resolves.toMatchObject({ reason: "size_mismatch" });
     const long = await scanning(PNG);
-    vi.spyOn(long.storage.port, "open").mockResolvedValueOnce((async function* () { yield PNG; yield PNG; })());
+    vi.spyOn(long.storage.port, "open").mockResolvedValueOnce(readableOf([PNG, PNG]));
     await expect(processCommissionFileScan({ db: fixture.db, storage: long.storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId: long.fileId, now })).resolves.toMatchObject({ reason: "size_mismatch" });
     expect(long.storage.has("clean", `commission/${long.fileId}`)).toBe(false);
   });
@@ -102,26 +106,48 @@ describe("commission file scan", () => {
     // (see clamd-client.ts), so a scanner that behaves like the real one is used here — a fake
     // that merely passed the raw storage error through would prove nothing about production.
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
-    vi.spyOn(storage.port, "open").mockResolvedValueOnce((async function* () { yield PNG.subarray(0, 4); throw new Error("ECONNRESET"); })());
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(readableThatErrorsAfter(PNG.subarray(0, 4), new Error("ECONNRESET")));
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ wrapSourceErrors: true, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "storage_unavailable" });
     expect(await fixture.read(fileId)).toMatchObject({ state: "scanning", nextScanAt: expect.any(Date), scanLeaseExpiresAt: null });
   });
   test("releases the quarantine stream when the declared size is exceeded", async () => {
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
-    const tracked = trackedStream([PNG, PNG]);
-    vi.spyOn(storage.port, "open").mockResolvedValueOnce(tracked.iterable);
+    const readable = readableOf([PNG, PNG]);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(readable);
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toMatchObject({ reason: "size_mismatch" });
-    expect(tracked.returned()).toBe(true);
+    expect(readable.destroyed).toBe(true);
   });
   test("releases the quarantine stream when the scanner abandons it mid-read", async () => {
     // Mirrors the real clamd client: its own `for await` over the source throws (a rejected
     // socket write) after consuming some chunks, which must close the still-open source instead
     // of leaving it to be garbage-collected.
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
-    const tracked = trackedStream([PNG]);
-    vi.spyOn(storage.port, "open").mockResolvedValueOnce(tracked.iterable);
+    const readable = readableOf([PNG]);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(readable);
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ abandonAfterChunks: 1, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "scanner_unavailable" });
-    expect(tracked.returned()).toBe(true);
+    expect(readable.destroyed).toBe(true);
+  });
+  test("destroys the quarantine stream without ever reading it when the scanner never starts", async () => {
+    // Calling .return() on a never-started async generator completes it without running its
+    // body/finally, so the stream is never destroyed that way; release here must happen from the
+    // outer flow, by destroying the real stream resource directly, independent of the generator.
+    clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
+    const readable = readableOf([PNG]);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(readable);
+    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ rejectBeforeReading: new ClamdUnavailableError("connect"), signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "scanner_unavailable" });
+    expect(readable.destroyed).toBe(true);
+  });
+  test("destroys a stalled quarantine stream within a bounded time instead of hanging the scan", async () => {
+    // A stream's async iterator queues .return() behind an already-pending .next(), so awaiting
+    // that close hangs forever against a source that never pushes another chunk. destroy() must
+    // unblock this on its own, promptly, instead of leaving the job pending indefinitely.
+    clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
+    const readable = stalledReadable(PNG);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(readable);
+    const startedAt = Date.now();
+    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ timeoutAfterMs: 50, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "scanner_unavailable" });
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(readable.destroyed).toBe(true);
   });
   test("fails the scan once the 24-hour deadline passes", async () => {
     const { fileId, storage } = await scanning(PNG); clock = new Date(fixtureAt.getTime() + 86_400_000);

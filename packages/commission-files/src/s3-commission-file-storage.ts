@@ -3,7 +3,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { isBoundedS3Text, isProviderNotFound, isValidS3Bucket, isValidS3Endpoint, readExactNativeArray, readPlainDataRecord } from "@pawket/object-storage";
 
 import { COMMISSION_FILE_CONTENT_TYPES } from "./file-policy.js";
-import { CommissionFileStorageError, type CommissionFileStoragePort, type CommissionObjectArea } from "./storage-port.js";
+import { CommissionFileStorageError, type CommissionFileReadStream, type CommissionFileStoragePort, type CommissionObjectArea } from "./storage-port.js";
 
 export type S3CommissionFileStorageOptions = Readonly<{
   endpoint: string; region: string; accessKeyId: string; secretAccessKey: string;
@@ -68,8 +68,11 @@ export function createS3CommissionFileStorage(options: S3CommissionFileStorageOp
       try {
         const response = readPlainDataRecord(await client.send(new GetObjectCommand({ Bucket: bucket(area), Key: key(value), VersionId: version(versionValue) })));
         const body = response?.Body;
-        if (!body || typeof body !== "object" || !(Symbol.asyncIterator in body)) return unavailable();
-        return body as AsyncIterable<Uint8Array>;
+        // The Node runtime always returns the SDK Body as a Readable (which is both the async
+        // iterable and the synchronously-destroyable resource the processor needs); a body
+        // lacking a `destroy` function cannot be released safely and is treated as missing.
+        if (!body || typeof body !== "object" || !(Symbol.asyncIterator in body) || typeof (body as { destroy?: unknown }).destroy !== "function") return unavailable();
+        return body as CommissionFileReadStream;
       } catch (error) {
         if (error instanceof CommissionFileStorageError) throw error;
         return unavailable();
