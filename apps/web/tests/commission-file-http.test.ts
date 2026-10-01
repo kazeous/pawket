@@ -1,0 +1,68 @@
+import { randomUUID } from "node:crypto";
+import { describe, expect, test, vi } from "vitest";
+import { CommissionFileError } from "@pawket/commission-files";
+import { createCommissionFileHttpHandlers } from "../src/platform/commission-file-http";
+
+const origin = "https://pawket.example"; const actor = { userId: "user-buyer-1", sessionId: "session-1" };
+function handlers(overrides: Partial<Parameters<typeof createCommissionFileHttpHandlers>[0]> = {}) {
+  const files = { createUpload: vi.fn(async () => ({ fileId: randomUUID(), url: "https://bucket.invalid/put", requiredHeaders: { "content-type": "application/octet-stream" }, expiresAt: new Date().toISOString() })),
+    completeUpload: vi.fn(async () => ({ state: "scanning" })), discard: vi.fn(async () => ({ state: "discarded" })), getFile: vi.fn(async () => ({ state: "clean" })),
+    downloadGrant: vi.fn(async () => ({ url: "https://bucket.invalid/get?signed=1" })) };
+  const onOperation = vi.fn();
+  return { files, onOperation, http: createCommissionFileHttpHandlers({ appBaseUrl: origin, lookupHmacKey: new Uint8Array(32).fill(5), authenticate: async () => actor,
+    throttle: async () => true, files: files as never, onOperation, ...overrides }) };
+}
+const post = (path: string, body: unknown, headers: Record<string, string> = {}) => new Request(`${origin}${path}`, { method: "POST", body: JSON.stringify(body),
+  headers: { origin, "content-type": "application/json", "x-real-ip": "203.0.113.5", "idempotency-key": randomUUID(), ...headers } });
+const get = (path: string, headers: Record<string, string> = {}) => new Request(`${origin}${path}`, { headers: { "x-real-ip": "203.0.113.5", ...headers } });
+
+describe("commission file HTTP", () => {
+  test("creates an upload grant for a same-origin authenticated buyer", async () => {
+    const { http, files, onOperation } = handlers(); const packageId = randomUUID();
+    const response = await http.createUpload(post("/api/v1/commission-files", { context: "brief", packageId, fileName: "a.png", declaredBytes: 10 }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toMatchObject({ upload: { url: "https://bucket.invalid/put" } });
+    expect(files.createUpload).toHaveBeenCalledWith(expect.objectContaining({ actor, context: "brief", packageId, fileName: "a.png", declaredBytes: 10 }));
+    expect(onOperation).toHaveBeenCalledWith({ operation: "grant", outcome: "accepted" });
+  });
+  test.each([
+    ["a cross-origin post", () => post("/api/v1/commission-files", {}, { origin: "https://evil.example" }), 403, "untrusted_origin"],
+    ["a missing client address", () => post("/api/v1/commission-files", { context: "brief", packageId: randomUUID(), fileName: "a.png", declaredBytes: 1 }, { "x-real-ip": "" }), 503, "dependency_unavailable"],
+    ["an extra body field", () => post("/api/v1/commission-files", { context: "brief", packageId: randomUUID(), fileName: "a.png", declaredBytes: 1, orderId: randomUUID() }), 400, "invalid_request"],
+  ])("refuses %s", async (_label, request, status, code) => {
+    const response = await handlers().http.createUpload(request());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ code });
+  });
+  test("maps service errors to stable HTTP codes", async () => {
+    for (const [code, status] of [["file_too_large", 400], ["files_disabled", 503], ["unsent_limit", 409], ["not_available", 404]] as const) {
+      const { http, files } = handlers(); files.createUpload.mockRejectedValueOnce(new CommissionFileError(code));
+      const response = await http.createUpload(post("/api/v1/commission-files", { context: "brief", packageId: randomUUID(), fileName: "a.png", declaredBytes: 10 }));
+      expect([response.status, await response.json()]).toEqual([status, { code }]);
+    }
+  });
+  test("requires a session and respects the rate limit", async () => {
+    expect((await handlers({ authenticate: async () => null }).http.status(get(`/api/v1/commission-files/${randomUUID()}`), randomUUID())).status).toBe(401);
+    expect((await handlers({ throttle: async () => false }).http.status(get(`/api/v1/commission-files/${randomUUID()}`), randomUUID())).status).toBe(429);
+  });
+  test("redirects downloads without caching and validates the disposition", async () => {
+    const { http, files } = handlers(); const orderId = randomUUID(); const fileId = randomUUID();
+    const response = await http.download(get(`/api/v1/commissions/${orderId}/files/${fileId}?disposition=inline`), orderId, fileId);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://bucket.invalid/get?signed=1");
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(files.downloadGrant).toHaveBeenCalledWith({ actor, orderId, fileId, disposition: "inline" });
+    for (const query of ["", "?disposition=raw", "?disposition=inline&disposition=attachment", "?disposition=inline&x=1"]) {
+      expect((await http.download(get(`/api/v1/commissions/${orderId}/files/${fileId}${query}`), orderId, fileId)).status).toBe(400);
+    }
+    files.downloadGrant.mockRejectedValueOnce(new CommissionFileError("preview_not_allowed"));
+    expect((await http.download(get(`/api/v1/commissions/${orderId}/files/${fileId}?disposition=inline`), orderId, fileId)).status).toBe(400);
+  });
+  test("complete and discard accept only an empty JSON object", async () => {
+    const { http } = handlers(); const fileId = randomUUID();
+    expect((await http.complete(post(`/api/v1/commission-files/${fileId}/complete`, {}), fileId)).status).toBe(200);
+    expect((await http.discard(post(`/api/v1/commission-files/${fileId}/discard`, { reason: "x" }), fileId)).status).toBe(400);
+  });
+});
