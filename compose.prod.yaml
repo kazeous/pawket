@@ -139,6 +139,8 @@ services:
         condition: service_healthy
       valkey:
         condition: service_healthy
+      worker:
+        condition: service_healthy
 
   worker:
     image: pawket-worker:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
