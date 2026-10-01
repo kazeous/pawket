@@ -39,3 +39,15 @@ export {
   writePublicMediaWorkerHealth,
   type PublicMediaWorkerHealth,
 } from "./public-media-worker-health.js";
+export {
+  COMMISSION_FILE_QUEUE,
+  COMMISSION_FILE_SCAN_JOB,
+  SafeCommissionFileQueue,
+  commissionFileScanJobId,
+  createCommissionFileQueue,
+  enqueueCommissionFileScan,
+  parseCommissionFileJob,
+  parseCommissionFileUploadedPayload,
+  type CommissionFileQueuePublisher,
+  type CommissionFileScanJob,
+} from "./commission-file-queue.js";
