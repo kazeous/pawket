@@ -13,7 +13,7 @@ export const COMMISSION_POLICY_BOOTSTRAP_ID = "00000000-0000-4000-8000-000000000
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
 const routeCheck = (column: SQLWrapper) => sql`${column} in ('fixed_immediate','fixed_approval','custom_quote')`;
-const envelopeCheck = (column: SQLWrapper) => sql`coalesce(
+export const commissionEnvelopeCheck = (column: SQLWrapper) => sql`coalesce(
   jsonb_typeof(${column}) = 'object' and octet_length(${column}::text) <= 24000
   and ${column}->'version' = '1'::jsonb and ${column}->>'algorithm' = 'A256GCM'
   and jsonb_typeof(${column}->'keyId') = 'string' and ${column}->>'keyId' ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -171,8 +171,8 @@ export const commissionBriefs = pgTable("commission_briefs", {
   requestId: text("request_id").notNull(),
   createdAt: time("created_at").notNull(),
 }, (t) => [
-  check("commission_briefs_text_check", envelopeCheck(t.textEnvelope)),
-  check("commission_briefs_links_check", envelopeCheck(t.linksEnvelope)),
+  check("commission_briefs_text_check", commissionEnvelopeCheck(t.textEnvelope)),
+  check("commission_briefs_links_check", commissionEnvelopeCheck(t.linksEnvelope)),
 ]);
 
 // A new column instance is required on every table; Drizzle builders are mutable.
@@ -190,10 +190,10 @@ const privateTermsColumns = <R extends "commission_quote_revisions" | "commissio
 const privateTermsChecks = (prefix: string, t: { amountVnd: SQLWrapper; turnaroundDays: SQLWrapper; revisionAllowance: SQLWrapper; reviewWindowDays: SQLWrapper; scopeEnvelope: SQLWrapper; deliverablesEnvelope: SQLWrapper; usageRightsEnvelope: SQLWrapper; artistTermsEnvelope: SQLWrapper }) => [
   check(`${prefix}_amount_check`, sql`${t.amountVnd} between 50000 and 50000000`),
   check(`${prefix}_terms_check`, sql`${t.turnaroundDays} between 1 and 90 and ${t.revisionAllowance} between 0 and 10 and ${t.reviewWindowDays} between 3 and 14`),
-  check(`${prefix}_scope_check`, envelopeCheck(t.scopeEnvelope)),
-  check(`${prefix}_deliverables_check`, envelopeCheck(t.deliverablesEnvelope)),
-  check(`${prefix}_rights_check`, envelopeCheck(t.usageRightsEnvelope)),
-  check(`${prefix}_artist_terms_check`, envelopeCheck(t.artistTermsEnvelope)),
+  check(`${prefix}_scope_check`, commissionEnvelopeCheck(t.scopeEnvelope)),
+  check(`${prefix}_deliverables_check`, commissionEnvelopeCheck(t.deliverablesEnvelope)),
+  check(`${prefix}_rights_check`, commissionEnvelopeCheck(t.usageRightsEnvelope)),
+  check(`${prefix}_artist_terms_check`, commissionEnvelopeCheck(t.artistTermsEnvelope)),
 ];
 
 export const commissionQuoteRevisions = pgTable("commission_quote_revisions", {
