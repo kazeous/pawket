@@ -288,6 +288,8 @@ importers:
         specifier: 3.4.9
         version: 3.4.9
 
+  packages/object-storage: {}
+
   packages/observability:
     dependencies:
       '@pawket/config':
@@ -348,6 +350,9 @@ importers:
       '@pawket/database':
         specifier: workspace:*
         version: link:../database
+      '@pawket/object-storage':
+        specifier: workspace:*
+        version: link:../object-storage
       '@pawket/security':
         specifier: workspace:*
         version: link:../security
