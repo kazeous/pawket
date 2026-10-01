@@ -58,6 +58,8 @@ describe("worker telemetry server", () => {
       sepay: "disabled",
       sepayRecoveryScan: "not_configured",
       publicMediaCleanupScan: "not_configured",
+      commissionFilesScan: "not_configured",
+      commissionFileScanner: "not_configured",
       ...revision,
     });
   });

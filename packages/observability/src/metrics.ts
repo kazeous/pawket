@@ -53,6 +53,37 @@ export function recordCommissionOperation(input: { operation: string; outcome: s
   commissionOperationsTotal.inc({ operation: input.operation, outcome: input.outcome }, count);
 }
 
+const commissionFileOutcomes: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  grant: ["accepted", "rejected", "disabled", "rate_limited", "failed"],
+  complete: ["accepted", "rejected", "disabled", "rate_limited", "failed"],
+  discard: ["accepted", "rejected", "disabled", "rate_limited", "failed"],
+  download: ["accepted", "rejected", "disabled", "rate_limited", "failed"],
+  scan: ["clean", "rejected", "retry", "scan_failed", "skipped", "failed"],
+  maintenance: ["completed", "failed", "expired", "discarded", "scan_failed", "recovered", "purged", "purge_failed", "retention_deleted"],
+});
+const commissionFileOperationsTotal = new Counter({ name: "pawket_commission_file_operations_total", help: "Commission file operations by fixed operation and outcome; never file names, keys or URLs.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const commissionFileScannerUp = new Gauge({ name: "pawket_commission_file_scanner_up", help: "1 when clamd answered the last VERSION probe. Informational; not part of worker readiness.", registers: [metricsRegistry] });
+const commissionFileSignatureAge = new Gauge({ name: "pawket_commission_file_signature_age_seconds", help: "Age of the clamd signature database at the last successful probe; -1 when unknown.", registers: [metricsRegistry] });
+const commissionFilesScanning = new Gauge({ name: "pawket_commission_files_scanning", help: "Commission files uploaded and waiting for or inside a malware scan.", registers: [metricsRegistry] });
+const commissionFilesOldestScanning = new Gauge({ name: "pawket_commission_files_oldest_scanning_seconds", help: "Seconds since the oldest scanning file finished uploading; 0 when none.", registers: [metricsRegistry] });
+const commissionFilesRetentionDue = new Gauge({ name: "pawket_commission_files_retention_due", help: "Attached files past retention in the last sweep batch. Report only unless enforcement is approved.", registers: [metricsRegistry] });
+const safeCount = (value: unknown, maximum: number) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+export function recordCommissionFileOperation(input: { operation: string; outcome: string; count?: number }): void {
+  assertSafeStructuredData(input, "metric"); const count = input.count ?? 1;
+  if (!Object.hasOwn(commissionFileOutcomes, input.operation) || !commissionFileOutcomes[input.operation]?.includes(input.outcome) || !safeCount(count, 500)) rejectUnsafeMetric();
+  commissionFileOperationsTotal.inc({ operation: input.operation, outcome: input.outcome }, count);
+}
+export function setCommissionFileScannerMetric(input: { up: boolean; signatureAgeSeconds: number | null }): void {
+  assertSafeStructuredData(input, "metric");
+  if (typeof input.up !== "boolean" || (input.signatureAgeSeconds !== null && !safeCount(input.signatureAgeSeconds, 10 * 365 * 86_400))) rejectUnsafeMetric();
+  commissionFileScannerUp.set(input.up ? 1 : 0); commissionFileSignatureAge.set(input.signatureAgeSeconds ?? -1);
+}
+export function setCommissionFileBacklogMetrics(input: { scanning: number; oldestScanningSeconds: number | null; retentionDue: number }): void {
+  assertSafeStructuredData(input, "metric");
+  if (!safeCount(input.scanning, 1_000_000) || !safeCount(input.retentionDue, 500) || (input.oldestScanningSeconds !== null && !safeCount(input.oldestScanningSeconds, 10 * 365 * 86_400))) rejectUnsafeMetric();
+  commissionFilesScanning.set(input.scanning); commissionFilesOldestScanning.set(input.oldestScanningSeconds ?? 0); commissionFilesRetentionDue.set(input.retentionDue);
+}
+
 const tipOperationsTotal = new Counter({ name: "pawket_tip_operations_total", help: "Tip operation attempts by fixed operation and outcome; not proof of bank settlement.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
 const tipPaymentsEnabled = new Gauge({ name: "pawket_tip_payments_enabled", help: "Whether tip payment operations are enabled in this process.", registers: [metricsRegistry] });
 const tipOutcomes: Readonly<Record<string, readonly string[]>> = {
@@ -412,7 +443,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "oidc_cleanup"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "oidc_cleanup", "commission_files"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",

@@ -145,6 +145,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@pawket/commission-files':
+        specifier: workspace:*
+        version: link:../../packages/commission-files
       '@pawket/config':
         specifier: workspace:*
         version: link:../../packages/config
