@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createCommissionFileAttachmentPort } from "@pawket/commission-files";
-import { createCommissionOrderService } from "@pawket/orders";
+import { commissionCommandFingerprint, createCommissionOrderService, normalizeCommissionBrief } from "@pawket/orders";
 import { encryptSensitiveField } from "@pawket/security";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
 import { schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
@@ -69,5 +69,29 @@ describe("brief reference files", () => {
     const orderId = await noFiles.request(s.request());
     expect((await noFiles.getOrder({ actor: s.buyerActor, orderId })).referenceFiles).toEqual([]);
     expect(await fixture.db.select().from(schema.commissionFileAttachments).where(and(eq(schema.commissionFileAttachments.orderId, orderId)))).toHaveLength(0);
+  });
+});
+
+describe("idempotency fingerprint stability", () => {
+  test("a no-files request keeps the exact I6 fingerprint shape", async () => {
+    const s = await setupWithFiles();
+    const command = s.request();
+    await s.service.request(command);
+    const [row] = await fixture.db.select({ requestFingerprint: schema.systemCommandIdempotency.requestFingerprint }).from(schema.systemCommandIdempotency)
+      .where(and(eq(schema.systemCommandIdempotency.actorUserId, s.buyerActor.userId), eq(schema.systemCommandIdempotency.commandScope, "orders.commission.request")));
+    const brief = normalizeCommissionBrief(command.brief);
+    const i6Payload = [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash];
+    const expected = commissionCommandFingerprint(s.input.lookupHmacKey, "commission-command", ["request", s.buyerActor.userId, i6Payload]);
+    expect(row!.requestFingerprint).toBe(expected);
+  });
+  test("replays the same key with the same references, but refuses a different reference list under the same key", async () => {
+    const s = await setupWithFiles();
+    const a = await cleanFile({ keyring: s.input.keyring, ownerUserId: s.buyerActor.userId, packageId: s.packageId });
+    const b = await cleanFile({ keyring: s.input.keyring, ownerUserId: s.buyerActor.userId, packageId: s.packageId });
+    const command = { ...s.request(), referenceFileIds: [a] };
+    const orderId = await s.service.request(command);
+    await expect(s.service.request(command)).resolves.toBe(orderId);
+    expect((await ordersOf(s.buyerActor.userId)).length).toBe(1);
+    await expect(s.service.request({ ...command, referenceFileIds: [b] })).rejects.toMatchObject({ code: "idempotency_conflict" });
   });
 });

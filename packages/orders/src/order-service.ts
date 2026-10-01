@@ -141,7 +141,7 @@ export function createCommissionOrderService(input: Input) {
       const brief = normalizeCommissionBrief(command.brief);
       const fileIds = referenceIds(command.referenceFileIds);
       const find = async (tx: PawketTransaction) => { const row = await input.catalog.findPackageIdentity(tx, command.packageId); if (!row) commissionFail("not_available"); return row; };
-      return mutate(command, "request", [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash, fileIds], async (tx) => (await find(tx)).creatorUserId, async (tx) => {
+      return mutate(command, "request", [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash, ...(fileIds.length ? [fileIds] : [])], async (tx) => (await find(tx)).creatorUserId, async (tx) => {
         if (input.intakeMode !== "enabled") commissionFail("intake_disabled");
         const candidate = await find(tx); await participants(tx, candidate.creatorUserId, command.actor.userId);
         const immediate = candidate.route === "fixed_immediate";
