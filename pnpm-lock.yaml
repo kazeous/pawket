@@ -235,6 +235,27 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/commission-files:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: 3.1121.0
+        version: 3.1121.0
+      '@aws-sdk/s3-request-presigner':
+        specifier: 3.1121.0
+        version: 3.1121.0
+      '@pawket/database':
+        specifier: workspace:*
+        version: link:../database
+      '@pawket/object-storage':
+        specifier: workspace:*
+        version: link:../object-storage
+      '@pawket/security':
+        specifier: workspace:*
+        version: link:../security
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(postgres@3.4.9)
+
   packages/config:
     dependencies:
       zod:
