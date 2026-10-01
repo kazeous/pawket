@@ -1,7 +1,7 @@
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 import { commissionFiles, insertOutboxEvent, type PawketDatabase } from "@pawket/database";
 
-import { ClamdUnavailableError, type ClamdClient } from "./clamd-client.js";
+import { ClamdUnavailableError, type ClamdClient, type ClamdVerdict } from "./clamd-client.js";
 import { COMMISSION_FILE_CONTENT_TYPES, COMMISSION_FILE_POLICY, commissionFileRetryDelayMs, commissionFileUuid, type CommissionFileContext } from "./file-policy.js";
 import { classifyCommissionFile, createCommissionFileInspector } from "./file-signature.js";
 import { CommissionFileStorageError, type CommissionFileStoragePort } from "./storage-port.js";
@@ -58,8 +58,10 @@ export async function processCommissionFileScan(input: Readonly<{
   // outer catch below cannot tell "the scanner is down" from "the storage read broke" by error
   // type alone; `storageFailed` records the fact locally, from the only place that still knows
   // it, before the error is handed to the scanner. Only the read step (iterator.next()) is
-  // covered — a bug in `inspector.update` below is a code defect, not a storage failure, and
-  // must not be silently retried.
+  // covered — a bug in `inspector.update` below is a code defect, not a storage failure: under
+  // the real client it still ends in a retry (re-wrapped as ClamdUnavailableError, i.e.
+  // "scanner_unavailable"), but it is never misattributed to "storage_unavailable" and, with a
+  // scanner that does not mask errors, it is free to propagate as the unhandled bug it is.
   let storageFailed = false;
   try {
     const engine = await input.scanner.version();
@@ -67,26 +69,49 @@ export async function processCommissionFileScan(input: Readonly<{
     const head = await input.storage.head("quarantine", claimed.objectKey);
     if (!head || head.contentLength !== claimed.declaredBytes) return await reject("size_mismatch");
     const source = await input.storage.open("quarantine", claimed.objectKey, head.versionId);
+    const sourceIterator = source[Symbol.asyncIterator]();
+    // The opened body (an S3 SDK stream, in production) must be released on every exit path —
+    // the scanner may never start reading it (e.g. a refused clamd connection), may abandon it
+    // mid-stream (the real client's own `for await` closes its argument when a socket write
+    // rejects), or we may abandon it ourselves on overflow. `for await` normally does this via
+    // the iterator-close protocol, but that only works while `inspected()` keeps its own loop as
+    // a `for await`; iterating `source` manually (needed so only the read step can set
+    // `storageFailed`) opts out of that protocol, so release is made explicit and idempotent here
+    // instead, called from every place the stream can stop being read.
+    let sourceClosed = false;
+    async function closeSource(): Promise<void> {
+      if (sourceClosed) return;
+      sourceClosed = true;
+      try { await sourceIterator.return?.(); } catch { /* best-effort release; the scan outcome already reflects any failure */ }
+    }
     const inspector = createCommissionFileInspector(); let overflow = false;
     async function* inspected(): AsyncIterable<Uint8Array> {
       let seen = 0;
-      const iterator = source[Symbol.asyncIterator]();
-      for (;;) {
-        let result: IteratorResult<Uint8Array>;
-        try {
-          result = await iterator.next();
-        } catch (error) {
-          storageFailed = true;
-          throw error instanceof CommissionFileStorageError ? error : new CommissionFileStorageError("unavailable");
+      try {
+        for (;;) {
+          let result: IteratorResult<Uint8Array>;
+          try {
+            result = await sourceIterator.next();
+          } catch (error) {
+            storageFailed = true;
+            throw error instanceof CommissionFileStorageError ? error : new CommissionFileStorageError("unavailable");
+          }
+          if (result.done) return;
+          const chunk = result.value;
+          seen += chunk.byteLength;
+          if (seen > claimed.declaredBytes) { overflow = true; return; }
+          inspector.update(chunk); yield chunk;
         }
-        if (result.done) return;
-        const chunk = result.value;
-        seen += chunk.byteLength;
-        if (seen > claimed.declaredBytes) { overflow = true; return; }
-        inspector.update(chunk); yield chunk;
+      } finally {
+        await closeSource();
       }
     }
-    const verdict = await input.scanner.scan(inspected());
+    let verdict: ClamdVerdict;
+    try {
+      verdict = await input.scanner.scan(inspected());
+    } finally {
+      await closeSource();
+    }
     const inspection = inspector.finish();
     if (overflow || inspection.bytes !== claimed.declaredBytes) return await reject("size_mismatch");
     if (verdict.kind === "found") return await reject(verdict.reason, verdict.signature);

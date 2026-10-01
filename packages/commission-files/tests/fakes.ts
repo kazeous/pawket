@@ -40,13 +40,23 @@ export function createFakeCommissionFileStorage() {
  * is one (see `clamd-client.ts`'s `send(socket).catch(...)`). Without this option, a plain fake
  * would pass a source error through unchanged, which no real scanner implementation does and
  * would make processor tests pass for the wrong reason.
+ *
+ * `abandonAfterChunks` mimics the real client abandoning its source mid-stream (e.g. a socket
+ * write rejects after N chunks have already been sent): it throws from inside the `for await`
+ * loop body, so the loop's own iterator-close protocol calls `.return()` on `source` exactly as
+ * the real client's `for await` does, instead of just stopping without releasing it.
  */
-export function fakeScanner(options: Readonly<{ verdict?: ClamdVerdict; error?: Error; signatureDate?: () => Date; wrapSourceErrors?: boolean }> = {}) {
+export function fakeScanner(options: Readonly<{ verdict?: ClamdVerdict; error?: Error; signatureDate?: () => Date; wrapSourceErrors?: boolean; abandonAfterChunks?: number }> = {}) {
   return {
     async version() { return { engine: "fake", signatureVersion: 1, signatureDate: options.signatureDate?.() ?? new Date() }; },
     async scan(source: AsyncIterable<Uint8Array>): Promise<ClamdVerdict> {
       try {
-        for await (const chunk of source) void chunk;
+        let seen = 0;
+        for await (const chunk of source) {
+          void chunk;
+          seen += 1;
+          if (options.abandonAfterChunks !== undefined && seen >= options.abandonAfterChunks) throw new ClamdUnavailableError("closed");
+        }
       } catch (error) {
         if (!options.wrapSourceErrors) throw error;
         throw error instanceof ClamdUnavailableError ? error : new ClamdUnavailableError("closed");

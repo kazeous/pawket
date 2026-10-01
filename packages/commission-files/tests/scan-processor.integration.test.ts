@@ -20,6 +20,22 @@ async function scanning(bytes: Uint8Array | null, declaredBytes = PNG.byteLength
   return { fileId, storage, buyerUserId };
 }
 
+/** An async iterable that records whether its iterator was closed, standing in for the S3 SDK body stream the processor must always release. */
+function trackedStream(chunks: readonly Uint8Array[]): { iterable: AsyncIterable<Uint8Array>; returned: () => boolean } {
+  let returned = false; let index = 0;
+  const iterable: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next(): Promise<IteratorResult<Uint8Array>> {
+          return index < chunks.length ? { done: false, value: chunks[index++]! } : { done: true, value: undefined };
+        },
+        async return(value?: unknown): Promise<IteratorResult<Uint8Array>> { returned = true; return { done: true, value: value as Uint8Array }; },
+      };
+    },
+  };
+  return { iterable, returned: () => returned };
+}
+
 describe("commission file scan", () => {
   test("copies a clean PNG, records evidence and purges quarantine", async () => {
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
@@ -89,6 +105,23 @@ describe("commission file scan", () => {
     vi.spyOn(storage.port, "open").mockResolvedValueOnce((async function* () { yield PNG.subarray(0, 4); throw new Error("ECONNRESET"); })());
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ wrapSourceErrors: true, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "storage_unavailable" });
     expect(await fixture.read(fileId)).toMatchObject({ state: "scanning", nextScanAt: expect.any(Date), scanLeaseExpiresAt: null });
+  });
+  test("releases the quarantine stream when the declared size is exceeded", async () => {
+    clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
+    const tracked = trackedStream([PNG, PNG]);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(tracked.iterable);
+    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toMatchObject({ reason: "size_mismatch" });
+    expect(tracked.returned()).toBe(true);
+  });
+  test("releases the quarantine stream when the scanner abandons it mid-read", async () => {
+    // Mirrors the real clamd client: its own `for await` over the source throws (a rejected
+    // socket write) after consuming some chunks, which must close the still-open source instead
+    // of leaving it to be garbage-collected.
+    clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
+    const tracked = trackedStream([PNG]);
+    vi.spyOn(storage.port, "open").mockResolvedValueOnce(tracked.iterable);
+    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ abandonAfterChunks: 1, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "scanner_unavailable" });
+    expect(tracked.returned()).toBe(true);
   });
   test("fails the scan once the 24-hour deadline passes", async () => {
     const { fileId, storage } = await scanning(PNG); clock = new Date(fixtureAt.getTime() + 86_400_000);
