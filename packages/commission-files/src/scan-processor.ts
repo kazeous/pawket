@@ -52,6 +52,15 @@ export async function processCommissionFileScan(input: Readonly<{
   if (!claimed.scanDeadlineAt || claimedAt >= claimed.scanDeadlineAt) {
     return await settle({ state: "scan_failed", nextScanAt: null, endedAt: claimedAt }, "scan_failed") ? { outcome: "scan_failed" } : { outcome: "skipped" };
   }
+  // A raw error from the storage SDK while streaming (connection drop, timeout, ...) must never
+  // reach the caller unwrapped and must never be mistaken for a clean/clamd verdict. The real
+  // clamd client re-wraps anything its source throws as its own ClamdUnavailableError, so the
+  // outer catch below cannot tell "the scanner is down" from "the storage read broke" by error
+  // type alone; `storageFailed` records the fact locally, from the only place that still knows
+  // it, before the error is handed to the scanner. Only the read step (iterator.next()) is
+  // covered — a bug in `inspector.update` below is a code defect, not a storage failure, and
+  // must not be silently retried.
+  let storageFailed = false;
   try {
     const engine = await input.scanner.version();
     if (claimedAt.getTime() - engine.signatureDate.getTime() > COMMISSION_FILE_POLICY.signatureMaxAgeMs) return await retry("signatures_stale");
@@ -59,19 +68,22 @@ export async function processCommissionFileScan(input: Readonly<{
     if (!head || head.contentLength !== claimed.declaredBytes) return await reject("size_mismatch");
     const source = await input.storage.open("quarantine", claimed.objectKey, head.versionId);
     const inspector = createCommissionFileInspector(); let overflow = false;
-    // A raw error from the storage SDK while streaming (connection drop, timeout, ...) must
-    // never reach the caller unwrapped and must never be mistaken for a clean/clamd verdict:
-    // convert it to a storage-unavailable failure before it can propagate through the scanner.
     async function* inspected(): AsyncIterable<Uint8Array> {
       let seen = 0;
-      try {
-        for await (const chunk of source) {
-          seen += chunk.byteLength;
-          if (seen > claimed.declaredBytes) { overflow = true; return; }
-          inspector.update(chunk); yield chunk;
+      const iterator = source[Symbol.asyncIterator]();
+      for (;;) {
+        let result: IteratorResult<Uint8Array>;
+        try {
+          result = await iterator.next();
+        } catch (error) {
+          storageFailed = true;
+          throw error instanceof CommissionFileStorageError ? error : new CommissionFileStorageError("unavailable");
         }
-      } catch (error) {
-        throw error instanceof CommissionFileStorageError ? error : new CommissionFileStorageError("unavailable");
+        if (result.done) return;
+        const chunk = result.value;
+        seen += chunk.byteLength;
+        if (seen > claimed.declaredBytes) { overflow = true; return; }
+        inspector.update(chunk); yield chunk;
       }
     }
     const verdict = await input.scanner.scan(inspected());
@@ -94,8 +106,8 @@ export async function processCommissionFileScan(input: Readonly<{
     } catch { /* Maintenance retries the quarantine purge; the clean state is already committed. */ }
     return { outcome: "clean" };
   } catch (error) {
+    if (storageFailed || error instanceof CommissionFileStorageError) return await retry("storage_unavailable");
     if (error instanceof ClamdUnavailableError) return await retry("scanner_unavailable");
-    if (error instanceof CommissionFileStorageError) return await retry("storage_unavailable");
     throw error;
   }
 }

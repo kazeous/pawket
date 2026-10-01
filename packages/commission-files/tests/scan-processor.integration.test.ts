@@ -82,9 +82,12 @@ describe("commission file scan", () => {
     expect(await fixture.read(fileId)).toMatchObject({ state: "scanning", sha256: null });
   });
   test("ends a mid-stream storage read failure as a scheduled retry, never clean or an unhandled throw", async () => {
+    // The real clamd client re-wraps anything its source throws as its own ClamdUnavailableError
+    // (see clamd-client.ts), so a scanner that behaves like the real one is used here — a fake
+    // that merely passed the raw storage error through would prove nothing about production.
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
     vi.spyOn(storage.port, "open").mockResolvedValueOnce((async function* () { yield PNG.subarray(0, 4); throw new Error("ECONNRESET"); })());
-    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "storage_unavailable" });
+    await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ wrapSourceErrors: true, signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "storage_unavailable" });
     expect(await fixture.read(fileId)).toMatchObject({ state: "scanning", nextScanAt: expect.any(Date), scanLeaseExpiresAt: null });
   });
   test("fails the scan once the 24-hour deadline passes", async () => {

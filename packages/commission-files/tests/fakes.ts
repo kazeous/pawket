@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ClamdVerdict } from "../src/clamd-client.js";
+import { ClamdUnavailableError, type ClamdVerdict } from "../src/clamd-client.js";
 import { CommissionFileStorageError, type CommissionFileStoragePort, type CommissionObjectArea } from "../src/storage-port.js";
 
 export const sha256 = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -34,11 +34,23 @@ export function createFakeCommissionFileStorage() {
   return { port, put, copies: () => copies, has: (area: CommissionObjectArea, key: string) => objects.has(slot(area, key)) };
 }
 
-export function fakeScanner(options: Readonly<{ verdict?: ClamdVerdict; error?: Error; signatureDate?: () => Date }> = {}) {
+/**
+ * `wrapSourceErrors` mimics the real `createClamdClient`: its `exchange()` catches anything the
+ * source iterable throws and re-wraps it as `ClamdUnavailableError("closed")` unless it already
+ * is one (see `clamd-client.ts`'s `send(socket).catch(...)`). Without this option, a plain fake
+ * would pass a source error through unchanged, which no real scanner implementation does and
+ * would make processor tests pass for the wrong reason.
+ */
+export function fakeScanner(options: Readonly<{ verdict?: ClamdVerdict; error?: Error; signatureDate?: () => Date; wrapSourceErrors?: boolean }> = {}) {
   return {
     async version() { return { engine: "fake", signatureVersion: 1, signatureDate: options.signatureDate?.() ?? new Date() }; },
     async scan(source: AsyncIterable<Uint8Array>): Promise<ClamdVerdict> {
-      for await (const chunk of source) void chunk;
+      try {
+        for await (const chunk of source) void chunk;
+      } catch (error) {
+        if (!options.wrapSourceErrors) throw error;
+        throw error instanceof ClamdUnavailableError ? error : new ClamdUnavailableError("closed");
+      }
       if (options.error) throw options.error;
       return options.verdict ?? { kind: "clean" };
     },
