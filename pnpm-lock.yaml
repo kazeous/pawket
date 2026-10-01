@@ -66,6 +66,9 @@ importers:
       '@pawket/catalog':
         specifier: workspace:*
         version: link:../../packages/catalog
+      '@pawket/commission-files':
+        specifier: workspace:*
+        version: link:../../packages/commission-files
       '@pawket/config':
         specifier: workspace:*
         version: link:../../packages/config

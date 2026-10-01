@@ -8,3 +8,4 @@ export * from "./order-service.js";
 export * from "./order-maintenance.js";
 export * from "./order-operations.js";
 export * from "./command-fingerprint.js";
+export * from "./file-access-port.js";
