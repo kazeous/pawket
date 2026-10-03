@@ -17,6 +17,30 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
 const get = (path: string, headers: Record<string, string> = {}) => new Request(`${origin}${path}`, { headers: { "x-real-ip": "203.0.113.5", ...headers } });
 
 describe("commission file HTTP", () => {
+  test.each(["createUpload", "status", "complete", "discard", "download"] as const)("rejects a changed expected actor before %s throttling or service access", async (operation) => {
+    const throttle = vi.fn(async () => true);
+    const { http, files } = handlers({ throttle });
+    const fileId = randomUUID(); const orderId = randomUUID();
+    const headers = { "x-pawket-actor": "user-buyer-other" };
+    const response = operation === "createUpload"
+      ? await http.createUpload(post("/api/v1/commission-files", { context: "brief", packageId: randomUUID(), fileName: "a.png", declaredBytes: 10 }, headers))
+      : operation === "status" ? await http.status(get(`/api/v1/commission-files/${fileId}`, headers), fileId)
+      : operation === "download" ? await http.download(get(`/api/v1/commissions/${orderId}/files/${fileId}?disposition=attachment`, headers), orderId, fileId)
+      : await http[operation](post(`/api/v1/commission-files/${fileId}/${operation}`, {}, headers), fileId);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "OIDC_ACTOR_CHANGED" });
+    expect(throttle).not.toHaveBeenCalled();
+    for (const service of Object.values(files)) expect(service).not.toHaveBeenCalled();
+  });
+  test.each([undefined, actor.userId])("accepts an absent or matching expected actor (%s)", async (expectedActor) => {
+    const throttle = vi.fn(async () => true);
+    const { http, files } = handlers({ throttle }); const packageId = randomUUID();
+    const response = await http.createUpload(post("/api/v1/commission-files", { context: "brief", packageId, fileName: "a.png", declaredBytes: 10 },
+      expectedActor === undefined ? {} : { "x-pawket-actor": expectedActor }));
+    expect(response.status).toBe(200);
+    expect(throttle).toHaveBeenCalledOnce();
+    expect(files.createUpload).toHaveBeenCalledWith(expect.objectContaining({ actor, packageId }));
+  });
   test("creates an upload grant for a same-origin authenticated buyer", async () => {
     const { http, files, onOperation } = handlers(); const packageId = randomUUID();
     const response = await http.createUpload(post("/api/v1/commission-files", { context: "brief", packageId, fileName: "a.png", declaredBytes: 10 }));

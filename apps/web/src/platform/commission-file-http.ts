@@ -36,6 +36,8 @@ export function createCommissionFileHttpHandlers(input: Input) {
       if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) throw new CommissionHttpFailure(403, "untrusted_origin");
       const actor = await input.authenticate(request.headers);
       if (!actor) throw new CommissionHttpFailure(401, "authentication_required");
+      const expectedActor = request.headers.get("x-pawket-actor");
+      if (expectedActor !== null && expectedActor !== actor.userId) throw new CommissionHttpFailure(409, "OIDC_ACTOR_CHANGED");
       const network = commissionNetworkKey(request, key);
       if (await input.throttle({ actorUserId: actor.userId, networkKeyHash: network, operation }) !== true) throw new CommissionHttpFailure(429, "rate_limited");
       const response = respond(await action({ userId: actor.userId, sessionId: actor.sessionId }));
