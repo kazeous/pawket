@@ -26,7 +26,7 @@ export async function processCommissionFileScan(input: Readonly<{
     or(isNull(commissionFiles.nextScanAt), lte(commissionFiles.nextScanAt, claimedAt)),
     or(isNull(commissionFiles.scanLeaseExpiresAt), lte(commissionFiles.scanLeaseExpiresAt, claimedAt)))).returning();
   if (!file) return { outcome: "skipped" };
-  const claimed = file;
+  let claimed = file;
 
   /** Applies the result only if no one else changed the row since the claim. */
   async function settle(values: Values, outcome?: "clean" | "rejected" | "scan_failed"): Promise<boolean> {
@@ -122,6 +122,16 @@ export async function processCommissionFileScan(input: Readonly<{
     if (verdict.kind === "found") return await reject(verdict.reason, verdict.signature);
     const classified = classifyCommissionFile(claimed.context as CommissionFileContext, inspection);
     if (classified.kind === "rejected") return await reject(classified.reason);
+    // Commit intent BEFORE any possible provider write. It is irreversible: a timed-out or
+    // crashed request can complete later, so terminal maintenance must keep reconciling this key.
+    // The version fence also prevents a discarded/reclaimed attempt from starting another copy.
+    const copyAt = now();
+    const [intent] = await input.db.update(commissionFiles).set({ cleanCopyIntent: true, version: claimed.version + 1,
+      updatedAt: copyAt > claimed.updatedAt ? copyAt : claimed.updatedAt })
+      .where(and(eq(commissionFiles.id, claimed.id), eq(commissionFiles.version, claimed.version), eq(commissionFiles.state, "scanning")))
+      .returning();
+    if (!intent) return { outcome: "skipped" };
+    claimed = intent;
     // Always copy the exact scanned version; an earlier attempt's copy is never trusted for this scan's evidence.
     const copied = await input.storage.copyToClean({ key: claimed.objectKey, sourceVersionId: head.versionId, contentType: COMMISSION_FILE_CONTENT_TYPES[classified.type] });
     const verified = await input.storage.head("clean", claimed.objectKey);

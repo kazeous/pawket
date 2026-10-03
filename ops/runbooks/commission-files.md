@@ -22,6 +22,13 @@ Production bucket provisioning, scanner rollout, uploads/downloads enablement, a
 - `clamd` runs in the `clamd` service, internal network only. Signatures update automatically.
 - Signatures older than 24 hours count as unavailable, so files wait instead of passing.
 - The scanner is not part of worker readiness. If it is down, uploads wait. Deploys and the site keep working.
+- Informational VERSION probes have a separate 5-second timeout and are cancelled on worker stop; unknown signature age exports as `-1`.
+
+## Cleanup guarantees and costs
+- Each copy registers irreversible `clean_copy_intent` under the current scan claim before contacting storage. Terminal records with this intent remain eligible for clean-bucket reconciliation indefinitely, and never receive a final `clean_purged_at` stamp. A timed-out or crashed request can still finish at the provider arbitrarily later. Repeated all-version deletion catches those writes; live clean and attached winners are excluded.
+- This deliberately costs recurring bounded list/delete calls for every terminal file that ever started a copy. The worker walks candidates by immutable creation time and ID, carrying a purge cursor between sweeps and wrapping at the end. Failed objects stay retryable without blocking later files. A worker restart restarts the cursor; persistent restarts can delay a full pass.
+- Storage operations abort after at most 60 seconds including retries/pagination, with a 5-second connection timeout and a rejecting 30-second request timeout. The scan owns opened-body destruction and its scan deadline. A sweep can take multiple bounded operations per row; watch maintenance health and `purge_failed` counts, investigate provider access/retention failures, and let later cursor passes retry.
+- Migration 0038 conservatively marks existing uploaded rows as possible copy writers and clears their old clean purge stamps. It also erases filenames of existing ended unattached records. Database transitions automatically erase these names on rejection, scan failure, expiry or discard and prohibit restoration. Active clean draft names remain until their 24-hour TTL; attached and retention-deleted order names retain the order metadata policy.
 
 ## Alerts
 - **PawketCommissionFileScannerDown / SignaturesStale:** `docker logs <clamd>`; check memory (signature reload needs about 2–3 GB) and outbound access to the ClamAV mirror. Restarting `clamd` is safe.

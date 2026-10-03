@@ -17,6 +17,14 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
 const get = (path: string, headers: Record<string, string> = {}) => new Request(`${origin}${path}`, { headers: { "x-real-ip": "203.0.113.5", ...headers } });
 
 describe("commission file HTTP", () => {
+  test("serializes redacted terminal status with a null filename and no cache", async () => {
+    const fileId = randomUUID();
+    const { http } = handlers({ files: { getFile: async () => ({ fileId, state: "discarded", name: null }) } as never });
+    const response = await http.status(get(`/api/v1/commission-files/${fileId}`), fileId);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toEqual({ file: { fileId, state: "discarded", name: null } });
+  });
   test.each(["createUpload", "status", "complete", "discard", "download"] as const)("rejects a changed expected actor before %s throttling or service access", async (operation) => {
     const throttle = vi.fn(async () => true);
     const { http, files } = handlers({ throttle });

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import type { EncryptionEnvelope } from "@pawket/security";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
@@ -23,7 +23,8 @@ export const commissionFiles = pgTable("commission_files", {
   state: text("state").notNull().default("awaiting_upload"),
   version: integer("version").notNull().default(1),
   declaredBytes: bigint("declared_bytes", { mode: "number" }).notNull(),
-  filenameEnvelope: jsonb("filename_envelope").$type<EncryptionEnvelope<"commission_files", "filename">>().notNull(),
+  filenameEnvelope: jsonb("filename_envelope").$type<EncryptionEnvelope<"commission_files", "filename">>(),
+  cleanCopyIntent: boolean("clean_copy_intent").notNull().default(false),
   objectKey: text("object_key").notNull(),
   quarantineVersionId: text("quarantine_version_id"),
   cleanVersionId: text("clean_version_id"),
@@ -57,7 +58,7 @@ export const commissionFiles = pgTable("commission_files", {
   check("commission_files_order_check", sql`(${t.state} in ('attached','deleted')) = (${t.orderId} is not null and ${t.attachedAt} is not null)`),
   check("commission_files_size_check", sql`${t.declaredBytes} between 1 and 26214400`),
   check("commission_files_key_check", sql`${t.objectKey} = 'commission/' || ${t.id}::text`),
-  check("commission_files_filename_check", commissionEnvelopeCheck(t.filenameEnvelope)),
+  check("commission_files_filename_check", sql`case when ${t.orderId} is null and ${t.state} in ('rejected','scan_failed','expired','discarded') then ${t.filenameEnvelope} is null else ${commissionEnvelopeCheck(t.filenameEnvelope)} end`),
   check("commission_files_type_check", sql`${t.detectedType} is null or ${t.detectedType} in ('jpeg','png','webp','gif','pdf')`),
   check("commission_files_digest_check", sql`${t.sha256} is null or ${t.sha256} ~ '^sha256:[a-f0-9]{64}$'`),
   check("commission_files_clean_evidence_check", sql`(${t.state} not in ('clean','attached','deleted') or (${t.sha256} is not null and ${t.detectedType} is not null and ${t.cleanVersionId} is not null and ${t.cleanAt} is not null))

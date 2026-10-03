@@ -64,6 +64,7 @@ const commissionFileOutcomes: Readonly<Record<string, readonly string[]>> = Obje
 const commissionFileOperationsTotal = new Counter({ name: "pawket_commission_file_operations_total", help: "Commission file operations by fixed operation and outcome; never file names, keys or URLs.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
 const commissionFileScannerUp = new Gauge({ name: "pawket_commission_file_scanner_up", help: "1 when clamd answered the last VERSION probe. Informational; not part of worker readiness.", registers: [metricsRegistry] });
 const commissionFileSignatureAge = new Gauge({ name: "pawket_commission_file_signature_age_seconds", help: "Age of the clamd signature database at the last successful probe; -1 when unknown.", registers: [metricsRegistry] });
+commissionFileSignatureAge.set(-1);
 const commissionFilesScanning = new Gauge({ name: "pawket_commission_files_scanning", help: "Commission files uploaded and waiting for or inside a malware scan.", registers: [metricsRegistry] });
 const commissionFilesOldestScanning = new Gauge({ name: "pawket_commission_files_oldest_scanning_seconds", help: "Seconds since the oldest scanning file finished uploading; 0 when none.", registers: [metricsRegistry] });
 const commissionFilesRetentionDue = new Gauge({ name: "pawket_commission_files_retention_due", help: "Attached files past retention in the last sweep batch. Report only unless enforcement is approved.", registers: [metricsRegistry] });

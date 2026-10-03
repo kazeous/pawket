@@ -23,6 +23,7 @@ export function createWorkerCommissionFilesConfiguration(env: Env): CommissionFi
   return {
     storage: createS3CommissionFileStorage(storage),
     scanner: createClamdClient({ host: env.COMMISSION_FILES_CLAMD_HOST, port: env.COMMISSION_FILES_CLAMD_PORT, timeoutMs: env.COMMISSION_FILES_SCAN_TIMEOUT_MS }),
+    scannerProbe: createClamdClient({ host: env.COMMISSION_FILES_CLAMD_HOST, port: env.COMMISSION_FILES_CLAMD_PORT, timeoutMs: 5_000 }),
     concurrency: env.COMMISSION_FILES_SCAN_CONCURRENCY, batchSize: env.COMMISSION_FILES_MAINTENANCE_BATCH_SIZE,
     scanIntervalMs: env.COMMISSION_FILES_MAINTENANCE_INTERVAL_MS, retentionMode: env.COMMISSION_FILE_RETENTION_MODE,
     orders: { retentionFacts: readCommissionFileRetentionFacts }, holds: noCommissionFileEvidenceHolds,

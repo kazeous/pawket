@@ -39,6 +39,16 @@ async function participants() {
 const ids = () => ({ idempotencyKey: randomUUID(), requestId: randomUUID() });
 
 describe("commission file service", () => {
+  test.each(["rejected", "scan_failed", "expired", "discarded"] as const)("status reads return no filename for %s", async (state) => {
+    clock = fixtureAt; const p = await participants(); const s = service();
+    const fileId = await fixture.file({ ownerUserId: p.buyerUserId, packageId: p.packageId, state: state === "expired" ? "awaiting_upload" : "scanning" });
+    const row = await fixture.read(fileId);
+    if (state === "discarded") await s.files.discard({ actor: p.buyer, fileId });
+    else await fixture.db.update(commissionFiles).set({ state, endedAt: clock, version: row.version + 1,
+      ...(state === "rejected" ? { rejectionReason: "size_mismatch" } : {}) }).where(eq(commissionFiles.id, fileId));
+    expect(await fixture.read(fileId)).toMatchObject({ filenameEnvelope: null });
+    await expect(s.files.getFile({ actor: p.buyer, fileId })).resolves.toMatchObject({ name: null, state });
+  });
   test("issues an exact-size grant, stores the name encrypted and replays the same file", async () => {
     clock = fixtureAt; const p = await participants(); const s = service(); const command = { actor: p.buyer, context: "brief" as const, packageId: p.packageId, fileName: "mẫu nhân vật.png", declaredBytes: 1234, ...ids() };
     const first = await s.files.createUpload(command);

@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
@@ -31,6 +34,7 @@ const envelope = <R extends string, F extends string>(recordType: R, recordId: s
   encryptSensitiveField({ keyring, plaintext, binding: { recordType, recordId, fieldName } });
 const filename = (fileId: string) => envelope("commission_files", fileId, "filename", "ref.png");
 const sha = `sha256:${"a".repeat(64)}`;
+const legacyIds: string[] = [];
 
 async function expectSqlState(operation: PromiseLike<unknown>, code: string) {
   try { await operation; } catch (error) {
@@ -67,8 +71,27 @@ async function orderFixture() {
 beforeAll(async () => {
   await client.unsafe(`create schema "${schemaName}"`);
   await client.unsafe(`set search_path to "${schemaName}", public`);
+  // Exercise a real 0037 -> 0038 upgrade, including old completed purge facts.
+  const oldFolder = await mkdtemp(join(tmpdir(), "pawket-i7-migrations-"));
+  try {
+    const journal = JSON.parse(await readFile(join(migrationsFolder, "meta/_journal.json"), "utf8")) as { entries: { idx: number; tag: string }[] };
+    journal.entries = journal.entries.filter((entry) => entry.idx <= 37);
+    await mkdir(join(oldFolder, "meta"));
+    await writeFile(join(oldFolder, "meta/_journal.json"), JSON.stringify(journal));
+    await Promise.all(journal.entries.map((entry) => copyFile(join(migrationsFolder, `${entry.tag}.sql`), join(oldFolder, `${entry.tag}.sql`))));
+    await migrate(db, { migrationsFolder: oldFolder, migrationsSchema: journalSchema });
+    const owner = await orderFixture();
+    for (const state of ["rejected", "scan_failed", "expired", "discarded"] as const) {
+      const id = randomUUID(); legacyIds.push(id);
+      await client`insert into commission_files (id, owner_user_id, context, package_id, declared_bytes, filename_envelope, object_key, upload_expires_at, request_id, created_at, updated_at)
+        values (${id}, ${owner.buyerUserId}, 'brief', ${owner.packageId}, 3, ${JSON.stringify(filename(id))}::jsonb, ${`commission/${id}`}, ${new Date(at.getTime() + 900_000).toISOString()}, 'legacy', ${at.toISOString()}, ${at.toISOString()})`;
+      if (state !== "expired") await client`update commission_files set state='scanning', uploaded_at=${at.toISOString()}, scan_deadline_at=${new Date(at.getTime() + 86_400_000).toISOString()}, version=version+1 where id=${id}`;
+      await client`update commission_files set state=${state}, ended_at=${later.toISOString()}, rejection_reason=${state === "rejected" ? "size_mismatch" : null}, version=version+1 where id=${id}`;
+      await client`update commission_files set clean_purged_at=${later.toISOString()}, quarantine_purged_at=${later.toISOString()}, version=version+1 where id=${id}`;
+    }
+  } finally { await rm(oldFolder, { recursive: true, force: true }); }
   await migrate(db, { migrationsFolder, migrationsSchema: journalSchema });
-}, 30_000);
+}, 60_000);
 afterAll(async () => {
   await client.unsafe("set search_path to public");
   await client.unsafe(`drop schema if exists "${schemaName}" cascade`);
@@ -90,6 +113,34 @@ const uploaded = { state: "scanning", uploadedAt: at, scanDeadlineAt: new Date(a
 const clean = { state: "clean", sha256: sha, detectedType: "png", cleanVersionId: "v1", cleanAt: later, quarantineVersionId: "q1" } as const;
 
 describe("commission file schema", () => {
+  test("backfills ended legacy names and reopens ambiguous uploaded cleanup", async () => {
+    for (const id of legacyIds) {
+      const [row] = await db.select().from(commissionFiles).where(eq(commissionFiles.id, id));
+      expect(row!.filenameEnvelope).toBeNull();
+      expect(row!.cleanCopyIntent).toBe(row!.uploadedAt !== null);
+      expect(row!.cleanPurgedAt === null).toBe(row!.uploadedAt !== null);
+      await expectSqlState(step(id, { filenameEnvelope: filename(id) }), "23514");
+    }
+  });
+  test.each(["rejected", "scan_failed", "expired", "discarded"] as const)("redacts %s automatically and refuses restoration or live name edits", async (state) => {
+    const o = await orderFixture(); const id = await newFile(o.buyerUserId, o.packageId);
+    await expectSqlState(step(id, { filenameEnvelope: filename(id) }), "23514");
+    await expectSqlState(step(id, { filenameEnvelope: null }), "23514");
+    if (state !== "expired") await step(id, uploaded);
+    await step(id, { state, endedAt: later, ...(state === "rejected" ? { rejectionReason: "size_mismatch" } : {}) });
+    const [row] = await db.select().from(commissionFiles).where(eq(commissionFiles.id, id));
+    expect(row!.filenameEnvelope).toBeNull();
+    await expectSqlState(step(id, { filenameEnvelope: filename(id) }), "23514");
+    await expectSqlState(step(id, { state: "scanning" }), "23514");
+  });
+  test("copy intent is irreversible and cannot receive a final clean purge stamp", async () => {
+    const o = await orderFixture(); const id = await newFile(o.buyerUserId, o.packageId);
+    await expectSqlState(step(id, { cleanCopyIntent: true }), "23514");
+    await step(id, uploaded); await step(id, { cleanCopyIntent: true });
+    await expectSqlState(step(id, { cleanCopyIntent: false }), "23514");
+    await step(id, { state: "discarded", endedAt: later });
+    await expectSqlState(step(id, { cleanPurgedAt: later }), "23514");
+  });
   test("follows the allowed lifecycle and attaches to the buyer's order", async () => {
     const { buyerUserId, packageId, orderId } = await orderFixture();
     const id = await newFile(buyerUserId, packageId);

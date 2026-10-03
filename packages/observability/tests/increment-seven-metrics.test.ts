@@ -2,6 +2,10 @@ import { expect, test } from "vitest";
 import { UnsafeStructuredDataError } from "@pawket/security/structured-data";
 import { metricsRegistry, recordCommissionFileOperation, setCommissionFileBacklogMetrics, setCommissionFileScannerMetric, setWorkerScanHealthMetric } from "../src/index.js";
 
+test("initial signature age is unknown before any probe", async () => {
+  expect(await metricsRegistry.metrics()).toContain("pawket_commission_file_signature_age_seconds -1");
+});
+
 test("commission file metrics accept only fixed labels and sane values", () => {
   for (const value of [{ operation: "scan", outcome: "reference.png" }, { operation: "commission/abc", outcome: "clean" }, { operation: "__proto__", outcome: "failed" }]) {
     expect(() => recordCommissionFileOperation(value)).toThrow(UnsafeStructuredDataError);

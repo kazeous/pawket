@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { describe, expect, test } from "vitest";
 import { CommissionFileStorageError, createS3CommissionFileStorage } from "../src/index.js";
 
@@ -7,6 +8,27 @@ const options = { endpoint: "http://127.0.0.1:9090", region: "us-east-1", access
 const key = `commission/${randomUUID()}`;
 
 describe("commission file storage boundary", () => {
+  test("aborts actual silent TCP requests before headers for every worker operation", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((socket) => { sockets.add(socket); socket.on("data", () => undefined); socket.on("close", () => sockets.delete(socket)); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const storage = createS3CommissionFileStorage({ ...options, endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, operationTimeoutMs: 150 });
+      const calls = [() => storage.head("quarantine", key), () => storage.open("quarantine", key, "v1"),
+        () => storage.copyToClean({ key, sourceVersionId: "v1", contentType: "image/png" }),
+        () => storage.deleteAllVersions("clean", key), () => storage.headBucket("clean")];
+      for (const call of calls) {
+        const started = Date.now();
+        await expect(call()).rejects.toMatchObject({ code: "unavailable" });
+        expect(Date.now() - started).toBeLessThan(2_000);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(sockets.size).toBe(0);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
   test("refuses shared buckets and invalid options", () => {
     expect(() => createS3CommissionFileStorage({ ...options, cleanBucket: options.quarantineBucket })).toThrow(CommissionFileStorageError);
     expect(() => createS3CommissionFileStorage({ ...options, endpoint: "https://user:pw@host" })).toThrow(CommissionFileStorageError);

@@ -1379,30 +1379,39 @@ describe("worker shutdown", () => {
     const calls = expireDue.mock.calls.length; await vi.advanceTimersByTimeAsync(10_000); expect(expireDue).toHaveBeenCalledTimes(calls);
   });
 
-  test("commission file maintenance keeps its retention cursor in memory across sweeps", async () => {
+  test("commission file maintenance advances both cursors and stop cancels the separate probe", async () => {
     vi.useFakeTimers(); const doubles = runtimeDoubles(); const state = createWorkerHealthState(); const logger = { info: vi.fn(), error: vi.fn() };
     const cursor = { attachedAt: new Date("2026-08-30T08:00:00.000Z"), id: randomUUID() };
+    const purgeCursor = { createdAt: cursor.attachedAt, id: randomUUID() };
+    let probeSignal: AbortSignal | undefined;
+    const version = vi.fn((signal?: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      probeSignal = signal;
+      signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    }));
     const emptyReport = { expired: 0, discarded: 0, scanFailed: 0, recovered: 0, enqueued: 0, purged: 0, purgeFailures: 0, retentionDue: 0, retentionDeleted: 0, scanning: 0, oldestScanningSeconds: null };
     const runCommissionFileMaintenance = vi.fn()
-      .mockResolvedValueOnce({ ...emptyReport, retentionNextAfter: cursor })
-      .mockResolvedValue({ ...emptyReport, retentionNextAfter: null });
+      .mockResolvedValueOnce({ ...emptyReport, retentionNextAfter: cursor, purgeNextAfter: purgeCursor })
+      .mockResolvedValue({ ...emptyReport, retentionNextAfter: null, purgeNextAfter: null });
     const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
       concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger, healthState: state,
-      commissionFiles: { storage: {} as never, scanner: {} as never, concurrency: 1, batchSize: 100, scanIntervalMs: 10_000, retentionMode: "report_only",
+      commissionFiles: { storage: {} as never, scanner: {} as never, scannerProbe: { version }, concurrency: 1, batchSize: 100, scanIntervalMs: 10_000, retentionMode: "report_only",
         orders: { retentionFacts: async () => new Map() }, holds: { hasEvidenceHold: async () => false } },
       dependencies: { ...doubles.dependencies, runCommissionFileMaintenance } });
     try {
       await vi.advanceTimersByTimeAsync(0);
       expect(runCommissionFileMaintenance).toHaveBeenCalledTimes(1);
-      expect(runCommissionFileMaintenance.mock.calls[0]?.[0]).toMatchObject({ retentionAfter: null });
+      expect(runCommissionFileMaintenance.mock.calls[0]?.[0]).toMatchObject({ retentionAfter: null, purgeAfter: null });
       expect(state.lastCommissionFilesMaintenanceSucceededAt).not.toBeNull();
       await vi.advanceTimersByTimeAsync(10_000);
       expect(runCommissionFileMaintenance).toHaveBeenCalledTimes(2);
-      expect(runCommissionFileMaintenance.mock.calls[1]?.[0]).toMatchObject({ retentionAfter: cursor });
+      expect(runCommissionFileMaintenance.mock.calls[1]?.[0]).toMatchObject({ retentionAfter: cursor, purgeAfter: purgeCursor });
       await vi.advanceTimersByTimeAsync(10_000);
       expect(runCommissionFileMaintenance).toHaveBeenCalledTimes(3);
-      expect(runCommissionFileMaintenance.mock.calls[2]?.[0]).toMatchObject({ retentionAfter: null });
+      expect(runCommissionFileMaintenance.mock.calls[2]?.[0]).toMatchObject({ retentionAfter: null, purgeAfter: null });
+      expect(version).toHaveBeenCalledTimes(1);
+      expect(probeSignal?.aborted).toBe(false);
     } finally { await handle.stop(); }
+    expect(probeSignal?.aborted).toBe(true);
   });
 
   test("commission scans do not overlap or stall polling, and shutdown drains the current scan", async () => {

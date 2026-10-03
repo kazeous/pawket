@@ -48,7 +48,7 @@ import {
   setWorkerScanHealthMetric,
   withRequestContext,
 } from "@pawket/observability";
-import { processCommissionFileScan, runCommissionFileMaintenance, type ClamdClient, type CommissionFileEvidenceHoldPort, type CommissionFileOrderAccessPort, type CommissionFileRetentionCursor, type CommissionFileStoragePort } from "@pawket/commission-files";
+import { processCommissionFileScan, runCommissionFileMaintenance, type ClamdClient, type CommissionFileEvidenceHoldPort, type CommissionFileOrderAccessPort, type CommissionFilePurgeCursor, type CommissionFileRetentionCursor, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { expireTipPaymentIntents, scanVerificationDepositRefundWindows, TIP_NOTIFICATION_EVENTS, SEPAY_EVENT_RECEIVED, resolveSePayWorkerSource, readSePayBacklog, type TipExpiryPort } from "@pawket/payments";
 import {
   processPublicMediaAsset,
@@ -159,7 +159,7 @@ type MediaWorkerResource = Pick<Worker<MediaAssetJob>, "close" | "disconnect">;
 type CommissionFileQueueResource = ReturnType<typeof createCommissionFileQueue>;
 type CommissionFileWorkerResource = Pick<Worker<CommissionFileScanJob>, "close" | "disconnect">;
 export type CommissionFilesWorkerConfiguration = Readonly<{
-  storage: CommissionFileStoragePort; scanner: ClamdClient; concurrency: number; batchSize: number; scanIntervalMs: number;
+  storage: CommissionFileStoragePort; scanner: ClamdClient; scannerProbe: Pick<ClamdClient, "version">; concurrency: number; batchSize: number; scanIntervalMs: number;
   retentionMode: "report_only" | "enforce"; orders: Pick<CommissionFileOrderAccessPort, "retentionFacts">; holds: CommissionFileEvidenceHoldPort;
 }>;
 
@@ -786,6 +786,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let lastCommissionFilesScanAt = 0;
   let lastScannerProbeAt = 0;
   let commissionFilesRetentionCursor: CommissionFileRetentionCursor | null = null;
+  let commissionFilesPurgeCursor: CommissionFilePurgeCursor | null = null;
+  const scannerProbeAbort = new AbortController();
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
   let lastOidcCleanupAt = 0;
@@ -1066,7 +1068,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
     try {
       const report = await dependencies.runCommissionFileMaintenance({ db: database.db, storage: config.storage, orders: config.orders, holds: config.holds,
-        retentionMode: config.retentionMode, batchSize: config.batchSize, retentionAfter: commissionFilesRetentionCursor,
+        retentionMode: config.retentionMode, batchSize: config.batchSize, retentionAfter: commissionFilesRetentionCursor, purgeAfter: commissionFilesPurgeCursor,
         enqueueScan: async (fileId, attempt) => { await enqueueCommissionFileScan(queueResource, fileId, attempt); } });
       for (const [outcome, count] of [["expired", report.expired], ["discarded", report.discarded], ["scan_failed", report.scanFailed], ["recovered", report.recovered],
         ["purged", report.purged], ["purge_failed", report.purgeFailures], ["retention_deleted", report.retentionDeleted]] as const) {
@@ -1075,6 +1077,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       setCommissionFileBacklogMetrics({ scanning: report.scanning, oldestScanningSeconds: report.oldestScanningSeconds, retentionDue: report.retentionDue });
       recordCommissionFileOperation({ operation: "maintenance", outcome: "completed" });
       commissionFilesRetentionCursor = report.retentionNextAfter;
+      commissionFilesPurgeCursor = report.purgeNextAfter;
       const succeededAt = Date.now();
       setWorkerScanHealthMetric({ scan: "commission_files", healthy: true });
       setWorkerLastSuccessMetric({ scan: "commission_files", timestampSeconds: succeededAt / 1_000 });
@@ -1090,7 +1093,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (!running || !config || probeAt - lastScannerProbeAt < 60_000) return;
     lastScannerProbeAt = probeAt;
     try {
-      const version = await config.scanner.version();
+      const version = await config.scannerProbe.version(scannerProbeAbort.signal);
       const ageSeconds = Math.max(0, Math.floor((Date.now() - version.signatureDate.getTime()) / 1_000));
       setCommissionFileScannerMetric({ up: true, signatureAgeSeconds: ageSeconds });
       if (options.healthState) options.healthState.commissionFileScanner = ageSeconds > 86_400 ? "stale" : "up";
@@ -1242,6 +1245,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
 
   const shutdown = async (): Promise<void> => {
     running = false;
+    scannerProbeAbort.abort();
     if (options.healthState) options.healthState.stopping = true;
     if (pollTimer !== undefined) {
       clearTimeout(pollTimer);

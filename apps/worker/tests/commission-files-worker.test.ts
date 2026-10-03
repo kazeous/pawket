@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { describe, expect, test, vi } from "vitest";
 import { COMMISSION_FILE_SCAN_JOB, OUTBOX_JOB, commissionFileScanJobId } from "@pawket/queue";
 import { createWorkerCommissionFilesConfiguration } from "../src/commission-files-config.js";
@@ -18,6 +19,18 @@ function ready(state = createWorkerHealthState()) {
 }
 
 describe("commission file worker", () => {
+  test("production configuration gives VERSION its own five-second bound", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((socket) => { sockets.add(socket); socket.on("data", () => undefined); socket.on("close", () => sockets.delete(socket)); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const config = createWorkerCommissionFilesConfiguration({ ...baseEnv, ...storageEnv, COMMISSION_FILES_CLAMD_HOST: "127.0.0.1", COMMISSION_FILES_CLAMD_PORT: (server.address() as AddressInfo).port })!;
+      expect(config.scannerProbe).not.toBe(config.scanner);
+      const at = Date.now();
+      await expect(config.scannerProbe.version()).rejects.toMatchObject({ reason: "timeout" });
+      expect(Date.now() - at).toBeLessThan(8_000);
+    } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  }, 10_000);
   test("configures only when storage and clamd exist, and refuses enabled mode without them", () => {
     expect(createWorkerCommissionFilesConfiguration({ ...baseEnv })).toBeUndefined();
     expect(() => createWorkerCommissionFilesConfiguration({ ...baseEnv, COMMISSION_FILES_MODE: "enabled", ...storageEnv })).toThrow("clamd");

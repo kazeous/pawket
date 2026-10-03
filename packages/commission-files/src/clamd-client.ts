@@ -7,7 +7,7 @@ export class ClamdUnavailableError extends Error {
 }
 export type ClamdVerdict = Readonly<{ kind: "clean" }> | Readonly<{ kind: "found"; reason: "malware" | "encrypted_archive" | "limits_exceeded"; signature: string }>;
 export type ClamdVersion = Readonly<{ engine: string; signatureVersion: number; signatureDate: Date }>;
-export type ClamdClient = Readonly<{ scan(source: AsyncIterable<Uint8Array>): Promise<ClamdVerdict>; version(): Promise<ClamdVersion> }>;
+export type ClamdClient = Readonly<{ scan(source: AsyncIterable<Uint8Array>): Promise<ClamdVerdict>; version(signal?: AbortSignal): Promise<ClamdVersion> }>;
 
 const CHUNK_BYTES = 64 * 1024;
 const MAX_REPLY_BYTES = 4096;
@@ -50,15 +50,19 @@ export function createClamdClient(options: Readonly<{ host: string; port: number
   if (typeof options.host !== "string" || !options.host || !Number.isInteger(options.port) || options.port < 1 || options.port > 65_535 ||
     !Number.isInteger(options.timeoutMs) || options.timeoutMs < 100 || options.timeoutMs > 900_000) throw new Error("Invalid clamd client options");
 
-  function exchange(send: (socket: Socket) => Promise<void>): Promise<string> {
+  function exchange(send: (socket: Socket) => Promise<void>, signal?: AbortSignal): Promise<string> {
     return new Promise<string>((resolve, reject) => {
+      if (signal?.aborted) { reject(new ClamdUnavailableError("closed")); return; }
       const socket = connect({ host: options.host, port: options.port });
       const chunks: Buffer[] = []; let size = 0; let settled = false; let connected = false;
       const finish = (error: ClamdUnavailableError | null, reply?: string) => {
         if (settled) return; settled = true; clearTimeout(timer); socket.destroy();
+        signal?.removeEventListener("abort", abort);
         if (error) reject(error); else resolve(reply!);
       };
       const timer = setTimeout(() => finish(new ClamdUnavailableError("timeout")), options.timeoutMs);
+      const abort = () => finish(new ClamdUnavailableError("closed"));
+      signal?.addEventListener("abort", abort, { once: true });
       // `socket.connecting` can already be false by the time `error` fires (observed on this
       // Node/Windows combination even for a genuinely refused connection), so track the
       // transition explicitly instead of trusting that flag.
@@ -94,8 +98,8 @@ export function createClamdClient(options: Readonly<{ host: string; port: number
       });
       return parseClamdScanReply(reply);
     },
-    async version() {
-      return parseClamdVersion(await exchange((socket) => write(socket, Buffer.from("zVERSION\0", "latin1"))));
+    async version(signal) {
+      return parseClamdVersion(await exchange((socket) => write(socket, Buffer.from("zVERSION\0", "latin1")), signal));
     },
   };
 }

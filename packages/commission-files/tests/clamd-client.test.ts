@@ -24,6 +24,15 @@ function replyAfterStream(reply: string) {
 async function* source(...parts: string[]) { for (const part of parts) yield new TextEncoder().encode(part); }
 
 describe("clamd client", () => {
+  test("bounds a silent VERSION and cancels its socket explicitly", async () => {
+    const port = await fakeClamd(() => undefined);
+    await expect(createClamdClient({ host: "127.0.0.1", port, timeoutMs: 100 }).version()).rejects.toMatchObject({ reason: "timeout" });
+    const abort = new AbortController();
+    const pending = createClamdClient({ host: "127.0.0.1", port, timeoutMs: 300_000 }).version(abort.signal);
+    abort.abort();
+    await expect(pending).rejects.toMatchObject({ reason: "closed" });
+    await expect(createClamdClient({ host: "127.0.0.1", port, timeoutMs: 300_000 }).version(abort.signal)).rejects.toMatchObject({ reason: "closed" });
+  });
   test("frames INSTREAM chunks and reports a clean stream", async () => {
     let framed: Buffer | undefined;
     const port = await fakeClamd((socket, received) => socket.on("data", () => {

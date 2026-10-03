@@ -18,7 +18,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,200}$/u;
 type FileRow = typeof commissionFiles.$inferSelect;
 export type CommissionFileView = Readonly<{
-  fileId: string; state: CommissionFileState; name: string; declaredBytes: number; detectedType: CommissionFileType | null;
+  fileId: string; state: CommissionFileState; name: string | null; declaredBytes: number; detectedType: CommissionFileType | null;
   sha256: string | null; rejectionReason: string | null; uploadExpiresAt: string; previewable: boolean;
 }>;
 type Input = Readonly<{
@@ -29,7 +29,7 @@ type Input = Readonly<{
 
 function view(keyring: EncryptionKeyring, row: FileRow): CommissionFileView {
   const type = row.detectedType as CommissionFileType | null;
-  return { fileId: row.id, state: row.state as CommissionFileState, name: decryptCommissionFileName(keyring, row), declaredBytes: row.declaredBytes, detectedType: type,
+  return { fileId: row.id, state: row.state as CommissionFileState, name: row.filenameEnvelope === null ? null : decryptCommissionFileName(keyring, row), declaredBytes: row.declaredBytes, detectedType: type,
     sha256: row.sha256, rejectionReason: row.rejectionReason, uploadExpiresAt: row.uploadExpiresAt.toISOString(),
     previewable: (row.state === "clean" || row.state === "attached") && !!type && isInlinePreviewAllowed(type, row.declaredBytes) };
 }

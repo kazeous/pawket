@@ -1,9 +1,10 @@
-import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { commissionFiles } from "@pawket/database";
-import { noCommissionFileEvidenceHolds, runCommissionFileMaintenance, type CommissionFileOrderAccessPort } from "../src/index.js";
+import { encryptCommissionFileName, noCommissionFileEvidenceHolds, runCommissionFileMaintenance, type CommissionFileOrderAccessPort } from "../src/index.js";
 import { createFakeCommissionFileStorage } from "./fakes.js";
-import { createCommissionFileFixture, fixtureAt } from "./file-fixture.js";
+import { createCommissionFileFixture, fixtureAt, fixtureKeyring } from "./file-fixture.js";
 
 const fixture = createCommissionFileFixture("maintenance");
 beforeAll(fixture.initialize, 60_000);
@@ -18,6 +19,44 @@ function run(at: Date, options: Partial<Parameters<typeof runCommissionFileMaint
 }
 
 describe("commission file maintenance", () => {
+  test("advances past a full failed page with database microsecond creation timestamps", async () => {
+    const o = await fixture.order(); const ids = [randomUUID(), randomUUID(), randomUUID()].sort();
+    const preciseAt = "2026-09-28T03:00:00.000123Z";
+    for (const id of ids) await fixture.db.insert(commissionFiles).values({ id, ownerUserId: o.buyerUserId, context: "brief", packageId: o.packageId,
+      declaredBytes: 16, filenameEnvelope: encryptCommissionFileName(fixtureKeyring, id, "reference.png"), objectKey: `commission/${id}`, requestId: "fractional-fixture",
+      createdAt: sql`${preciseAt}::timestamptz`, updatedAt: sql`${preciseAt}::timestamptz`, uploadExpiresAt: sql`${preciseAt}::timestamptz + interval '15 minutes'` });
+    const storage = createFakeCommissionFileStorage(); const actualDelete = storage.port.deleteAllVersions;
+    vi.spyOn(storage.port, "deleteAllVersions").mockImplementation(async (area, key) => {
+      if (key !== `commission/${ids[2]}`) throw new Error("provider refusal");
+      return actualDelete(area, key);
+    });
+    try {
+      const first = await run(fixtureAt, { storage: storage.port, batchSize: 2 }).report;
+      expect(first.purgeFailures).toBe(2);
+      const second = await run(fixtureAt, { storage: storage.port, batchSize: 2, purgeAfter: first.purgeNextAfter }).report;
+      expect(second.purgeFailures).toBe(0);
+      expect(await fixture.read(ids[2]!)).toMatchObject({ cleanPurgedAt: expect.any(Date) });
+      expect(second.purgeNextAfter).toBeNull();
+    } finally { await run(fixtureAt).report; }
+  });
+  test("advances beyond an entire failing purge batch and retries failures after wrapping", async () => {
+    const o = await fixture.order(); const ids: string[] = [];
+    // Earlier than other fixture rows, with strictly ordered immutable creation times.
+    const at = new Date(fixtureAt.getTime() - DAY);
+    for (let i = 0; i < 3; i++) ids.push(await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "awaiting_upload", at: new Date(at.getTime() + i) }));
+    const storage = createFakeCommissionFileStorage(); const actualDelete = storage.port.deleteAllVersions;
+    const remove = vi.spyOn(storage.port, "deleteAllVersions").mockImplementation(async (area, key) => {
+      if (ids.slice(0, 2).some((id) => key === `commission/${id}`)) throw new Error("permanent provider refusal");
+      return actualDelete(area, key);
+    });
+    const first = await run(fixtureAt, { storage: storage.port, batchSize: 2 }).report;
+    expect(first.purgeFailures).toBe(2); expect(first.purgeNextAfter).not.toBeNull();
+    const second = await run(fixtureAt, { storage: storage.port, batchSize: 2, purgeAfter: first.purgeNextAfter }).report;
+    expect(await fixture.read(ids[2]!)).toMatchObject({ cleanPurgedAt: expect.any(Date), quarantinePurgedAt: expect.any(Date), filenameEnvelope: null });
+    expect(second.purgeNextAfter).toBeNull();
+    expect(await run(fixtureAt, { storage: storage.port, batchSize: 2, purgeAfter: second.purgeNextAfter }).report).toMatchObject({ purgeFailures: 2 });
+    expect(remove.mock.calls.filter(([, key]) => key === `commission/${ids[0]}`).length).toBe(2);
+  });
   test("expires stale grants, discards unsent clean files and purges their bytes", async () => {
     const o = await fixture.order();
     const grant = await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "awaiting_upload" });
@@ -25,8 +64,8 @@ describe("commission file maintenance", () => {
     const at = new Date(fixtureAt.getTime() + DAY);
     const first = run(at); const report = await first.report;
     expect(report).toMatchObject({ expired: 1, discarded: 1 });
-    expect(await fixture.read(grant)).toMatchObject({ state: "expired", endedAt: at });
-    expect(await fixture.read(unsent)).toMatchObject({ state: "discarded", endedAt: at });
+    expect(await fixture.read(grant)).toMatchObject({ state: "expired", endedAt: at, filenameEnvelope: null });
+    expect(await fixture.read(unsent)).toMatchObject({ state: "discarded", endedAt: at, filenameEnvelope: null });
     await (run(new Date(at.getTime() + 1_000)).report);
     expect(await fixture.read(grant)).toMatchObject({ quarantinePurgedAt: expect.any(Date), cleanPurgedAt: expect.any(Date) });
     expect(await fixture.read(unsent)).toMatchObject({ quarantinePurgedAt: expect.any(Date), cleanPurgedAt: expect.any(Date) });
@@ -48,7 +87,7 @@ describe("commission file maintenance", () => {
     expect(enqueueScan).toHaveBeenCalledWith(stuck, 1);
     expect(enqueueScan).not.toHaveBeenCalledWith(live, expect.anything());
     expect(await fixture.read(stuck)).toMatchObject({ scanAttempts: 1, scanLeaseExpiresAt: null });
-    expect(await fixture.read(late)).toMatchObject({ state: "scan_failed" });
+    expect(await fixture.read(late)).toMatchObject({ state: "scan_failed", filenameEnvelope: null });
     // A live (not yet expired) lease must never be recovered or enqueued: it means a scan is
     // genuinely in flight, possibly claimed by the real processor after this sweep's own
     // candidate selection ran.
@@ -64,7 +103,7 @@ describe("commission file maintenance", () => {
     const held = await run(new Date(fixtureAt.getTime() + 30 * DAY), { retentionMode: "enforce", holds: { hasEvidenceHold: async () => true } }).report;
     expect(held).toMatchObject({ retentionDeleted: 0 });
     expect(await run(new Date(fixtureAt.getTime() + 30 * DAY), { retentionMode: "enforce" }).report).toMatchObject({ retentionDeleted: 1 });
-    expect(await fixture.read(fileId)).toMatchObject({ state: "deleted", sha256: expect.any(String) });
+    expect(await fixture.read(fileId)).toMatchObject({ state: "deleted", sha256: expect.any(String), filenameEnvelope: expect.any(Object) });
   });
   test("counts purge failures without failing the sweep", async () => {
     const o = await fixture.order(); await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "awaiting_upload" });

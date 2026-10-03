@@ -1,8 +1,9 @@
 import { Readable } from "node:stream";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { commissionFiles, systemOutbox } from "@pawket/database";
-import { ClamdUnavailableError, CommissionFileStorageError, processCommissionFileScan } from "../src/index.js";
+import { ClamdUnavailableError, CommissionFileStorageError, createS3CommissionFileStorage, processCommissionFileScan, runCommissionFileMaintenance, noCommissionFileEvidenceHolds } from "../src/index.js";
 import { createFakeCommissionFileStorage, fakeScanner, sha256 } from "./fakes.js";
 import { createCommissionFileFixture, fixtureAt } from "./file-fixture.js";
 
@@ -14,11 +15,11 @@ beforeAll(fixture.initialize, 60_000);
 afterAll(fixture.dispose);
 
 async function scanning(bytes: Uint8Array | null, declaredBytes = PNG.byteLength) {
-  const { buyerUserId, packageId } = await fixture.order();
+  const { buyerUserId, packageId, orderId } = await fixture.order();
   const fileId = await fixture.file({ ownerUserId: buyerUserId, packageId, state: "scanning", declaredBytes });
   const storage = createFakeCommissionFileStorage();
   if (bytes) storage.put("quarantine", `commission/${fileId}`, bytes);
-  return { fileId, storage, buyerUserId };
+  return { fileId, storage, buyerUserId, orderId };
 }
 
 // Real node:stream Readables stand in for the S3 SDK body stream here — a plain-object async
@@ -41,6 +42,70 @@ function stalledReadable(chunk: Uint8Array): Readable {
 }
 
 describe("commission file scan", () => {
+  test("a silent pre-header provider releases the processor for the next job", async () => {
+    clock = fixtureAt; const { fileId } = await scanning(PNG); const sockets = new Set<Socket>();
+    const server = createServer((socket) => { sockets.add(socket); socket.on("data", () => undefined); socket.on("close", () => sockets.delete(socket)); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const storage = createS3CommissionFileStorage({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, region: "us-east-1",
+        accessKeyId: "synthetic", secretAccessKey: "synthetic", quarantineBucket: "test-quarantine", cleanBucket: "test-clean", operationTimeoutMs: 150 });
+      await expect(processCommissionFileScan({ db: fixture.db, storage, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "retry", reason: "storage_unavailable" });
+      expect(await fixture.read(fileId)).toMatchObject({ state: "scanning", scanLeaseExpiresAt: null, nextScanAt: expect.any(Date) });
+      const next = await scanning(PNG);
+      await expect(processCommissionFileScan({ db: fixture.db, storage: next.storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId: next.fileId, now })).resolves.toEqual({ outcome: "clean" });
+      await new Promise((resolve) => setTimeout(resolve, 50)); expect(sockets.size).toBe(0);
+    } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+  test.each(["late-success", "ambiguous-failure", "crash"] as const)("reconciles every late copy version after terminal purge (%s)", async (mode) => {
+    clock = fixtureAt; const { fileId, storage } = await scanning(PNG); const key = `commission/${fileId}`;
+    let start!: () => void; const started = new Promise<void>((resolve) => { start = resolve; });
+    let finish!: () => void; const finished = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(storage.port, "copyToClean").mockImplementation(async () => {
+      expect((await fixture.read(fileId)).cleanCopyIntent).toBe(true);
+      start();
+      if (mode === "ambiguous-failure") throw new CommissionFileStorageError("unavailable");
+      if (mode === "crash") throw new Error("simulated process loss after provider acceptance");
+      await finished;
+      return { versionId: storage.put("clean", key, PNG) };
+    });
+    // Catch immediately so the simulated process-loss rejection never becomes unhandled.
+    const pending = processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now }).catch((error: unknown) => error);
+    await started;
+    if (mode !== "late-success") {
+      const result = await pending;
+      if (mode === "ambiguous-failure") expect(result).toEqual({ outcome: "retry", reason: "storage_unavailable" });
+      else expect(result).toBeInstanceOf(Error);
+    }
+    const row = await fixture.read(fileId);
+    await fixture.db.update(commissionFiles).set({ state: "discarded", endedAt: clock, scanLeaseExpiresAt: null, nextScanAt: null, version: row.version + 1 }).where(eq(commissionFiles.id, fileId));
+    const sweep = () => runCommissionFileMaintenance({ db: fixture.db, storage: storage.port, orders: { retentionFacts: async () => new Map() },
+      holds: noCommissionFileEvidenceHolds, retentionMode: "report_only", batchSize: 500, enqueueScan: async () => undefined, now });
+    await sweep();
+    expect(await fixture.read(fileId)).toMatchObject({ state: "discarded", cleanCopyIntent: true, cleanPurgedAt: null, filenameEnvelope: null });
+    // Provider work already accepted can finish after request failure or process loss too.
+    if (mode === "late-success") { finish(); expect(await pending).toEqual({ outcome: "skipped" }); }
+    else storage.put("clean", key, PNG);
+    storage.put("clean", key, PNG);
+    expect(storage.has("clean", key)).toBe(true);
+    await sweep();
+    expect(storage.has("clean", key)).toBe(false);
+    expect(await fixture.read(fileId)).toMatchObject({ state: "discarded", cleanPurgedAt: null });
+    // There is deliberately no final completion stamp: an arbitrarily later accepted write is covered.
+    storage.put("clean", key, PNG); await sweep(); expect(storage.has("clean", key)).toBe(false);
+  });
+  test("maintenance never deletes a live winning clean or attached copy with intent", async () => {
+    clock = fixtureAt; const { fileId, storage, orderId } = await scanning(PNG);
+    expect(await processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).toEqual({ outcome: "clean" });
+    await runCommissionFileMaintenance({ db: fixture.db, storage: storage.port, orders: { retentionFacts: async () => new Map() }, holds: noCommissionFileEvidenceHolds,
+      retentionMode: "report_only", batchSize: 500, enqueueScan: async () => undefined, now });
+    expect(storage.has("clean", `commission/${fileId}`)).toBe(true);
+    expect(await fixture.read(fileId)).toMatchObject({ state: "clean", cleanCopyIntent: true, filenameEnvelope: expect.any(Object) });
+    await fixture.attach(fileId, orderId);
+    await runCommissionFileMaintenance({ db: fixture.db, storage: storage.port, orders: { retentionFacts: async () => new Map() }, holds: noCommissionFileEvidenceHolds,
+      retentionMode: "report_only", batchSize: 500, enqueueScan: async () => undefined, now });
+    expect(storage.has("clean", `commission/${fileId}`)).toBe(true);
+    expect(await fixture.read(fileId)).toMatchObject({ state: "attached", cleanCopyIntent: true, filenameEnvelope: expect.any(Object) });
+  });
   test("copies a clean PNG, records evidence and purges quarantine", async () => {
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "clean" });
@@ -53,7 +118,7 @@ describe("commission file scan", () => {
   test("rejects a completion with no uploaded object and frees the unsent slot", async () => {
     clock = fixtureAt; const { fileId, storage, buyerUserId } = await scanning(null);
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "rejected", reason: "size_mismatch" });
-    expect(await fixture.read(fileId)).toMatchObject({ state: "rejected", rejectionReason: "size_mismatch", sha256: null });
+    expect(await fixture.read(fileId)).toMatchObject({ state: "rejected", rejectionReason: "size_mismatch", sha256: null, filenameEnvelope: null });
     const unsent = await fixture.db.select().from(commissionFiles).where(and(eq(commissionFiles.ownerUserId, buyerUserId), inArray(commissionFiles.state, ["awaiting_upload", "scanning", "clean"])));
     expect(unsent).toHaveLength(0);
   });
@@ -152,7 +217,7 @@ describe("commission file scan", () => {
   test("fails the scan once the 24-hour deadline passes", async () => {
     const { fileId, storage } = await scanning(PNG); clock = new Date(fixtureAt.getTime() + 86_400_000);
     await expect(processCommissionFileScan({ db: fixture.db, storage: storage.port, scanner: fakeScanner({ signatureDate: () => clock }), fileId, now })).resolves.toEqual({ outcome: "scan_failed" });
-    expect(await fixture.read(fileId)).toMatchObject({ state: "scan_failed", endedAt: clock });
+    expect(await fixture.read(fileId)).toMatchObject({ state: "scan_failed", endedAt: clock, filenameEnvelope: null });
   });
   test("lets only one worker hold the lease", async () => {
     clock = fixtureAt; const { fileId, storage } = await scanning(PNG);

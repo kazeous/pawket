@@ -6,9 +6,10 @@ import type { CommissionFileEvidenceHoldPort, CommissionFileOrderAccessPort } fr
 import type { CommissionFileStoragePort } from "./storage-port.js";
 
 export type CommissionFileRetentionCursor = Readonly<{ attachedAt: Date; id: string }>;
+export type CommissionFilePurgeCursor = Readonly<{ createdAt: Date; id: string }>;
 export type CommissionFileMaintenanceReport = Readonly<{
   expired: number; discarded: number; scanFailed: number; recovered: number; enqueued: number;
-  purged: number; purgeFailures: number; retentionDue: number; retentionDeleted: number; retentionNextAfter: CommissionFileRetentionCursor | null;
+  purged: number; purgeFailures: number; purgeNextAfter: CommissionFilePurgeCursor | null; retentionDue: number; retentionDeleted: number; retentionNextAfter: CommissionFileRetentionCursor | null;
   scanning: number; oldestScanningSeconds: number | null;
 }>;
 const TERMINAL = ["rejected", "scan_failed", "expired", "discarded", "deleted"] as const;
@@ -27,9 +28,13 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   db: PawketDatabase; storage: Pick<CommissionFileStoragePort, "deleteAllVersions">;
   orders: Pick<CommissionFileOrderAccessPort, "retentionFacts">; holds: CommissionFileEvidenceHoldPort;
   retentionMode: "report_only" | "enforce"; batchSize: number; retentionAfter?: CommissionFileRetentionCursor | null;
+  purgeAfter?: CommissionFilePurgeCursor | null;
   enqueueScan(fileId: string, attempt: number): Promise<void>; now?: () => Date;
 }>): Promise<CommissionFileMaintenanceReport> {
   if (!Number.isInteger(input.batchSize) || input.batchSize < 1 || input.batchSize > 500) throw new Error("Invalid commission file maintenance batch");
+  if (input.purgeAfter != null && (!(input.purgeAfter.createdAt instanceof Date) || Number.isNaN(input.purgeAfter.createdAt.getTime()) || !commissionFileUuid(input.purgeAfter.id))) {
+    throw new Error("Invalid commission file maintenance purge cursor");
+  }
   if (input.retentionAfter != null && (!(input.retentionAfter.attachedAt instanceof Date) || Number.isNaN(input.retentionAfter.attachedAt.getTime()) || !commissionFileUuid(input.retentionAfter.id))) {
     throw new Error("Invalid commission file maintenance retention cursor");
   }
@@ -92,29 +97,42 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   // simply fails to match, and the row is left for the next sweep, counted as neither purged nor
   // failed.
   let purged = 0; let purgeFailures = 0;
-  const purgeCandidates = await input.db.select().from(commissionFiles).where(or(
-    and(inArray(commissionFiles.state, [...TERMINAL]), or(isNull(commissionFiles.quarantinePurgedAt), isNull(commissionFiles.cleanPurgedAt))),
+  // Immutable creation order makes failed rows and perpetual reconciliation tombstones fair:
+  // every full page advances, and a short page wraps so earlier failures remain retryable.
+  // PostgreSQL defaults can have microseconds; JS Date cursors only retain milliseconds.
+  // Normalize BOTH sort and seek, otherwise a fractional first page can repeat forever.
+  const purgeCreatedAt = sql`date_trunc('milliseconds', ${commissionFiles.createdAt})`;
+  const purgeCursor = input.purgeAfter;
+  const purgeCandidates = await input.db.select().from(commissionFiles).where(and(or(
+    and(inArray(commissionFiles.state, [...TERMINAL]), or(isNull(commissionFiles.quarantinePurgedAt), isNull(commissionFiles.cleanPurgedAt), eq(commissionFiles.cleanCopyIntent, true))),
     and(inArray(commissionFiles.state, ["clean", "attached"]), isNull(commissionFiles.quarantinePurgedAt), lte(commissionFiles.cleanAt, new Date(at.getTime() - 300_000))),
-  )).orderBy(asc(commissionFiles.updatedAt), asc(commissionFiles.id)).limit(input.batchSize);
+  ), purgeCursor ? sql`(${purgeCreatedAt} > ${purgeCursor.createdAt.toISOString()}::timestamptz or
+    (${purgeCreatedAt} = ${purgeCursor.createdAt.toISOString()}::timestamptz and ${commissionFiles.id} > ${purgeCursor.id}::uuid))` : undefined))
+    .orderBy(asc(purgeCreatedAt), asc(commissionFiles.id)).limit(input.batchSize);
   for (const file of purgeCandidates) {
     const terminal = (TERMINAL as readonly string[]).includes(file.state);
     const needsQuarantine = !file.quarantinePurgedAt;
-    const needsClean = terminal && !file.cleanPurgedAt;
+    const needsClean = terminal && (!file.cleanPurgedAt || file.cleanCopyIntent);
+    const canMarkClean = needsClean && !file.cleanCopyIntent;
     try {
       if (needsQuarantine) await input.storage.deleteAllVersions("quarantine", file.objectKey);
       if (needsClean) await input.storage.deleteAllVersions("clean", file.objectKey);
       const guard = and(
         ...(needsQuarantine ? [isNull(commissionFiles.quarantinePurgedAt)] : []),
-        ...(needsClean ? [isNull(commissionFiles.cleanPurgedAt)] : []),
+        ...(canMarkClean ? [isNull(commissionFiles.cleanPurgedAt)] : []),
       );
       const [marked] = await input.db.update(commissionFiles).set({
         ...(needsQuarantine ? { quarantinePurgedAt: at } : {}),
-        ...(needsClean ? { cleanPurgedAt: at } : {}),
+        // A cancelled CopyObject can still complete provider-side. Never claim final purge
+        // after any copy intent: repeat only for permanent terminal rows, never live winners.
+        ...(canMarkClean ? { cleanPurgedAt: at } : {}),
         ...bump,
       }).where(and(eq(commissionFiles.id, file.id), eq(commissionFiles.state, file.state), guard)).returning({ id: commissionFiles.id });
-      if (marked) purged += 1;
+      if (marked && (!needsClean || canMarkClean)) purged += 1;
     } catch { purgeFailures += 1; }
   }
+  const purgeNextAfter: CommissionFilePurgeCursor | null = purgeCandidates.length === input.batchSize
+    ? { createdAt: purgeCandidates[purgeCandidates.length - 1]!.createdAt, id: purgeCandidates[purgeCandidates.length - 1]!.id } : null;
 
   // I7 Stage A: only references of orders closed before payment expire. Stage B adds the
   // terminal-order rule. Files attached to open or already-paid orders stay `attached` forever, so
@@ -152,7 +170,7 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   const oldest = backlog?.oldest ?? null;
   return {
     expired: expired.length, discarded: discarded.length, scanFailed: scanFailed.length, recovered: recovered.length, enqueued: toEnqueue.length,
-    purged, purgeFailures, retentionDue, retentionDeleted, retentionNextAfter, scanning: Number(backlog?.total ?? 0),
+    purged, purgeFailures, purgeNextAfter, retentionDue, retentionDeleted, retentionNextAfter, scanning: Number(backlog?.total ?? 0),
     oldestScanningSeconds: oldest ? Math.max(0, Math.floor((at.getTime() - oldest.getTime()) / 1000)) : null,
   };
 }

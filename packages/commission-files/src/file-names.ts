@@ -8,6 +8,7 @@ export function encryptCommissionFileName(keyring: EncryptionKeyring, fileId: st
   return encryptSensitiveField({ keyring, plaintext: normalizeCommissionFileName(name), binding: binding(fileId) });
 }
 export function decryptCommissionFileName(keyring: EncryptionKeyring, row: Pick<typeof commissionFiles.$inferSelect, "id" | "filenameEnvelope">): string {
+  if (row.filenameEnvelope === null) return commissionFileFail("not_available");
   try { return normalizeCommissionFileName(decryptSensitiveField({ keyring, envelope: row.filenameEnvelope, binding: binding(row.id) })); }
   catch { return commissionFileFail("dependency_unavailable"); }
 }
