@@ -28,11 +28,12 @@ services:
       start_period: 5s
 
   clamd:
-    image: clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578
+    image: pawket-clamd:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}
+    build:
+      context: ./ops/clamav
     restart: unless-stopped
     exclude_from_hc: true
     volumes:
-      - ./ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
       - clamav_data:/var/lib/clamav
     healthcheck:
       test: ["CMD-SHELL", "echo PING | nc -w 2 127.0.0.1 3310 | grep -q PONG"]

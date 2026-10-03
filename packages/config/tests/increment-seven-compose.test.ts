@@ -5,13 +5,20 @@ const compose = readFileSync(new URL("../../../compose.prod.yaml", import.meta.u
 const service = (name: string) => { const start = compose.indexOf(`\n  ${name}:\n`); const next = compose.slice(start + 1).search(/\n  [a-z][a-z0-9-]*:\n/u); return compose.slice(start, next < 0 ? undefined : start + 1 + next); };
 
 describe("production compose for commission files", () => {
-  test("runs a digest-pinned clamd on the internal network only", () => {
+  test("runs a digest-pinned clamd with baked configuration on the internal network only", () => {
     const clamd = service("clamd");
-    expect(clamd).toMatch(/image: clamav\/clamav:[0-9.]+(?:-debian)?@sha256:[a-f0-9]{64}/u);
-    expect(clamd).toContain("image: clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578");
+    expect(clamd).toContain("image: pawket-clamd:${SOURCE_COMMIT:?Enable SOURCE_COMMIT in Coolify}");
+    expect(clamd).toContain("context: ./ops/clamav");
+    const dockerfile = readFileSync(new URL("../../../ops/clamav/Dockerfile", import.meta.url), "utf8");
+    expect(dockerfile).toMatch(/^FROM clamav\/clamav:[0-9.]+(?:-debian)?@sha256:[a-f0-9]{64}$/mu);
+    expect(dockerfile).toContain("FROM clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578");
+    expect(dockerfile).toMatch(/^COPY (?:--chmod=0644 )?clamd\.conf \/etc\/clamav\/clamd\.conf$/mu);
     expect(clamd).not.toMatch(/\n    ports:/u);
-    expect(clamd).toContain("./ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro");
     expect(clamd).toContain("exclude_from_hc: true");
+  });
+  test("never bind-mounts repository files, which Coolify cannot provide on the host", () => {
+    expect(compose).not.toMatch(/^\s+- \.{1,2}\//mu);
+    expect(compose).not.toMatch(/^\s+source: \.{1,2}\//mu);
   });
   test("uses the same verified image in dev and CI and splits storage credentials", () => {
     const image = "clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578";
