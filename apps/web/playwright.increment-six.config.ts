@@ -3,7 +3,7 @@ import { defineConfig } from "@playwright/test";
 import base from "./playwright.config";
 import { browserDatabaseConfiguration, browserDatabaseUrl } from "./tests/increment-three-database";
 if (browserDatabaseConfiguration.targetDatabaseName !== "pawket_increment6_commissions_browser") throw new Error("Increment 6 requires its dedicated disposable browser database");
-export default defineConfig({ ...base, globalSetup: "./tests/increment-six-global-setup.ts", testMatch: ["commission-journey.playwright.ts"], testIgnore: [], timeout: 60_000,
+export default defineConfig({ ...base, globalSetup: "./tests/increment-six-global-setup.ts", testMatch: ["commission-journey.playwright.ts", "commission-reference-files.playwright.ts"], testIgnore: [], timeout: 60_000,
   fullyParallel: false, workers: 1, outputDir: path.resolve(import.meta.dirname, ".playwright-artifacts", "increment-six"),
   use: { ...base.use, baseURL: "http://127.0.0.1:4181", locale: "vi-VN", colorScheme: "light", contextOptions: { reducedMotion: "reduce" }, extraHTTPHeaders: { "x-real-ip": "127.0.0.1" } },
   webServer: ([4181, 4182] as const).map((port) => ({
@@ -13,6 +13,10 @@ export default defineConfig({ ...base, globalSetup: "./tests/increment-six-globa
       DATABASE_URL: browserDatabaseUrl, APP_BASE_URL: `http://127.0.0.1:${port}`, AUTH_TRUSTED_ORIGINS: `http://127.0.0.1:${port}`,
       VALKEY_URL: process.env.TEST_VALKEY_URL ?? "redis://127.0.0.1:16379/0", CREATOR_PUBLISHING_MODE: "general_audience", PUBLIC_MEDIA_RETENTION_MODE: "report_only",
       TIP_PAYMENTS_MODE: "disabled", COMMISSION_INTAKE_MODE: port === 4181 ? "enabled" : "disabled", COMMISSION_PAYMENTS_MODE: port === 4181 ? "manual_only" : "disabled",
+      COMMISSION_FILES_MODE: port === 4181 ? "enabled" : "disabled",
+      COMMISSION_FILES_S3_ENDPOINT: process.env.COMMISSION_FILES_S3_ENDPOINT ?? "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
+      COMMISSION_FILES_S3_ACCESS_KEY_ID: process.env.COMMISSION_FILES_S3_ACCESS_KEY_ID ?? "local-commission-files-key", COMMISSION_FILES_S3_SECRET_ACCESS_KEY: process.env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY ?? "local-commission-files-secret",
+      COMMISSION_FILES_QUARANTINE_BUCKET: process.env.COMMISSION_FILES_QUARANTINE_BUCKET ?? "pawket-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: process.env.COMMISSION_FILES_CLEAN_BUCKET ?? "pawket-commission-clean", COMMISSION_FILES_S3_FORCE_PATH_STYLE: "true",
       COMMISSION_REQUEST_LIMIT: "100", COMMISSION_COMMAND_LIMIT: "1000", COMMISSION_READ_LIMIT: "2000",
     },
   })),

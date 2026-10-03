@@ -3,6 +3,17 @@ import { formatVnd, readCreatedInstruction, requireTipDraftActor, tipErrorText, 
 
 afterEach(() => vi.unstubAllGlobals());
 describe("private tip browser boundary", () => {
+  test("caller cancellation aborts the bounded underlying request", async () => {
+    const controller = new AbortController(); let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_path: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      signal = init.signal!;
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    })));
+    const pending = tipRequest("/api/v1/commission-files/example", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "dependency_unavailable" });
+    expect(signal?.aborted).toBe(true);
+  });
   test("reauthenticated drafts require the original account and normalize identity errors", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user: { id: "original" } })));
     await expect(requireTipDraftActor("original")).resolves.toBeUndefined();

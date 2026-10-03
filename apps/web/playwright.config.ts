@@ -19,6 +19,7 @@ export default defineConfig({
     "owner-tip-policy.playwright.ts",
     "sepay-journey.playwright.ts",
     "commission-journey.playwright.ts",
+    "commission-reference-files.playwright.ts",
     "ui-foundation.playwright.ts",
     "ui-regression.playwright.ts",
     INCREMENT_THREE_DISABLED_TEST,
