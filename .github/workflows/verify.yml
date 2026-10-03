@@ -166,6 +166,23 @@ jobs:
       - name: Unit tests
         run: corepack pnpm test
 
+      - name: Start ClamAV for integration tests
+        run: >-
+          docker run -d --name pawket-ci-clamd -p 127.0.0.1:3310:3310
+          -e CLAMAV_NO_FRESHCLAMD=true
+          -v "$GITHUB_WORKSPACE/ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro"
+          clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578
+
+      - name: Wait for ClamAV
+        shell: bash
+        run: |
+          for attempt in $(seq 1 90); do
+            if printf 'PING\n' | nc -w 2 127.0.0.1 3310 | grep -q PONG; then exit 0; fi
+            sleep 2
+          done
+          docker logs pawket-ci-clamd
+          exit 1
+
       - name: Apply integration-test migrations
         run: corepack pnpm --filter @pawket/database db:migrate
 

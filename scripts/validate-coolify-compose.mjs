@@ -5,6 +5,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MARKER = "exclude_from_hc: true";
 const SENSITIVE_ENVIRONMENT_VARIABLES = [
+  "COMMISSION_FILES_WEB_SECRET_ACCESS_KEY",
+  "COMMISSION_FILES_WORKER_SECRET_ACCESS_KEY",
+  "COMMISSION_FILES_WEB_ACCESS_KEY_ID",
+  "COMMISSION_FILES_WORKER_ACCESS_KEY_ID",
   "DATABASE_URL",
   "VALKEY_URL",
   "METRICS_TOKEN",
@@ -106,24 +110,25 @@ export function projectCoolifyCompose(source) {
     }
   }
 
-  if (markers.length !== 1) {
-    throw new Error(
-      `Coolify Compose validation requires exactly one ${MARKER} marker; found ${markers.length}`,
-    );
+  for (const marker of markers) {
+    if (marker.service !== "migrate" && marker.service !== "clamd") {
+      throw new Error(`Coolify Compose ${MARKER} marker must belong to the migrate service or clamd service`);
+    }
+    const expectedIndent = serviceKeyIndent(lines, marker.serviceStart, marker.serviceIndent);
+    if (marker.indent !== expectedIndent) {
+      throw new Error(`Coolify Compose ${MARKER} marker must be a service-level key`);
+    }
   }
-
-  const marker = markers[0];
-  if (marker.service !== "migrate") {
-    throw new Error(`Coolify Compose ${MARKER} marker must belong to the migrate service`);
+  const migrateMarkers = markers.filter((marker) => marker.service === "migrate");
+  if (migrateMarkers.length !== 1) {
+    throw new Error(`Coolify Compose validation requires exactly one ${MARKER} marker; found ${migrateMarkers.length} on migrate`);
   }
-
-  const expectedIndent = serviceKeyIndent(lines, marker.serviceStart, marker.serviceIndent);
-  if (marker.indent !== expectedIndent) {
-    throw new Error(`Coolify Compose ${MARKER} marker must be a service-level key`);
+  if (markers.filter((marker) => marker.service === "clamd").length > 1) {
+    throw new Error("Coolify Compose permits at most one clamd exclusion marker");
   }
-
+  const markerIndexes = new Set(markers.map((marker) => marker.index));
   return lines
-    .filter((_, index) => index !== marker.index)
+    .filter((_, index) => !markerIndexes.has(index))
     .map((line) => line.raw)
     .join("");
 }

@@ -52,6 +52,24 @@ describe("projectCoolifyCompose", () => {
     );
   });
 
+  it("projects migrate and clamd markers without changing other bytes", () => {
+    const source = validCompose.replace("  web:", "  clamd:\r\n    image: clamav/clamav:test\r\n    exclude_from_hc: true\r\n  web:");
+    expect(projectCoolifyCompose(source)).toBe(source.replaceAll("    exclude_from_hc: true\r\n", ""));
+  });
+
+  it("rejects duplicate and nested clamd markers and a clamd-only exclusion", () => {
+    const source = validCompose.replace("  web:", "  clamd:\r\n    image: clamav/clamav:test\r\n    exclude_from_hc: true\r\n  web:");
+    expect(() => projectCoolifyCompose(source.replace("    image: clamav/clamav:test", "    exclude_from_hc: true\r\n    image: clamav/clamav:test"))).toThrow("at most one clamd");
+    expect(() => projectCoolifyCompose(source.replace("    image: clamav/clamav:test\r\n    exclude_from_hc: true", "    image: clamav/clamav:test\r\n    environment:\r\n      exclude_from_hc: true"))).toThrow("service-level key");
+    expect(() => projectCoolifyCompose(source.replace("    image: pawket-migrate:test\r\n    exclude_from_hc: true", "    image: pawket-migrate:test"))).toThrow("found 0 on migrate");
+  });
+
+  it("redacts separate web and worker private storage credentials", () => {
+    const names = ["COMMISSION_FILES_WEB_SECRET_ACCESS_KEY", "COMMISSION_FILES_WORKER_SECRET_ACCESS_KEY", "COMMISSION_FILES_WEB_ACCESS_KEY_ID", "COMMISSION_FILES_WORKER_ACCESS_KEY_ID"];
+    const environment = Object.fromEntries(names.map((name, index) => [name, `synthetic-storage-credential-${index}`]));
+    expect(redaction.redactSensitiveValues(Object.values(environment).join(" "), environment)).toBe(names.map((name) => `[REDACTED ${name}]`).join(" "));
+  });
+
   it("rejects a missing Coolify health-check exclusion marker", () => {
     // Catches silently validating a migration that Coolify would include in health checks.
     expect(() =>

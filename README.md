@@ -131,7 +131,9 @@ corepack pnpm compose:validate
 ```
 
 The validator requires exactly one service-level `exclude_from_hc: true` on
-the `migrate` service, removes only that Coolify extension in memory, and
+the `migrate` service and permits one service-level marker on `clamd`. It rejects
+duplicates, nested markers and markers on unrelated services, removes those
+Coolify extensions in memory, and
 streams the projected source to strict Docker Compose validation without
 writing rendered configuration to disk. CI and Task 8 must call this command
 instead of running `docker compose -f compose.prod.yaml config --quiet`
