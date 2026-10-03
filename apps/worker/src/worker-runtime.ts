@@ -31,6 +31,9 @@ import {
   recordCommissionOperation,
   setCommissionOperationalMetrics,
   setCommissionCleanupConfiguredMetric,
+  recordCommissionFileOperation,
+  setCommissionFileBacklogMetrics,
+  setCommissionFileScannerMetric,
   recordSePayOperation,
   setSePayBacklogMetrics,
   setSePayRecoveryEnabledMetric,
@@ -45,6 +48,7 @@ import {
   setWorkerScanHealthMetric,
   withRequestContext,
 } from "@pawket/observability";
+import { processCommissionFileScan, runCommissionFileMaintenance, type ClamdClient, type CommissionFileEvidenceHoldPort, type CommissionFileOrderAccessPort, type CommissionFilePurgeCursor, type CommissionFileRetentionCursor, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { expireTipPaymentIntents, scanVerificationDepositRefundWindows, TIP_NOTIFICATION_EVENTS, SEPAY_EVENT_RECEIVED, resolveSePayWorkerSource, readSePayBacklog, type TipExpiryPort } from "@pawket/payments";
 import {
   processPublicMediaAsset,
@@ -56,20 +60,29 @@ import {
   type PublicMediaRetentionHoldPort,
 } from "@pawket/public-media";
 import {
+  COMMISSION_FILE_QUEUE,
+  COMMISSION_FILE_SCAN_JOB,
   MEDIA_PROCESS_JOB,
   MEDIA_QUEUE,
   OUTBOX_JOB,
   SYSTEM_QUEUE,
+  commissionFileScanJobId,
   connectQueueProducer,
   connectQueueWorker,
+  createCommissionFileQueue,
   createMediaQueue,
   createQueueConnection,
   createSystemQueue,
   createWorkerConnection,
   dispatchOutboxBatch,
+  enqueueCommissionFileScan,
   enqueueMediaAsset,
+  parseCommissionFileJob,
+  parseCommissionFileUploadedPayload,
   parsePublicMediaCompletedPayload,
   writePublicMediaWorkerHealth,
+  type CommissionFileQueuePublisher,
+  type CommissionFileScanJob,
   type MediaAssetJob,
   type MediaQueuePublisher,
   type SystemOutboxJob,
@@ -124,6 +137,7 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "media.public_asset_failed.v1",
   "trust.public_content_reported.v1",
   "trust.public_report_triaged.v1",
+  "commission.file_scanned.v1",
 ]);
 
 type RuntimeLogger = {
@@ -142,6 +156,12 @@ type QueueResource = ReturnType<typeof createSystemQueue>;
 type WorkerResource = Pick<Worker<SystemOutboxJob>, "close" | "disconnect">;
 type MediaQueueResource = ReturnType<typeof createMediaQueue>;
 type MediaWorkerResource = Pick<Worker<MediaAssetJob>, "close" | "disconnect">;
+type CommissionFileQueueResource = ReturnType<typeof createCommissionFileQueue>;
+type CommissionFileWorkerResource = Pick<Worker<CommissionFileScanJob>, "close" | "disconnect">;
+export type CommissionFilesWorkerConfiguration = Readonly<{
+  storage: CommissionFileStoragePort; scanner: ClamdClient; scannerProbe: Pick<ClamdClient, "version">; concurrency: number; batchSize: number; scanIntervalMs: number;
+  retentionMode: "report_only" | "enforce"; orders: Pick<CommissionFileOrderAccessPort, "retentionFacts">; holds: CommissionFileEvidenceHoldPort;
+}>;
 
 export type SePayWorkerService = {
   processInbox(inboxId: string): Promise<"confirmed" | "review_required" | "deferred" | "unchanged">;
@@ -179,6 +199,10 @@ export type WorkerRuntimeDependencies = {
     connection: ConnectionResource,
     concurrency: number,
   ): MediaWorkerResource;
+  createCommissionFileQueue(connection: ConnectionResource): CommissionFileQueueResource;
+  createCommissionFileWorker(processor: Processor<CommissionFileScanJob>, connection: ConnectionResource, concurrency: number): CommissionFileWorkerResource;
+  processCommissionFile: typeof processCommissionFileScan;
+  runCommissionFileMaintenance: typeof runCommissionFileMaintenance;
   dispatch: typeof dispatchOutboxBatch;
   acknowledge: typeof acknowledgeOutboxEvent;
   processMediaAsset: typeof processPublicMediaAsset;
@@ -239,6 +263,7 @@ export type StartWorkerOptions = {
     scanIntervalMs: number;
   };
   healthState?: WorkerHealthState;
+  commissionFiles?: CommissionFilesWorkerConfiguration;
   retention?: {
     mode: "report_only" | "enforce";
     policyVersion: string;
@@ -281,6 +306,12 @@ const defaultDependencies: WorkerRuntimeDependencies = {
       connection,
     });
   },
+  createCommissionFileQueue,
+  createCommissionFileWorker(processor, connection, concurrency) {
+    return new Worker<CommissionFileScanJob>(COMMISSION_FILE_QUEUE, processor, { concurrency, connection });
+  },
+  processCommissionFile: processCommissionFileScan,
+  runCommissionFileMaintenance,
   dispatch: dispatchOutboxBatch,
   acknowledge: acknowledgeOutboxEvent,
   processMediaAsset: processPublicMediaAsset,
@@ -301,6 +332,7 @@ export function createWorkerJobProcessor(input: {
   database: DatabaseResource["db"];
   acknowledge: typeof acknowledgeOutboxEvent;
   mediaQueue?: MediaQueuePublisher;
+  commissionFileQueue?: CommissionFileQueuePublisher;
   sepay?: { environment: "test" | "live"; mode: TipPaymentsMode; commissionMode?: TipPaymentsMode; service: SePayWorkerService; resolveSource?: typeof resolveSePayWorkerSource };
   securityEmail?: {
     keyring: EncryptionKeyring;
@@ -423,6 +455,11 @@ export function createWorkerJobProcessor(input: {
                 outcome: materialized === "created" ? "queued" : "attention_required",
               });
             }
+          } else if (job.data.eventType === "commission.file_uploaded.v1") {
+            if (!input.commissionFileQueue) throw new Error("Commission file scanning unavailable");
+            const payload = parseCommissionFileUploadedPayload(job.data.payload);
+            if (job.data.aggregateType !== "commission_file" || payload.fileId !== job.data.aggregateId) throw new Error("Invalid commission file upload payload");
+            await enqueueCommissionFileScan(input.commissionFileQueue, payload.fileId, 0);
           } else if (job.data.eventType === "media.public_upload_completed.v1") {
             if (!input.mediaQueue) throw new Error("Public media processing unavailable");
             const payload = parsePublicMediaCompletedPayload(job.data.payload);
@@ -567,6 +604,26 @@ export function createMediaJobProcessor(input: {
   };
 }
 
+export function createCommissionFileJobProcessor(input: {
+  logger: RuntimeLogger; database: DatabaseResource["db"]; storage: CommissionFileStoragePort; scanner: ClamdClient; process?: typeof processCommissionFileScan;
+}): Processor<CommissionFileScanJob> {
+  return async (job: Job<CommissionFileScanJob>) => {
+    let data: CommissionFileScanJob;
+    try { data = parseCommissionFileJob(job.data); } catch { throw new Error("Invalid commission file worker job"); }
+    if (!job.id || job.name !== COMMISSION_FILE_SCAN_JOB || job.id !== commissionFileScanJobId(data.fileId, data.attempt)) throw new Error("Invalid commission file worker job");
+    return withRequestContext({ requestId: job.id, jobId: job.id }, async () => {
+      try {
+        const result = await (input.process ?? processCommissionFileScan)({ db: input.database, storage: input.storage, scanner: input.scanner, fileId: data.fileId });
+        recordCommissionFileOperation({ operation: "scan", outcome: result.outcome });
+      } catch {
+        recordCommissionFileOperation({ operation: "scan", outcome: "failed" });
+        input.logger.error({ category: "commission_file_scan_failed", jobId: job.id }, "Commission file scan failed");
+        throw new Error("Commission file scan failed");
+      }
+    });
+  };
+}
+
 export async function startWorker(options: StartWorkerOptions): Promise<WorkerHandle> {
   if (options.tipPayments && (!["disabled", "manual_only", "sepay_optional"].includes(options.tipPayments.mode) || !Number.isInteger(options.tipPayments.batchSize) || options.tipPayments.batchSize < 1 || options.tipPayments.batchSize > 500 ||
     !Number.isSafeInteger(options.tipPayments.scanIntervalMs) || options.tipPayments.scanIntervalMs < 5_000 || options.tipPayments.scanIntervalMs > 300_000 || typeof options.tipPayments.tips?.expireTip !== "function")) throw new Error("Invalid tip expiry configuration");
@@ -580,6 +637,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     (options.commissions.paymentsMode !== undefined && !["disabled", "manual_only", "sepay_optional"].includes(options.commissions.paymentsMode)) ||
     !Number.isInteger(options.commissions.scanIntervalMs) || options.commissions.scanIntervalMs < 5_000 || options.commissions.scanIntervalMs > 300_000 ||
     typeof options.commissions.createService !== "function")) throw new Error("Invalid commission worker configuration");
+  if (options.commissionFiles && (!Number.isInteger(options.commissionFiles.concurrency) || options.commissionFiles.concurrency < 1 || options.commissionFiles.concurrency > 2 ||
+    !Number.isInteger(options.commissionFiles.batchSize) || options.commissionFiles.batchSize < 1 || options.commissionFiles.batchSize > 500 ||
+    !Number.isInteger(options.commissionFiles.scanIntervalMs) || options.commissionFiles.scanIntervalMs < 10_000 || options.commissionFiles.scanIntervalMs > 600_000)) throw new Error("Invalid commission file worker configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -599,6 +659,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let worker: WorkerResource | undefined;
   let mediaQueue: MediaQueueResource | undefined;
   let mediaWorker: MediaWorkerResource | undefined;
+  let commissionFileQueue: CommissionFileQueueResource | undefined;
+  let commissionFileWorker: CommissionFileWorkerResource | undefined;
   let sepayService: SePayWorkerService | undefined;
   let commissionService: CommissionOrderMaintenanceService | undefined;
 
@@ -624,11 +686,17 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (mediaWorker) {
       await attemptCleanup("media-worker", () => mediaWorker?.disconnect());
     }
+    if (commissionFileWorker) {
+      await attemptCleanup("commission-file-worker", () => commissionFileWorker?.disconnect());
+    }
     if (worker) {
       await attemptCleanup("worker", () => worker?.disconnect());
     }
     if (mediaQueue) {
       await attemptCleanup("media-queue", () => mediaQueue?.disconnect());
+    }
+    if (commissionFileQueue) {
+      await attemptCleanup("commission-file-queue", () => commissionFileQueue?.disconnect());
     }
     if (queue) {
       await attemptCleanup("queue", () => queue?.disconnect());
@@ -656,12 +724,14 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (options.publicMedia) {
       mediaQueue = dependencies.createMediaQueue(producerConnection);
     }
+    if (options.commissionFiles) commissionFileQueue = dependencies.createCommissionFileQueue(producerConnection);
     worker = dependencies.createWorker(
       createWorkerJobProcessor({
         logger,
         database: database.db,
         acknowledge: dependencies.acknowledge,
         mediaQueue,
+        commissionFileQueue,
         securityEmail: options.securityEmail,
         ...(options.sepay && sepayService ? { sepay: { environment: options.sepay.environment, mode: options.sepay.mode, commissionMode: options.sepay.commissionMode, service: sepayService } } : {}),
       }),
@@ -681,6 +751,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         options.publicMedia.concurrency,
       );
     }
+    if (options.commissionFiles) {
+      commissionFileWorker = dependencies.createCommissionFileWorker(createCommissionFileJobProcessor({ logger, database: database.db, storage: options.commissionFiles.storage,
+        scanner: options.commissionFiles.scanner, process: dependencies.processCommissionFile }), workerConnection, options.commissionFiles.concurrency);
+    }
     if (options.healthState) {
       options.healthState.initializedAt = Date.now();
       options.healthState.stopping = false;
@@ -690,6 +764,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         : null;
       options.healthState.lastPublicMediaCleanupScanSucceededAt = null;
       options.healthState.oldestPublicMediaCleanupCandidateAt = null;
+      options.healthState.commissionFilesConfigured = options.commissionFiles !== undefined;
+      options.healthState.commissionFilesMaximumAgeMs = options.commissionFiles ? options.commissionFiles.scanIntervalMs * 3 + 120_000 : null;
+      options.healthState.lastCommissionFilesMaintenanceSucceededAt = null;
+      options.healthState.commissionFileScanner = options.commissionFiles ? "down" : "not_configured";
     }
   } catch {
     await startupCleanup();
@@ -703,6 +781,13 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let currentCommissionScan: Promise<void> | undefined;
   let lastCommissionScanAt = 0;
   let commissionScanCursor: string | null = null;
+  let currentCommissionFilesScan: Promise<void> | undefined;
+  let currentScannerProbe: Promise<void> | undefined;
+  let lastCommissionFilesScanAt = 0;
+  let lastScannerProbeAt = 0;
+  let commissionFilesRetentionCursor: CommissionFileRetentionCursor | null = null;
+  let commissionFilesPurgeCursor: CommissionFilePurgeCursor | null = null;
+  const scannerProbeAbort = new AbortController();
   let lastRefundScanAt = 0;
   let lastRetentionScanAt = 0;
   let lastOidcCleanupAt = 0;
@@ -748,6 +833,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (mediaCleanup) {
     setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
   }
+  if (options.commissionFiles) setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -975,6 +1061,48 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
+    const config = options.commissionFiles; const queueResource = commissionFileQueue;
+    if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
+    lastCommissionFilesScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
+    try {
+      const report = await dependencies.runCommissionFileMaintenance({ db: database.db, storage: config.storage, orders: config.orders, holds: config.holds,
+        retentionMode: config.retentionMode, batchSize: config.batchSize, retentionAfter: commissionFilesRetentionCursor, purgeAfter: commissionFilesPurgeCursor,
+        enqueueScan: async (fileId, attempt) => { await enqueueCommissionFileScan(queueResource, fileId, attempt); } });
+      for (const [outcome, count] of [["expired", report.expired], ["discarded", report.discarded], ["scan_failed", report.scanFailed], ["recovered", report.recovered],
+        ["purged", report.purged], ["purge_failed", report.purgeFailures], ["retention_deleted", report.retentionDeleted]] as const) {
+        if (count > 0) recordCommissionFileOperation({ operation: "maintenance", outcome, count: Math.min(count, 500) });
+      }
+      setCommissionFileBacklogMetrics({ scanning: report.scanning, oldestScanningSeconds: report.oldestScanningSeconds, retentionDue: report.retentionDue });
+      recordCommissionFileOperation({ operation: "maintenance", outcome: "completed" });
+      commissionFilesRetentionCursor = report.retentionNextAfter;
+      commissionFilesPurgeCursor = report.purgeNextAfter;
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "commission_files", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "commission_files", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastCommissionFilesMaintenanceSucceededAt = succeededAt;
+    } catch {
+      recordCommissionFileOperation({ operation: "maintenance", outcome: "failed" });
+      logger.error({ category: "commission_files_maintenance_failed" }, "Commission file maintenance failed");
+    }
+  };
+  /** Informational only. A slow or missing scanner must never affect readiness or deploys. */
+  const probeCommissionFileScannerIfDue = async (probeAt: number): Promise<void> => {
+    const config = options.commissionFiles;
+    if (!running || !config || probeAt - lastScannerProbeAt < 60_000) return;
+    lastScannerProbeAt = probeAt;
+    try {
+      const version = await config.scannerProbe.version(scannerProbeAbort.signal);
+      const ageSeconds = Math.max(0, Math.floor((Date.now() - version.signatureDate.getTime()) / 1_000));
+      setCommissionFileScannerMetric({ up: true, signatureAgeSeconds: ageSeconds });
+      if (options.healthState) options.healthState.commissionFileScanner = ageSeconds > 86_400 ? "stale" : "up";
+    } catch {
+      setCommissionFileScannerMetric({ up: false, signatureAgeSeconds: null });
+      if (options.healthState) options.healthState.commissionFileScanner = "down";
+    }
+  };
+
   const scanSePayIfDue = async (scanAt: number): Promise<void> => {
     const config = options.sepay;
     if (!running || !config || !sepayService || (config.mode !== "sepay_optional" && config.commissionMode !== "sepay_optional") || scanAt - lastSePayScanAt < config.scanIntervalMs) return;
@@ -1091,6 +1219,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (!currentCommissionScan) {
         currentCommissionScan = scanCommissionsIfDue(Date.now()).finally(() => { currentCommissionScan = undefined; });
       }
+      if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
+      if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
       // flight without delaying outbox dispatch, notification handoff or health.
       if (!currentSePayScan) {
@@ -1115,6 +1245,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
 
   const shutdown = async (): Promise<void> => {
     running = false;
+    scannerProbeAbort.abort();
     if (options.healthState) options.healthState.stopping = true;
     if (pollTimer !== undefined) {
       clearTimeout(pollTimer);
@@ -1138,9 +1269,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentDispatch;
       await currentSePayScan;
       await currentCommissionScan;
+      await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
+      if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());
       await attemptClose("worker", () => worker.close());
       if (mediaQueue) await attemptClose("media-queue", () => mediaQueue.close());
+      if (commissionFileQueue) await attemptClose("commission-file-queue", () => commissionFileQueue.close());
       await attemptClose("queue", () => queue.close());
       await attemptClose("producer-valkey", () => producerConnection.quit());
       await attemptClose("worker-valkey", () => workerConnection.quit());
@@ -1148,8 +1282,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     };
     const forceClose = (): void => {
       if (mediaWorker) void attemptClose("media-worker-force", () => mediaWorker.disconnect());
+      if (commissionFileWorker) void attemptClose("commission-file-worker-force", () => commissionFileWorker.disconnect());
       void attemptClose("worker-force", () => worker.disconnect());
       if (mediaQueue) void attemptClose("media-queue-force", () => mediaQueue.disconnect());
+      if (commissionFileQueue) void attemptClose("commission-file-queue-force", () => commissionFileQueue.disconnect());
       void attemptClose("queue-force", () => queue.disconnect());
       try {
         producerConnection.disconnect();

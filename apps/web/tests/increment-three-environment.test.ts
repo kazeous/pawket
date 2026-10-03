@@ -29,6 +29,26 @@ function resolveStorage(environment: Environment): StorageFixture {
 }
 
 describe("Increment 3 browser environment isolation", () => {
+  test("clears inherited CI private-files configuration in legacy browser subprocesses", async () => {
+    const inherited = {
+      COMMISSION_FILES_MODE: "enabled", COMMISSION_FILE_RETENTION_MODE: "enforce",
+      COMMISSION_FILES_S3_ENDPOINT: "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
+      COMMISSION_FILES_S3_ACCESS_KEY_ID: "ci-commission-files-key", COMMISSION_FILES_S3_SECRET_ACCESS_KEY: "ci-commission-files-secret",
+      COMMISSION_FILES_QUARANTINE_BUCKET: "pawket-ci-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: "pawket-ci-commission-clean", COMMISSION_FILES_CLAMD_HOST: "127.0.0.1",
+    };
+    try {
+      for (const [name, value] of Object.entries(inherited)) vi.stubEnv(name, value);
+      const { default: config } = await import("../playwright.config");
+      if (!config.webServer || Array.isArray(config.webServer)) throw new Error("Expected one legacy fixture server");
+      const effective = { ...inherited, ...config.webServer.env };
+      expect(effective.COMMISSION_FILES_MODE).toBe("disabled");
+      expect(effective.COMMISSION_FILE_RETENTION_MODE).toBe("report_only");
+      for (const name of Object.keys(inherited).filter((name) => name !== "COMMISSION_FILES_MODE" && name !== "COMMISSION_FILE_RETENTION_MODE")) {
+        expect(effective[name as keyof typeof effective], name).toBe("");
+      }
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   test("defines disjoint enabled, disabled, and legacy browser discovery", () => {
     // Break caught: the acceptance journey is silently skipped or runs under disabled/legacy settings.
     const enabled = (

@@ -14,9 +14,11 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY packages/admin/package.json packages/admin/package.json
 COPY packages/catalog/package.json packages/catalog/package.json
+COPY packages/commission-files/package.json packages/commission-files/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/identity/package.json packages/identity/package.json
+COPY packages/object-storage/package.json packages/object-storage/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/orders/package.json packages/orders/package.json
 COPY packages/payments/package.json packages/payments/package.json

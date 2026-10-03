@@ -13,6 +13,7 @@ export const COMMISSION_ERRORS = [
   "invalid_terms", "invalid_brief", "version_conflict", "policy_changed", "capacity_full",
   "request_limit", "expired", "invalid_transition", "idempotency_conflict", "evidence_mismatch",
   "recent_auth_required", "totp_required", "rate_limited", "dependency_unavailable",
+  "files_disabled", "invalid_reference_files",
 ] as const;
 export type CommissionErrorCode = typeof COMMISSION_ERRORS[number];
 export class CommissionError extends Error {

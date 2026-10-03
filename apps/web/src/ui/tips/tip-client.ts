@@ -12,6 +12,9 @@ export class TipRequestError extends Error {
 
 export async function tipRequest(path: string, init: RequestInit = {}, maximumBytes = 16_384): Promise<unknown> {
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (init.signal?.aborted) controller.abort();
+  init.signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await fetch(path, { ...init, credentials: "same-origin", cache: "no-store", redirect: "error", referrerPolicy: "no-referrer", signal: controller.signal });
@@ -31,7 +34,7 @@ export async function tipRequest(path: string, init: RequestInit = {}, maximumBy
   } catch (error) {
     if (error instanceof TipRequestError) throw error;
     throw new TipRequestError("dependency_unavailable");
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); init.signal?.removeEventListener("abort", abort); }
 }
 export const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 export function readTipSettlement(value: Record<string, unknown>) {

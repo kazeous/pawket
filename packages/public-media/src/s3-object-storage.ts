@@ -8,7 +8,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { types as nodeTypes } from "node:util";
+import { isBoundedS3Text, isProviderCreateOnlyConflict, isProviderNotFound, isValidS3Bucket, isValidS3Endpoint, readExactNativeArray, readExactOwnRecord, readPlainDataRecord } from "@pawket/object-storage";
 
 import {
   ObjectStorageConflictError,
@@ -17,7 +17,6 @@ import {
   type ObjectStoragePort,
 } from "./object-storage-port.js";
 import { isOpaqueVersionId, isRawStorageEtag, MediaPolicyError } from "./media-policy.js";
-import { readExactNativeArray, readExactOwnRecord, readPlainDataRecord } from "./runtime-boundary.js";
 
 export type S3ObjectStorageOptions = Readonly<{
   endpoint: string;
@@ -56,25 +55,19 @@ function validateAreaKey(value: unknown): ObjectLocation {
   return { area: location.area, key: location.key, ...(location.versionId === undefined ? {} : { versionId: location.versionId }) };
 }
 
-function validateEndpoint(endpoint: string): void {
-  if (typeof endpoint !== "string") throw new MediaPolicyError("INVALID_INPUT");
-  try {
-    const parsed = new URL(endpoint);
-    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("endpoint");
-  } catch {
-    throw new MediaPolicyError("INVALID_INPUT");
-  }
+function validateEndpoint(endpoint: unknown): void {
+  if (!isValidS3Endpoint(endpoint)) throw new MediaPolicyError("INVALID_INPUT");
 }
 
-function validateBucket(bucket: string): void {
-  if (typeof bucket !== "string" || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(bucket) || bucket.length < 3 || bucket.length > 63) throw new MediaPolicyError("INVALID_INPUT");
+function validateBucket(bucket: unknown): void {
+  if (!isValidS3Bucket(bucket)) throw new MediaPolicyError("INVALID_INPUT");
 }
 
 export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectStoragePort {
   const optionRecord = readExactOwnRecord(options, ["endpoint", "region", "accessKeyId", "secretAccessKey", "quarantineBucket", "derivativeBucket"], ["forcePathStyle", "now"]);
   if (!optionRecord) throw new MediaPolicyError("INVALID_INPUT");
   validateEndpoint(optionRecord.endpoint as string);
-  if (typeof optionRecord.region !== "string" || !optionRecord.region || optionRecord.region.length > 128 || /[\u0000-\u001f\u007f]/u.test(optionRecord.region) || typeof optionRecord.accessKeyId !== "string" || !optionRecord.accessKeyId || optionRecord.accessKeyId.length > 256 || /[\u0000-\u001f\u007f]/u.test(optionRecord.accessKeyId) || typeof optionRecord.secretAccessKey !== "string" || !optionRecord.secretAccessKey || optionRecord.secretAccessKey.length > 512 || /[\u0000-\u001f\u007f]/u.test(optionRecord.secretAccessKey) || typeof optionRecord.quarantineBucket !== "string" || typeof optionRecord.derivativeBucket !== "string" || !optionRecord.quarantineBucket || !optionRecord.derivativeBucket || optionRecord.quarantineBucket === optionRecord.derivativeBucket || (optionRecord.forcePathStyle !== undefined && typeof optionRecord.forcePathStyle !== "boolean") || (optionRecord.now !== undefined && typeof optionRecord.now !== "function")) {
+  if (!isBoundedS3Text(optionRecord.region, 128) || !isBoundedS3Text(optionRecord.accessKeyId, 256) || !isBoundedS3Text(optionRecord.secretAccessKey, 512) || typeof optionRecord.quarantineBucket !== "string" || typeof optionRecord.derivativeBucket !== "string" || !optionRecord.quarantineBucket || !optionRecord.derivativeBucket || optionRecord.quarantineBucket === optionRecord.derivativeBucket || (optionRecord.forcePathStyle !== undefined && typeof optionRecord.forcePathStyle !== "boolean") || (optionRecord.now !== undefined && typeof optionRecord.now !== "function")) {
     throw new MediaPolicyError("INVALID_INPUT");
   }
   const safeOptions: S3ObjectStorageOptions = {
@@ -158,7 +151,7 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
           sha256: sha256 ?? null,
         } satisfies HeadObjectResult;
       } catch (error) {
-        if (isNotFound(error)) return null;
+        if (isProviderNotFound(error)) return null;
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }
     },
@@ -196,7 +189,7 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
         }
         throw new Error("version pagination exceeded bound");
       } catch (error) {
-        if (isNotFound(error)) return [];
+        if (isProviderNotFound(error)) return [];
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }
     },
@@ -208,7 +201,7 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
         if (!result?.Body || !(typeof result.Body === "object" && ("pipe" in result.Body || Symbol.asyncIterator in result.Body))) throw new Error("malformed GET response");
         return result.Body as NodeJS.ReadableStream;
       } catch (error) {
-        if (isNotFound(error)) throw new MediaPolicyError("MEDIA_NOT_FOUND");
+        if (isProviderNotFound(error)) throw new MediaPolicyError("MEDIA_NOT_FOUND");
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }
     },
@@ -223,7 +216,7 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
         if (!response || !isOpaqueVersionId(response.VersionId)) throw new Error("malformed PUT response");
         return { versionId: response.VersionId };
       } catch (error) {
-        if (request.createOnly === true && isCreateOnlyConflict(error)) {
+        if (request.createOnly === true && isProviderCreateOnlyConflict(error)) {
           throw new ObjectStorageConflictError();
         }
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
@@ -235,125 +228,11 @@ export function createS3ObjectStorage(options: S3ObjectStorageOptions): ObjectSt
       try {
         await client.send(new DeleteObjectCommand(parts));
       } catch (error) {
-        if (isNotFound(error)) throw new MediaPolicyError("MEDIA_NOT_FOUND");
+        if (isProviderNotFound(error)) throw new MediaPolicyError("MEDIA_NOT_FOUND");
         throw new MediaPolicyError("STORAGE_UNAVAILABLE");
       }
     },
   };
-}
-
-function isNotFound(error: unknown): boolean {
-  const visited = new Set<object>();
-  let candidate: unknown = error;
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (!candidate || typeof candidate !== "object" || nodeTypes.isProxy(candidate) || visited.has(candidate)) return false;
-    visited.add(candidate);
-    if (!hasSafeProviderErrorShape(candidate)) return false;
-
-    const name = readOwnDataValue(candidate, "name");
-    if (name.kind === "accessor") return false;
-    const metadata = readOwnDataValue(candidate, "$metadata");
-    if (metadata.kind === "accessor") return false;
-    if (
-      name.kind === "data" &&
-      (name.value === "NotFound" || name.value === "NoSuchKey" || name.value === "NoSuchVersion")
-    ) return true;
-    if (metadata.kind === "data" && hasSafeNotFoundStatus(metadata.value)) return true;
-
-    const cause = readOwnDataValue(candidate, "cause");
-    if (cause.kind === "accessor" || cause.kind === "missing") return false;
-    candidate = cause.value;
-  }
-  return false;
-}
-
-function isCreateOnlyConflict(error: unknown): boolean {
-  const visited = new Set<object>();
-  let candidate: unknown = error;
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (!candidate || typeof candidate !== "object" || nodeTypes.isProxy(candidate) || visited.has(candidate)) return false;
-    visited.add(candidate);
-    if (!hasSafeProviderErrorShape(candidate)) return false;
-
-    const name = readOwnDataValue(candidate, "name");
-    if (name.kind === "accessor") return false;
-    const metadata = readOwnDataValue(candidate, "$metadata");
-    if (metadata.kind === "accessor") return false;
-    if (
-      name.kind === "data" &&
-      (name.value === "PreconditionFailed" || name.value === "ConditionalRequestConflict")
-    ) return true;
-    if (metadata.kind === "data") {
-      const safeMetadata = readPlainDataRecord(metadata.value);
-      if (safeMetadata?.httpStatusCode === 412 || safeMetadata?.httpStatusCode === 409) return true;
-    }
-
-    const cause = readOwnDataValue(candidate, "cause");
-    if (cause.kind === "accessor" || cause.kind === "missing") return false;
-    candidate = cause.value;
-  }
-  return false;
-}
-
-function hasSafeProviderErrorShape(value: object): boolean {
-  let current: object | null = value;
-  let allowsNativeStackAccessor = false;
-  let recognizedPrototype = false;
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (nodeTypes.isProxy(current)) return false;
-    let prototype: object | null;
-    try {
-      prototype = Object.getPrototypeOf(current);
-    } catch {
-      return false;
-    }
-    if (prototype === Object.prototype) {
-      recognizedPrototype = true;
-      break;
-    }
-    if (prototype === Error.prototype) {
-      allowsNativeStackAccessor = true;
-      recognizedPrototype = true;
-      break;
-    }
-    if (prototype === null || nodeTypes.isProxy(prototype)) return false;
-    current = prototype;
-  }
-  if (!recognizedPrototype) return false;
-  try {
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key !== "string")) return false;
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const key of ownKeys as string[]) {
-      const descriptor = descriptors[key];
-      if (!descriptor) return false;
-      if (!("value" in descriptor) && !(allowsNativeStackAccessor && key === "stack" && descriptor.enumerable === false)) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-type OwnDataValue =
-  | Readonly<{ kind: "missing" }>
-  | Readonly<{ kind: "accessor" }>
-  | Readonly<{ kind: "data"; value: unknown }>;
-
-function readOwnDataValue(value: object, key: string): OwnDataValue {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor) return { kind: "missing" };
-    if (!("value" in descriptor)) return { kind: "accessor" };
-    return { kind: "data", value: descriptor.value };
-  } catch {
-    return { kind: "accessor" };
-  }
-}
-
-function hasSafeNotFoundStatus(value: unknown): boolean {
-  const metadata = readPlainDataRecord(value);
-  return metadata?.httpStatusCode === 404;
 }
 
 function paginationMarkerTuple(keyMarker: string | undefined, versionIdMarker: string | undefined): string {

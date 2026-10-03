@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@pawket/commission-files": "workspace:*",
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/identity": "workspace:*",

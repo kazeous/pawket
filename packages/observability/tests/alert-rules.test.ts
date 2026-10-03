@@ -76,6 +76,10 @@ const REQUIRED_INCREMENT_THREE_ALERTS = [
   "PawketCommissionCleanupUnhealthy",
   "PawketCommissionExpiryDelayed",
   "PawketCommissionDeliveryOverdue",
+  "PawketCommissionFileScannerDown",
+  "PawketCommissionFileSignaturesStale",
+  "PawketCommissionFileScanBacklog",
+  "PawketCommissionFileMaintenanceUnhealthy",
 ] as const;
 
 function parseAlertBlocks(source: string) {

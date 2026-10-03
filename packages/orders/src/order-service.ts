@@ -16,7 +16,7 @@ import { commissionExpiredReason as expiredReason, createCommissionOrderPersiste
 import { createCommissionOrderMaintenanceService } from "./order-maintenance.js";
 import { commissionCommandFingerprint } from "./command-fingerprint.js";
 import { requireCommissionPolicy, type CommissionPolicyReadPort } from "./policy-repository.js";
-import type { CommissionCatalogPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort } from "./ports.js";
+import type { CommissionCatalogPort, CommissionFilesPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort } from "./ports.js";
 
 type Order = typeof commissionOrders.$inferSelect;
 type Quote = typeof commissionQuoteRevisions.$inferSelect;
@@ -27,6 +27,7 @@ type Input = Readonly<{
   intakeMode: "disabled" | "enabled"; paymentsMode: "disabled" | "manual_only" | "sepay_optional";
   identity: CommissionIdentityPort; catalog: CommissionCatalogPort; payments: CommissionPaymentsPort; policy: CommissionPolicyReadPort;
   trust: { lockCommissionPage(tx: PawketTransaction, creatorUserId: string): Promise<boolean> };
+  files?: CommissionFilesPort;
   authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   now?: () => Date; idFactory?: () => string;
 }>;
@@ -37,6 +38,11 @@ function actorValid(actor: CommissionActor) {
 function existingValid(command: ExistingCommand) {
   if (!commissionUuid(command.orderId)) commissionFail("invalid_request");
   commissionInteger(command.expectedVersion, 1, 2_147_483_646);
+}
+function referenceIds(value: unknown): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 10 || !value.every(commissionUuid) || new Set(value).size !== value.length) commissionFail("invalid_request");
+  return Object.freeze([...value]);
 }
 export function createCommissionOrderService(input: Input) {
   if (!commissionIdentifier(input.applicationRevision) || input.lookupHmacKey.length < 32) commissionFail("invalid_request");
@@ -129,12 +135,13 @@ export function createCommissionOrderService(input: Input) {
   }
   return {
     paymentsLifecycle,
-    async request(command: Command & { packageId: string; revisionId: string; policyRevisionId: string; acceptTerms: boolean; brief: unknown; abuseKeyHash: string }) {
+    async request(command: Command & { packageId: string; revisionId: string; policyRevisionId: string; acceptTerms: boolean; brief: unknown; abuseKeyHash: string; referenceFileIds?: readonly string[] }) {
       if (!commissionUuid(command.packageId) || !commissionUuid(command.revisionId) || !commissionUuid(command.policyRevisionId) || typeof command.acceptTerms !== "boolean" ||
         !/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u.test(command.abuseKeyHash)) commissionFail("invalid_request");
       const brief = normalizeCommissionBrief(command.brief);
+      const fileIds = referenceIds(command.referenceFileIds);
       const find = async (tx: PawketTransaction) => { const row = await input.catalog.findPackageIdentity(tx, command.packageId); if (!row) commissionFail("not_available"); return row; };
-      return mutate(command, "request", [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash], async (tx) => (await find(tx)).creatorUserId, async (tx) => {
+      return mutate(command, "request", [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash, ...(fileIds.length ? [fileIds] : [])], async (tx) => (await find(tx)).creatorUserId, async (tx) => {
         if (input.intakeMode !== "enabled") commissionFail("intake_disabled");
         const candidate = await find(tx); await participants(tx, candidate.creatorUserId, command.actor.userId);
         const immediate = candidate.route === "fixed_immediate";
@@ -153,6 +160,12 @@ export function createCommissionOrderService(input: Input) {
           expiresAt: immediate ? commissionPaymentExpiry(at) : commissionRequestExpiry(at), createdAt: at, updatedAt: at }).returning();
         if (!order) commissionFail("dependency_unavailable");
         await tx.insert(commissionBriefs).values({ orderId, ...encryptCommissionBrief(input.keyring, orderId, brief), buyerSessionId: command.actor.sessionId, requestId: command.requestId, createdAt: at });
+        if (fileIds.length) {
+          if (!input.files) commissionFail("files_disabled");
+          const attached = await input.files.attachBriefFiles(tx, { orderId, buyerUserId: command.actor.userId, packageId: command.packageId, fileIds, at });
+          if (attached === "disabled") commissionFail("files_disabled");
+          if (attached !== "attached") commissionFail("invalid_reference_files");
+        }
         if (terms) await acceptance(tx, order, "buyer", command.actor, at, terms.policyRevisionId, null, command.requestId);
         if (immediate) {
           await acceptance(tx, order, "creator", { userId: order.creatorUserId, sessionId: data.revision.actorSessionId }, data.revision.publishedAt, terms!.policyRevisionId, null, data.revision.requestId);
@@ -263,14 +276,16 @@ export function createCommissionOrderService(input: Input) {
         const canShowInstructions = order.buyerUserId === command.actor.userId && input.paymentsMode !== "disabled" && order.state === "awaiting_payment" &&
           await paymentsLifecycle.lockSettlement(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now() });
         const payment = await input.payments.projectPayment(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now(), includeInstructions: canShowInstructions });
+        const role = order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const;
+        const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" }) : [];
         const at = now(); if (proofExpiry <= at) commissionFail("not_authorized");
         const effectivePayment = payment && payment.state === "awaiting_transfer" && new Date(payment.expiresAt) <= at
           ? { ...payment, state: "expired" as const, instruction: null } : payment;
-        return { id: order.id, version: order.version, role: order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const,
+        return { id: order.id, version: order.version, role,
           state: order.state as CommissionState, route: order.route, closeReason: order.closeReason, createdAt: order.createdAt.toISOString(), expiresAt: order.expiresAt?.toISOString() ?? null,
           acceptedAt: order.acceptedAt?.toISOString() ?? null, confirmedAt: order.confirmedAt?.toISOString() ?? null, dueAt: order.dueAt?.toISOString() ?? null,
           overdue: !!order.dueAt && order.dueAt <= at, deadlinePassed: !!order.expiresAt && order.expiresAt <= at && ["requested", "quoted", "awaiting_payment"].includes(order.state),
-          package: { id: order.packageId, revisionId: order.packageRevisionId, title: revision.title }, brief: decryptCommissionBrief(input.keyring, order.id, brief),
+          package: { id: order.packageId, revisionId: order.packageRevisionId, title: revision.title }, brief: decryptCommissionBrief(input.keyring, order.id, brief), referenceFiles,
           terms, policy: policy ?? null, currentPolicy: currentPolicy ? { revisionId: currentPolicy.revisionId, document: currentPolicy.document, acceptsOrders: currentPolicy.acceptsOrders } : null,
           quote: quote ? { id: quote.id, revisionNumber: quote.revisionNumber, issuedAt: quote.issuedAt.toISOString(), expiresAt: quote.expiresAt.toISOString() } : null, payment: effectivePayment };
       }));

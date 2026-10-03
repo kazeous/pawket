@@ -4,8 +4,13 @@ import {
   HeadBucketCommand,
   ListObjectVersionsCommand,
   PutBucketVersioningCommand,
-  type S3Client,
+  S3Client,
 } from "@aws-sdk/client-s3";
+
+export async function createVersionedTestBuckets(config: NonNullable<ConstructorParameters<typeof S3Client>[0]>, buckets: readonly string[]): Promise<void> {
+  const client = new S3Client(config);
+  try { await ensureVersionedBuckets(client, buckets); } finally { client.destroy(); }
+}
 
 function isMissingBucket(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;

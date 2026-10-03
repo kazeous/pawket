@@ -58,8 +58,9 @@ import {
   type ObjectStoragePort,
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
-import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation } from "@pawket/observability";
-import { createCommissionOrderService, createCommissionPolicyReadPort } from "@pawket/orders";
+import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation, recordCommissionFileOperation } from "@pawket/observability";
+import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort } from "@pawket/orders";
+import { createCommissionFileAttachmentPort, createCommissionFileService, createS3CommissionFileStorage, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -70,6 +71,7 @@ import {
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
 import { createCommissionHttpHandlers } from "./commission-http.js";
+import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
@@ -94,6 +96,7 @@ export type WebPlatformRuntime = {
   creatorTips: ReturnType<typeof createCreatorTipPaymentService>;
   sepayHandlers: ReturnType<typeof createSePayHttpHandlers>;
   commissionHandlers: ReturnType<typeof createCommissionHttpHandlers>;
+  commissionFileHandlers: ReturnType<typeof createCommissionFileHttpHandlers>;
   commissions: ReturnType<typeof createCommissionOrderService>;
   commissionCatalog: ReturnType<typeof createCommissionPackageService>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
@@ -120,6 +123,11 @@ function unavailableMediaStorage(): ObjectStoragePort {
     putObject: unavailable,
     deleteObject: unavailable,
   };
+}
+
+function unavailableCommissionFileStorage(): CommissionFileStoragePort {
+  const unavailable = async (): Promise<never> => { throw new Error("Commission file storage unavailable"); };
+  return { presignUpload: unavailable, presignDownload: unavailable, head: unavailable, open: unavailable, copyToClean: unavailable, deleteAllVersions: unavailable, headBucket: unavailable };
 }
 
 export function getPlatformRuntime(): WebPlatformRuntime {
@@ -433,8 +441,15 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissionCatalog = createCommissionPackageService({ ...commissionCommon, identity: commissionIdentity, policy: commissionPolicy,
     visibility: publicCatalog, publishingMode: env.CREATOR_PUBLISHING_MODE,
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.COMMISSION_PAYMENTS_MODE }) });
+  const commissionFileStorage = env.COMMISSION_FILES_S3_ENDPOINT && env.COMMISSION_FILES_S3_REGION && env.COMMISSION_FILES_S3_ACCESS_KEY_ID && env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY &&
+    env.COMMISSION_FILES_QUARANTINE_BUCKET && env.COMMISSION_FILES_CLEAN_BUCKET
+    ? createS3CommissionFileStorage({ endpoint: env.COMMISSION_FILES_S3_ENDPOINT, region: env.COMMISSION_FILES_S3_REGION, accessKeyId: env.COMMISSION_FILES_S3_ACCESS_KEY_ID,
+        secretAccessKey: env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY, quarantineBucket: env.COMMISSION_FILES_QUARANTINE_BUCKET, cleanBucket: env.COMMISSION_FILES_CLEAN_BUCKET,
+        forcePathStyle: env.COMMISSION_FILES_S3_FORCE_PATH_STYLE })
+    : unavailableCommissionFileStorage();
   const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
-    policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon) });
+    policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
+    files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
     totpAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
     onCommitted: (replayed) => recordCommissionOperation({ operation: "confirm", outcome: replayed ? "replayed" : "creator_manual" }) });
@@ -447,6 +462,20 @@ export function getPlatformRuntime(): WebPlatformRuntime {
       const results = await Promise.all([
         recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
         ...(actorUserId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) })] : []),
+      ]);
+      return results.every((result) => result.allowed);
+    },
+  });
+  const commissionFiles = createCommissionFileService({ db: database.db, storage: commissionFileStorage, keyring, lookupHmacKey, mode: env.COMMISSION_FILES_MODE,
+    sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
+  const commissionFileHandlers = createCommissionFileHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, files: commissionFiles,
+    onOperation: recordCommissionFileOperation,
+    async throttle({ actorUserId, networkKeyHash, operation }) {
+      const maximumAttempts = operation === "read" ? env.COMMISSION_READ_LIMIT : operation === "file_grant" ? env.COMMISSION_FILES_GRANT_LIMIT : env.COMMISSION_COMMAND_LIMIT;
+      const policy = { action: `commission_${operation}`, now: new Date(), windowMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, blockMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, maximumAttempts };
+      const results = await Promise.all([
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
+        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) }),
       ]);
       return results.every((result) => result.allowed);
     },
@@ -572,6 +601,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     creatorTips,
     sepayHandlers: commandHttp.wrap(sepayHandlers),
     commissionHandlers: commandHttp.wrap(commissionHandlers),
+    commissionFileHandlers,
     commissions,
     commissionCatalog,
     mediaCommandHandlers,

@@ -237,3 +237,36 @@ groups:
         annotations:
           summary: Paid commissions have passed their recorded delivery deadline
           runbook: ops/runbooks/commission-operations.md
+
+      - alert: PawketCommissionFileScannerDown
+        expr: (pawket_commission_file_scanner_up == 0) and on(job, instance) (pawket_worker_scan_healthy{scan="commission_files"} >= 0)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The commission file scanner has not answered for fifteen minutes; uploads wait in quarantine
+          runbook: ops/runbooks/commission-files.md
+      - alert: PawketCommissionFileSignaturesStale
+        expr: pawket_commission_file_signature_age_seconds > 86400
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ClamAV signatures are older than 24 hours; scans are paused until they refresh
+          runbook: ops/runbooks/commission-files.md
+      - alert: PawketCommissionFileScanBacklog
+        expr: pawket_commission_files_oldest_scanning_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A commission file has waited more than an hour for its malware scan
+          runbook: ops/runbooks/commission-files.md
+      - alert: PawketCommissionFileMaintenanceUnhealthy
+        expr: (pawket_worker_scan_healthy{scan="commission_files"} == 0) or (time() - pawket_worker_last_success_timestamp_seconds{scan="commission_files"} >= 900)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commission file maintenance is failing or stale; expiry, retries and purges are not running
+          runbook: ops/runbooks/commission-files.md
