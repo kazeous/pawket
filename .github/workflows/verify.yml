@@ -310,6 +310,15 @@ jobs:
       - name: Install dependencies
         run: corepack pnpm install --frozen-lockfile
 
+      # The commission reference-file journeys scan uploads with ClamAV. Start it
+      # early so it is ready by the time the Increment 6 suite runs.
+      - name: Start ClamAV for commission browser journeys
+        run: >-
+          docker run -d --name pawket-ci-clamd -p 127.0.0.1:3310:3310
+          -e CLAMAV_NO_FRESHCLAMD=true
+          -v "$GITHUB_WORKSPACE/ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro"
+          clamav/clamav:1.5.4-debian@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578
+
       - name: Wait for disposable private S3Mock
         shell: bash
         run: >-
@@ -339,6 +348,16 @@ jobs:
         env:
           PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment4_tips_browser
         run: corepack pnpm test:browser:increment-five
+
+      - name: Wait for ClamAV
+        shell: bash
+        run: |
+          for attempt in $(seq 1 90); do
+            if printf 'PING\n' | nc -w 2 127.0.0.1 3310 | grep -q PONG; then exit 0; fi
+            sleep 2
+          done
+          docker logs pawket-ci-clamd
+          exit 1
 
       - name: Increment 6 synthetic commission browser journeys
         env:
