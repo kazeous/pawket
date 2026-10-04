@@ -56,7 +56,7 @@ test("public creator page offers contextual reporting without reporter identity"
 });
 
 test("owner report queue hides and restores the target with fresh TOTP without reporter identity", async ({ page }) => {
-  // Break caught: owner triage leaks reporter identity or applies unaudited visibility changes without TOTP step-up.
+  // Break caught: owner triage leaks reporter identity or applies unaudited visibility changes without MFA step-up.
   await createIndependentAuthenticatedReport(page);
   await signInAsOwner(page);
   await page.goto("/admin/content-reports");

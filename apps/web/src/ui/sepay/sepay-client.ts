@@ -29,7 +29,7 @@ export function readSePayQueue(value: unknown): SePayReviewQueue {
 export function sepayErrorText(code: string): string {
   switch (code) {
     case "authentication_required": case "recent_auth_required": return "Hãy đăng nhập lại rồi quay về đây để tiếp tục.";
-    case "totp_required": return "Hãy xác thực bằng mã từ ứng dụng xác thực trước khi tiếp tục.";
+    case "totp_required": return "Hãy xác thực lại bằng mã ứng dụng xác thực hoặc khóa truy cập trước khi tiếp tục.";
     case "payments_disabled": return "Thanh toán đang tạm đóng. Bạn vẫn có thể xem lịch sử.";
     case "provider_unavailable": case "provider_contract_pending": case "contract_unverified": return "Kết nối SePay chưa sẵn sàng. Hệ thống chưa thể tự động xác nhận giao dịch.";
     case "open_manual_intents": return "Vẫn còn thanh toán đang chờ đối chiếu thủ công. Đối chiếu các giao dịch đó hoặc đợi chúng hết hạn trước khi bật tự đối soát.";

@@ -12,7 +12,8 @@ describe("sign-in notices", () => {
     for (const code of ["login_required", "session_revoked", "invalid_response", "anything-else", undefined]) {
       expect(oidcNoticeNeedsReauthentication(code)).toBe(false);
     }
-    expect(oidcNotice("assurance_required")).toContain("mã ứng dụng xác thực");
+    expect(oidcNotice("assurance_required")).toContain("mã ứng dụng xác thực hoặc khóa truy cập");
+    expect(oidcNotice("assurance_required")).not.toContain("chưa thay được");
   });
   test("unknown codes fall back to the generic message and no code shows nothing", () => {
     expect(oidcNotice("anything-else")).toBe(oidcNotice("invalid_response"));

@@ -24,7 +24,7 @@ export function readOwnerTipPolicyData(value: unknown): OwnerTipPolicyData {
 export const ownerTipPolicyRequest = (path: string, init?: RequestInit) => tipRequest(path, init, 131_072);
 export function ownerTipPolicyError(code: string): string {
   switch (code) {
-    case "owner_totp_required": return "Xác nhận mã TOTP để lưu đúng thay đổi đã xem lại.";
+    case "owner_totp_required": return "Xác thực lại bằng mã ứng dụng xác thực hoặc khóa truy cập để lưu đúng thay đổi đã xem lại.";
     case "authentication_required": return "Phiên đăng nhập đã hết hiệu lực. Đăng nhập lại để tiếp tục.";
     case "account_changed": return "Bạn đang đăng nhập bằng tài khoản khác. Đăng nhập lại đúng tài khoản đã mở trang này để tiếp tục; nội dung đang nhập vẫn được giữ nguyên.";
     case "owner_required": return "Tài khoản hiện tại không có quyền quản lý chính sách tip.";
