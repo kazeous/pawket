@@ -102,6 +102,8 @@ describe("release-gate workflow contract", () => {
         // Both findings are the fixed HTTP unit-test request key, not credentials.
         "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:20",
         "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:31",
+        // The valkey image tag ("val-key") copied into the parallel browser job's services.
+        "a48241a5ae8acbf91a92918ca52fa0fc702408e9:.github/workflows/verify.yml:generic-api-key:266",
       ].join("\n"),
     );
   });

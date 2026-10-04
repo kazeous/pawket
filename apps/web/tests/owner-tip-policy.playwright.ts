@@ -149,7 +149,7 @@ test("creator SSO review preserves an uncertain save and confirms it only once",
     await page.getByRole("button", { name: "Dừng nhận tip mới", exact: true }).click();
     await page.getByRole("button", { name: "Lưu cài đặt tip", exact: true }).click();
     await expect(page.getByRole("button", { name: "Thử lại lần lưu này" })).toBeVisible();
-    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
+    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 3_601_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
     await page.getByRole("button", { name: "Thử lại lần lưu này" }).click();
     await expect(page).toHaveURL(/\/auth\/review\/[0-9a-f-]{36}$/u);
     await expect(page.getByRole("button", { name: "Xác nhận thực hiện", exact: true })).toHaveCount(0);
