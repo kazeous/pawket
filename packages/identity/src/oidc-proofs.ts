@@ -2,7 +2,7 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import { identityOidcProofBindings, identityStepUpProofs, type PawketTransaction } from "@pawket/database";
 import { createOidcAssurancePort } from "./oidc-assurance-port.js";
 import type { OidcSessionProvider } from "./oidc-session.js";
-import { OIDC_PRIMARY_FRESH_MS, OIDC_TOTP_FRESH_MS } from "./oidc-policy.js";
+import { OIDC_PRIMARY_FRESH_MS, OIDC_MFA_FRESH_MS } from "./oidc-policy.js";
 import { StepUpProofError } from "./step-up-error.js";
 
 export type OidcFreshness = { primaryFreshMs?: number; totpFreshMs?: number };
@@ -15,7 +15,7 @@ export function createOidcProofRepository(provider: OidcSessionProvider, clock: 
   async function validity(tx: PawketTransaction, input: ProofInput) {
     if (!validDigest(input.commandDigest) || !/^[a-z][a-z0-9_.-]{2,63}$/u.test(input.actionClass)) return null;
     const primaryMs = Math.min(input.primaryFreshMs ?? OIDC_PRIMARY_FRESH_MS, OIDC_PRIMARY_FRESH_MS);
-    const totpMs = Math.min(input.totpFreshMs ?? OIDC_TOTP_FRESH_MS, OIDC_TOTP_FRESH_MS);
+    const totpMs = Math.min(input.totpFreshMs ?? OIDC_MFA_FRESH_MS, OIDC_MFA_FRESH_MS);
     if (![primaryMs, totpMs].every((value) => Number.isSafeInteger(value) && value > 0)) return null;
     const proof = await assurance.read(tx, input, input.now);
     if (!proof) return null;

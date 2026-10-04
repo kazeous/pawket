@@ -197,7 +197,7 @@ export function createOidcSessionStore(deps: { db: PawketDatabase; config: OidcP
           session.expiresAt <= now || session.idleExpiresAt <= now || session.absoluteExpiresAt <= now) return reject("session_revoked");
         if (transaction.purpose === "lease_check") {
           // A silent check can only extend liveness. New enrollment or a different IdP session requires an interactive login.
-          if (sidecar.sid !== evidence.sid || sidecar.totpStatus !== evidence.totpStatus) {
+          if (sidecar.sid !== evidence.sid || sidecar.totpStatus !== evidence.mfaStatus) {
             await revokeOidcUserSessions(tx, { userId: user.id, now, reason: "idp_assurance_changed", sessionIds: [session.id] });
             return reject("session_revoked");
           }
@@ -205,24 +205,24 @@ export function createOidcSessionStore(deps: { db: PawketDatabase; config: OidcP
           try { assertOidcStepUp(evidence, { expectedSubject: transaction.expectedSubject!, requestedAt: transaction.createdAt, now, owner }); }
           catch { return reject("assurance_required"); }
           await tx.update(identitySessions).set({ token: hashOpaqueToken(input.newSessionToken, "identity-session"),
-            primaryAuthenticatedAt: evidence.primaryAt, mfaVerifiedAt: evidence.totpAt, updatedAt: now }).where(eq(identitySessions.id, session.id));
+            primaryAuthenticatedAt: evidence.primaryAt, mfaVerifiedAt: evidence.mfaAt, updatedAt: now }).where(eq(identitySessions.id, session.id));
         }
         await tx.update(identityOidcSessions).set({ sid: evidence.sid, primaryMethod: transaction.purpose === "step_up" ? evidence.primaryMethod : sidecar.primaryMethod,
-          totpStatus: evidence.totpStatus, evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt,
+          totpStatus: evidence.mfaStatus, evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt,
           idpValidUntil: oidcLeaseDeadline(transaction.createdAt, session.expiresAt), transactionId: transaction.id }).where(eq(identityOidcSessions.sessionId, session.id));
         return { ok: true, userId: user.id, sessionId: session.id, authorizationVersion, expiresAt: session.absoluteExpiresAt, rotated: transaction.purpose === "step_up" };
       }
-      if (owner && (evidence.totpStatus !== "enrolled" || !evidence.totpAt)) return reject("assurance_required");
+      if (owner && (evidence.mfaStatus !== "enrolled" || !evidence.mfaAt)) return reject("assurance_required");
       if (expired()) return reject("transaction_expired");
       const policy = resolveSessionPolicy({ kind: owner ? "owner" : "user", now, lifetimes: deps.lifetimes });
       const expiresAt = new Date(Math.min(policy.absoluteExpiresAt.getTime(), policy.idleExpiresAt.getTime()));
       const sessionId = randomUUID();
       await tx.insert(identitySessions).values({ id: sessionId, userId: user.id, token: hashOpaqueToken(input.newSessionToken, "identity-session"),
         createdAt: now, updatedAt: now, lastUsedAt: now, assuranceState: "active", primaryAuthenticatedAt: evidence.primaryAt,
-        mfaVerifiedAt: evidence.totpAt, authorizationVersion, expiresAt, ...policy,
+        mfaVerifiedAt: evidence.mfaAt, authorizationVersion, expiresAt, ...policy,
         ipAddress: input.networkKey, userAgent: normalizeUserAgentFamily(input.userAgent) });
       await tx.insert(identityOidcSessions).values({ sessionId, userId: user.id, accountId: account.id, clientId: config.clientId,
-        providerRevision: config.providerRevision, sid: evidence.sid, primaryMethod: evidence.primaryMethod, totpStatus: evidence.totpStatus,
+        providerRevision: config.providerRevision, sid: evidence.sid, primaryMethod: evidence.primaryMethod, totpStatus: evidence.mfaStatus,
         evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt, idpValidUntil: oidcLeaseDeadline(transaction.createdAt, expiresAt), transactionId: transaction.id });
       if (transaction.purpose === "owner_link") await appendAdminAuditEvent(tx, { actorUserId: user.id, actorSessionId: sessionId,
         subjectType: "identity_user", subjectId: user.id, action: "identity.oidc_owner_link_completed", outcome: "succeeded", reasonCode: "signed_browser_proof",
