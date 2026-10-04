@@ -102,8 +102,8 @@ test("0028→current preserves manual/provider tips through second-factor column
     expect(await snapshot()).toEqual(expected);
     const confirmation = captured.get("payment_confirmations")!.find((row) => row.payment_intent_id === manualIntent.id)!;
     expect(confirmation.totp_verified_at).not.toBeNull();
-    expect(await client`select mfa_verified_at from payment_confirmations where payment_intent_id = ${manualIntent.id}`)
-      .toEqual([{ mfa_verified_at: new Date(String(confirmation.totp_verified_at)) }]);
+    expect(await client`select mfa_verified_at = ${String(confirmation.totp_verified_at)}::timestamptz as preserved
+      from payment_confirmations where payment_intent_id = ${manualIntent.id}`).toEqual([{ preserved: true }]);
     expect(await client`select count(*)::int as count from commission_orders`).toEqual([{ count: 0 }]);
     expect(await client`select purpose, count(*)::int as count from payment_intents where commission_order_id is null group by purpose`).toEqual([{ purpose: "tip", count: 6 }]);
     // Settlement SQL remains usable with the current factor column when commission creation is off.
