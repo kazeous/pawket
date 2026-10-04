@@ -27,7 +27,7 @@ async function fixture(totp = false) {
   const result = await transactions.complete({ id: transaction.id, now }, (tx, transaction) => sessions.accept(tx, { transaction, now,
     newSessionToken: opaque(), evidence: { issuer: config.issuer, subject, sid: randomUUID(), email: `${subject}@example.test`,
       canonicalEmail: `${subject}@example.test`, emailVerified: true, name: "Fixture", primaryAt: now, primaryMethod: "password",
-      totpStatus: totp ? "enrolled" : "not_enrolled", totpAt: totp ? now : null, providerRevision: config.providerRevision } }));
+      mfaStatus: totp ? "enrolled" : "not_enrolled", mfaAt: totp ? now : null, providerRevision: config.providerRevision } }));
   if (!result.ok) throw new Error(result.code);
   return { userId: result.userId, sessionId: result.sessionId, actionClass: "payments.confirm", commandDigest: digest(subject), now };
 }

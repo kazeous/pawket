@@ -28,7 +28,7 @@ afterAll(() => database.close());
 function evidence(overrides: Partial<OidcEvidence> = {}): OidcEvidence {
   const id = randomUUID();
   return { issuer: config.issuer, subject: id, sid: randomUUID(), email: `${id}@example.test`, canonicalEmail: `${id}@example.test`,
-    emailVerified: true, name: "Buyer fixture", primaryAt: now, primaryMethod: "password", totpStatus: "not_enrolled", totpAt: null,
+    emailVerified: true, name: "Buyer fixture", primaryAt: now, primaryMethod: "password", mfaStatus: "not_enrolled", mfaAt: null,
     providerRevision: config.providerRevision, ...overrides };
 }
 async function prepared(e: OidcEvidence, intent: OidcTransactionIntent = { purpose: "login" }, startedAt = now) {
@@ -165,9 +165,9 @@ describe("OIDC provisioning and revocation", () => {
     expect((await session(first.sessionId)).revokedAt).not.toBeNull();
   });
   test("silent lease renews from transaction start and preserves primary/MFA times", async () => {
-    const e = evidence({ totpStatus: "enrolled", totpAt: now }); const first = await login(e);
+    const e = evidence({ mfaStatus: "enrolled", mfaAt: now }); const first = await login(e);
     const actor = { userId: first.userId, sessionId: first.sessionId, authorizationVersion: 1, subject: e.subject };
-    const pending = await prepared({ ...e, primaryAt: plus(60_000), totpAt: plus(60_000) }, { purpose: "lease_check", actor }, plus(120_000));
+    const pending = await prepared({ ...e, primaryAt: plus(60_000), mfaAt: plus(60_000) }, { purpose: "lease_check", actor }, plus(120_000));
     expect(await pending.finish(plus(180_000))).toMatchObject({ ok: true, rotated: false });
     const [sidecar] = await db.select().from(identityOidcSessions).where(eq(identityOidcSessions.sessionId, first.sessionId));
     expect(sidecar!.idpValidUntil).toEqual(plus(420_000));
@@ -186,7 +186,7 @@ describe("OIDC provisioning and revocation", () => {
   test("new MFA enrollment during a silent check revokes the old session", async () => {
     const e = evidence(); const first = await login(e);
     const actor = { userId: first.userId, sessionId: first.sessionId, authorizationVersion: 1, subject: e.subject };
-    expect(await (await prepared({ ...e, totpStatus: "enrolled" }, { purpose: "lease_check", actor })).finish()).toEqual({ ok: false, code: "session_revoked" });
+    expect(await (await prepared({ ...e, mfaStatus: "enrolled" }, { purpose: "lease_check", actor })).finish()).toEqual({ ok: false, code: "session_revoked" });
     expect((await session(first.sessionId)).revocationReason).toBe("idp_assurance_changed");
   });
   test("step-up rotates cookie and rejects fresh tokens carrying old authentication", async () => {
@@ -243,7 +243,7 @@ describe("OIDC provisioning and revocation", () => {
     expect((await session(first.sessionId)).revokedAt).not.toBeNull();
   });
   test("owner binding requires a pinned subject and fresh TOTP, retaining owner ID and roles", async () => {
-    const userId = randomUUID(); const e = evidence({ totpStatus: "enrolled", totpAt: now });
+    const userId = randomUUID(); const e = evidence({ mfaStatus: "enrolled", mfaAt: now });
     await db.insert(identityUsers).values({ id: userId, name: "Owner", email: e.email, canonicalEmail: e.canonicalEmail,
       emailVerified: true, emailVerifiedAt: now, emailVerificationProvenance: "password_email_challenge" });
     await db.insert(identityRoleGrants).values({ userId, role: "owner", grantSource: "bootstrap_cli" });
@@ -251,7 +251,7 @@ describe("OIDC provisioning and revocation", () => {
     expect(await (await prepared(e, intent)).finish()).toEqual({ ok: false, code: "actor_changed" });
     await db.insert(identityOidcOwnerLinks).values({ userId, issuer: config.issuer, clientId: config.clientId, subject: e.subject,
       providerRevision: config.providerRevision, invitationHash: opaque(), approvedAt: now, expiresAt: plus(3_600_000) });
-    expect(await (await prepared({ ...e, totpAt: null }, intent)).finish()).toEqual({ ok: false, code: "assurance_required" });
+    expect(await (await prepared({ ...e, mfaAt: null }, intent)).finish()).toEqual({ ok: false, code: "assurance_required" });
     const result = await (await prepared(e, intent)).finish();
     expect(result).toMatchObject({ ok: true, userId, authorizationVersion: 2 });
     expect((await db.select().from(identityRoleGrants).where(eq(identityRoleGrants.userId, userId)))[0]!.state).toBe("active");
