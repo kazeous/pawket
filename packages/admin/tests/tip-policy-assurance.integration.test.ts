@@ -43,14 +43,14 @@ beforeAll(async () => {
   await db.insert(identityRoleGrants).values({ userId: actor.userId, role: "owner", state: "active", grantSource: "bootstrap_cli" });
   await db.insert(identitySessions).values({ id: actor.sessionId, userId: actor.userId, token: "synthetic-policy-session-hash", assuranceState: "active", authorizationVersion: 1, createdAt: at, updatedAt: at,
     primaryAuthenticatedAt: at, mfaVerifiedAt: at, expiresAt: new Date(at.getTime() + 3_600_000), idleExpiresAt: new Date(at.getTime() + 3_600_000), absoluteExpiresAt: new Date(at.getTime() + 3_600_000), lastUsedAt: at });
-  await attachSyntheticOidcSession(db, { ...actor, now: at, totpStatus: "enrolled" });
+  await attachSyntheticOidcSession(db, { ...actor, now: at, mfaStatus: "enrolled" });
   subject = (await db.select().from(identityAccounts).where(eq(identityAccounts.userId, actor.userId)))[0]!.accountId;
   const commands = createOidcPendingCommandRepository({ db, keyring, fingerprintKey: key, provider: syntheticOidcProvider, now: () => at, actionFor: () => "owner.tip_policy_update" });
   context = createOidcCommandContext({ provider: syntheticOidcProvider, commands, now: () => at });
   ports = createOwnerTipPolicyAssurancePort({ provider: syntheticOidcProvider, authorizeCommand: context.authorize, now: () => at });
 });
 beforeEach(async () => {
-  await db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
+  await db.update(identityOidcSessions).set({ mfaStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
   await db.update(identityUsers).set({ twoFactorEnabled: true, accessStatus: "active", authorizationVersion: 1, emailVerified: true }).where(eq(identityUsers.id, actor.userId));
   await db.update(identitySessions).set({ revokedAt: null, revocationReason: null, mfaVerifiedAt: at, primaryAuthenticatedAt: at, authorizationVersion: 1, expiresAt: new Date(at.getTime() + 3_600_000) }).where(eq(identitySessions.id, actor.sessionId));
   await db.update(identityRoleGrants).set({ state: "active", revokedAt: null }).where(eq(identityRoleGrants.userId, actor.userId));
@@ -81,8 +81,8 @@ describe("platform policy real owner assurance", () => {
     if (state === "revoked_session") await db.update(identitySessions).set({ revokedAt: at, revocationReason: "user_revoked" }).where(eq(identitySessions.id, actor.sessionId));
     if (state === "role_revoked") await db.update(identityRoleGrants).set({ state: "revoked", revokedAt: at }).where(eq(identityRoleGrants.userId, actor.userId));
     if (state === "stale_version") await db.update(identityUsers).set({ authorizationVersion: 2 }).where(eq(identityUsers.id, actor.userId));
-    if (state === "missing_totp") await db.update(identityOidcSessions).set({ totpStatus: "not_enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
-    if (state === "unknown_enrollment") await db.update(identityOidcSessions).set({ totpStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
+    if (state === "missing_totp") await db.update(identityOidcSessions).set({ mfaStatus: "not_enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
+    if (state === "unknown_enrollment") await db.update(identityOidcSessions).set({ mfaStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
     if (state === "blocked") await db.update(identityUsers).set({ accessStatus: "access_suspended" }).where(eq(identityUsers.id, actor.userId));
     if (state === "expired") await db.update(identitySessions).set({ expiresAt: at }).where(eq(identitySessions.id, actor.sessionId));
     await expect(savePolicy(input)).rejects.toMatchObject({ code: "FORBIDDEN" });

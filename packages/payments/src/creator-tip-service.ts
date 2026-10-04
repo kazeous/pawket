@@ -11,13 +11,13 @@ import { createManualPaymentConfirmationService } from "./manual-payment-service
 import { isTipPayment } from "./payment-purpose.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
-type Assurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date }>;
+type Assurance = Readonly<{ primaryAuthenticatedAt: Date; mfaEnrolled: boolean; mfaVerifiedAt: Date | null; sessionExpiresAt: Date }>;
 type GuestContent = Readonly<{ name: string | null; message: string | null }>;
 type Intent = typeof paymentIntents.$inferSelect;
 type Input = Readonly<{
   applicationRevision: string;
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; paymentsMode: TipPaymentsMode;
-  pageSize: number; recentAuthMs: number; totpAuthMs: number;
+  pageSize: number; recentAuthMs: number; mfaAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
   authorizeCommand?: (tx: PawketTransaction, actor: Actor) => Promise<void>;
   tips: { completeTip(tx: PawketTransaction, command: { tipId: string; creatorUserId: string; amountVnd: number; at: Date }): Promise<boolean>;
@@ -39,7 +39,7 @@ export function createCreatorTipPaymentService(input: Input) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100 ||
     !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
-    !Number.isSafeInteger(input.totpAuthMs) || input.totpAuthMs < 30_000 || input.totpAuthMs > 300_000) fail("invalid_request");
+    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 300_000) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date());
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };
@@ -49,14 +49,14 @@ export function createCreatorTipPaymentService(input: Input) {
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   function validateAssurance(proof: Assurance | null, at: Date, fresh: boolean): Assurance {
-    const fields = readTipPortRecord(proof, ["primaryAuthenticatedAt", "sessionExpiresAt", "totpEnrolled", "totpVerifiedAt"]);
-    if (!fields || !validDate(fields.primaryAuthenticatedAt) || !validDate(fields.sessionExpiresAt) || typeof fields.totpEnrolled !== "boolean" ||
-      (fields.totpVerifiedAt !== null && !validDate(fields.totpVerifiedAt))) fail("not_authorized");
-    proof = { primaryAuthenticatedAt: fields.primaryAuthenticatedAt, sessionExpiresAt: fields.sessionExpiresAt, totpEnrolled: fields.totpEnrolled, totpVerifiedAt: fields.totpVerifiedAt };
+    const fields = readTipPortRecord(proof, ["primaryAuthenticatedAt", "sessionExpiresAt", "mfaEnrolled", "mfaVerifiedAt"]);
+    if (!fields || !validDate(fields.primaryAuthenticatedAt) || !validDate(fields.sessionExpiresAt) || typeof fields.mfaEnrolled !== "boolean" ||
+      (fields.mfaVerifiedAt !== null && !validDate(fields.mfaVerifiedAt))) fail("not_authorized");
+    proof = { primaryAuthenticatedAt: fields.primaryAuthenticatedAt, sessionExpiresAt: fields.sessionExpiresAt, mfaEnrolled: fields.mfaEnrolled, mfaVerifiedAt: fields.mfaVerifiedAt };
     if (proof.sessionExpiresAt <= at) fail("not_authorized");
     const age = at.getTime() - proof.primaryAuthenticatedAt.getTime();
     if (age < 0 || (fresh && age > input.recentAuthMs)) fail("recent_auth_required");
-    if (fresh && proof.totpEnrolled && (!proof.totpVerifiedAt || proof.totpVerifiedAt > at || proof.totpVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.totpVerifiedAt.getTime() > input.totpAuthMs)) fail("totp_required");
+    if (fresh && proof.mfaEnrolled && (!proof.mfaVerifiedAt || proof.mfaVerifiedAt > at || proof.mfaVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.mfaVerifiedAt.getTime() > input.mfaAuthMs)) fail("totp_required");
     return proof;
   }
   function encodeCursor(row: Intent, actorUserId: string, state: PaymentIntentState): string {

@@ -37,7 +37,7 @@ async function authorize(evidence: OidcEvidence, intent: OidcTransactionIntent, 
 async function fixture() {
   const subject = randomUUID(); const evidence: OidcEvidence = { issuer: config.issuer, subject, sid: randomUUID(), email: `${subject}@example.test`,
     canonicalEmail: `${subject}@example.test`, emailVerified: true, name: "Fixture", primaryAt: now, primaryMethod: "password",
-    totpStatus: "not_enrolled", totpAt: null, providerRevision: config.providerRevision };
+    mfaStatus: "not_enrolled", mfaAt: null, providerRevision: config.providerRevision };
   const actor = await authorize(evidence, { purpose: "login" });
   const pending = await commands.prepare({ actor, payload, now });
   return { actor, pending, async reauthenticate() {

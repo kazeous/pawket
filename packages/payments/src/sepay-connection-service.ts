@@ -344,7 +344,7 @@ export function createSePayConnectionService(input: Input) {
             if (cutover && (cutover.connectionId !== connection.id || cutover.creatorUserId !== command.actor.userId || cutover.providerTenantId !== connection.providerTenantId || cutover.providerAccountId !== connection.providerAccountId)) sepayFail("account_conflict");
             if (!cutover) await tx.insert(paymentsSepayAccountCutovers).values({ id: randomUUID(), accountFingerprint: destination.accountFingerprint, creatorUserId: command.actor.userId,
               connectionId: connection.id, providerEnvironment: input.environment, providerTenantId: grant.binding.tenantId, providerAccountId: grant.binding.accountId,
-              actorSessionId: command.actor.sessionId, primaryAuthenticatedAt: proof.primaryAuthenticatedAt, totpVerifiedAt: proof.totpEnrolled ? proof.totpVerifiedAt : null, cutoverAt: now() });
+              actorSessionId: command.actor.sessionId, primaryAuthenticatedAt: proof.primaryAuthenticatedAt, mfaVerifiedAt: proof.mfaEnrolled ? proof.mfaVerifiedAt : null, cutoverAt: now() });
             patch.automationEnabled = true;
           } else sepayFail("invalid_request");
         }

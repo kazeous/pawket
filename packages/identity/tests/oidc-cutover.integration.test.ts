@@ -79,7 +79,7 @@ test("cutover dry run, conflict, delivery drain, apply and SSO-only rollback reh
   const buyerSubject = randomUUID();
   const minted = await transactions.complete({ id: txn.id, now: at }, (tx, transaction) => sessions.accept(tx, { transaction, now: at, newSessionToken: newToken,
     evidence: { issuer: provider.issuer, subject: buyerSubject, sid: randomUUID(), email: "buyer-cutover@example.test", canonicalEmail: "buyer-cutover@example.test", emailVerified: true,
-      name: "Buyer", primaryAt: at, primaryMethod: "password", totpStatus: "not_enrolled", totpAt: null, providerRevision: provider.providerRevision } }));
+      name: "Buyer", primaryAt: at, primaryMethod: "password", mfaStatus: "not_enrolled", mfaAt: null, providerRevision: provider.providerRevision } }));
   expect(minted.ok).toBe(true);
   expect(await createOidcSessionResolver({ db, provider })({ token: newToken, now: new Date() })).not.toBeNull();
   expect((await db.select().from(identityAccounts).where(eq(identityAccounts.id, credentialId)))[0]).toEqual(beforeCredential[0]);

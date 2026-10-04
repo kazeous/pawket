@@ -191,7 +191,7 @@ export const paymentConfirmations = pgTable("payment_confirmations", {
   attestedReceived: boolean("attested_received"),
   actorSessionId: text("actor_session_id"),
   primaryAuthenticatedAt: time("primary_authenticated_at"),
-  totpVerifiedAt: time("totp_verified_at"),
+  mfaVerifiedAt: time("mfa_verified_at"),
   idempotencyKeyHash: text("idempotency_key_hash"),
   requestId: text("request_id").notNull(),
   confirmedAt: time("confirmed_at").notNull(),
@@ -205,12 +205,12 @@ export const paymentConfirmations = pgTable("payment_confirmations", {
       and ${table.attestedReceived} = true and ${table.actorSessionId} is not null and ${table.primaryAuthenticatedAt} is not null and ${table.idempotencyKeyHash} is not null)
     or (${table.source} = 'sepay_automatic' and ${table.bankTransactionFingerprint} is null and ${table.providerTransactionId} is not null
       and ${table.workerIdentity} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' and ${table.attestedReceived} is null and ${table.actorSessionId} is null
-      and ${table.primaryAuthenticatedAt} is null and ${table.totpVerifiedAt} is null and ${table.idempotencyKeyHash} is null)
+      and ${table.primaryAuthenticatedAt} is null and ${table.mfaVerifiedAt} is null and ${table.idempotencyKeyHash} is null)
     or (${table.source} = 'creator_reviewed_sepay' and ${table.bankTransactionFingerprint} is null and ${table.providerTransactionId} is not null and ${table.workerIdentity} is null
       and ${table.attestedReceived} = true and ${table.actorSessionId} is not null and ${table.primaryAuthenticatedAt} is not null and ${table.idempotencyKeyHash} is not null), false)`),
   check("payment_confirmations_bank_txn_check", hmacCheck(table.bankTransactionFingerprint)),
   check("payment_confirmations_idempotency_check", hmacCheck(table.idempotencyKeyHash)),
   check("payment_confirmations_assurance_time_check", sql`${table.primaryAuthenticatedAt} <= ${table.confirmedAt}
     and ${table.primaryAuthenticatedAt} >= ${table.confirmedAt} - interval '15 minutes'
-    and (${table.totpVerifiedAt} is null or (${table.totpVerifiedAt} <= ${table.confirmedAt} and ${table.totpVerifiedAt} >= ${table.confirmedAt} - interval '5 minutes'))`),
+    and (${table.mfaVerifiedAt} is null or (${table.mfaVerifiedAt} <= ${table.confirmedAt} and ${table.mfaVerifiedAt} >= ${table.confirmedAt} - interval '5 minutes'))`),
 ]);

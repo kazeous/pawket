@@ -44,7 +44,7 @@ export function readCreatorTipQueue(value: unknown): CreatorTipQueue {
 export function creatorTipErrorText(code: string): string {
   switch (code) {
     case "recent_auth_required": case "authentication_required": return "Hãy đăng nhập lại để xác thực gần đây, rồi mở lại trang tip để đối chiếu.";
-    case "totp_required": return "Nhập mã từ ứng dụng xác thực để tiếp tục xác nhận.";
+    case "totp_required": return "Xác thực lại bằng mã ứng dụng xác thực hoặc khóa truy cập để tiếp tục xác nhận.";
     case "evidence_mismatch": case "invalid_amount": case "invalid_request": return "Dữ liệu đối chiếu chưa khớp hoặc chưa hợp lệ. Kiểm tra giao dịch ngân hàng và nhập lại.";
     case "bank_transaction_conflict": return "Mã giao dịch ngân hàng này đã được dùng để xác nhận tip. Kiểm tra lại lịch sử trước khi tiếp tục.";
     case "intent_not_pending": case "idempotency_conflict": return "Tip này không còn có thể xác nhận bằng yêu cầu này. Tải lại danh sách để kiểm tra trạng thái.";

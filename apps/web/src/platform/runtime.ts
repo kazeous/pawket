@@ -159,14 +159,15 @@ export function getPlatformRuntime(): WebPlatformRuntime {
             ? "Vietcombank"
             : "Configured operating bank",
   } as const;
+  // Legacy TOTP environment variable names configure freshness for either second factor.
   const commandFor: typeof oidcCommand = (payload) => {
     const command = oidcCommand(payload, {
-    tip: { primaryFreshMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpFreshMs: env.TIP_TOTP_AUTH_SECONDS * 1000 },
-    commission: { primaryFreshMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, totpFreshMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000 },
+    tip: { primaryFreshMs: env.TIP_RECENT_AUTH_SECONDS * 1000, mfaFreshMs: env.TIP_TOTP_AUTH_SECONDS * 1000 },
+    commission: { primaryFreshMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaFreshMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000 },
     });
     return command && { ...command, policy: { ...command.policy,
       primaryFreshMs: Math.min(command.policy.primaryFreshMs ?? 900_000, env.AUTH_PRIMARY_STEP_UP_TTL_SECONDS * 1000),
-      totpFreshMs: Math.min(command.policy.totpFreshMs ?? 300_000, env.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS * 1000),
+      mfaFreshMs: Math.min(command.policy.mfaFreshMs ?? 300_000, env.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS * 1000),
     } };
   };
   const pendingCommands = createOidcPendingCommandRepository({ db: database.db, keyring, provider: oidcConfig,
@@ -431,7 +432,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     applicationRevision: env.APP_REVISION,
     onCommitted: (replayed) => recordTipOperation({ operation: "confirm", outcome: replayed ? "replayed" : "accepted" }),
     db: database.db, keyring, lookupHmacKey, paymentsMode: env.TIP_PAYMENTS_MODE, pageSize: env.TIP_QUEUE_PAGE_SIZE,
-    recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, totpAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
+    recentAuthMs: env.TIP_RECENT_AUTH_SECONDS * 1000, mfaAuthMs: env.TIP_TOTP_AUTH_SECONDS * 1000,
     assurance: createIdentityTipAssurancePort(oidcConfig), tips: createTipLifecyclePort({ keyring }),
   });
   const commissionIdentity = createIdentityCommissionAssurancePort(oidcConfig);
@@ -451,7 +452,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
     files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
-    totpAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
+    mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
     onCommitted: (replayed) => recordCommissionOperation({ operation: "confirm", outcome: replayed ? "replayed" : "creator_manual" }) });
   const commissionHandlers = createCommissionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, intakeMode: env.COMMISSION_INTAKE_MODE,
     paymentsMode: env.COMMISSION_PAYMENTS_MODE, authenticate, orders: commissions, catalog: commissionCatalog, manual: commissionManual,

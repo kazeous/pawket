@@ -59,7 +59,7 @@ async function confirmSyntheticReceipt(reference: string) {
   const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": new Uint8Array(32).fill(1) } });
   try {
     await createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db: database.db, keyring, lookupHmacKey: new Uint8Array(32).fill(2), paymentsMode: "manual_only", pageSize: 25,
-      recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: createIdentityTipAssurancePort(syntheticOidcProvider), tips: createTipLifecyclePort({ keyring }) }).confirm({
+      recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: createIdentityTipAssurancePort(syntheticOidcProvider), tips: createTipLifecyclePort({ keyring }) }).confirm({
       actor: { userId: tipBrowserUserId, sessionId: tipBrowserSessionId }, paymentIntentId: intent.id, observedAmountVnd: intent.amountVnd,
       observedTransferReference: reference, observedBankTransactionId: `SYNTHETIC-${randomUUID()}`, attestedReceived: true, idempotencyKey: randomUUID(), requestId: randomUUID(),
     });
@@ -360,7 +360,7 @@ test("creator confirmation waits for OIDC primary and enrolled TOTP, then explic
   try {
     await signInTipCreator(page);
     await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000), mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
-    await database.db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
+    await database.db.update(identityOidcSessions).set({ mfaStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
     await page.goto("/creator/tips");
     await page.getByRole("row").filter({ hasText: reference }).getByRole("button", { name: "Đối chiếu giao dịch" }).click();
     const dialog = page.getByRole("alertdialog");
@@ -381,7 +381,7 @@ test("creator confirmation waits for OIDC primary and enrolled TOTP, then explic
     await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
     expect((await receiptFacts(reference)).intent.state).toBe("confirmed");
   } finally {
-    await database.db.update(identityOidcSessions).set({ totpStatus: "not_enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
+    await database.db.update(identityOidcSessions).set({ mfaStatus: "not_enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
     await restoreBrowserSessionToken(database.db, tipBrowserSessionId, tipBrowserSessionToken);
     await database.close(); await refreshBrowserSession(tipBrowserSessionToken);
   }

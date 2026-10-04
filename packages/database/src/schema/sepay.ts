@@ -120,7 +120,7 @@ export const paymentsSepayAccountCutovers = pgTable("payments_sepay_account_cuto
   providerAccountId: text("provider_account_id").notNull(),
   actorSessionId: text("actor_session_id").notNull(),
   primaryAuthenticatedAt: time("primary_authenticated_at").notNull(),
-  totpVerifiedAt: time("totp_verified_at"),
+  mfaVerifiedAt: time("mfa_verified_at"),
   cutoverAt: time("cutover_at").notNull(),
 }, (table) => [
   uniqueIndex("sepay_cutover_fingerprint_uidx").on(table.accountFingerprint),
@@ -129,7 +129,7 @@ export const paymentsSepayAccountCutovers = pgTable("payments_sepay_account_cuto
   check("sepay_cutover_provider_check", sql`${boundedIdentity(table.providerTenantId)} and ${table.providerAccountId} ~ '^[1-9][0-9]{0,39}$'`),
   check("sepay_cutover_actor_check", boundedIdentity(table.actorSessionId)),
   check("sepay_cutover_assurance_check", sql`${table.primaryAuthenticatedAt} between ${table.cutoverAt} - interval '15 minutes' and ${table.cutoverAt}
-    and (${table.totpVerifiedAt} is null or ${table.totpVerifiedAt} between ${table.cutoverAt} - interval '5 minutes' and ${table.cutoverAt})`),
+    and (${table.mfaVerifiedAt} is null or ${table.mfaVerifiedAt} between ${table.cutoverAt} - interval '5 minutes' and ${table.cutoverAt})`),
 ]);
 
 export const paymentsSepayInbox = pgTable("payments_sepay_inbox", {

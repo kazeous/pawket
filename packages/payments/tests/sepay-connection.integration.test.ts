@@ -58,13 +58,13 @@ describe("SePay connection and OAuth lifecycle with real persistence", () => {
   test("rejects stale primary authentication and requires TOTP only when enrolled", async () => {
     const creator = await fixture.creator();
     creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: new Date(at.getTime() - 900_001),
-      totpEnrolled: false, totpVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
+      mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
     await expect(creator.start()).rejects.toMatchObject({ code: "recent_auth_required" });
     creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: at,
-      totpEnrolled: true, totpVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
+      mfaEnrolled: true, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
     await expect(creator.start()).rejects.toMatchObject({ code: "totp_required" });
     creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: at,
-      totpEnrolled: true, totpVerifiedAt: at, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
+      mfaEnrolled: true, mfaVerifiedAt: at, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
     expect(await creator.start()).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 

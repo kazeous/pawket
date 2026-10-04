@@ -33,7 +33,7 @@ async function setup() {
   const input = { ...s.input, identity, trust: createCommissionTrustPort() };
   const service = createCommissionOrderService(input);
   const manual = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only",
-    recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: identity, commissions: service.paymentsLifecycle });
+    recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: identity, commissions: service.paymentsLifecycle });
   const detail = (orderId: string) => service.getOrder({ actor: s.buyerActor, orderId });
   async function pending() {
     const orderId = await service.request(s.request()); const payment = (await detail(orderId)).payment!;

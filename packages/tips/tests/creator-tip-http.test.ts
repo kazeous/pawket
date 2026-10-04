@@ -45,7 +45,7 @@ describe("creator confirmation HTTP boundary", () => {
     expect(untrusted.status).toBe(403); privateResponse(untrusted);
     expect((await s.handlers.queue(request({ method: "GET", headers: { "sec-fetch-site": "cross-site" } }))).status).toBe(403);
   });
-  test.each(["actor", "creatorUserId", "primaryAuthenticatedAt", "totpVerifiedAt", "totpEnrolled", "paymentIntentId"]) ("rejects client-supplied authority or identity fields (%s)", async (field) => {
+  test.each(["actor", "creatorUserId", "primaryAuthenticatedAt", "mfaVerifiedAt", "mfaEnrolled", "paymentIntentId"]) ("rejects client-supplied authority or identity fields (%s)", async (field) => {
     const s = setup(); const response = await s.handlers.confirm(request({ body: JSON.stringify({ ...body, [field]: "forged" }) }), intentId);
     expect(response.status).toBe(400); expect(s.service.confirm).not.toHaveBeenCalled();
   });

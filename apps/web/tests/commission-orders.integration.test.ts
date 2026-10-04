@@ -17,7 +17,7 @@ async function accept(s: Setup, orderId: string, expectedVersion: number, quoteR
 async function confirm(s: Setup, orderId: string) {
   const order = await detail(s, orderId);
   const service = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only", recentAuthMs: 900_000,
-    totpAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
+    mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
   return service.confirm({ actor: s.creator.actor, paymentIntentId: order.payment!.id, observedAmountVnd: order.payment!.amountVnd,
     observedTransferReference: order.payment!.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
 }

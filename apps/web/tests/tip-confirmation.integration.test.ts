@@ -134,11 +134,11 @@ async function session(f: Fixture, options: { primaryAt?: Date; mfaAt?: Date | n
     primaryAuthenticatedAt: primaryAt, mfaVerifiedAt: options.mfaAt ?? null, assuranceState: "active", authorizationVersion: 1,
     expiresAt: new Date(at.getTime() + 86_400_000), idleExpiresAt: new Date(at.getTime() + 86_400_000), absoluteExpiresAt: new Date(at.getTime() + 86_400_000),
   });
-  await attachSyntheticOidcSession(db, { userId: f.userId, sessionId, now: at, totpStatus: options.enrolled ? "enrolled" : "not_enrolled" });
+  await attachSyntheticOidcSession(db, { userId: f.userId, sessionId, now: at, mfaStatus: options.enrolled ? "enrolled" : "not_enrolled" });
   return { userId: f.userId, sessionId };
 }
 function creatorService(overrides: Partial<Parameters<typeof createCreatorTipPaymentService>[0]> = {}) {
-  return createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, totpAuthMs: 300_000,
+  return createCreatorTipPaymentService({ applicationRevision: "synthetic-increment-four-revision", db, keyring, lookupHmacKey: key, paymentsMode: "manual_only", pageSize: 25, recentAuthMs: 900_000, mfaAuthMs: 300_000,
     assurance: createIdentityTipAssurancePort(syntheticOidcProvider, () => at), tips: createTipLifecyclePort({ keyring }), now: () => at, ...overrides });
 }
 async function pending(options: Parameters<typeof session>[1] = {}, creation: Partial<Parameters<typeof createTipService>[0]> = {}) {
@@ -244,7 +244,7 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
     expect(Object.values(rows).map((value) => value.length)).toEqual([1, 1, 1, 1, 1, 1]);
     expect(rows.tips[0]).toMatchObject({ state: "completed", closedAt: at });
     expect(rows.intents[0]).toMatchObject({ state: "confirmed", closedAt: at });
-    expect(rows.confirmations[0]).toMatchObject({ source: "creator_manual", actorSessionId: p.actor.sessionId, primaryAuthenticatedAt: at, totpVerifiedAt: null, attestedReceived: true });
+    expect(rows.confirmations[0]).toMatchObject({ source: "creator_manual", actorSessionId: p.actor.sessionId, primaryAuthenticatedAt: at, mfaVerifiedAt: null, attestedReceived: true });
     for (const sensitive of [p.confirm.observedBankTransactionId, p.confirm.observedBankTransactionId.toUpperCase(), p.created.guestCapability!.secret, "Synthetic Guest", p.f.accountNumber]) {
       expect(JSON.stringify(rows)).not.toContain(sensitive);
     }
@@ -281,15 +281,15 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
     }
     const p = await pending({ enrolled: true, mfaAt: at });
     expect((await creatorService().confirm(p.confirm)).state).toBe("confirmed");
-    expect((await confirmationFacts(p.f)).confirmations[0]?.totpVerifiedAt).toEqual(at);
+    expect((await confirmationFacts(p.f)).confirmations[0]?.mfaVerifiedAt).toEqual(at);
   });
 
   test("OIDC evidence governs enrollment; a local flag cannot supply missing or unknown MFA evidence", async () => {
     const p = await pending({ enrolled: true, mfaAt: at });
     await db.update(identityUsers).set({ twoFactorEnabled: true }).where(eq(identityUsers.id, p.f.userId));
-    await db.update(identityOidcSessions).set({ totpStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
+    await db.update(identityOidcSessions).set({ mfaStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
     await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "not_authorized" });
-    await db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
+    await db.update(identityOidcSessions).set({ mfaStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, p.actor.sessionId));
     await db.update(identitySessions).set({ mfaVerifiedAt: null }).where(eq(identitySessions.id, p.actor.sessionId));
     await expect(creatorService().confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
     await db.update(identityUsers).set({ twoFactorEnabled: false }).where(eq(identityUsers.id, p.f.userId));
@@ -299,7 +299,7 @@ describe("creator manual confirmation with authoritative Identity assurance", ()
 
   test("a narrower configured TOTP window is enforced independently of the primary-authentication window", async () => {
     const p = await pending({ enrolled: true, primaryAt: new Date(at.getTime() - 60_000), mfaAt: new Date(at.getTime() - 30_001) });
-    await expect(creatorService({ totpAuthMs: 30_000 }).confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
+    await expect(creatorService({ mfaAuthMs: 30_000 }).confirm(p.confirm)).rejects.toMatchObject({ code: "totp_required" });
     expect((await creatorService().confirm(p.confirm)).state).toBe("confirmed");
   });
 

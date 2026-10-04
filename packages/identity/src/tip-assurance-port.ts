@@ -3,7 +3,7 @@ import type { OidcSessionProvider } from "./oidc-session.js";
 import type { PawketTransaction } from "@pawket/database";
 
 export type TipSessionAssurance = Readonly<{
-  primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date;
+  primaryAuthenticatedAt: Date; mfaEnrolled: boolean; mfaVerifiedAt: Date | null; sessionExpiresAt: Date;
 }>;
 
 export function createIdentityTipAssurancePort(provider: OidcSessionProvider, clock?: () => Date) {
@@ -11,7 +11,7 @@ export function createIdentityTipAssurancePort(provider: OidcSessionProvider, cl
   return { async getTipSessionAssurance(tx: PawketTransaction, actor: { userId: string; sessionId: string }, at: Date): Promise<TipSessionAssurance | null> {
     const evidence = await assurance.read(tx, actor, at);
     // Domain ports deliberately reject unknown fields. Keep protocol metadata private to Identity.
-    return evidence ? { primaryAuthenticatedAt: evidence.primaryAuthenticatedAt, totpEnrolled: evidence.totpEnrolled,
-      totpVerifiedAt: evidence.totpVerifiedAt, sessionExpiresAt: evidence.sessionExpiresAt } : null;
+    return evidence ? { primaryAuthenticatedAt: evidence.primaryAuthenticatedAt, mfaEnrolled: evidence.mfaEnrolled,
+      mfaVerifiedAt: evidence.mfaVerifiedAt, sessionExpiresAt: evidence.sessionExpiresAt } : null;
   } };
 }

@@ -3,7 +3,7 @@ import { createOidcAccountHttpHandlers } from "../src/oidc-account-http.js";
 import type { OidcSessionContext } from "../src/oidc-session.js";
 
 const actor: OidcSessionContext = { userId: "user", sessionId: "session", authorizationVersion: 1, subject: "subject",
-  primaryAuthenticatedAt: new Date(), mfaVerifiedAt: null, totpStatus: "not_enrolled", sessionExpiresAt: new Date(),
+  primaryAuthenticatedAt: new Date(), mfaVerifiedAt: null, mfaStatus: "not_enrolled", sessionExpiresAt: new Date(),
   idpValidUntil: new Date(), leaseRequired: false, owner: false };
 function fixture(leaseRequired = false) {
   const revoke = vi.fn(async () => true); const revokeAll = vi.fn(async () => 2);
@@ -26,6 +26,11 @@ describe("OIDC local account endpoints", () => {
   });
   test("me uses current OIDC enrollment instead of the legacy factor flag", async () => {
     expect(await (await fixture().handlers.me(request("GET"))).json()).toMatchObject({ user: { twoFactorEnabled: false }, identityProvider: "authentik" });
+  });
+  test("me reports two-factor enabled for a passkey-enrolled OIDC session", async () => {
+    const f = fixture();
+    f.authenticate.mockResolvedValue({ ...actor, mfaStatus: "enrolled", leaseRequired: false });
+    expect(await (await f.handlers.me(request("GET"))).json()).toMatchObject({ user: { twoFactorEnabled: true } });
   });
   test("expired lease cannot read account or sessions", async () => {
     const { handlers } = fixture(true);

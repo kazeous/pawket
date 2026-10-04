@@ -21,17 +21,17 @@ export function createOidcAssurancePort(provider: OidcSessionProvider, clock: ()
       !session.primaryAuthenticatedAt || session.primaryAuthenticatedAt > at || session.createdAt > at ||
       session.expiresAt <= at || session.idleExpiresAt <= at || session.absoluteExpiresAt <= at) return null;
     const evidence = await readOidcSessionEvidence(tx, { ...actor, now: at, provider });
-    if (!evidence || evidence.totpStatus === "unknown") return null;
-    const totpVerifiedAt = evidence.totpStatus === "enrolled" && session.mfaVerifiedAt &&
+    if (!evidence || evidence.mfaStatus === "unknown") return null;
+    const mfaVerifiedAt = evidence.mfaStatus === "enrolled" && session.mfaVerifiedAt &&
       session.mfaVerifiedAt >= session.primaryAuthenticatedAt && session.mfaVerifiedAt <= at ? session.mfaVerifiedAt : null;
-    return { primaryAuthenticatedAt: session.primaryAuthenticatedAt, totpEnrolled: evidence.totpStatus === "enrolled",
-      totpVerifiedAt, sessionExpiresAt: new Date(Math.min(session.expiresAt.getTime(), session.idleExpiresAt.getTime(),
+    return { primaryAuthenticatedAt: session.primaryAuthenticatedAt, mfaEnrolled: evidence.mfaStatus === "enrolled",
+      mfaVerifiedAt, sessionExpiresAt: new Date(Math.min(session.expiresAt.getTime(), session.idleExpiresAt.getTime(),
         session.absoluteExpiresAt.getTime(), evidence.idpValidUntil.getTime())), authorizationVersion: user.version,
       transactionId: evidence.transactionId, subject: evidence.subject, checkedAt: at };
   }
   async function owner(tx: PawketTransaction, actor: OidcAssuranceActor, at: Date): Promise<boolean> {
     const assurance = await read(tx, actor, at);
-    if (!assurance?.totpEnrolled || !assurance.totpVerifiedAt) return false;
+    if (!assurance?.mfaEnrolled || !assurance.mfaVerifiedAt) return false;
     const [role] = await tx.select({ id: identityRoleGrants.id }).from(identityRoleGrants).where(and(
       eq(identityRoleGrants.userId, actor.userId), eq(identityRoleGrants.role, "owner"), eq(identityRoleGrants.state, "active"),
     )).for("share");

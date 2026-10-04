@@ -13,7 +13,7 @@ import type { OidcProviderConfig } from "./oidc-protocol.js";
 import type { OidcActorBinding } from "./oidc-transactions.js";
 
 export type OidcSessionContext = OidcActorBinding & Readonly<{
-  primaryAuthenticatedAt: Date; mfaVerifiedAt: Date | null; totpStatus: string;
+  primaryAuthenticatedAt: Date; mfaVerifiedAt: Date | null; mfaStatus: string;
   sessionExpiresAt: Date; idpValidUntil: Date; leaseRequired: boolean; owner: boolean;
 }>;
 export type OidcSessionProvider = Pick<OidcProviderConfig, "issuer" | "clientId" | "providerRevision">;
@@ -24,7 +24,7 @@ export async function readOidcSessionEvidence(tx: PawketTransaction, input: {
 }) {
   const [evidence] = await tx.select({
     sid: identityOidcSessions.sid, subject: identityAccounts.accountId,
-    totpStatus: identityOidcSessions.totpStatus, idpValidUntil: identityOidcSessions.idpValidUntil,
+    mfaStatus: identityOidcSessions.mfaStatus, idpValidUntil: identityOidcSessions.idpValidUntil,
     transactionId: identityOidcSessions.transactionId,
   }).from(identityOidcSessions).innerJoin(identityAccounts, eq(identityAccounts.id, identityOidcSessions.accountId))
     .where(and(eq(identityOidcSessions.sessionId, input.sessionId), eq(identityOidcSessions.userId, input.userId),
@@ -55,7 +55,7 @@ export function createOidcSessionResolver(deps: { db: PawketDatabase; provider: 
       if (!session || session.revokedAt || session.authorizationVersion !== user.authorizationVersion || session.assuranceState !== "active" ||
         !session.primaryAuthenticatedAt || session.primaryAuthenticatedAt > at || session.createdAt > at ||
         session.expiresAt <= at || session.idleExpiresAt <= at || session.absoluteExpiresAt <= at) return null;
-      const [sidecar] = await tx.select({ subject: identityAccounts.accountId, totpStatus: identityOidcSessions.totpStatus,
+      const [sidecar] = await tx.select({ subject: identityAccounts.accountId, mfaStatus: identityOidcSessions.mfaStatus,
         idpValidUntil: identityOidcSessions.idpValidUntil }).from(identityOidcSessions)
         .innerJoin(identityAccounts, eq(identityAccounts.id, identityOidcSessions.accountId))
         .where(and(eq(identityOidcSessions.sessionId, session.id), eq(identityOidcSessions.userId, session.userId),
@@ -79,7 +79,7 @@ export function createOidcSessionResolver(deps: { db: PawketDatabase; provider: 
       }
       return { userId: session.userId, sessionId: session.id, authorizationVersion: user.authorizationVersion,
         subject: sidecar.subject, primaryAuthenticatedAt: session.primaryAuthenticatedAt, mfaVerifiedAt: session.mfaVerifiedAt,
-        totpStatus: sidecar.totpStatus, sessionExpiresAt, idpValidUntil: sidecar.idpValidUntil, leaseRequired, owner };
+        mfaStatus: sidecar.mfaStatus, sessionExpiresAt, idpValidUntil: sidecar.idpValidUntil, leaseRequired, owner };
     });
   };
 }

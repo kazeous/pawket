@@ -23,10 +23,21 @@ const tables = ["identity_users", "payments_receiving_account_onboarding", "crea
   "payments_sepay_inbox", "payments_sepay_transactions", "payment_confirmations", "payments_sepay_processing", "payments_sepay_decisions"] as const;
 type Table = typeof tables[number];
 type Row = Record<string, unknown>;
-test("0028→0030 preserves pending, confirmed and expired manual/provider tips and accepts old settlement SQL", async () => {
+function renameSecondFactorColumn(table: Table, row: Row, from: string, to: string): Row {
+  if (!["payment_confirmations", "payments_sepay_account_cutovers"].includes(table) || !Object.hasOwn(row, from)) return row;
+  const renamed = { ...row, [to]: row[from] };
+  delete renamed[from];
+  return renamed;
+}
+
+test("0028→current preserves manual/provider tips through second-factor column renames", async () => {
   const manual = await source.creator(); const manualIntent = await manual.createIntent(); manual.advance(1_000);
   const manualService = createCreatorTipPaymentService({ ...manual.common, applicationRevision: "synthetic-i6-upgrade", paymentsMode: "manual_only", pageSize: 25,
-    recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: manual.assurance,
+    recentAuthMs: 900_000, mfaAuthMs: 300_000,
+    assurance: { async getTipSessionAssurance(tx, actor, at) {
+      const proof = await manual.assurance.getTipSessionAssurance(tx, actor, at);
+      return proof ? { ...proof, mfaEnrolled: true, mfaVerifiedAt: proof.primaryAuthenticatedAt } : null;
+    } },
     tips: { ...manual.tips, getConfirmedGuestContent: async () => ({ name: "Synthetic buyer", message: "Synthetic upgrade" }) } });
   await manualService.confirm({ actor: manual.actor, paymentIntentId: manualIntent.id, observedAmountVnd: manualIntent.amountVnd,
     observedTransferReference: manualIntent.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
@@ -45,7 +56,8 @@ test("0028→0030 preserves pending, confirmed and expired manual/provider tips 
   const captured = new Map<Table, Row[]>();
   for (const table of tables) {
     const rows = await source.client.unsafe<{ row: Row }[]>(`select to_jsonb(item) ${table === "payment_intents" ? "- 'commission_order_id'" : ""} as row from "${table}" item order by to_jsonb(item)::text`);
-    captured.set(table, rows.map((item) => item.row));
+    // Seed migration 0028 using its original field names, including non-null factor evidence.
+    captured.set(table, rows.map((item) => renameSecondFactorColumn(table, item.row, "mfa_verified_at", "totp_verified_at")));
   }
   const name = `commission_upgrade_${process.pid}_${Date.now()}`; const journalName = `${name}_journal`;
   const temporary = await mkdtemp(join(tmpdir(), "pawket-i6-upgrade-"));
@@ -81,16 +93,21 @@ test("0028→0030 preserves pending, confirmed and expired manual/provider tips 
     });
     const snapshot = async () => Promise.all(tables.map(async (table) => {
       const result = await client.unsafe<{ row: Row }[]>(`select to_jsonb(item) - 'commission_order_id' as row from "${table}" item order by to_jsonb(item)::text`);
-      return [table, result.map((item) => item.row)];
+      return [table, result.map((item) => item.row)] as const;
     }));
     const before = await snapshot();
     expect(before).toEqual([...captured.entries()]);
     await migrate(db, { migrationsFolder, migrationsSchema: journalName });
-    expect(await snapshot()).toEqual(before);
+    const expected = before.map(([table, rows]) => [table, rows.map((row) => renameSecondFactorColumn(table, row, "totp_verified_at", "mfa_verified_at"))]);
+    expect(await snapshot()).toEqual(expected);
+    const confirmation = captured.get("payment_confirmations")!.find((row) => row.payment_intent_id === manualIntent.id)!;
+    expect(confirmation.totp_verified_at).not.toBeNull();
+    expect(await client`select mfa_verified_at = ${String(confirmation.totp_verified_at)}::timestamptz as preserved
+      from payment_confirmations where payment_intent_id = ${manualIntent.id}`).toEqual([{ preserved: true }]);
     expect(await client`select count(*)::int as count from commission_orders`).toEqual([{ count: 0 }]);
     expect(await client`select purpose, count(*)::int as count from payment_intents where commission_order_id is null group by purpose`).toEqual([{ purpose: "tip", count: 6 }]);
-    // I5 confirmation columns/updates remain usable when commission creation is off.
-    const template = captured.get("payment_confirmations")!.find((row) => row.payment_intent_id === manualIntent.id)!;
+    // Settlement SQL remains usable with the current factor column when commission creation is off.
+    const template = renameSecondFactorColumn("payment_confirmations", confirmation, "totp_verified_at", "mfa_verified_at");
     const confirmationId = randomUUID(); const at = new Date(manual.now().getTime() + 1_000).toISOString();
     await client.begin(async (tx) => {
       await tx.unsafe("insert into payment_confirmations select * from jsonb_populate_record(null::payment_confirmations, $1::jsonb)", [JSON.stringify({ ...template,

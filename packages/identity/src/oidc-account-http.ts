@@ -37,7 +37,7 @@ export function createOidcAccountHttpHandlers(options: {
       try {
         const session = await actor(request); if (session instanceof Response) return session;
         const user = await options.getMe(session.userId);
-        return user ? json(200, { user: { ...user, twoFactorEnabled: session.totpStatus === "enrolled" },
+        return user ? json(200, { user: { ...user, twoFactorEnabled: session.mfaStatus === "enrolled" },
           identityProvider: "authentik", accountPortalUrl: options.accountPortalUrl }) : json(401, { code: "AUTHENTICATION_REQUIRED" });
       } catch { return unavailable(); }
     },

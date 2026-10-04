@@ -89,7 +89,7 @@ test("an assurance rejection and the reauth tab force a fresh login instead of r
     bodies.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { code: "provider_unavailable" } });
   });
   await page.goto("/sign-in?notice=assurance_required");
-  await expect(page.getByText("Khóa truy cập (passkey)", { exact: false })).toBeVisible();
+  await expect(page.getByText("mã ứng dụng xác thực hoặc khóa truy cập", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Đăng nhập lại với reyuuGAMES", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "Chưa thể kết nối dịch vụ tài khoản." })).toBeVisible();
   await page.goto("/sign-in/reauth");

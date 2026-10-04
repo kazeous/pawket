@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { identityOidcSessions, identityRoleGrants, identitySessions, identityUsers } from "@pawket/database";
+import { identityOidcSessions, identityRoleGrants, identitySessions, identityStepUpProofs, identityUsers } from "@pawket/database";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { createOidcAssurancePort } from "../src/oidc-assurance-port.js";
 import { createOidcProofRepository } from "../src/oidc-proofs.js";
@@ -20,22 +20,41 @@ const now = new Date("2026-09-27T10:00:00Z"); const plus = (ms: number) => new D
 const digest = (value: string) => createLookupHmac({ value, context: "oidc-command", key: new Uint8Array(32).fill(9) });
 const opaque = () => randomBytes(32).toString("base64url");
 beforeAll(() => database.setup(), 30_000); afterAll(() => database.close());
-async function fixture(totp = false) {
+async function fixture(mfa = false) {
   const subject = randomUUID(); const material = { state: opaque(), nonce: opaque(), verifier: opaque() }; const browserBinding = opaque();
   const transaction = await transactions.start({ material, browserBinding, intent: { purpose: "login" }, returnPath: "/", now });
   await transactions.claim({ state: material.state, browserBinding, now });
   const result = await transactions.complete({ id: transaction.id, now }, (tx, transaction) => sessions.accept(tx, { transaction, now,
     newSessionToken: opaque(), evidence: { issuer: config.issuer, subject, sid: randomUUID(), email: `${subject}@example.test`,
       canonicalEmail: `${subject}@example.test`, emailVerified: true, name: "Fixture", primaryAt: now, primaryMethod: "password",
-      totpStatus: totp ? "enrolled" : "not_enrolled", totpAt: totp ? now : null, providerRevision: config.providerRevision } }));
+      mfaStatus: mfa ? "enrolled" : "not_enrolled", mfaAt: mfa ? now : null, providerRevision: config.providerRevision } }));
   if (!result.ok) throw new Error(result.code);
   return { userId: result.userId, sessionId: result.sessionId, actionClass: "payments.confirm", commandDigest: digest(subject), now };
 }
 
 describe("OIDC business assurance and command proofs", () => {
-  test("configured shorter primary and TOTP windows bound both issue and consume", async () => {
+  test("historical TOTP owner proofs remain stored but cannot be consumed after deploy", async () => {
+    const actor = { ...await fixture(true), actionClass: "owner.payment_confirm" };
+    await db.insert(identityRoleGrants).values({ userId: actor.userId, role: "owner", state: "active", grantSource: "bootstrap_cli" });
+    try {
+      const proof = await db.transaction((tx) => proofs.create(tx, actor));
+      const [current] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
+      expect(current?.assuranceMethod).toBe("mfa");
+      // Preserve a valid command binding while simulating a proof issued by the pre-deploy binary.
+      await db.update(identityStepUpProofs).set({ assuranceMethod: "totp" }).where(eq(identityStepUpProofs.id, proof.id));
+      expect(await db.transaction((tx) => proofs.usable(tx, { ...actor, proofId: proof.id }))).toBe(false);
+      expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: proof.id }))).toBe(false);
+      const [historical] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
+      expect(historical).toMatchObject({ assuranceMethod: "totp", consumedAt: null });
+      const fresh = await db.transaction((tx) => proofs.create(tx, actor));
+      expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: fresh.id }))).toBe(true);
+    } finally {
+      await db.update(identityRoleGrants).set({ state: "revoked", revokedAt: now }).where(eq(identityRoleGrants.userId, actor.userId));
+    }
+  });
+  test("configured shorter primary and MFA windows bound both issue and consume", async () => {
     const actor = await fixture(true);
-    const policy = { primaryFreshMs: 30_000, totpFreshMs: 10_000 };
+    const policy = { primaryFreshMs: 30_000, mfaFreshMs: 10_000 };
     const proof = await db.transaction((tx) => proofs.create(tx, { ...actor, ...policy }));
     expect(proof.expiresAt).toEqual(plus(10_000));
     expect(await db.transaction((tx) => proofs.usable(tx, { ...actor, ...policy, proofId: proof.id, now: plus(10_000) }))).toBe(false);
@@ -90,15 +109,15 @@ describe("OIDC business assurance and command proofs", () => {
   });
   test("unknown enrollment, future MFA, or revoked session do not yield assurance", async () => {
     const actor = await fixture(true);
-    await db.update(identityOidcSessions).set({ totpStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
+    await db.update(identityOidcSessions).set({ mfaStatus: "unknown" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
     expect(await db.transaction((tx) => assurance.read(tx, actor, now))).toBeNull();
-    await db.update(identityOidcSessions).set({ totpStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
+    await db.update(identityOidcSessions).set({ mfaStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, actor.sessionId));
     await db.update(identitySessions).set({ mfaVerifiedAt: plus(1000) }).where(eq(identitySessions.id, actor.sessionId));
     await expect(db.transaction((tx) => proofs.create(tx, actor))).rejects.toMatchObject({ code: "RECENT_AUTH_REQUIRED" });
     await db.update(identitySessions).set({ revokedAt: now, revocationReason: "test" }).where(eq(identitySessions.id, actor.sessionId));
     expect(await db.transaction((tx) => assurance.read(tx, actor, now))).toBeNull();
   });
-  test("owner role is local and requires real TOTP evidence without a local TOTP row", async () => {
+  test("owner role is local and requires real MFA evidence without a local TOTP row", async () => {
     const actor = { ...await fixture(true), actionClass: "owner.payment_confirm" };
     expect(await db.transaction((tx) => assurance.authorizeOwner(tx, actor, now))).toBe(false);
     await db.insert(identityRoleGrants).values({ userId: actor.userId, role: "owner", state: "active", grantSource: "bootstrap_cli" });

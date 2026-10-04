@@ -291,8 +291,8 @@ describe("Increment 4 additive payment/tip schema", () => {
     const f = await fixture();
     for (const patch of [
       { primaryAuthenticatedAt: new Date("2026-09-11T23:00:00.000Z") },
-      { primaryAuthenticatedAt: expiresAt }, { totpVerifiedAt: new Date("2026-09-11T23:00:00.000Z") },
-      { totpVerifiedAt: expiresAt }, { confirmedAt: expiresAt },
+      { primaryAuthenticatedAt: expiresAt }, { mfaVerifiedAt: new Date("2026-09-11T23:00:00.000Z") },
+      { mfaVerifiedAt: expiresAt }, { confirmedAt: expiresAt },
     ]) await sqlState(confirm(f, patch), "23514");
     await sqlState(db.transaction(async (tx) => {
       await tx.insert(paymentConfirmations).values(confirmation(f));

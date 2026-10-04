@@ -64,7 +64,7 @@ export const identityOidcSessions = pgTable("identity_oidc_sessions", {
   providerRevision: text("provider_revision").notNull(),
   sid: text("sid").notNull(),
   primaryMethod: text("primary_method").notNull(),
-  totpStatus: text("totp_status").notNull(),
+  mfaStatus: text("mfa_status").notNull(),
   evidenceVerifiedAt: instant("evidence_verified_at").notNull(),
   leaseStartedAt: instant("lease_started_at").notNull(),
   idpValidUntil: instant("idp_valid_until").notNull(),
@@ -75,7 +75,7 @@ export const identityOidcSessions = pgTable("identity_oidc_sessions", {
   index("identity_oidc_sessions_account_sid_idx").on(t.accountId, t.clientId, t.sid),
   index("identity_oidc_sessions_lease_idx").on(t.idpValidUntil),
   check("identity_oidc_sessions_primary_method_check", sql`${t.primaryMethod} in ('password', 'source')`),
-  check("identity_oidc_sessions_totp_status_check", sql`${t.totpStatus} in ('enrolled', 'not_enrolled', 'unknown')`),
+  check("identity_oidc_sessions_mfa_status_check", sql`${t.mfaStatus} in ('enrolled', 'not_enrolled', 'unknown')`),
   check("identity_oidc_sessions_lease_check", sql`${t.idpValidUntil} > ${t.leaseStartedAt} and ${t.idpValidUntil} <= ${t.leaseStartedAt} + interval '5 minutes' and ${t.evidenceVerifiedAt} >= ${t.leaseStartedAt}`),
 ]);
 
