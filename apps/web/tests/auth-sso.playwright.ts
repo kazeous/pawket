@@ -82,3 +82,19 @@ test("owner invitation is POST-only and erased after a refused attempt", async (
   await expect(page.getByLabel("Mã mời liên kết một lần")).toHaveValue(""); expect(submissions).toBe(1);
   expect(page.url()).not.toContain(invitation); await expect(page.getByRole("button", { name: "Xác minh tài khoản owner", exact: true })).toBeDisabled();
 });
+
+test("an assurance rejection and the reauth tab force a fresh login instead of reusing the account session", async ({ page }) => {
+  const bodies: unknown[] = [];
+  await page.route("**/api/v1/auth/oidc/start", (route) => {
+    bodies.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { code: "provider_unavailable" } });
+  });
+  await page.goto("/sign-in?notice=assurance_required");
+  await expect(page.getByText("Khóa truy cập (passkey)", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Đăng nhập lại với reyuuGAMES", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Chưa thể kết nối dịch vụ tài khoản." })).toBeVisible();
+  await page.goto("/sign-in/reauth");
+  await expect(page.getByRole("heading", { name: "Đăng nhập lại để tiếp tục." })).toBeVisible();
+  await page.getByRole("button", { name: "Đăng nhập lại với reyuuGAMES", exact: true }).click();
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies).toEqual([{ returnPath: "/settings/security", reauthenticate: true }, { returnPath: "/settings/security", reauthenticate: true }]);
+});

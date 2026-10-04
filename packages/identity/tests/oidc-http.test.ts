@@ -47,6 +47,18 @@ describe("OIDC HTTP boundary", () => {
     await h.handlers.login(h.post({ purpose: "owner_link", userId: "attacker" }));
     expect(h.service.begin).toHaveBeenLastCalledWith({ intent: { purpose: "login" }, returnPath: "/" });
   });
+  test("login asks for a forced re-authentication only when the body says exactly true", async () => {
+    const h = harness();
+    await h.handlers.login(h.post({ returnPath: "/admin", reauthenticate: true }));
+    expect(h.service.begin).toHaveBeenLastCalledWith({ intent: { purpose: "login" }, returnPath: "/admin", reauthenticate: true });
+    for (const value of ["true", 1, false, null]) {
+      await h.handlers.login(h.post({ returnPath: "/admin", reauthenticate: value }));
+      expect(h.service.begin).toHaveBeenLastCalledWith({ intent: { purpose: "login" }, returnPath: "/admin" });
+    }
+    // The flag belongs to plain login; a lease check stays silent.
+    await h.handlers.lease(h.post({ reauthenticate: true }, { cookie: `__Host-pawket.session=${session}` }));
+    expect(vi.mocked(h.service.begin).mock.lastCall![0]).not.toHaveProperty("reauthenticate");
+  });
   test("callback requires matching browser cookie, clears it, and redirects without OAuth parameters", async () => {
     const h = harness(); const started = await h.handlers.login(h.post({}));
     const browserCookie = started.headers.get("set-cookie")!.split(";")[0]!;

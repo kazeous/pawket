@@ -68,7 +68,7 @@ describe("OIDC protocol boundary", () => {
   });
   test("forces re-authentication with prompt=login plus a non-zero max_age only when fresh proof is needed", async () => {
     const h = harness();
-    for (const purpose of ["step_up", "owner_link"] as const) {
+    for (const purpose of ["step_up", "owner_link", "reauthenticate"] as const) {
       const params = new URL(await h.protocol.authorizationUrl(h.material, purpose)).searchParams;
       // authentik ignores max_age=0 and keeps prompt=login once per IdP session, so both are sent.
       expect(params.get("prompt")).toBe("login");
