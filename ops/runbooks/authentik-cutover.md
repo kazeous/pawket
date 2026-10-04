@@ -155,3 +155,36 @@ recorded rollback window. Purge requires separate authorization after that
 deadline. Verify backup retention at the backup system: the marker records an
 operator attestation, not remote enforcement. Follow `owner-mfa-break-glass.md`
 for owner recovery.
+
+## Second-factor claims
+
+Merge the owner interactive-login fix (PR #29) first. Apply PR A's updated
+`deploy/authentik/pawket-flows-v1.yaml` in authentik, run the owner gate below,
+and only then merge and deploy Pawket PR B (including migration 0039). Merging
+PR A does not apply the blueprint or change Pawket's runtime.
+
+The mapping keeps contract version 1, policy `pawket-v1`, and the legacy
+`totp_enrolled` / `totp_at` claims. New `mfa_enrolled` / `mfa_at` claims count
+only confirmed TOTP and WebAuthn devices belonging to the user and validated
+in the session's actual login event. Passwordless passkey login remains
+unsupported. Do not log tokens, credentials or private device material.
+
+Owner gate: sign in to Pawket with password + passkey and with password +
+TOTP; both must reach `/settings/security`. Record provider revision,
+deployed Pawket revision, time and callback outcomes without token contents.
+Never merge PR B before the gate passes.
+
+Release blocker: the pre-PR-B Pawket runtime reads only the legacy TOTP
+claims and refuses an owner login whose only second factor is a passkey.
+Consequently the passkey half of the gate above cannot pass on that runtime.
+The owner must explicitly resolve this sequencing contradiction before PR B
+is merged; applying the blueprint or passing CI alone does not satisfy it.
+Do not mark the gate passed based on a provider-only sign-in.
+
+After any authentik upgrade, re-check the login-event device serialization,
+confirmed-device filtering, `auth_time` correspondence and `amr: mfa`, then
+repeat password + passkey and password + TOTP acceptance. Unknown or missing
+second-factor claims fail closed. After PR B deploys, read-only acceptance
+also covers owner tip-policy step-up with a passkey, health/revision, logs
+and migration 0039. Remove the legacy mapping claims in a separate cleanup
+PR only after that acceptance passes.
