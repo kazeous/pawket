@@ -117,14 +117,16 @@ export function createOidcProtocol(config: OidcProviderConfig, dependencies: {
     newAuthorizationMaterial(): OidcAuthorizationMaterial {
       return { state: oidc.randomState(), nonce: oidc.randomNonce(), verifier: oidc.randomPKCECodeVerifier() };
     },
-    async authorizationUrl(material: OidcAuthorizationMaterial, purpose: "login" | "lease_check" | "step_up" | "owner_link"): Promise<string> {
+    /** reauthenticate is a plain login that must not reuse the IdP session's existing login event. */
+    async authorizationUrl(material: OidcAuthorizationMaterial,
+      purpose: "login" | "reauthenticate" | "lease_check" | "step_up" | "owner_link"): Promise<string> {
       const client = await discover();
       return oidc.buildAuthorizationUrl(client, {
         redirect_uri: config.redirectUri, scope: "openid email pawket_assurance", response_type: "code",
         state: material.state, nonce: material.nonce,
         code_challenge: await oidc.calculatePKCECodeChallenge(material.verifier), code_challenge_method: "S256",
-        ...(purpose === "lease_check" ? { prompt: "none" } : purpose === "step_up" || purpose === "owner_link"
-          ? { prompt: "login", max_age: String(reauthenticationMaxAgeSeconds) } : {}),
+        ...(purpose === "lease_check" ? { prompt: "none" } : purpose === "step_up" || purpose === "owner_link" || purpose === "reauthenticate"
+          ?{ prompt: "login", max_age: String(reauthenticationMaxAgeSeconds) } : {}),
       }).href;
     },
     async exchange(callback: URL, material: OidcAuthorizationMaterial): Promise<Record<string, unknown>> {

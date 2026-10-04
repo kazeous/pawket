@@ -42,7 +42,7 @@ export function createOidcIdentityService(options: {
       return { purpose: "owner_link", ...link };
     },
     /** intent is built by the server, never copied from untrusted request JSON. */
-    async begin(input: { intent: OidcTransactionIntent; returnPath: string }): Promise<{
+    async begin(input: { intent: OidcTransactionIntent; returnPath: string; reauthenticate?: boolean }): Promise<{
       authorizationUrl: string; state: string; browserBinding: string;
     }> {
       if (input.intent.purpose === "step_up" && !options.completeStepUp) throw new OidcIdentityError("assurance_required");
@@ -50,7 +50,8 @@ export function createOidcIdentityService(options: {
       const material = protocol.newAuthorizationMaterial(); const browserBinding = opaque();
       const transaction = await transactions.start({ material, browserBinding, intent: input.intent, returnPath: input.returnPath, now: startedAt });
       try {
-        const authorizationUrl = await protocol.authorizationUrl(material, input.intent.purpose);
+        const authorizationUrl = await protocol.authorizationUrl(material,
+          input.reauthenticate && input.intent.purpose === "login" ? "reauthenticate" : input.intent.purpose);
         return { authorizationUrl, state: material.state, browserBinding };
       } catch {
         await transactions.fail(transaction.id, now());

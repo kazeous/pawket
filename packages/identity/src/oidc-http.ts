@@ -78,7 +78,9 @@ export function createOidcHttpHandlers(options: {
         if (typeof body.pendingId !== "string" || !options.stepUpIntent) return json(400, "INVALID_REQUEST");
         const saved = await options.stepUpIntent(body.pendingId, actor); intent = saved.intent; returnPath = saved.returnPath;
       }
-      const started = await options.service.begin({ intent, returnPath });
+      // Forcing a fresh IdP login only makes a plain login stricter, so the client may ask for it.
+      const reauthenticate = purpose === "login" && body.reauthenticate === true;
+      const started = await options.service.begin({ intent, returnPath, ...(reauthenticate ? { reauthenticate } : {}) });
       const name = bindingCookieName(started.state, sessionCookie.secure);
       return Response.json({ authorizationUrl: started.authorizationUrl }, { headers: {
         ...noStore, "set-cookie": cookie(name, started.browserBinding, sessionCookie.secure, 600),

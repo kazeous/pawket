@@ -4,7 +4,7 @@ const notices: Record<string, string> = {
   email_unverified: "Hãy xác minh email tại trang tài khoản chung rồi đăng nhập lại.",
   identity_conflict: "Email này đang gắn với một tài khoản Pawket khác. Liên hệ người quản trị để nối đúng tài khoản.",
   actor_changed: "Tài khoản hoặc phiên đã thay đổi. Hãy quay lại thao tác ban đầu bằng đúng tài khoản.",
-  assurance_required: "Thao tác cần xác thực lại bằng tài khoản chung và mã ứng dụng xác thực nếu đã bật.",
+  assurance_required: "Cần đăng nhập lại tại tài khoản reyuuGAMES, kèm mã ứng dụng xác thực nếu đã bật. Khóa truy cập (passkey) chưa thay được mã này.",
   session_revoked: "Phiên đã kết thúc. Hãy đăng nhập lại.",
   provider_unavailable: "Hệ thống tài khoản đang gặp sự cố. Hãy thử lại sau. Bạn vẫn có thể xem các trang công khai.",
   login_required: "Phiên tài khoản reyuuGAMES đã kết thúc. Hãy đăng nhập lại.",
@@ -13,4 +13,8 @@ const notices: Record<string, string> = {
 };
 export function oidcNotice(code?: string): string | null {
   return code ? notices[code] ?? notices.invalid_response! : null;
+}
+/** Reusing the IdP session would return the same insufficient evidence, so the retry must force a fresh login. */
+export function oidcNoticeNeedsReauthentication(code?: string): boolean {
+  return code === "assurance_required";
 }
