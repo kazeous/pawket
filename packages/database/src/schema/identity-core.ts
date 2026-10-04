@@ -493,11 +493,11 @@ export const identityStepUpProofs = pgTable(
     ),
     check(
       "identity_step_up_proofs_assurance_method_check",
-      sql`${table.assuranceMethod} in ('primary', 'totp', 'recovery')`,
+      sql`${table.assuranceMethod} in ('primary', 'totp', 'mfa', 'recovery')`,
     ),
     check(
       "identity_step_up_proofs_owner_totp_check",
-      sql`${table.actionClass} !~ '^owner[.]' or ${table.assuranceMethod} = 'totp'`,
+      sql`${table.actionClass} !~ '^owner[.]' or ${table.assuranceMethod} in ('totp', 'mfa')`,
     ),
     check(
       "identity_step_up_proofs_time_check",

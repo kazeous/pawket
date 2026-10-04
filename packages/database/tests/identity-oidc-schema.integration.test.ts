@@ -54,6 +54,28 @@ async function sqlState(operation: PromiseLike<unknown>, code: string) {
 }
 
 describe("OIDC persistence integrity", () => {
+  test("owner proofs allow MFA and historical TOTP, but reject primary assurance", async () => {
+    const userId = await user(); const sessionId = await session(userId);
+    const proof = { userId, sessionId, actionClass: "owner.tip_policy_update", issuedAt: at, expiresAt: later };
+    for (const assuranceMethod of ["mfa", "totp"]) {
+      await db.insert(schema.identityStepUpProofs).values({ ...proof, assuranceMethod });
+    }
+    await expect(db.insert(schema.identityStepUpProofs).values({ ...proof, assuranceMethod: "primary" }))
+      .rejects.toMatchObject({ cause: { code: "23514", constraint_name: "identity_step_up_proofs_owner_totp_check" } });
+  });
+  test("second-factor columns are renamed without retaining the old names", async () => {
+    const rows = await client<{ table_name: string; column_name: string }[]>`
+      select table_name, column_name from information_schema.columns
+      where table_schema = ${schemaName} and table_name in
+        ('identity_oidc_sessions', 'payment_confirmations', 'payments_sepay_account_cutovers')`;
+    const names = rows.map((row) => `${row.table_name}.${row.column_name}`);
+    expect(names).toContain("identity_oidc_sessions.mfa_status");
+    expect(names).toContain("payment_confirmations.mfa_verified_at");
+    expect(names).toContain("payments_sepay_account_cutovers.mfa_verified_at");
+    expect(names).not.toContain("identity_oidc_sessions.totp_status");
+    expect(names).not.toContain("payment_confirmations.totp_verified_at");
+    expect(names).not.toContain("payments_sepay_account_cutovers.totp_verified_at");
+  });
   test("migrations are repeatable with no cross-schema FKs", async () => {
     await migrate(db, { migrationsFolder, migrationsSchema: journalSchema });
     const rows = await client`select distinct target_ns.nspname from pg_constraint c join pg_class source on source.oid = c.conrelid join pg_namespace source_ns on source_ns.oid = source.relnamespace join pg_class target on target.oid = c.confrelid join pg_namespace target_ns on target_ns.oid = target.relnamespace where c.contype = 'f' and source_ns.nspname = ${schemaName}`;
@@ -81,7 +103,7 @@ describe("OIDC persistence integrity", () => {
     const accountId = randomUUID(); await db.insert(schema.identityAccounts).values({ id: accountId, userId: second, issuer: "https://idp.example/pawket/", providerId: "authentik", accountId: second });
     const t = transaction(); await db.insert(schema.identityOidcTransactions).values(t);
     const sidecar = { sessionId, userId: first, accountId, clientId: "pawket-test", providerRevision: "pawket-v1", sid: "sid",
-      primaryMethod: "password", totpStatus: "not_enrolled", evidenceVerifiedAt: at, leaseStartedAt: at, idpValidUntil: later, transactionId: t.id };
+      primaryMethod: "password", mfaStatus: "not_enrolled", evidenceVerifiedAt: at, leaseStartedAt: at, idpValidUntil: later, transactionId: t.id };
     await sqlState(db.insert(schema.identityOidcSessions).values(sidecar), "23503");
     await db.update(schema.identityAccounts).set({ userId: first }).where(eq(schema.identityAccounts.id, accountId));
     await sqlState(db.insert(schema.identityOidcSessions).values({ ...sidecar, idpValidUntil: new Date(at.getTime() + 301_000) }), "23514");

@@ -167,6 +167,16 @@ afterAll(async () => {
 });
 
 describe("SePay persistence and legacy-writer database fences", () => {
+  test("cutovers store MFA evidence and enforce the unchanged freshness window", async () => {
+    const owner = await creator(); const connection = await readyConnection(owner);
+    const boundary = cutover(owner, connection);
+    for (const mfaVerifiedAt of [new Date(cutoverAt.getTime() - 301_000), new Date(cutoverAt.getTime() + 1000)]) {
+      await expectSql(db.insert(schema.paymentsSepayAccountCutovers).values({ ...boundary, mfaVerifiedAt }));
+    }
+    await db.insert(schema.paymentsSepayAccountCutovers).values({ ...boundary, mfaVerifiedAt: at });
+    const [stored] = await db.select().from(schema.paymentsSepayAccountCutovers).where(eq(schema.paymentsSepayAccountCutovers.id, boundary.id));
+    expect(stored?.mfaVerifiedAt).toEqual(at);
+  });
   test("generates a chained additive snapshot and binds every foreign key to the selected schema", async () => {
     const previous = JSON.parse(await readFile(join(migrationsFolder, "meta/0026_snapshot.json"), "utf8"));
     const current = JSON.parse(await readFile(join(migrationsFolder, "meta/0027_snapshot.json"), "utf8"));

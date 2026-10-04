@@ -274,6 +274,13 @@
       "when": 1791011746064,
       "tag": "0038_increment_7_cleanup_guarantees",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791085661826,
+      "tag": "0039_passkey_second_factor",
+      "breakpoints": true
     }
   ]
 }
