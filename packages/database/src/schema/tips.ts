@@ -211,6 +211,6 @@ export const paymentConfirmations = pgTable("payment_confirmations", {
   check("payment_confirmations_bank_txn_check", hmacCheck(table.bankTransactionFingerprint)),
   check("payment_confirmations_idempotency_check", hmacCheck(table.idempotencyKeyHash)),
   check("payment_confirmations_assurance_time_check", sql`${table.primaryAuthenticatedAt} <= ${table.confirmedAt}
-    and ${table.primaryAuthenticatedAt} >= ${table.confirmedAt} - interval '15 minutes'
-    and (${table.mfaVerifiedAt} is null or (${table.mfaVerifiedAt} <= ${table.confirmedAt} and ${table.mfaVerifiedAt} >= ${table.confirmedAt} - interval '5 minutes'))`),
+    and ${table.primaryAuthenticatedAt} >= ${table.confirmedAt} - interval '60 minutes'
+    and (${table.mfaVerifiedAt} is null or (${table.mfaVerifiedAt} <= ${table.confirmedAt} and ${table.mfaVerifiedAt} >= ${table.confirmedAt} - interval '60 minutes'))`),
 ]);

@@ -7,8 +7,8 @@ const integer = (minimum: number, maximum: number) => z.preprocess(
 export const incrementSixEnvShape = {
   COMMISSION_INTAKE_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
   COMMISSION_PAYMENTS_MODE: z.enum(["disabled", "manual_only", "sepay_optional"]).default("disabled"),
-  COMMISSION_RECENT_AUTH_SECONDS: integer(60, 900).default(900),
-  COMMISSION_TOTP_AUTH_SECONDS: integer(30, 300).default(300),
+  COMMISSION_RECENT_AUTH_SECONDS: integer(60, 3_600).default(3_600),
+  COMMISSION_TOTP_AUTH_SECONDS: integer(30, 3_600).default(3_600),
   COMMISSION_SCAN_BATCH_SIZE: integer(1, 500).default(100),
   COMMISSION_SCAN_INTERVAL_MS: integer(5_000, 300_000).default(60_000),
   COMMISSION_RATE_WINDOW_SECONDS: integer(60, 86_400).default(3_600),

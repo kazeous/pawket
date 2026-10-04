@@ -41,8 +41,8 @@ export function normalizeTipBankTransactionId(value: unknown): string {
 /** Shared transaction, assurance, account fence and evidence dedup for both purposes. */
 export function createManualPaymentConfirmationService<T>(input: Input<T>) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
-  if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
-    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 300_000) fail("invalid_request");
+  if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 3_600_000 ||
+    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 3_600_000) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const id = input.idFactory ?? randomUUID; const clock = input.now ?? (() => new Date());
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };

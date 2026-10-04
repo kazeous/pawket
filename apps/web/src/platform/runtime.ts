@@ -166,8 +166,8 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     commission: { primaryFreshMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaFreshMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000 },
     });
     return command && { ...command, policy: { ...command.policy,
-      primaryFreshMs: Math.min(command.policy.primaryFreshMs ?? 900_000, env.AUTH_PRIMARY_STEP_UP_TTL_SECONDS * 1000),
-      mfaFreshMs: Math.min(command.policy.mfaFreshMs ?? 300_000, env.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS * 1000),
+      primaryFreshMs: Math.min(command.policy.primaryFreshMs ?? 3_600_000, env.AUTH_PRIMARY_STEP_UP_TTL_SECONDS * 1000),
+      mfaFreshMs: Math.min(command.policy.mfaFreshMs ?? 3_600_000, env.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS * 1000),
     } };
   };
   const pendingCommands = createOidcPendingCommandRepository({ db: database.db, keyring, provider: oidcConfig,

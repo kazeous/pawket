@@ -10,12 +10,25 @@ function claims() { return { iss: issuer, sub: "subject-1", sid: "session-1", em
   pawket_assurance: { version: 1, policy: "pawket-v1", primary_at: seconds, primary_method: "password", mfa_enrolled: true, mfa_at: seconds } }; }
 
 describe("OIDC application assurance policy", () => {
-  test.each([299_000, 300_000, 301_000])("preserves the owner second-factor freshness boundary at %s ms", (elapsed) => {
+  test.each([3_540_000, 3_599_000, 3_600_000, 3_601_000, 3_660_000])("bounds owner second-factor freshness at %s ms", (elapsed) => {
     const evidence = normalizeOidcEvidence(claims(), options);
     const check = () => assertOidcStepUp(evidence, { expectedSubject: evidence.subject,
       requestedAt: now, now: new Date(now.getTime() + elapsed), owner: true });
-    if (elapsed > 300_000) expect(check).toThrow("assurance_required");
+    if (elapsed > 3_600_000) expect(check).toThrow("assurance_required");
     else expect(check).not.toThrow();
+  });
+  test.each([3_540_000, 3_600_000, 3_660_000])("bounds primary freshness at %s ms without MFA enrollment", (elapsed) => {
+    const evidence = { ...normalizeOidcEvidence(claims(), options), mfaStatus: "not_enrolled" as const, mfaAt: null };
+    const check = () => assertOidcStepUp(evidence, { expectedSubject: evidence.subject,
+      requestedAt: now, now: new Date(now.getTime() + elapsed), owner: false });
+    if (elapsed > 3_600_000) expect(check).toThrow("assurance_required");
+    else expect(check).not.toThrow();
+  });
+  test("an hour window still refuses primary authentication older than the request", () => {
+    const evidence = normalizeOidcEvidence(claims(), options);
+    expect(() => assertOidcStepUp(evidence, { expectedSubject: evidence.subject,
+      requestedAt: new Date(now.getTime() + 1000), now: new Date(now.getTime() + 3_540_000), owner: true }))
+      .toThrow("assurance_required");
   });
   test("only totp_* claims are unknown, not enrolled", () => {
     const c: Record<string, unknown> = claims();

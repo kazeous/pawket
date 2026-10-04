@@ -33,9 +33,10 @@ const envelope = <R extends string, F extends string>(recordType: R, recordId: s
   encryptSensitiveField({ keyring, plaintext, binding: { recordType, recordId, fieldName } });
 type InsertDb = Pick<typeof db, "insert">;
 
-async function expectSql(promise: PromiseLike<unknown>, code = "23514") {
+async function expectSql(promise: PromiseLike<unknown>, code = "23514", constraint?: string) {
   try { await promise; } catch (error) {
     expect((error as { cause?: unknown }).cause ?? error).toMatchObject({ code });
+    if (constraint) expect((error as { cause?: unknown }).cause ?? error).toMatchObject({ constraint_name: constraint });
     return;
   }
   throw new Error(`Expected SQLSTATE ${code}`);
@@ -167,10 +168,22 @@ afterAll(async () => {
 });
 
 describe("SePay persistence and legacy-writer database fences", () => {
-  test("cutovers store MFA evidence and enforce the unchanged freshness window", async () => {
+  test.each([59, 60])("accepts cutover with both authentication factors %s minutes old", async (minutes) => {
+    const owner = await creator(); const connection = await readyConnection(owner); const boundary = cutover(owner, connection);
+    const authenticatedAt = new Date(cutoverAt.getTime() - minutes * 60_000);
+    await db.insert(schema.paymentsSepayAccountCutovers).values({ ...boundary, primaryAuthenticatedAt: authenticatedAt, mfaVerifiedAt: authenticatedAt });
+    const [stored] = await db.select().from(schema.paymentsSepayAccountCutovers).where(eq(schema.paymentsSepayAccountCutovers.id, boundary.id));
+    expect(stored).toMatchObject({ primaryAuthenticatedAt: authenticatedAt, mfaVerifiedAt: authenticatedAt });
+  });
+  test.each(["primaryAuthenticatedAt", "mfaVerifiedAt"] as const)("rejects cutover with %s 61 minutes old", async (field) => {
+    const owner = await creator(); const connection = await readyConnection(owner);
+    await expectSql(db.insert(schema.paymentsSepayAccountCutovers).values({ ...cutover(owner, connection),
+      [field]: new Date(cutoverAt.getTime() - 61 * 60_000) }), "23514", "sepay_cutover_assurance_check");
+  });
+  test("cutovers store MFA evidence and reject stale or future factors", async () => {
     const owner = await creator(); const connection = await readyConnection(owner);
     const boundary = cutover(owner, connection);
-    for (const mfaVerifiedAt of [new Date(cutoverAt.getTime() - 301_000), new Date(cutoverAt.getTime() + 1000)]) {
+    for (const mfaVerifiedAt of [new Date(cutoverAt.getTime() - 3_601_000), new Date(cutoverAt.getTime() + 1000)]) {
       await expectSql(db.insert(schema.paymentsSepayAccountCutovers).values({ ...boundary, mfaVerifiedAt }));
     }
     await db.insert(schema.paymentsSepayAccountCutovers).values({ ...boundary, mfaVerifiedAt: at });

@@ -110,10 +110,11 @@ async function confirm(f: Draft, patch: Partial<typeof paymentConfirmations.$inf
     await tx.update(tips).set({ state: "completed", closedAt: confirmedAt, updatedAt: confirmedAt }).where(eq(tips.id, f.tip.id));
   });
 }
-async function sqlState(promise: PromiseLike<unknown>, code: string) {
+async function sqlState(promise: PromiseLike<unknown>, code: string, constraint?: string) {
   try { await promise; } catch (error) {
     const cause = (error as { cause?: unknown }).cause ?? error;
     expect(cause).toMatchObject({ code });
+    if (constraint) expect(cause).toMatchObject({ constraint_name: constraint });
     return;
   }
   throw new Error(`Expected SQLSTATE ${code}`);
@@ -132,6 +133,17 @@ afterAll(async () => {
 });
 
 describe("Increment 4 additive payment/tip schema", () => {
+  test.each([59, 60])("accepts confirmation with both authentication factors %s minutes old", async (minutes) => {
+    const f = await fixture(); const authenticatedAt = new Date(confirmedAt.getTime() - minutes * 60_000);
+    await confirm(f, { primaryAuthenticatedAt: authenticatedAt, mfaVerifiedAt: authenticatedAt });
+    const [stored] = await db.select().from(paymentConfirmations).where(eq(paymentConfirmations.paymentIntentId, f.intent.id));
+    expect(stored).toMatchObject({ primaryAuthenticatedAt: authenticatedAt, mfaVerifiedAt: authenticatedAt });
+  });
+  test.each(["primaryAuthenticatedAt", "mfaVerifiedAt"] as const)("rejects confirmation with %s 61 minutes old", async (field) => {
+    const f = await fixture();
+    await sqlState(confirm(f, { [field]: new Date(confirmedAt.getTime() - 61 * 60_000) }),
+      "23514", "payment_confirmations_assurance_time_check");
+  });
   test("migrates the real journal, retains the snapshot chain and reruns idempotently", async () => {
     await migrate(db, { migrationsFolder, migrationsSchema: journalSchema });
     const [count] = await client.unsafe<{ count: number }[]>(`select count(*)::int as count from "${journalSchema}".__drizzle_migrations`);

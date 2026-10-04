@@ -127,7 +127,7 @@ export const incrementTwoEnvShape = {
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: optionalBoundedInteger(3_600, 86_400),
   AUTH_OWNER_IDLE_TTL_SECONDS: optionalBoundedInteger(300, 7_200),
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: optionalBoundedInteger(60, 3_600),
-  AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: optionalBoundedInteger(30, 900),
+  AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: optionalBoundedInteger(30, 3_600),
 };
 
 type ParsedIncrementTwoEnv = {
@@ -181,8 +181,8 @@ const localDefaults: IncrementTwoServerEnv = {
   AUTH_USER_IDLE_TTL_SECONDS: 604_800,
   AUTH_OWNER_ABSOLUTE_TTL_SECONDS: 43_200,
   AUTH_OWNER_IDLE_TTL_SECONDS: 1_800,
-  AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 900,
-  AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 300,
+  AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3_600,
+  AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3_600,
 };
 
 const deployedRequiredFields: (keyof IncrementTwoServerEnv)[] = [

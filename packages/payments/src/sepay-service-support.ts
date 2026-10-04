@@ -21,12 +21,13 @@ export function validateSePayCommand(command: { actor: SePayActor; idempotencyKe
   validateSePayActor(command.actor);
   if (!sepayIdentifier(command.requestId) || typeof command.idempotencyKey !== "string" || !/^[A-Za-z0-9._-]{8,200}$/u.test(command.idempotencyKey)) sepayFail("invalid_request");
 }
+const SEPAY_AUTH_FRESH_MS = 3_600_000;
 export function requireSePayAssurance(proof: SePayAssurance | null, at: Date, fresh: boolean): SePayAssurance {
   if (!proof || !sepayValidDate(at) || !sepayValidDate(proof.primaryAuthenticatedAt) || !sepayValidDate(proof.sessionExpiresAt) ||
     typeof proof.mfaEnrolled !== "boolean" || (proof.mfaVerifiedAt !== null && !sepayValidDate(proof.mfaVerifiedAt)) || proof.sessionExpiresAt <= at) sepayFail("not_authorized");
   const age = at.getTime() - proof.primaryAuthenticatedAt.getTime();
-  if (age < 0 || (fresh && age > 900_000)) sepayFail("recent_auth_required");
-  if (fresh && proof.mfaEnrolled && (!proof.mfaVerifiedAt || proof.mfaVerifiedAt > at || proof.mfaVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.mfaVerifiedAt.getTime() > 300_000)) sepayFail("totp_required");
+  if (age < 0 || (fresh && age > SEPAY_AUTH_FRESH_MS)) sepayFail("recent_auth_required");
+  if (fresh && proof.mfaEnrolled && (!proof.mfaVerifiedAt || proof.mfaVerifiedAt > at || proof.mfaVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.mfaVerifiedAt.getTime() > SEPAY_AUTH_FRESH_MS)) sepayFail("totp_required");
   return proof;
 }
 export function createSePayCryptography(input: { keyring: EncryptionKeyring; lookupHmacKey: Uint8Array }) {

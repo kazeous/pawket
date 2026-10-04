@@ -63,7 +63,7 @@ type Input = Readonly<{
 
 export function createCreatorTipSettingsService(input: Input) {
   if (!identifier(input.applicationRevision)) fail("INVALID_REQUEST");
-  if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 1 || input.recentAuthMs > 900_000) fail("INVALID_POLICY");
+  if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 1 || input.recentAuthMs > 3_600_000) fail("INVALID_POLICY");
   const clock = input.now ?? (() => new Date());
   const id = input.idFactory ?? randomUUID;
   const modesActive = () => isTipPaymentsEnabled(input.paymentsMode) && input.publishingMode === "general_audience";
