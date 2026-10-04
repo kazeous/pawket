@@ -163,8 +163,9 @@ Merge the owner interactive-login fix (PR #29) first. Apply PR A's updated
 and only then merge and deploy Pawket PR B (including migration 0039). Merging
 PR A does not apply the blueprint or change Pawket's runtime.
 
-The mapping keeps contract version 1, policy `pawket-v1`, and the legacy
-`totp_enrolled` / `totp_at` claims. New `mfa_enrolled` / `mfa_at` claims count
+The mapping keeps contract version 1 and policy `pawket-v1`. The legacy
+`totp_enrolled` / `totp_at` claims were removed on 2026-10-04 after PR B's live
+acceptance. Pawket reads only the `mfa_enrolled` / `mfa_at` claims, which count
 only confirmed TOTP and WebAuthn devices belonging to the user and validated
 in the session's actual login event. Passwordless passkey login remains
 unsupported. Do not log tokens, credentials or private device material.

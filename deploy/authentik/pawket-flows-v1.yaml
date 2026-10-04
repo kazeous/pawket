@@ -171,13 +171,11 @@ entries:
             primary_method = "source"
         else:
             return {}
-        devices = TOTPDevice.objects.filter(user=user, confirmed=True)
-        ids = set(devices.values_list("pk", flat=True))
-        validated = event.context.get("auth_method_args", {}).get("mfa_devices", [])
-        totp = any(isinstance(device, dict) and device.get("app") == "authentik_stages_authenticator_totp"
-            and device.get("model_name") == "totpdevice" and device.get("pk") in ids for device in validated)
         from authentik.stages.authenticator_webauthn.models import WebAuthnDevice
-        mfa_ids = {("authentik_stages_authenticator_totp", "totpdevice", pk) for pk in ids}
+        validated = event.context.get("auth_method_args", {}).get("mfa_devices", [])
+        # A second factor is a confirmed TOTP or WebAuthn device of this user that this login validated.
+        mfa_ids = {("authentik_stages_authenticator_totp", "totpdevice", pk)
+            for pk in TOTPDevice.objects.filter(user=user, confirmed=True).values_list("pk", flat=True)}
         mfa_ids.update(("authentik_stages_authenticator_webauthn", "webauthndevice", pk)
             for pk in WebAuthnDevice.objects.filter(user=user, confirmed=True).values_list("pk", flat=True))
         mfa = any(isinstance(d, dict) and (d.get("app"), d.get("model_name"), d.get("pk")) in mfa_ids
@@ -189,5 +187,4 @@ entries:
             return {}
         return {"name": user.name, "pawket_assurance": {"version": 1, "policy": "pawket-v1",
             "primary_at": primary_at, "primary_method": primary_method,
-            "totp_enrolled": bool(ids), "totp_at": primary_at if totp else None,
             "mfa_enrolled": bool(mfa_ids), "mfa_at": primary_at if mfa else None}}
