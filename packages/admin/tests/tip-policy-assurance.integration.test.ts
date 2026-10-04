@@ -70,7 +70,7 @@ describe("platform policy real owner assurance", () => {
     const proofs = await db.select().from(identityStepUpProofs);
     expect(proofs.length).toBe(before.length + 1);
     expect(proofs.at(-1)).toMatchObject({ actionClass: "owner.tip_policy_update", consumedAt: at });
-    await db.update(identitySessions).set({ mfaVerifiedAt: new Date(at.getTime() - 600_000), primaryAuthenticatedAt: new Date(at.getTime() - 660_000) }).where(eq(identitySessions.id, actor.sessionId));
+    await db.update(identitySessions).set({ mfaVerifiedAt: new Date(at.getTime() - 3_660_000), primaryAuthenticatedAt: new Date(at.getTime() - 3_720_000) }).where(eq(identitySessions.id, actor.sessionId));
     expect(await savePolicy(input)).toEqual(result);
     expect(await db.select().from(identityStepUpProofs)).toHaveLength(proofs.length);
     expect(await db.select().from(adminAuditEvents).where(eq(adminAuditEvents.subjectId, result.revisionId))).toHaveLength(1);
