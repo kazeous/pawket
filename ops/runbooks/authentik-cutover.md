@@ -169,17 +169,26 @@ only confirmed TOTP and WebAuthn devices belonging to the user and validated
 in the session's actual login event. Passwordless passkey login remains
 unsupported. Do not log tokens, credentials or private device material.
 
-Owner gate: sign in to Pawket with password + passkey and with password +
-TOTP; both must reach `/settings/security`. Record provider revision,
-deployed Pawket revision, time and callback outcomes without token contents.
-Never merge PR B before the gate passes.
+The owner approved this two-stage gate on 2026-10-04 because the pre-PR-B
+Pawket runtime reads only legacy TOTP claims and refuses passkey-only owner
+second-factor evidence.
 
-Release blocker: the pre-PR-B Pawket runtime reads only the legacy TOTP
-claims and refuses an owner login whose only second factor is a passkey.
-Consequently the passkey half of the gate above cannot pass on that runtime.
-The owner must explicitly resolve this sequencing contradiction before PR B
-is merged; applying the blueprint or passing CI alone does not satisfy it.
-Do not mark the gate passed based on a provider-only sign-in.
+Before PR B, use the updated OIDC probe from PR B's reviewed candidate
+(`corepack pnpm exec tsx scripts/probe-authentik.mjs`) with the approved
+provider/client contract. Complete password + passkey and password + TOTP
+sign-in and step-up separately. Both must pass signature/protocol validation,
+the MFA claim contract and owner freshness checks. Record only bounded verdicts
+including enrolled status, MFA proof, provider revision, candidate revision,
+time and callback outcomes; never token contents or credentials. Also verify
+password + TOTP reaches `/settings/security` on the current deployed Pawket.
+Never merge PR B before these pre-deployment checks pass. A provider-only
+sign-in or green CI does not satisfy them.
+
+After the controlled PR B deployment, both password + passkey and password +
+TOTP must reach Pawket `/settings/security`, and an owner tip-policy step-up
+with a passkey must succeed. Record the deployed revision and migration 0039
+alongside callback and step-up outcomes. Do not mark live acceptance complete
+or remove legacy claims before this post-deployment gate passes.
 
 After any authentik upgrade, re-check the login-event device serialization,
 confirmed-device filtering, `auth_time` correspondence and `amr: mfa`, then
