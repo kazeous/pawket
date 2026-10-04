@@ -36,17 +36,21 @@ describe("OIDC business assurance and command proofs", () => {
   test("historical TOTP owner proofs remain stored but cannot be consumed after deploy", async () => {
     const actor = { ...await fixture(true), actionClass: "owner.payment_confirm" };
     await db.insert(identityRoleGrants).values({ userId: actor.userId, role: "owner", state: "active", grantSource: "bootstrap_cli" });
-    const proof = await db.transaction((tx) => proofs.create(tx, actor));
-    const [current] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
-    expect(current?.assuranceMethod).toBe("mfa");
-    // Preserve a valid command binding while simulating a proof issued by the pre-deploy binary.
-    await db.update(identityStepUpProofs).set({ assuranceMethod: "totp" }).where(eq(identityStepUpProofs.id, proof.id));
-    expect(await db.transaction((tx) => proofs.usable(tx, { ...actor, proofId: proof.id }))).toBe(false);
-    expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: proof.id }))).toBe(false);
-    const [historical] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
-    expect(historical).toMatchObject({ assuranceMethod: "totp", consumedAt: null });
-    const fresh = await db.transaction((tx) => proofs.create(tx, actor));
-    expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: fresh.id }))).toBe(true);
+    try {
+      const proof = await db.transaction((tx) => proofs.create(tx, actor));
+      const [current] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
+      expect(current?.assuranceMethod).toBe("mfa");
+      // Preserve a valid command binding while simulating a proof issued by the pre-deploy binary.
+      await db.update(identityStepUpProofs).set({ assuranceMethod: "totp" }).where(eq(identityStepUpProofs.id, proof.id));
+      expect(await db.transaction((tx) => proofs.usable(tx, { ...actor, proofId: proof.id }))).toBe(false);
+      expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: proof.id }))).toBe(false);
+      const [historical] = await db.select().from(identityStepUpProofs).where(eq(identityStepUpProofs.id, proof.id));
+      expect(historical).toMatchObject({ assuranceMethod: "totp", consumedAt: null });
+      const fresh = await db.transaction((tx) => proofs.create(tx, actor));
+      expect(await db.transaction((tx) => proofs.consume(tx, { ...actor, proofId: fresh.id }))).toBe(true);
+    } finally {
+      await db.update(identityRoleGrants).set({ state: "revoked", revokedAt: now }).where(eq(identityRoleGrants.userId, actor.userId));
+    }
   });
   test("configured shorter primary and MFA windows bound both issue and consume", async () => {
     const actor = await fixture(true);
