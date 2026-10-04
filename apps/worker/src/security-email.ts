@@ -5,6 +5,12 @@ import {
   type SecurityEmailSender,
 } from "@pawket/identity/security-email";
 
+import {
+  renderSecurityEmailHtml,
+  renderSecurityEmailText,
+  type SecurityEmailContent,
+} from "./security-email-html.js";
+
 export type SmtpSecurityEmailConfig = Readonly<{
   host: string;
   port: number;
@@ -28,6 +34,7 @@ export type SmtpMail = Readonly<{
   to: string;
   subject: string;
   text: string;
+  html: string;
 }>;
 
 export type SmtpTransport = {
@@ -90,7 +97,7 @@ function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
   }
 }
 
-function noticeText(event: string | undefined): string {
+function noticeContent(event: string | undefined): SecurityEmailContent {
   const notices: Record<string, string> = {
     password_changed: "Mật khẩu Pawket của bạn đã được thay đổi.",
     primary_email_changed: "Email chính của tài khoản Pawket đã được thay đổi.",
@@ -107,28 +114,40 @@ function noticeText(event: string | undefined): string {
     owner_mfa_break_glass_completed:
       "Khôi phục MFA khẩn cấp cho owner đã hoàn tất. Tất cả phiên và yếu tố cũ đã bị vô hiệu hóa; hãy đăng nhập và thiết lập TOTP mới ngay.",
   };
-  const eventText = event ? notices[event] : undefined;
+  const eventText = event && Object.hasOwn(notices, event) ? notices[event] : undefined;
   if (!eventText) throw new Error("Invalid security email message");
-  return `Thông báo bảo mật Pawket\n\n${eventText}\n\nNếu bạn không thực hiện thay đổi này, hãy liên hệ hỗ trợ Pawket ngay.`;
+  // Security notices deliberately carry no call-to-action link.
+  return {
+    heading: "Thông báo bảo mật Pawket",
+    paragraphs: [eventText, "Nếu bạn không thực hiện thay đổi này, hãy liên hệ hỗ trợ Pawket ngay."],
+  };
 }
 
 function safePawketLink(appBaseUrl: string, path: string): string {
   return new URL(path, appBaseUrl).toString();
 }
 
-function applicationOutcomeText(appBaseUrl: string, state: string | undefined): string {
+function applicationOutcomeContent(appBaseUrl: string, state: string | undefined): SecurityEmailContent {
   const outcomes: Record<string, string> = {
     changes_requested: "Pawket cần bạn cập nhật một số nội dung trong hồ sơ creator.",
     approved: "Hồ sơ creator của bạn đã được chấp thuận.",
     rejected: "Hồ sơ creator của bạn chưa được chấp thuận.",
     reopened: "Pawket đã mở lại hồ sơ creator để bạn tiếp tục cập nhật.",
   };
-  const outcome = state ? outcomes[state] : undefined;
+  const outcome = state && Object.hasOwn(outcomes, state) ? outcomes[state] : undefined;
   if (!outcome) throw new Error("Invalid security email message");
-  return `Cập nhật hồ sơ creator Pawket\n\n${outcome}\n\nXem trạng thái và hướng dẫn tiếp theo:\n${safePawketLink(appBaseUrl, "/creator/apply")}`;
+  return {
+    heading: "Cập nhật hồ sơ creator Pawket",
+    paragraphs: [outcome],
+    action: {
+      intro: "Xem trạng thái và hướng dẫn tiếp theo:",
+      label: "Xem trạng thái và hướng dẫn",
+      url: safePawketLink(appBaseUrl, "/creator/apply"),
+    },
+  };
 }
 
-function creatorStatusText(appBaseUrl: string, state: string | undefined): string {
+function creatorStatusContent(appBaseUrl: string, state: string | undefined): SecurityEmailContent {
   const status =
     state === "active"
       ? "Quyền creator Pawket của bạn đang hoạt động."
@@ -136,13 +155,17 @@ function creatorStatusText(appBaseUrl: string, state: string | undefined): strin
         ? "Quyền creator Pawket của bạn đã bị tạm ngưng."
         : undefined;
   if (!status) throw new Error("Invalid security email message");
-  return `Cập nhật quyền creator Pawket\n\n${status}\n\nXem trạng thái:\n${safePawketLink(appBaseUrl, "/creator")}`;
+  return {
+    heading: "Cập nhật quyền creator Pawket",
+    paragraphs: [status],
+    action: { intro: "Xem trạng thái:", label: "Xem trạng thái", url: safePawketLink(appBaseUrl, "/creator") },
+  };
 }
 
-function refundStatusText(
+function refundStatusContent(
   appBaseUrl: string,
   data: Readonly<Record<string, string>>,
-): string {
+): SecurityEmailContent {
   const statuses: Record<string, string> = {
     pending_window: "Pawket đã ghi nhận nghĩa vụ hoàn khoản xác minh về đúng tài khoản đã chứng minh.",
     ready: "Khoản hoàn xác minh đã bước vào thời gian xử lý.",
@@ -151,41 +174,53 @@ function refundStatusText(
     sent: "Pawket đã ghi nhận khoản hoàn xác minh là đã gửi.",
     attention_required: "Khoản hoàn xác minh cần được Pawket xử lý thêm.",
   };
-  const status = data.state ? statuses[data.state] : undefined;
+  const status = data.state && Object.hasOwn(statuses, data.state) ? statuses[data.state] : undefined;
   if (!status || !/^\d{4}-\d{2}-\d{2}$/u.test(data.refundNotBefore ?? "") || !/^\d{4}-\d{2}-\d{2}$/u.test(data.refundDue ?? "")) {
     throw new Error("Invalid security email message");
   }
-  return (
-    `Cập nhật hoàn khoản xác minh Pawket\n\n${status}\n\n` +
-    `Khung hoàn đã ghi nhận: ${data.refundNotBefore} đến ${data.refundDue}.\n\n` +
-    `Xem trạng thái:\n${safePawketLink(appBaseUrl, "/creator/apply")}`
-  );
+  return {
+    heading: "Cập nhật hoàn khoản xác minh Pawket",
+    paragraphs: [status],
+    detail: { label: "Khung hoàn đã ghi nhận", value: `${data.refundNotBefore} đến ${data.refundDue}` },
+    action: { intro: "Xem trạng thái:", label: "Xem trạng thái", url: safePawketLink(appBaseUrl, "/creator/apply") },
+  };
 }
 
-function renderText(appBaseUrl: string, message: SecurityEmailMessage): string {
-    switch (message.purpose) {
-      case "security_notice":
-        return noticeText(message.templateData.event);
-      case "application_outcome":
-        return applicationOutcomeText(appBaseUrl, message.templateData.state);
-      case "creator_status":
-        return creatorStatusText(appBaseUrl, message.templateData.state);
-      case "refund_status":
-        return refundStatusText(appBaseUrl, message.templateData);
-      case "tip_status": {
-        const states: Record<string, string> = {
-          created: "Có yêu cầu tip mới trong lịch sử của bạn. Đây chưa phải xác nhận tiền đã vào ngân hàng.",
-          confirmed: "Pawket đã ghi nhận thao tác xác nhận tip thủ công của bạn.",
-          expired: "Một yêu cầu tip đã hết thời hạn chuyển khoản trên Pawket. Trạng thái này không xác định tiền có đến ngân hàng hay chưa.",
-        };
-        if (message.secret !== null || !Object.hasOwn(states, message.templateData.state ?? "") || Object.keys(message.templateData).sort().join() !== "returnPath,state" || message.templateData.returnPath !== "/creator/tips") throw new Error("Invalid security email message");
-        return `Cập nhật tip Pawket\n\n${states[message.templateData.state!]}\n\nMở danh sách để xem trạng thái hiện tại. Pawket không giữ tiền tip; chỉ đối chiếu với giao dịch thực nhận trong ngân hàng.\n${safePawketLink(appBaseUrl, "/creator/tips")}`;
-      }
-      case "email_verification":
-      case "password_reset":
-      case "email_change":
-        throw new Error("AUTH_MOVED");
-    }
+function tipStatusContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
+  const states: Record<string, string> = {
+    created: "Có yêu cầu tip mới trong lịch sử của bạn. Đây chưa phải xác nhận tiền đã vào ngân hàng.",
+    confirmed: "Pawket đã ghi nhận thao tác xác nhận tip thủ công của bạn.",
+    expired: "Một yêu cầu tip đã hết thời hạn chuyển khoản trên Pawket. Trạng thái này không xác định tiền có đến ngân hàng hay chưa.",
+  };
+  if (message.secret !== null || !Object.hasOwn(states, message.templateData.state ?? "") || Object.keys(message.templateData).sort().join() !== "returnPath,state" || message.templateData.returnPath !== "/creator/tips") throw new Error("Invalid security email message");
+  return {
+    heading: "Cập nhật tip Pawket",
+    paragraphs: [states[message.templateData.state!]!],
+    action: {
+      intro: "Mở danh sách để xem trạng thái hiện tại. Pawket không giữ tiền tip; chỉ đối chiếu với giao dịch thực nhận trong ngân hàng.",
+      label: "Mở danh sách tip",
+      url: safePawketLink(appBaseUrl, "/creator/tips"),
+    },
+  };
+}
+
+function renderContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
+  switch (message.purpose) {
+    case "security_notice":
+      return noticeContent(message.templateData.event);
+    case "application_outcome":
+      return applicationOutcomeContent(appBaseUrl, message.templateData.state);
+    case "creator_status":
+      return creatorStatusContent(appBaseUrl, message.templateData.state);
+    case "refund_status":
+      return refundStatusContent(appBaseUrl, message.templateData);
+    case "tip_status":
+      return tipStatusContent(appBaseUrl, message);
+    case "email_verification":
+    case "password_reset":
+    case "email_change":
+      throw new Error("AUTH_MOVED");
+  }
 }
 
 class SmtpSecurityEmailSender implements SecurityEmailSender {
@@ -196,11 +231,14 @@ class SmtpSecurityEmailSender implements SecurityEmailSender {
   ) {}
 
   async send(message: SecurityEmailMessage): Promise<void> {
+    const subject = subjectFor(message.purpose);
+    const content = renderContent(this.appBaseUrl, message);
     await this.transport.sendMail({
       from: this.from,
       to: message.destination,
-      subject: subjectFor(message.purpose),
-      text: renderText(this.appBaseUrl, message),
+      subject,
+      text: renderSecurityEmailText(content),
+      html: renderSecurityEmailHtml(this.appBaseUrl, content),
     });
   }
 }

@@ -10,6 +10,7 @@ import {
   type SmtpMail,
   type SmtpTransportOptions,
 } from "../src/security-email.js";
+import { renderSecurityEmailHtml } from "../src/security-email-html.js";
 import * as workerRuntime from "../src/worker-runtime.js";
 
 type ProcessorFactory = {
@@ -274,8 +275,76 @@ describe("production SMTP security email sender", () => {
       subject: "Thông báo bảo mật Pawket",
       text:
         "Thông báo bảo mật Pawket\n\nMột phiên đăng nhập Pawket đã được thu hồi.\n\nNếu bạn không thực hiện thay đổi này, hãy liên hệ hỗ trợ Pawket ngay.",
+      html: expect.stringContaining("Một phiên đăng nhập Pawket đã được thu hồi."),
     });
   });
+
+  test("sends a branded HTML alternative that mirrors the text body and its only link", async () => {
+    // Catches the HTML part drifting from the text part or linking somewhere the text does not.
+    const sent: SmtpMail[] = [];
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp,
+      createTransport() { return { async sendMail(mail) { sent.push(mail); } }; } });
+    const messages = [
+      { purpose: "application_outcome", templateData: { state: "approved" }, path: "/creator/apply" },
+      { purpose: "creator_status", templateData: { state: "active" }, path: "/creator" },
+      { purpose: "refund_status", templateData: { state: "ready", refundNotBefore: "2026-09-01", refundDue: "2026-09-08" }, path: "/creator/apply" },
+      { purpose: "tip_status", templateData: { state: "created", returnPath: "/creator/tips" }, path: "/creator/tips" },
+    ] as const;
+    for (const { purpose, templateData } of messages) {
+      await sender.send({ handoffId: "synthetic-html-handoff", purpose, destination: "synthetic@example.invalid", secret: null, templateData });
+    }
+
+    expect(sent).toHaveLength(messages.length);
+    sent.forEach((mail, index) => {
+      expect(mail.html).toMatch(/^<!DOCTYPE html>\n<html lang="vi">/u);
+      expect(mail.html).toContain(`<h1 style="margin: 0; font-size: 22px; line-height: 1.3; font-weight: bold;">${mail.subject}</h1>`);
+      // The refund window renders as a label/value box (asserted below); colon lead-ins become the button.
+      for (const line of mail.text.split("\n").filter((value) => value.length > 0 && !value.startsWith("Khung hoàn") && !value.endsWith(":"))) expect(mail.html).toContain(line);
+      const actionUrl = `https://pawket.example${messages[index]!.path}`;
+      const hrefs = [...mail.html.matchAll(/href="([^"]*)"/gu)].map((match) => match[1]);
+      expect(new Set(hrefs)).toEqual(new Set([actionUrl, "https://pawket.example/"]));
+    });
+    expect(sent[2]?.html).toContain("2026-09-01 đến 2026-09-08");
+  });
+
+  test("security notice HTML carries no call-to-action link", async () => {
+    // Catches a phishing-shaped "click here" button appearing in account security notices.
+    let delivered: SmtpMail | undefined;
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp,
+      createTransport() { return { async sendMail(mail) { delivered = mail; } }; } });
+    await sender.send({ handoffId: "synthetic-notice", purpose: "security_notice", destination: "synthetic@example.invalid", secret: null, templateData: { event: "password_changed" } });
+
+    const hrefs = [...(delivered?.html ?? "").matchAll(/href="([^"]*)"/gu)].map((match) => match[1]);
+    expect(hrefs).toEqual(["https://pawket.example/"]);
+    expect(delivered?.html).toContain("Mật khẩu Pawket của bạn đã được thay đổi.");
+  });
+
+  test("rejects inherited template keys instead of rendering prototype values", async () => {
+    // Catches lookups such as notices["__proto__"] slipping past validation into the email body.
+    const sendMail = vi.fn(async () => {});
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp, createTransport: () => ({ sendMail }) });
+    const base = { handoffId: "synthetic-proto", destination: "synthetic@example.invalid", secret: null } as const;
+    await expect(sender.send({ ...base, purpose: "security_notice", templateData: { event: "__proto__" } })).rejects.toThrow("Invalid security email message");
+    await expect(sender.send({ ...base, purpose: "application_outcome", templateData: { state: "constructor" } })).rejects.toThrow("Invalid security email message");
+    await expect(sender.send({ ...base, purpose: "refund_status", templateData: { state: "toString", refundNotBefore: "2026-09-01", refundDue: "2026-09-08" } })).rejects.toThrow("Invalid security email message");
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  test("HTML renderer escapes every inserted value", () => {
+    // Catches markup injection if a future template passes untrusted text into the layout.
+    const html = renderSecurityEmailHtml("https://pawket.example", {
+      heading: "<script>alert(1)</script>",
+      paragraphs: ["a & b \"quoted\" 'single'"],
+      detail: { label: "<b>label</b>", value: "<img src=x>" },
+      action: { intro: "<i>intro</i>", label: "<u>go</u>", url: "https://pawket.example/x?a=1&b=\"2\"" },
+    });
+
+    expect(html).not.toMatch(/<(script|b|img|i|u)[ >]/u);
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("a &amp; b &quot;quoted&quot; &#39;single&#39;");
+    expect(html).toContain('href="https://pawket.example/x?a=1&amp;b=&quot;2&quot;"');
+  });
+
   test("SMTP sender cannot emit retired credential links", async () => {
     const sendMail = vi.fn(async () => {});
     const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp, createTransport: () => ({ sendMail }) });
