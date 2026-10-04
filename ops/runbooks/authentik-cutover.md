@@ -181,6 +181,24 @@ The owner must explicitly resolve this sequencing contradiction before PR B
 is merged; applying the blueprint or passing CI alone does not satisfy it.
 Do not mark the gate passed based on a provider-only sign-in.
 
+Migration 0039 renames columns used by the pre-PR-B binary. Before merging
+PR B, set Coolify to manual deployments only and verify that it saved. After
+the blueprint and owner-approved gate, drain authenticated writes and stop
+the old web and worker before running the migration. Verify a consistent,
+recoverable backup and record its evidence privately. If the backup restarts
+containers, stop the old web and worker again. Keep them stopped until 0039
+completes and start only PR B's candidate web and worker. Compose's migration
+dependency orders new containers; it does not prove an already running old
+binary has stopped. Verify the migration exit status and the deployed source
+revision before owner acceptance.
+
+After 0039, the pre-PR-B binary is incompatible with the renamed schema.
+Use a compatible forward fix; do not redeploy the old binary, down-migrate
+history, restore revoked sessions or restore the backup over live production.
+A reverse-rename rollback or live backup restore needs a separately reviewed
+procedure and explicit owner authorization. If migration or startup fails,
+keep authenticated services stopped until a compatible release is verified.
+
 After any authentik upgrade, re-check the login-event device serialization,
 confirmed-device filtering, `auth_time` correspondence and `amr: mfa`, then
 repeat password + passkey and password + TOTP acceptance. Unknown or missing
