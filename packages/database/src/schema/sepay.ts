@@ -128,8 +128,8 @@ export const paymentsSepayAccountCutovers = pgTable("payments_sepay_account_cuto
   check("sepay_cutover_environment_check", sql`${table.providerEnvironment} in ('test','live')`),
   check("sepay_cutover_provider_check", sql`${boundedIdentity(table.providerTenantId)} and ${table.providerAccountId} ~ '^[1-9][0-9]{0,39}$'`),
   check("sepay_cutover_actor_check", boundedIdentity(table.actorSessionId)),
-  check("sepay_cutover_assurance_check", sql`${table.primaryAuthenticatedAt} between ${table.cutoverAt} - interval '15 minutes' and ${table.cutoverAt}
-    and (${table.mfaVerifiedAt} is null or ${table.mfaVerifiedAt} between ${table.cutoverAt} - interval '5 minutes' and ${table.cutoverAt})`),
+  check("sepay_cutover_assurance_check", sql`${table.primaryAuthenticatedAt} between ${table.cutoverAt} - interval '60 minutes' and ${table.cutoverAt}
+    and (${table.mfaVerifiedAt} is null or ${table.mfaVerifiedAt} between ${table.cutoverAt} - interval '60 minutes' and ${table.cutoverAt})`),
 ]);
 
 export const paymentsSepayInbox = pgTable("payments_sepay_inbox", {

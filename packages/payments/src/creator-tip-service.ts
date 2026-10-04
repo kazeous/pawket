@@ -38,8 +38,8 @@ export { normalizeTipBankTransactionId } from "./manual-payment-service.js";
 export function createCreatorTipPaymentService(input: Input) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100 ||
-    !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
-    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 300_000) fail("invalid_request");
+    !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 3_600_000 ||
+    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 3_600_000) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date());
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };

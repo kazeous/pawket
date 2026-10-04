@@ -147,7 +147,14 @@ describe("parseServerEnv", () => {
     expect(local.APP_BASE_URL).toBe("http://localhost:3000");
     expect(local.APP_BUILD_REVISION).toBe("local");
     expect(local.SECURITY_EMAIL_ADAPTER).toBe("local");
+    expect(local.AUTH_PRIMARY_STEP_UP_TTL_SECONDS).toBe(3600);
+    expect(local.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS).toBe(3600);
     expect(Object.keys(local).join(" ")).not.toMatch(/phone|sms/i);
+  });
+
+  it.each(["AUTH_PRIMARY_STEP_UP_TTL_SECONDS", "AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS"])("bounds %s at one hour", (field) => {
+    expect(parseServerEnv({ ...completeProductionEnv, [field]: "3600" })[field as "AUTH_PRIMARY_STEP_UP_TTL_SECONDS" | "AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS"]).toBe(3600);
+    expect(() => parseServerEnv({ ...completeProductionEnv, [field]: "3601" })).toThrow(field);
   });
 
   it("requires a matching exact source revision in production", () => {

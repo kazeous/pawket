@@ -3,9 +3,9 @@ import { requireSePayAssurance } from "../src/sepay-service-support.js";
 
 const at = new Date("2026-10-04T10:00:00Z");
 const proof = {
-  primaryAuthenticatedAt: new Date(at.getTime() - 400_000),
+  primaryAuthenticatedAt: new Date(at.getTime() - 3_600_000),
   mfaEnrolled: true,
-  mfaVerifiedAt: new Date(at.getTime() - 299_000),
+  mfaVerifiedAt: new Date(at.getTime() - 3_599_000),
   sessionExpiresAt: new Date(at.getTime() + 3_600_000),
 };
 
@@ -13,8 +13,15 @@ describe("SePay second-factor assurance", () => {
   test("fresh passkey second-factor evidence authorizes a payment step-up", () => {
     expect(requireSePayAssurance(proof, at, true)).toEqual(proof);
   });
-  test.each([new Date(at.getTime() - 301_000), null])("rejects stale or missing second-factor evidence: %s", (mfaVerifiedAt) => {
+  test.each([new Date(at.getTime() - 3_601_000), null])("rejects stale or missing second-factor evidence: %s", (mfaVerifiedAt) => {
     expect(() => requireSePayAssurance({ ...proof, mfaVerifiedAt }, at, true)).toThrow("totp_required");
+  });
+  test("accepts the exact one-hour second-factor boundary", () => {
+    expect(() => requireSePayAssurance({ ...proof, mfaVerifiedAt: proof.primaryAuthenticatedAt }, at, true)).not.toThrow();
+  });
+  test("rejects primary authentication beyond one hour", () => {
+    expect(() => requireSePayAssurance({ ...proof, primaryAuthenticatedAt: new Date(at.getTime() - 3_601_000) }, at, true))
+      .toThrow("recent_auth_required");
   });
   test("a creator without an enrolled second factor can use fresh primary", () => {
     const primary = { ...proof, mfaEnrolled: false, mfaVerifiedAt: null };

@@ -19,6 +19,11 @@ const localBase = {
 };
 
 describe("Increment 4 fail-closed configuration", () => {
+  test.each(["TIP_RECENT_AUTH_SECONDS", "TIP_TOTP_AUTH_SECONDS"] as const)("defaults and bounds %s at one hour", (field) => {
+    expect(shape.parse({})[field]).toBe(3600);
+    expect(shape.parse({ [field]: "3600" })[field]).toBe(3600);
+    expect(() => shape.parse({ [field]: "3601" })).toThrow();
+  });
   test("keeps defaults and publishing/retention independent", () => {
     const parsed = parseServerEnv(localBase);
     expect(parsed).toMatchObject({
@@ -50,10 +55,12 @@ describe("Increment 4 fail-closed configuration", () => {
     expect(() => resolveIncrementFourEnv(parsed, "test")).toThrow("validated encryption keyring");
     const dependencies = {
       PII_ACTIVE_KEY_ID: "test-key", PII_KEYRING_JSON: { "test-key": "test-only" }, PII_LOOKUP_HMAC_KEY: "test-only",
-      AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 900, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 300,
+      AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3600, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3600,
     };
     expect(() => resolveIncrementFourEnv({ ...parsed, ...dependencies, AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 60 }, "test")).toThrow("TIP_RECENT_AUTH_SECONDS");
     expect(() => resolveIncrementFourEnv({ ...parsed, ...dependencies, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 30 }, "test")).toThrow("TIP_TOTP_AUTH_SECONDS");
+    expect(() => resolveIncrementFourEnv({ ...parsed, ...dependencies, AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3599 }, "test")).toThrow("TIP_RECENT_AUTH_SECONDS");
+    expect(() => resolveIncrementFourEnv({ ...parsed, ...dependencies, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3599 }, "test")).toThrow("TIP_TOTP_AUTH_SECONDS");
     const resolved = resolveIncrementFourEnv({ ...parsed, ...dependencies }, "test");
     expect(resolved).not.toHaveProperty("PII_KEYRING_JSON");
     expect(resolved).not.toHaveProperty("PII_LOOKUP_HMAC_KEY");

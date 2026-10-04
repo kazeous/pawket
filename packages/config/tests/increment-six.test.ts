@@ -8,9 +8,14 @@ const base = { NODE_ENV: "test", APP_ENV: "test", APP_REVISION: "synthetic",
   DATABASE_URL: "postgresql://test:test@localhost:15449/test", VALKEY_URL: "redis://localhost:16389", METRICS_TOKEN: "synthetic-test-metrics-000000000000" };
 const shape = z.object(incrementSixEnvShape);
 const dependencies = { PII_ACTIVE_KEY_ID: "synthetic", PII_KEYRING_JSON: { synthetic: "synthetic-only" }, PII_LOOKUP_HMAC_KEY: "synthetic-only",
-  AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 900, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 300 };
+  AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3600, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3600 };
 
 describe("commission operational controls", () => {
+  test.each(["COMMISSION_RECENT_AUTH_SECONDS", "COMMISSION_TOTP_AUTH_SECONDS"] as const)("defaults and bounds %s at one hour", (field) => {
+    expect(shape.parse({})[field]).toBe(3600);
+    expect(shape.parse({ [field]: "3600" })[field]).toBe(3600);
+    expect(() => shape.parse({ [field]: "3601" })).toThrow();
+  });
   test("defaults disabled and keeps intake, payments, tip and publishing independent", () => {
     expect(parseServerEnv(base)).toMatchObject({ COMMISSION_INTAKE_MODE: "disabled", COMMISSION_PAYMENTS_MODE: "disabled" });
     for (const intake of ["disabled", "enabled"]) for (const payment of ["disabled", "manual_only", "sepay_optional"]) {
@@ -28,6 +33,8 @@ describe("commission operational controls", () => {
     const parsed = { ...shape.parse({ COMMISSION_PAYMENTS_MODE: "manual_only" }), ...dependencies };
     expect(() => resolveIncrementSixEnv({ ...parsed, AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 60 })).toThrow("COMMISSION_RECENT_AUTH_SECONDS");
     expect(() => resolveIncrementSixEnv({ ...parsed, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 30 })).toThrow("COMMISSION_TOTP_AUTH_SECONDS");
+    expect(() => resolveIncrementSixEnv({ ...parsed, AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3599 })).toThrow("COMMISSION_RECENT_AUTH_SECONDS");
+    expect(() => resolveIncrementSixEnv({ ...parsed, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3599 })).toThrow("COMMISSION_TOTP_AUTH_SECONDS");
   });
   test.each(["", "0", "501", "1e2", "1.0", " 100", "-1"])("rejects invalid scan bounds %j", (value) => {
     expect(() => parseServerEnv({ ...base, COMMISSION_SCAN_BATCH_SIZE: value })).toThrow("COMMISSION_SCAN_BATCH_SIZE");

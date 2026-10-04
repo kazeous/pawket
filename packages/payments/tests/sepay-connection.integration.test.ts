@@ -57,7 +57,7 @@ describe("SePay connection and OAuth lifecycle with real persistence", () => {
 
   test("rejects stale primary authentication and requires TOTP only when enrolled", async () => {
     const creator = await fixture.creator();
-    creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: new Date(at.getTime() - 900_001),
+    creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: new Date(at.getTime() - 3_600_001),
       mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) }));
     await expect(creator.start()).rejects.toMatchObject({ code: "recent_auth_required" });
     creator.assurance.getTipSessionAssurance.mockImplementation(async (_tx, _actor, at) => ({ primaryAuthenticatedAt: at,
