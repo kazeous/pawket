@@ -10,6 +10,13 @@ function claims() { return { iss: issuer, sub: "subject-1", sid: "session-1", em
   pawket_assurance: { version: 1, policy: "pawket-v1", primary_at: seconds, primary_method: "password", mfa_enrolled: true, mfa_at: seconds } }; }
 
 describe("OIDC application assurance policy", () => {
+  test.each([299_000, 300_000, 301_000])("preserves the owner second-factor freshness boundary at %s ms", (elapsed) => {
+    const evidence = normalizeOidcEvidence(claims(), options);
+    const check = () => assertOidcStepUp(evidence, { expectedSubject: evidence.subject,
+      requestedAt: now, now: new Date(now.getTime() + elapsed), owner: true });
+    if (elapsed > 300_000) expect(check).toThrow("assurance_required");
+    else expect(check).not.toThrow();
+  });
   test("only totp_* claims are unknown, not enrolled", () => {
     const c: Record<string, unknown> = claims();
     c.pawket_assurance = { version: 1, policy: "pawket-v1", primary_at: seconds, primary_method: "password", totp_enrolled: true, totp_at: seconds };

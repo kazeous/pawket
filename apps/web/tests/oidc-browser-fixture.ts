@@ -10,9 +10,9 @@ import { oidcCommand } from "../src/platform/oidc-command-registry";
 const keyring = createEncryptionKeyring({ activeKeyId: "playwright-pii-v1", keys: { "playwright-pii-v1": new Uint8Array(32).fill(1) } });
 const config = { ...syntheticOidcProvider, clientSecret: "browser-synthetic-only-0000000000000000", redirectUri: "http://127.0.0.1:4177/api/v1/auth/oidc/callback", accountPortalUrl: "https://idp.example.invalid/if/user/" };
 const opaque = () => randomBytes(32).toString("base64url");
-function totpStatus(value: string): "enrolled" | "not_enrolled" | "unknown" {
+function mfaStatus(value: string): "enrolled" | "not_enrolled" | "unknown" {
   if (value === "enrolled" || value === "not_enrolled" || value === "unknown") return value;
-  throw new Error("Invalid synthetic TOTP evidence");
+  throw new Error("Invalid synthetic MFA evidence");
 }
 
 /** Explicit test composition only: no application route or production switch. */
@@ -25,10 +25,10 @@ export async function refreshBrowserSession(token: string) {
     const [sidecar] = await database.db.select().from(identityOidcSessions).where(eq(identityOidcSessions.sessionId, session.id));
     if (!sidecar) throw new Error("Missing synthetic OIDC evidence");
     await database.db.transaction(async (tx) => {
-      await tx.update(identitySessions).set({ primaryAuthenticatedAt: now, mfaVerifiedAt: sidecar.totpStatus === "enrolled" ? now : null,
+      await tx.update(identitySessions).set({ primaryAuthenticatedAt: now, mfaVerifiedAt: sidecar.mfaStatus === "enrolled" ? now : null,
         expiresAt: new Date(now.getTime() + 1_800_000), idleExpiresAt: new Date(now.getTime() + 1_800_000),
         absoluteExpiresAt: new Date(now.getTime() + 3_600_000), revokedAt: null, updatedAt: now }).where(eq(identitySessions.id, session.id));
-      await attachSyntheticOidcSession(tx, { userId: session.userId, sessionId: session.id, now, totpStatus: totpStatus(sidecar.totpStatus) });
+      await attachSyntheticOidcSession(tx, { userId: session.userId, sessionId: session.id, now, mfaStatus: mfaStatus(sidecar.mfaStatus) });
     });
   } finally { await database.close(); }
 }
@@ -56,8 +56,8 @@ export async function completeSyntheticPendingAuthentication(db: PawketDatabase,
   await transactions.complete({ id: transaction.id, now }, async (tx, claimed) => {
     const result = await sessions.accept(tx, { transaction: claimed, now, newSessionToken: sessionToken, evidence: {
       issuer: config.issuer, subject: account.accountId, sid: sidecar.sid, email: user.email, canonicalEmail: user.canonicalEmail,
-      emailVerified: true, name: user.name, primaryAt: now, primaryMethod: "password", totpStatus: totpStatus(sidecar.totpStatus),
-      totpAt: sidecar.totpStatus === "enrolled" ? now : null, providerRevision: config.providerRevision,
+      emailVerified: true, name: user.name, primaryAt: now, primaryMethod: "password", mfaStatus: mfaStatus(sidecar.mfaStatus),
+      mfaAt: sidecar.mfaStatus === "enrolled" ? now : null, providerRevision: config.providerRevision,
     } });
     if (!result.ok) throw new Error(result.code);
     await commands.completeStepUp(tx, { transaction: claimed, ...result, now });

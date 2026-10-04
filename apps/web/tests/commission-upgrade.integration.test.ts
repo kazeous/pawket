@@ -26,7 +26,7 @@ type Row = Record<string, unknown>;
 test("0028→0030 preserves pending, confirmed and expired manual/provider tips and accepts old settlement SQL", async () => {
   const manual = await source.creator(); const manualIntent = await manual.createIntent(); manual.advance(1_000);
   const manualService = createCreatorTipPaymentService({ ...manual.common, applicationRevision: "synthetic-i6-upgrade", paymentsMode: "manual_only", pageSize: 25,
-    recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: manual.assurance,
+    recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: manual.assurance,
     tips: { ...manual.tips, getConfirmedGuestContent: async () => ({ name: "Synthetic buyer", message: "Synthetic upgrade" }) } });
   await manualService.confirm({ actor: manual.actor, paymentIntentId: manualIntent.id, observedAmountVnd: manualIntent.amountVnd,
     observedTransferReference: manualIntent.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });

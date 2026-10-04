@@ -35,7 +35,7 @@ function page() {
   <style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:20px}label{display:block;margin:12px 0}input{display:block;width:95%;padding:8px}button{padding:10px;margin:8px}pre{white-space:pre-wrap;background:#eee;padding:16px}</style>
   <h1>Kiểm tra authentik cho Pawket</h1><p>Chạy tại máy này. Secret chỉ giữ trong bộ nhớ cho tới khi đóng tiến trình.</p>
   <pre>${escape(lastResult)}</pre>
-  ${protocol ? '<p>Đã cấu hình confidential client.</p><form method="post" action="/login"><button>Đăng nhập thử</button></form><form method="post" action="/lease"><button>Kiểm tra phiên im lặng</button></form><form method="post" action="/step-up"><button>Xác thực lại với TOTP</button></form>' :
+  ${protocol ? '<p>Đã cấu hình confidential client.</p><form method="post" action="/login"><button>Đăng nhập thử</button></form><form method="post" action="/lease"><button>Kiểm tra phiên im lặng</button></form><form method="post" action="/step-up"><button>Xác thực lại hai bước</button></form>' :
   '<form method="post" action="/configure"><label>Issuer<input name="issuer" value="https://account.reyuugames.com/application/o/pawket-sso-test/" required></label><label>Client ID<input name="clientId" value="pawket-sso-test-v1" required></label><label>Client secret<input type="password" name="clientSecret" autocomplete="off" required></label><button>Lưu trong bộ nhớ</button></form>'}</html>`;
 }
 const server = createServer(async (req, res) => {
@@ -63,7 +63,7 @@ const server = createServer(async (req, res) => {
         hasAuthTime: Number.isSafeInteger(claims.auth_time), authTimeNotFuture: typeof claims.auth_time === "number" && claims.auth_time * 1000 <= Date.now(),
         assuranceVersionMatches: assurance?.version === 1, assurancePolicyMatches: assurance?.policy === config.providerRevision,
         primaryTimeMatches: assurance?.primary_at === claims.auth_time, primaryMethodAllowed: ["password", "source"].includes(assurance?.primary_method),
-        enrollmentKnown: typeof assurance?.totp_enrolled === "boolean", hasTotpEvidence: typeof assurance?.totp_at === "number",
+        enrollmentKnown: typeof assurance?.mfa_enrolled === "boolean", hasMfaEvidence: typeof assurance?.mfa_at === "number",
         amrIncludesMfa: Array.isArray(claims.amr) && claims.amr.includes("mfa") };
       const evidence = normalizeOidcEvidence(claims, { issuer: config.issuer, providerRevision: config.providerRevision, now: new Date() });
       phase = "freshness";
@@ -72,7 +72,7 @@ const server = createServer(async (req, res) => {
       });
       const verdict = { signatureAndProtocol: "passed", purpose: transaction.purpose, emailVerified: evidence.emailVerified,
         primaryMethod: evidence.primaryMethod, primaryAgeSeconds: Math.floor((Date.now() - evidence.primaryAt.getTime()) / 1000),
-        totpStatus: evidence.totpStatus, totpProof: evidence.totpAt !== null,
+        mfaStatus: evidence.mfaStatus, mfaProof: evidence.mfaAt !== null,
         sameIdentity: previous ? evidence.subject === previous.subject : null,
         sameSession: previous ? evidence.sid === previous.sid : null,
         primaryTimeUnchanged: previous ? evidence.primaryAt.getTime() === previous.primaryAt.getTime() : null };

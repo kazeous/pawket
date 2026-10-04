@@ -8,7 +8,7 @@ export const syntheticOidcProvider = { issuer: "https://idp.example.invalid/appl
 
 /** Synthetic provider evidence for domain tests; production never imports this fixture. */
 export async function attachSyntheticOidcSession(db: PawketDatabase | PawketTransaction, input: {
-  userId: string; sessionId: string; now: Date; totpStatus?: "enrolled" | "not_enrolled" | "unknown";
+  userId: string; sessionId: string; now: Date; mfaStatus?: "enrolled" | "not_enrolled" | "unknown";
 }) {
   let [account] = await db.select().from(identityAccounts).where(and(eq(identityAccounts.userId, input.userId),
     eq(identityAccounts.providerId, "authentik"), eq(identityAccounts.issuer, syntheticOidcProvider.issuer)));
@@ -20,7 +20,7 @@ export async function attachSyntheticOidcSession(db: PawketDatabase | PawketTran
     returnPath: "/", createdAt: input.now, expiresAt, claimedAt: input.now, completedAt: input.now });
   const sidecar = { sessionId: input.sessionId, userId: input.userId, accountId: account!.id,
     clientId: syntheticOidcProvider.clientId, providerRevision: syntheticOidcProvider.providerRevision,
-    sid: randomUUID(), primaryMethod: "password", totpStatus: input.totpStatus ?? "not_enrolled",
+    sid: randomUUID(), primaryMethod: "password", mfaStatus: input.mfaStatus ?? "not_enrolled",
     evidenceVerifiedAt: input.now, leaseStartedAt: input.now, idpValidUntil: expiresAt, transactionId };
   await db.insert(identityOidcSessions).values(sidecar).onConflictDoUpdate({ target: identityOidcSessions.sessionId, set: sidecar });
 }

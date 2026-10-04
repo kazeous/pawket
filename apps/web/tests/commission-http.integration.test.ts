@@ -11,7 +11,7 @@ const origin = "https://pawket.example.invalid";
 async function setup(route: CommissionRoute = "fixed_immediate") {
   const s = await f.setup(route); const throttle = vi.fn(async () => true);
   const manual = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only", recentAuthMs: 900_000,
-    totpAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
+    mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
   const input = { appBaseUrl: origin, lookupHmacKey: s.creator.common.lookupHmacKey, intakeMode: "enabled" as const, paymentsMode: "manual_only" as const,
     authenticate: async (headers: Headers) => {
       const userId = headers.get("x-synthetic-user"); const sessionId = headers.get("x-synthetic-session");
@@ -79,7 +79,7 @@ describe("commission HTTP boundary", () => {
     const s = await setup(); const { orderId } = await json(await s.handlers.request(s.req("POST", s.requestBody())));
     const orders = createCommissionOrderService({ ...s.orderInput, intakeMode: "disabled", paymentsMode: "disabled" });
     const manual = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "disabled", recentAuthMs: 900_000,
-      totpAuthMs: 300_000, assurance: s.creator.assurance, commissions: orders.paymentsLifecycle });
+      mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: orders.paymentsLifecycle });
     const paused = createCommissionHttpHandlers({ ...s.input, intakeMode: "disabled", paymentsMode: "disabled", orders, manual });
     const { order } = await json(await paused.detail(s.req(), orderId, "buyer")); expect(order.payment.instruction).toBeNull();
     expect(await json(await paused.request(s.req("POST", s.requestBody())), 503)).toEqual({ code: "intake_disabled" });

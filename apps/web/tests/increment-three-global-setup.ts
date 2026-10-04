@@ -143,7 +143,7 @@ export async function resetIncrementThreeState() {
     const [ownerUser] = await db.select({ authorizationVersion: identityUsers.authorizationVersion }).from(identityUsers).where(eq(identityUsers.id, ownerUserId));
     await db.delete(identitySessions).where(eq(identitySessions.id, "task15-owner-session"));
     await db.insert(identitySessions).values({ id: "task15-owner-session", token: hashSessionToken(ownerSessionToken), userId: ownerUserId, expiresAt: new Date(now.getTime() + 30 * 60_000), createdAt: now, updatedAt: now, assuranceState: "active", primaryAuthenticatedAt: now, mfaVerifiedAt: now, lastUsedAt: now, absoluteExpiresAt: new Date(now.getTime() + 12 * 60 * 60_000), idleExpiresAt: new Date(now.getTime() + 30 * 60_000), authorizationVersion: ownerUser!.authorizationVersion });
-    await attachSyntheticOidcSession(db, { userId: ownerUserId, sessionId: "task15-owner-session", now, totpStatus: "enrolled" });
+    await attachSyntheticOidcSession(db, { userId: ownerUserId, sessionId: "task15-owner-session", now, mfaStatus: "enrolled" });
   } finally { await database.close(); }
 }
 

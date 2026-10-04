@@ -151,7 +151,7 @@ export function createSePayReconciliationService(input: Input) {
         await tx.insert(paymentConfirmations).values({ id: confirmationId, paymentIntentId: intent.id, creatorUserId: intent.creatorUserId, accountVersionId: intent.accountVersionId,
           observedAmountVnd: intent.amountVnd, referenceHash: intent.referenceHash, bankTransactionFingerprint: null, providerTransactionId: transactionId,
           source: review ? "creator_reviewed_sepay" : "sepay_automatic", workerIdentity: review ? null : input.workerIdentity, attestedReceived: review ? true : null,
-          actorSessionId: review?.actor.sessionId ?? null, primaryAuthenticatedAt: proof?.primaryAuthenticatedAt ?? null, totpVerifiedAt: proof?.totpEnrolled ? proof.totpVerifiedAt : null,
+          actorSessionId: review?.actor.sessionId ?? null, primaryAuthenticatedAt: proof?.primaryAuthenticatedAt ?? null, mfaVerifiedAt: proof?.mfaEnrolled ? proof.mfaVerifiedAt : null,
           idempotencyKeyHash: review ? keyHash : null, requestId, confirmedAt: at });
         const [confirmed] = await tx.update(paymentIntents).set({ state: "confirmed", closedAt: at, updatedAt: at }).where(and(eq(paymentIntents.id, intent.id), eq(paymentIntents.state, "awaiting_transfer"), gt(paymentIntents.expiresAt, at))).returning();
         if (!confirmed) sepayFail("intent_not_pending");

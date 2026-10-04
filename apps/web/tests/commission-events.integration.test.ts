@@ -18,7 +18,7 @@ test("the worker validates every commission source and replay without a tip emai
   await s.service.claimTransfer(claim); await s.service.claimTransfer(claim);
   await s.service.claimTransfer({ ...claim, ...commandIds() });
   await createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only", recentAuthMs: 900_000,
-    totpAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle }).confirm({ actor: s.creator.actor,
+    mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle }).confirm({ actor: s.creator.actor,
     paymentIntentId: detail.payment!.id, observedAmountVnd: detail.payment!.amountVnd, observedTransferReference: detail.payment!.reference,
     observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
   const q = await f.setup("custom_quote"); const requestId = await q.service.request(q.request());

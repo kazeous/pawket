@@ -197,7 +197,7 @@ export function createOidcSessionStore(deps: { db: PawketDatabase; config: OidcP
           session.expiresAt <= now || session.idleExpiresAt <= now || session.absoluteExpiresAt <= now) return reject("session_revoked");
         if (transaction.purpose === "lease_check") {
           // A silent check can only extend liveness. New enrollment or a different IdP session requires an interactive login.
-          if (sidecar.sid !== evidence.sid || sidecar.totpStatus !== evidence.mfaStatus) {
+          if (sidecar.sid !== evidence.sid || sidecar.mfaStatus !== evidence.mfaStatus) {
             await revokeOidcUserSessions(tx, { userId: user.id, now, reason: "idp_assurance_changed", sessionIds: [session.id] });
             return reject("session_revoked");
           }
@@ -208,7 +208,7 @@ export function createOidcSessionStore(deps: { db: PawketDatabase; config: OidcP
             primaryAuthenticatedAt: evidence.primaryAt, mfaVerifiedAt: evidence.mfaAt, updatedAt: now }).where(eq(identitySessions.id, session.id));
         }
         await tx.update(identityOidcSessions).set({ sid: evidence.sid, primaryMethod: transaction.purpose === "step_up" ? evidence.primaryMethod : sidecar.primaryMethod,
-          totpStatus: evidence.mfaStatus, evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt,
+          mfaStatus: evidence.mfaStatus, evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt,
           idpValidUntil: oidcLeaseDeadline(transaction.createdAt, session.expiresAt), transactionId: transaction.id }).where(eq(identityOidcSessions.sessionId, session.id));
         return { ok: true, userId: user.id, sessionId: session.id, authorizationVersion, expiresAt: session.absoluteExpiresAt, rotated: transaction.purpose === "step_up" };
       }
@@ -222,13 +222,13 @@ export function createOidcSessionStore(deps: { db: PawketDatabase; config: OidcP
         mfaVerifiedAt: evidence.mfaAt, authorizationVersion, expiresAt, ...policy,
         ipAddress: input.networkKey, userAgent: normalizeUserAgentFamily(input.userAgent) });
       await tx.insert(identityOidcSessions).values({ sessionId, userId: user.id, accountId: account.id, clientId: config.clientId,
-        providerRevision: config.providerRevision, sid: evidence.sid, primaryMethod: evidence.primaryMethod, totpStatus: evidence.mfaStatus,
+        providerRevision: config.providerRevision, sid: evidence.sid, primaryMethod: evidence.primaryMethod, mfaStatus: evidence.mfaStatus,
         evidenceVerifiedAt: now, leaseStartedAt: transaction.createdAt, idpValidUntil: oidcLeaseDeadline(transaction.createdAt, expiresAt), transactionId: transaction.id });
       if (transaction.purpose === "owner_link") await appendAdminAuditEvent(tx, { actorUserId: user.id, actorSessionId: sessionId,
         subjectType: "identity_user", subjectId: user.id, action: "identity.oidc_owner_link_completed", outcome: "succeeded", reasonCode: "signed_browser_proof",
         beforeState: { accessRevision: user.authorizationVersion }, afterState: { accessRevision: authorizationVersion, issuer: config.issuer, subject: evidence.subject,
           clientId: config.clientId, providerRevision: config.providerRevision, mappingId: account.id },
-        assurance: { method: "oidc_primary_totp", transactionId: transaction.id }, applicationRevision: deps.applicationRevision ?? "unversioned",
+        assurance: { method: "oidc_primary_mfa", transactionId: transaction.id }, applicationRevision: deps.applicationRevision ?? "unversioned",
         requestId: `oidc-link:${transaction.id}`, occurredAt: now });
       // Cookie survives idle sliding; database idle and lease deadlines remain authoritative.
       return { ok: true, userId: user.id, sessionId, authorizationVersion, expiresAt: policy.absoluteExpiresAt, rotated: true };

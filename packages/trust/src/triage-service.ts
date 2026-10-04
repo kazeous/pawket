@@ -472,7 +472,7 @@ export function createTriageService(value: FactoryInput) {
         outcome: "succeeded",
         beforeState: { reportId: report.id, state: report.state, version: report.version, holdId: actionName === "restore" ? holdId : null },
         afterState: { reportId: report.id, state: nextState, version: transitioned.report_version, holdId },
-        assurance: { method: "totp", actionClass: `owner.public_report_${actionName}` },
+        assurance: { method: "mfa", actionClass: `owner.public_report_${actionName}` },
         applicationRevision: target.publicationRevisionId,
         requestId: command.requestId,
         occurredAt: at,

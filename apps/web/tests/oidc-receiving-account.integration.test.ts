@@ -26,7 +26,7 @@ async function fixture() {
   await transactions.claim({ state: material.state, browserBinding, now });
   const accepted = await transactions.complete({ id: transaction.id, now }, (tx, transaction) => sessions.accept(tx, { transaction, now, newSessionToken: opaque(),
     evidence: { issuer: config.issuer, subject, sid: randomUUID(), email: `${subject}@example.test`, canonicalEmail: `${subject}@example.test`,
-      emailVerified: true, name: "Synthetic", primaryAt: now, primaryMethod: "password", totpStatus: "not_enrolled", totpAt: null, providerRevision: "v1" } }));
+      emailVerified: true, name: "Synthetic", primaryAt: now, primaryMethod: "password", mfaStatus: "not_enrolled", mfaAt: null, providerRevision: "v1" } }));
   if (!accepted.ok) throw new Error(accepted.code);
   const actor = { userId: accepted.userId, sessionId: accepted.sessionId, authorizationVersion: accepted.authorizationVersion, subject };
   const body = { bankBin: "000000", accountNumber: "1234567890", accountHolderLabel: "SYNTHETIC ACCOUNT" };

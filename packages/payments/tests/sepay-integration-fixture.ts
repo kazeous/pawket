@@ -93,7 +93,7 @@ export function createSePayIntegrationFixture(label: string) {
     const actor = { userId: id, sessionId: `synthetic-session-${randomUUID()}` };
     const assurance = { getTipSessionAssurance: vi.fn<SePayAssurancePort["getTipSessionAssurance"]>(async (_tx, requested, at) =>
       requested.userId === actor.userId && requested.sessionId === actor.sessionId
-        ? { primaryAuthenticatedAt: at, totpEnrolled: false, totpVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) } : null) };
+        ? { primaryAuthenticatedAt: at, mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 3_600_000) } : null) };
     const binding: SePayProviderBinding = { environment: "test", tenantId: `synthetic-tenant-${randomUUID()}`, accountId: "11",
       bankBin: "970436", bankGateway: "Vietcombank", accountNumber, subAccount: null };
     const provider = syntheticProvider(binding, now);

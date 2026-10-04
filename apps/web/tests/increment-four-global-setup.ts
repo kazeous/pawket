@@ -39,7 +39,7 @@ export async function seedCreatorPaymentBrowserFixture(expectedDatabase: "pawket
       await tx.insert(identitySessions).values({ id: tipBrowserSessionId, token: hashSessionToken(tipBrowserSessionToken), userId, expiresAt, absoluteExpiresAt: expiresAt, idleExpiresAt: expiresAt,
         assuranceState: "active", authorizationVersion: 1, primaryAuthenticatedAt: at, createdAt: at, updatedAt: at, lastUsedAt: at });
       await attachSyntheticOidcSession(tx, { userId, sessionId: tipBrowserSessionId, now: at });
-      await attachSyntheticOidcSession(tx, { userId: tipPolicyOwnerUserId, sessionId: tipPolicyOwnerSessionId, now: at, totpStatus: "enrolled" });
+      await attachSyntheticOidcSession(tx, { userId: tipPolicyOwnerUserId, sessionId: tipPolicyOwnerSessionId, now: at, mfaStatus: "enrolled" });
       await tx.insert(creatorApplications).values({ id: applicationId, userId, state: "approved", version: 1, currentRevisionId: null, createdAt: at, updatedAt: at });
       await tx.insert(creatorApplicationRevisions).values({ id: revisionId, applicationId, revisionNumber: 1, artistDisplayName: "Tip Test Artist", shortIntroduction: "Nghệ sĩ giả lập để kiểm tra giao diện tip.", createdAt: at, updatedAt: at });
       await tx.update(creatorApplications).set({ currentRevisionId: revisionId }).where(eq(creatorApplications.id, applicationId));

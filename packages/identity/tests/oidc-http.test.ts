@@ -8,7 +8,7 @@ const state = "state".repeat(10); const binding = "b".repeat(43); const session 
 function harness() {
   const service: ReturnType<typeof createOidcIdentityService> = {
     authenticate: vi.fn(async () => ({ userId: "user", sessionId: "session", authorizationVersion: 1, subject: "subject",
-      primaryAuthenticatedAt: new Date(), mfaVerifiedAt: null, totpStatus: "not_enrolled", sessionExpiresAt: new Date(Date.now() + 600_000),
+      primaryAuthenticatedAt: new Date(), mfaVerifiedAt: null, mfaStatus: "not_enrolled", sessionExpiresAt: new Date(Date.now() + 600_000),
       idpValidUntil: new Date(), leaseRequired: true, owner: false })),
     ownerLinkIntent: vi.fn(async () => ({ purpose: "owner_link" as const, userId: "owner", subject: "owner-sub", authorizationVersion: 2 })),
     begin: vi.fn(async () => ({ authorizationUrl: "https://idp.example/authorize?state=synthetic", state, browserBinding: binding })),

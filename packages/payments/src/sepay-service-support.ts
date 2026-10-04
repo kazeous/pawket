@@ -2,7 +2,7 @@ import { createLookupHmac, decryptSensitiveField, encryptSensitiveField, type En
 import type { PawketTransaction } from "@pawket/database";
 
 export type SePayActor = Readonly<{ userId: string; sessionId: string }>;
-export type SePayAssurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date }>;
+export type SePayAssurance = Readonly<{ primaryAuthenticatedAt: Date; mfaEnrolled: boolean; mfaVerifiedAt: Date | null; sessionExpiresAt: Date }>;
 export type SePayAssurancePort = { getTipSessionAssurance(tx: PawketTransaction, actor: SePayActor, at: Date): Promise<SePayAssurance | null> };
 export type SePayServiceErrorCode = "invalid_request" | "not_available" | "payments_disabled" | "provider_unavailable" | "not_authorized" |
   "recent_auth_required" | "totp_required" | "version_conflict" | "idempotency_conflict" | "open_manual_intents" |
@@ -23,10 +23,10 @@ export function validateSePayCommand(command: { actor: SePayActor; idempotencyKe
 }
 export function requireSePayAssurance(proof: SePayAssurance | null, at: Date, fresh: boolean): SePayAssurance {
   if (!proof || !sepayValidDate(at) || !sepayValidDate(proof.primaryAuthenticatedAt) || !sepayValidDate(proof.sessionExpiresAt) ||
-    typeof proof.totpEnrolled !== "boolean" || (proof.totpVerifiedAt !== null && !sepayValidDate(proof.totpVerifiedAt)) || proof.sessionExpiresAt <= at) sepayFail("not_authorized");
+    typeof proof.mfaEnrolled !== "boolean" || (proof.mfaVerifiedAt !== null && !sepayValidDate(proof.mfaVerifiedAt)) || proof.sessionExpiresAt <= at) sepayFail("not_authorized");
   const age = at.getTime() - proof.primaryAuthenticatedAt.getTime();
   if (age < 0 || (fresh && age > 900_000)) sepayFail("recent_auth_required");
-  if (fresh && proof.totpEnrolled && (!proof.totpVerifiedAt || proof.totpVerifiedAt > at || proof.totpVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.totpVerifiedAt.getTime() > 300_000)) sepayFail("totp_required");
+  if (fresh && proof.mfaEnrolled && (!proof.mfaVerifiedAt || proof.mfaVerifiedAt > at || proof.mfaVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.mfaVerifiedAt.getTime() > 300_000)) sepayFail("totp_required");
   return proof;
 }
 export function createSePayCryptography(input: { keyring: EncryptionKeyring; lookupHmacKey: Uint8Array }) {

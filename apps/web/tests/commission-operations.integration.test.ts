@@ -17,7 +17,7 @@ test("aggregate expiry, overdue and retention reporting is read-only at exact bo
   const paid = await f.setup(); const paidId = await paid.service.request(paid.request());
   const detail = await paid.service.getOrder({ actor: paid.buyerActor, orderId: paidId });
   const confirm = createCreatorCommissionPaymentService({ ...paid.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only", recentAuthMs: 900_000,
-    totpAuthMs: 300_000, assurance: paid.creator.assurance, commissions: paid.service.paymentsLifecycle });
+    mfaAuthMs: 300_000, assurance: paid.creator.assurance, commissions: paid.service.paymentsLifecycle });
   await confirm.confirm({ actor: paid.creator.actor, paymentIntentId: detail.payment!.id, observedAmountVnd: detail.payment!.amountVnd,
     observedTransferReference: detail.payment!.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
   const rows = async () => Promise.all([f.db.select().from(schema.commissionOrders), f.db.select().from(schema.commissionBriefs),

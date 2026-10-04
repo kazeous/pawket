@@ -11,12 +11,12 @@ import { readPaymentPurpose } from "./payment-purpose.js";
 import { retryPaymentAccountChange } from "./payment-account-fence.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
-type Assurance = Readonly<{ primaryAuthenticatedAt: Date; totpEnrolled: boolean; totpVerifiedAt: Date | null; sessionExpiresAt: Date }>;
+type Assurance = Readonly<{ primaryAuthenticatedAt: Date; mfaEnrolled: boolean; mfaVerifiedAt: Date | null; sessionExpiresAt: Date }>;
 type Intent = typeof paymentIntents.$inferSelect;
 type Input<T> = Readonly<{
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   applicationRevision: string; paymentsMode: TipPaymentsMode; purpose: "tip" | "commission";
-  recentAuthMs: number; totpAuthMs: number;
+  recentAuthMs: number; mfaAuthMs: number;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
   authorizeCommand?: (tx: PawketTransaction, actor: Actor) => Promise<void>;
   lockAggregate(tx: PawketTransaction, intent: Intent, at: Date): Promise<boolean>;
@@ -42,7 +42,7 @@ export function normalizeTipBankTransactionId(value: unknown): string {
 export function createManualPaymentConfirmationService<T>(input: Input<T>) {
   if (!identifier(input.applicationRevision)) fail("invalid_request");
   if (!Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 900_000 ||
-    !Number.isSafeInteger(input.totpAuthMs) || input.totpAuthMs < 30_000 || input.totpAuthMs > 300_000) fail("invalid_request");
+    !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 300_000) fail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const id = input.idFactory ?? randomUUID; const clock = input.now ?? (() => new Date());
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const now = () => { const at = clock(); if (!validDate(at)) fail("dependency_unavailable"); return new Date(at); };
@@ -52,14 +52,14 @@ export function createManualPaymentConfirmationService<T>(input: Input<T>) {
     try { return await run(); } catch (error) { if (error instanceof TipPaymentError) throw error; return fail("dependency_unavailable"); }
   }
   function validateAssurance(proof: Assurance | null, at: Date, fresh: boolean): Assurance {
-    const fields = readTipPortRecord(proof, ["primaryAuthenticatedAt", "sessionExpiresAt", "totpEnrolled", "totpVerifiedAt"]);
-    if (!fields || !validDate(fields.primaryAuthenticatedAt) || !validDate(fields.sessionExpiresAt) || typeof fields.totpEnrolled !== "boolean" ||
-      (fields.totpVerifiedAt !== null && !validDate(fields.totpVerifiedAt))) fail("not_authorized");
-    proof = { primaryAuthenticatedAt: fields.primaryAuthenticatedAt, sessionExpiresAt: fields.sessionExpiresAt, totpEnrolled: fields.totpEnrolled, totpVerifiedAt: fields.totpVerifiedAt };
+    const fields = readTipPortRecord(proof, ["primaryAuthenticatedAt", "sessionExpiresAt", "mfaEnrolled", "mfaVerifiedAt"]);
+    if (!fields || !validDate(fields.primaryAuthenticatedAt) || !validDate(fields.sessionExpiresAt) || typeof fields.mfaEnrolled !== "boolean" ||
+      (fields.mfaVerifiedAt !== null && !validDate(fields.mfaVerifiedAt))) fail("not_authorized");
+    proof = { primaryAuthenticatedAt: fields.primaryAuthenticatedAt, sessionExpiresAt: fields.sessionExpiresAt, mfaEnrolled: fields.mfaEnrolled, mfaVerifiedAt: fields.mfaVerifiedAt };
     if (proof.sessionExpiresAt <= at) fail("not_authorized");
     const age = at.getTime() - proof.primaryAuthenticatedAt.getTime();
     if (age < 0 || (fresh && age > input.recentAuthMs)) fail("recent_auth_required");
-    if (fresh && proof.totpEnrolled && (!proof.totpVerifiedAt || proof.totpVerifiedAt > at || proof.totpVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.totpVerifiedAt.getTime() > input.totpAuthMs)) fail("totp_required");
+    if (fresh && proof.mfaEnrolled && (!proof.mfaVerifiedAt || proof.mfaVerifiedAt > at || proof.mfaVerifiedAt < proof.primaryAuthenticatedAt || at.getTime() - proof.mfaVerifiedAt.getTime() > input.mfaAuthMs)) fail("totp_required");
     return proof;
   }
   return {
@@ -108,14 +108,14 @@ export function createManualPaymentConfirmationService<T>(input: Input<T>) {
           const [confirmation] = await tx.insert(paymentConfirmations).values({ id: confirmationId, paymentIntentId: intentId, creatorUserId: actor.userId,
             accountVersionId: intent.accountVersionId, observedAmountVnd: amountVnd, referenceHash: intent.referenceHash, bankTransactionFingerprint,
             source: "creator_manual", attestedReceived: true, actorSessionId: actor.sessionId, primaryAuthenticatedAt: proof.primaryAuthenticatedAt,
-            totpVerifiedAt: proof.totpEnrolled ? proof.totpVerifiedAt : null, idempotencyKeyHash: keyHash, requestId, confirmedAt: at,
+            mfaVerifiedAt: proof.mfaEnrolled ? proof.mfaVerifiedAt : null, idempotencyKeyHash: keyHash, requestId, confirmedAt: at,
           }).onConflictDoNothing({ target: paymentConfirmations.bankTransactionFingerprint }).returning({ id: paymentConfirmations.id });
           if (!confirmation) fail("bank_transaction_conflict");
           const [confirmed] = await tx.update(paymentIntents).set({ state: "confirmed", closedAt: at, updatedAt: at }).where(and(eq(paymentIntents.id, intentId), eq(paymentIntents.state, "awaiting_transfer"), gt(paymentIntents.expiresAt, at))).returning();
           if (!confirmed || !await input.completeAggregate(tx, { intent, actor, at, requestId })) fail("intent_not_pending");
           await appendAdminAuditEvent(tx, { actorUserId: actor.userId, actorSessionId: actor.sessionId, subjectType: "payment_intent", subjectId: intentId,
             action: `${input.purpose}.confirmed`, outcome: "succeeded", beforeState: { state: "awaiting_transfer" }, afterState: { state: "confirmed", confirmationId },
-            assurance: { method: proof.totpEnrolled ? "recent_primary_and_totp" : "recent_primary_auth" }, applicationRevision: input.applicationRevision, requestId, occurredAt: at });
+            assurance: { method: proof.mfaEnrolled ? "recent_primary_and_mfa" : "recent_primary_auth" }, applicationRevision: input.applicationRevision, requestId, occurredAt: at });
           await insertOutboxEvent(tx, { eventType: `${input.purpose}.confirmed.v1`, eventVersion: 1, aggregateType: "payment_intent", aggregateId: intentId,
             payload: { paymentIntentId: intentId, ...(input.purpose === "tip" ? { tipId: intent.tipId } : { orderId: intent.commissionOrderId }), creatorUserId: actor.userId, confirmationId, correlationId: requestId }, occurredAt: at });
           if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `${input.purpose}-confirmed-v1:${confirmationId}`, completedAt: at })) fail("idempotency_conflict");

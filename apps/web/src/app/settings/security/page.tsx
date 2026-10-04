@@ -10,6 +10,6 @@ export default async function SecuritySettingsPage() {
   if (!session || session.leaseRequired) redirect("/sign-in?returnTo=/settings/security");
   return <AppShell context="Tài khoản" action={{ href: "/creator/apply", label: "Hồ sơ creator" }}>
     <header className="workspace-header reveal"><div><p className="eyebrow">Tài khoản</p><h1>Bảo mật &amp; đăng nhập</h1><p className="lede">Quản lý tài khoản chung và các phiên truy cập Pawket.</p></div></header>
-    <SecurityPanel accountPortalUrl={runtime.accountPortalUrl} totpStatus={session.totpStatus} />
+    <SecurityPanel accountPortalUrl={runtime.accountPortalUrl} mfaStatus={session.mfaStatus} />
   </AppShell>;
 }

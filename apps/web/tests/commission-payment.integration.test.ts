@@ -20,7 +20,7 @@ const eligibility = { lockSettlementParticipants: vi.fn(async () => true) };
 type Pending = Awaited<ReturnType<typeof commissionFixture>>;
 function service(pending: Pending, commissions = createCommissionPaymentLifecyclePort({ eligibility })) {
   return createCreatorCommissionPaymentService({ ...pending.creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only",
-    recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: pending.creator.assurance, commissions });
+    recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: pending.creator.assurance, commissions });
 }
 function command(p: Pending, bankTransactionId = randomUUID()) {
   return { actor: p.creator.actor, paymentIntentId: p.payment.id, observedAmountVnd: p.payment.amountVnd, observedTransferReference: p.payment.reference,
@@ -91,7 +91,7 @@ describe("commission payments share the existing financial boundary", () => {
     for (const first of ["tip", "commission"] as const) {
       const creator = await fixture.creator(); const tip = await creator.createIntent(); const p = await commissionFixture(fixture, creator); creator.advance(1_000);
       const tips = createCreatorTipPaymentService({ ...creator.common, applicationRevision: "synthetic-i6", paymentsMode: "manual_only", pageSize: 25,
-        recentAuthMs: 900_000, totpAuthMs: 300_000, assurance: creator.assurance,
+        recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: creator.assurance,
         tips: { ...creator.tips, getConfirmedGuestContent: async () => ({ name: "Synthetic buyer", message: "Private fixture message" }) } });
       const shared = command(p);
       const tipCommand = { ...shared, paymentIntentId: tip.id, observedTransferReference: tip.reference };
