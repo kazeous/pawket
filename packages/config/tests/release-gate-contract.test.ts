@@ -22,7 +22,8 @@ function indexOfRequired(text: string): number {
 }
 
 function releaseGateEnvironment(): Record<string, string> {
-  const block = workflow.match(/\n    env:\r?\n(?<body>(?:      [A-Z0-9_]+:.*\r?\n)+)    services:/u)
+  // Workflow-level env shared by every parallel verification job.
+  const block = workflow.match(/\nenv:\r?\n(?<body>(?:  [A-Z0-9_]+:.*\r?\n)+)\r?\njobs:/u)
     ?.groups?.body;
   expect(block, "release-gate environment block is missing").toBeDefined();
   return Object.fromEntries(
@@ -30,7 +31,7 @@ function releaseGateEnvironment(): Record<string, string> {
       .trimEnd()
       .split(/\r?\n/u)
       .map((line) => {
-        const match = line.match(/^\s{6}([A-Z0-9_]+):\s*(.*)$/u);
+        const match = line.match(/^\s{2}([A-Z0-9_]+):\s*(.*)$/u);
         if (!match) throw new Error("Release-gate environment entry is malformed");
         return [match[1]!, match[2]!.replace(/^(['"])(.*)\1$/u, "$2")];
       }),
@@ -101,6 +102,8 @@ describe("release-gate workflow contract", () => {
         // Both findings are the fixed HTTP unit-test request key, not credentials.
         "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:20",
         "4004a30b48f5e06674134be40b43530172186b1e:packages/admin/tests/tip-policy-http.test.ts:generic-api-key:31",
+        // The valkey image tag ("val-key") copied into the parallel browser job's services.
+        "a48241a5ae8acbf91a92918ca52fa0fc702408e9:.github/workflows/verify.yml:generic-api-key:266",
       ].join("\n"),
     );
   });

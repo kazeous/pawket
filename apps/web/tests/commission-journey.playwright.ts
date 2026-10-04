@@ -167,7 +167,7 @@ test("confirmation preserves exact evidence and key through OIDC review", async 
   await signIn(page, tipBrowserSessionToken); await page.goto('/creator/commissions/' + orderId);
   const database = createDatabase(browserDatabaseUrl);
   try {
-    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
+    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 3_601_000) }).where(eq(identitySessions.id, tipBrowserSessionId));
     const attempts: Array<{ key: string | undefined; body: string | null }> = [];
     await page.route('**/api/v1/creator/commissions/' + orderId + '/confirm', async (route) => {
       attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() }); await route.continue();

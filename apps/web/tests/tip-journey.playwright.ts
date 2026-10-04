@@ -359,7 +359,7 @@ test("creator confirmation waits for OIDC primary and enrolled TOTP, then explic
   const database = createDatabase(browserDatabaseUrl);
   try {
     await signInTipCreator(page);
-    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 901_000), mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
+    await database.db.update(identitySessions).set({ primaryAuthenticatedAt: new Date(Date.now() - 3_601_000), mfaVerifiedAt: null }).where(eq(identitySessions.id, tipBrowserSessionId));
     await database.db.update(identityOidcSessions).set({ mfaStatus: "enrolled" }).where(eq(identityOidcSessions.sessionId, tipBrowserSessionId));
     await page.goto("/creator/tips");
     await page.getByRole("row").filter({ hasText: reference }).getByRole("button", { name: "Đối chiếu giao dịch" }).click();
