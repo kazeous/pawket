@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
-import { incrementSevenEnvShape, resolveIncrementSevenEnv } from "../src/increment-seven.js";
+import { IncrementSevenConfigError, incrementSevenEnvShape, resolveIncrementSevenEnv } from "../src/increment-seven.js";
 import { parseServerEnv } from "../src/index.js";
 
 const base = { NODE_ENV: "test", APP_ENV: "test", APP_REVISION: "synthetic",
@@ -13,6 +13,22 @@ const storage = { COMMISSION_FILES_S3_ENDPOINT: "http://127.0.0.1:9090", COMMISS
   COMMISSION_FILES_QUARANTINE_BUCKET: "pawket-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: "pawket-commission-clean" };
 
 describe("commission file controls", () => {
+  test("fulfilment defaults to disabled", () => {
+    expect(shape.parse({})).toMatchObject({ COMMISSION_FULFILLMENT_MODE: "disabled", COMMISSION_MESSAGE_LIMIT: 60 });
+  });
+  test("fulfilment requires commission files", () => {
+    const resolve = () => resolveIncrementSevenEnv({ ...shape.parse({ COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_FILES_MODE: "disabled" }), APP_ENV: "test" });
+    expect(resolve).toThrow(IncrementSevenConfigError);
+    expect(resolve).toThrow(expect.objectContaining({ failures: expect.arrayContaining([
+      { field: "COMMISSION_FULFILLMENT_MODE", reason: "requires COMMISSION_FILES_MODE=enabled" },
+    ]) }));
+    expect(resolveIncrementSevenEnv({ ...shape.parse({ COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_FILES_MODE: "enabled", ...storage }), ...keys }))
+      .toMatchObject({ COMMISSION_FULFILLMENT_MODE: "enabled" });
+  });
+  test("message limit is bounded", () => {
+    for (const value of ["0", "1001"]) expect(() => shape.parse({ COMMISSION_MESSAGE_LIMIT: value })).toThrow();
+    expect(shape.parse({ COMMISSION_MESSAGE_LIMIT: "1000" })).toMatchObject({ COMMISSION_MESSAGE_LIMIT: 1000 });
+  });
   test("defaults off and report-only", () => {
     expect(parseServerEnv(base)).toMatchObject({ COMMISSION_FILES_MODE: "disabled", COMMISSION_FILE_RETENTION_MODE: "report_only",
       COMMISSION_FILES_CLAMD_PORT: 3310, COMMISSION_FILES_SCAN_CONCURRENCY: 1, COMMISSION_INTAKE_MODE: "disabled" });
@@ -47,8 +63,11 @@ describe("commission file controls", () => {
     const root = new URL("../../../", import.meta.url);
     const read = (path: string) => readFileSync(new URL(path, root), "utf8");
     expect(read(".env.example")).toContain("COMMISSION_FILES_MODE=disabled");
+    expect(read(".env.example").includes("COMMISSION_FULFILLMENT_MODE=disabled")).toBe(true);
+    expect(read(".env.example").includes("COMMISSION_MESSAGE_LIMIT=60")).toBe(true);
     expect(read(".env.example")).toContain("COMMISSION_FILE_RETENTION_MODE=report_only");
     expect(read(".github/workflows/verify.yml")).toContain("COMMISSION_FILES_MODE: disabled");
+    expect(read(".github/workflows/verify.yml").includes("COMMISSION_FULFILLMENT_MODE: disabled")).toBe(true);
     expect(read("compose.prod.yaml").match(/^      COMMISSION_FILES_MODE: disabled$/gmu)).toHaveLength(2);
     expect(read("compose.prod.yaml").match(/^      COMMISSION_FILE_RETENTION_MODE: report_only$/gmu)).toHaveLength(2);
   });

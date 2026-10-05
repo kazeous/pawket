@@ -42,6 +42,7 @@ describe("production compose for commission files", () => {
     expect(service("worker")).toContain("COMMISSION_FILES_CLAMD_HOST: clamd");
     for (const name of ["web", "worker"]) {
       expect(service(name)).toContain("COMMISSION_FILES_MODE: disabled");
+      expect(/^      COMMISSION_FULFILLMENT_MODE: disabled$/mu.test(service(name))).toBe(true);
       expect(service(name)).toContain("COMMISSION_FILE_RETENTION_MODE: report_only");
     }
   });
