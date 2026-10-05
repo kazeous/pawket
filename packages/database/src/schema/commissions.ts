@@ -10,6 +10,7 @@ import { identityUsers } from "./identity-core";
 import { creatorPages } from "./creator-catalog";
 
 export const COMMISSION_POLICY_BOOTSTRAP_ID = "00000000-0000-4000-8000-000000000006";
+export const COMMISSION_SUBMISSION_RESPONSES = ["approved", "changes_requested", "superseded"] as const;
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
 const routeCheck = (column: SQLWrapper) => sql`${column} in ('fixed_immediate','fixed_approval','custom_quote')`;
@@ -134,6 +135,11 @@ export const commissionOrders = pgTable("commission_orders", {
   acceptedAt: time("accepted_at"),
   confirmedAt: time("confirmed_at"),
   dueAt: time("due_at"),
+  deliveredAt: time("delivered_at"),
+  reviewEndsAt: time("review_ends_at"),
+  completedAt: time("completed_at"),
+  completionKind: text("completion_kind"),
+  revisionsUsed: integer("revisions_used").notNull().default(0),
   closedAt: time("closed_at"),
   closeReason: text("close_reason"),
   createdAt: time("created_at").notNull(),
@@ -145,17 +151,24 @@ export const commissionOrders = pgTable("commission_orders", {
   index("commission_orders_buyer_idx").on(t.buyerUserId, t.createdAt, t.id),
   index("commission_orders_creator_idx").on(t.creatorUserId, t.state, t.createdAt, t.id),
   index("commission_orders_expiry_idx").on(t.expiresAt, t.id).where(sql`${t.state} in ('requested','quoted','awaiting_payment')`),
+  index("commission_orders_review_idx").on(t.reviewEndsAt, t.id).where(sql`${t.state} = 'delivered'`),
   check("commission_orders_actor_check", sql`${t.creatorUserId} <> ${t.buyerUserId}`),
   check("commission_orders_route_check", routeCheck(t.route)),
-  check("commission_orders_state_check", sql`${t.state} in ('requested','quoted','awaiting_payment','in_progress','closed') and ${t.version} > 0`),
+  check("commission_orders_state_check", sql`${t.state} in ('requested','quoted','awaiting_payment','in_progress','delivered','completed','closed') and ${t.version} > 0`),
   check("commission_orders_amount_check", sql`${t.amountVnd} is null or ${t.amountVnd} between 50000 and 50000000`),
-  check("commission_orders_payment_state_check", sql`(${t.state} not in ('awaiting_payment','in_progress') or (${t.acceptedAt} is not null and ${t.amountVnd} is not null))
+  check("commission_orders_payment_state_check", sql`(${t.state} not in ('awaiting_payment','in_progress','delivered','completed') or (${t.acceptedAt} is not null and ${t.amountVnd} is not null))
     and (${t.state} not in ('requested','quoted') or (${t.acceptedAt} is null and ${t.amountVnd} is null))
     and (${t.state} <> 'quoted' or (${t.route} = 'custom_quote' and ${t.currentQuoteId} is not null))`),
   check("commission_orders_deadline_check", sql`(${t.state} not in ('requested','quoted','awaiting_payment') or (${t.expiresAt} is not null and ${t.expiresAt} > ${t.createdAt}))
-    and (${t.state} <> 'in_progress' or (${t.expiresAt} is not null and ${t.confirmedAt} < ${t.expiresAt}))`),
-  check("commission_orders_completion_check", sql`coalesce((${t.state} = 'in_progress' and ${t.confirmedAt} is not null and ${t.dueAt} > ${t.confirmedAt})
-    or (${t.state} <> 'in_progress' and ${t.confirmedAt} is null and ${t.dueAt} is null), false)`),
+    and (${t.state} not in ('in_progress','delivered','completed') or (${t.expiresAt} is not null and ${t.confirmedAt} < ${t.expiresAt}))`),
+  check("commission_orders_completion_check", sql`coalesce((${t.state} in ('in_progress','delivered','completed') and ${t.confirmedAt} is not null and ${t.dueAt} > ${t.confirmedAt})
+    or (${t.state} not in ('in_progress','delivered','completed') and ${t.confirmedAt} is null and ${t.dueAt} is null), false)`),
+  check("commission_orders_fulfillment_check", sql`${t.revisionsUsed} between 0 and 10 and coalesce(
+    (${t.state} in ('requested','quoted','awaiting_payment','closed') and ${t.revisionsUsed} = 0 and ${t.deliveredAt} is null and ${t.reviewEndsAt} is null and ${t.completedAt} is null and ${t.completionKind} is null)
+    or (${t.state} = 'in_progress' and ${t.deliveredAt} is null and ${t.reviewEndsAt} is null and ${t.completedAt} is null and ${t.completionKind} is null)
+    or (${t.state} = 'delivered' and ${t.deliveredAt} is not null and ${t.reviewEndsAt} > ${t.deliveredAt} and ${t.completedAt} is null and ${t.completionKind} is null)
+    or (${t.state} = 'completed' and ${t.deliveredAt} is not null and ${t.reviewEndsAt} > ${t.deliveredAt} and ${t.completedAt} >= ${t.deliveredAt} and ${t.completedAt} = ${t.updatedAt}
+      and ${t.completionKind} in ('buyer_accepted','review_window_elapsed') and (${t.completionKind} <> 'review_window_elapsed' or ${t.completedAt} >= ${t.reviewEndsAt})), false)`),
   check("commission_orders_closed_check", sql`(${t.state} = 'closed' and ${t.closedAt} is not null and ${t.closeReason} is not null
     and ${t.closeReason} in ('buyer_withdrawn','creator_declined','quote_withdrawn','quote_declined','request_expired','quote_expired','buyer_cancelled','creator_cancelled','payment_expired','security_invalidated','eligibility_invalidated'))
     or (${t.state} <> 'closed' and ${t.closedAt} is null and ${t.closeReason} is null)`),
@@ -252,7 +265,8 @@ export const commissionReservations = pgTable("commission_reservations", {
   index("commission_reservations_capacity_idx").on(t.creatorUserId, t.state),
   check("commission_reservations_state_check", sql`(${t.state} = 'reserved' and ${t.occupiedAt} is null and ${t.releasedAt} is null)
     or (${t.state} = 'occupied' and ${t.occupiedAt} is not null and ${t.occupiedAt} >= ${t.reservedAt} and ${t.releasedAt} is null)
-    or (${t.state} = 'released' and ${t.occupiedAt} is null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.reservedAt})`),
+    or (${t.state} = 'released' and ${t.occupiedAt} is null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.reservedAt})
+    or (${t.state} = 'completed' and ${t.occupiedAt} is not null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.occupiedAt})`),
 ]);
 
 export const commissionEvents = pgTable("commission_events", {
@@ -268,5 +282,40 @@ export const commissionEvents = pgTable("commission_events", {
 }, (t) => [
   uniqueIndex("commission_events_version_uidx").on(t.orderId, t.orderVersion),
   check("commission_events_version_check", sql`${t.orderVersion} > 0`),
-  check("commission_events_type_check", sql`${t.type} in ('requested','quoted','awaiting_payment','in_progress','closed')`),
+  check("commission_events_type_check", sql`${t.type} in ('requested','quoted','awaiting_payment','in_progress','delivered','completed','closed')`),
+]);
+
+export const commissionSubmissions = pgTable("commission_submissions", {
+  id: uuid("id").primaryKey(),
+  orderId: uuid("order_id").notNull().references(() => commissionOrders.id, { onDelete: "restrict" }),
+  kind: text("kind").notNull(),
+  noteEnvelope: jsonb("note_envelope").$type<EncryptionEnvelope<"commission_submissions", "note">>(),
+  actorSessionId: text("actor_session_id").notNull(),
+  requestId: text("request_id").notNull(),
+  submittedAt: time("submitted_at").notNull(),
+  response: text("response"),
+  responseNoteEnvelope: jsonb("response_note_envelope").$type<EncryptionEnvelope<"commission_submissions", "response_note">>(),
+  responseSessionId: text("response_session_id"),
+  responseRequestId: text("response_request_id"),
+  respondedAt: time("responded_at"),
+}, (t) => [
+  index("commission_submissions_order_idx").on(t.orderId, t.submittedAt, t.id),
+  uniqueIndex("commission_submissions_open_draft_uidx").on(t.orderId).where(sql`${t.kind} = 'draft' and ${t.response} is null`),
+  uniqueIndex("commission_submissions_open_final_uidx").on(t.orderId).where(sql`${t.kind} = 'final' and ${t.response} is null`),
+  check("commission_submissions_check", sql`${t.kind} in ('draft','final') and coalesce(
+    (${t.response} is null and ${t.respondedAt} is null and ${t.responseSessionId} is null and ${t.responseRequestId} is null)
+    or (${t.response} in ('approved','changes_requested') and ${t.respondedAt} is not null and ${t.responseSessionId} is not null and ${t.responseRequestId} is not null)
+    or (${t.response} = 'superseded' and ${t.respondedAt} is not null and ${t.responseSessionId} is null and ${t.responseRequestId} is null), false)
+    and coalesce(${t.response} = 'changes_requested', false) = (${t.responseNoteEnvelope} is not null)
+    and (${t.noteEnvelope} is null or ${commissionEnvelopeCheck(t.noteEnvelope)})
+    and (${t.responseNoteEnvelope} is null or ${commissionEnvelopeCheck(t.responseNoteEnvelope)})
+    and (${t.respondedAt} is null or ${t.respondedAt} >= ${t.submittedAt})`),
+]);
+
+export const commissionFulfillmentPauses = pgTable("commission_fulfillment_pauses", {
+  id: uuid("id").primaryKey(),
+  startedAt: time("started_at").notNull(),
+  endedAt: time("ended_at"),
+}, (t) => [
+  uniqueIndex("commission_fulfillment_pauses_open_uidx").on(sql`(true)`).where(sql`${t.endedAt} is null`),
 ]);

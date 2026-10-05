@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
@@ -12,7 +12,7 @@ import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security
 import * as schema from "../src/schema.js";
 import {
   COMMISSION_POLICY_BOOTSTRAP_ID, commissionBriefs, commissionEvents, commissionFileAttachments, commissionFiles,
-  commissionOrders, commissionPackageRevisions, commissionPackages, creatorPages, identityUsers,
+  commissionPackageRevisions, commissionPackages, creatorPages, identityUsers,
 } from "../src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -59,8 +59,9 @@ async function orderFixture() {
     actorSessionId: "synthetic-creator", requestId: randomUUID(), publishedAt: at });
   await db.update(commissionPackages).set({ state: "open", version: 2, publishedRevisionId: packageRevisionId, updatedAt: at }).where(eq(commissionPackages.id, packageId));
   await db.transaction(async (tx) => {
-    await tx.insert(commissionOrders).values({ id: orderId, creatorUserId, buyerUserId, packageId, packageRevisionId, route: "custom_quote", state: "requested", version: 1,
-      expiresAt: expiry, createdAt: at, updatedAt: at });
+    // This fixture also seeds 0037, before fulfillment columns exist.
+    await tx.execute(sql`insert into commission_orders (id, creator_user_id, buyer_user_id, package_id, package_revision_id, route, state, version, expires_at, created_at, updated_at)
+      values (${orderId}, ${creatorUserId}, ${buyerUserId}, ${packageId}, ${packageRevisionId}, 'custom_quote', 'requested', 1, ${expiry.toISOString()}, ${at.toISOString()}, ${at.toISOString()})`);
     await tx.insert(commissionBriefs).values({ orderId, textEnvelope: envelope("commission_briefs", orderId, "text", "Private brief"),
       linksEnvelope: envelope("commission_briefs", orderId, "links", "[]"), buyerSessionId: "synthetic-buyer", requestId: randomUUID(), createdAt: at });
     await tx.insert(commissionEvents).values({ id: randomUUID(), orderId, orderVersion: 1, type: "requested", actorUserId: buyerUserId, actorSessionId: "synthetic-buyer", requestId: randomUUID(), occurredAt: at });
