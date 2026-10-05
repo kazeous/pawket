@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import type { EncryptionEnvelope } from "@pawket/security";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
@@ -10,6 +10,7 @@ import { identityUsers } from "./identity-core";
 import { commissionEnvelopeCheck, commissionOrders, commissionPackages } from "./commissions";
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
+export const COMMISSION_FILE_CONTEXTS_DB = ["brief", "thread", "submission"] as const;
 export const COMMISSION_FILE_STATES = ["awaiting_upload", "scanning", "clean", "attached", "rejected", "scan_failed", "expired", "discarded", "deleted"] as const;
 export type CommissionFileState = typeof COMMISSION_FILE_STATES[number];
 const states = COMMISSION_FILE_STATES.map((state) => `'${state}'`).join(",");
@@ -19,6 +20,7 @@ export const commissionFiles = pgTable("commission_files", {
   ownerUserId: text("owner_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict" }),
   context: text("context").notNull(),
   packageId: uuid("package_id").references(() => commissionPackages.id, { onDelete: "restrict" }),
+  uploadOrderId: uuid("upload_order_id").references(() => commissionOrders.id, { onDelete: "restrict" }),
   orderId: uuid("order_id").references(() => commissionOrders.id, { onDelete: "restrict" }),
   state: text("state").notNull().default("awaiting_upload"),
   version: integer("version").notNull().default(1),
@@ -49,17 +51,20 @@ export const commissionFiles = pgTable("commission_files", {
 }, (t) => [
   index("commission_files_owner_state_idx").on(t.ownerUserId, t.state, t.createdAt),
   index("commission_files_order_idx").on(t.orderId, t.state),
+  index("commission_files_upload_order_idx").on(t.uploadOrderId, t.state).where(sql`${t.uploadOrderId} is not null`),
   index("commission_files_scan_due_idx").on(t.nextScanAt, t.id).where(sql`${t.state} = 'scanning'`),
   index("commission_files_upload_expiry_idx").on(t.uploadExpiresAt, t.id).where(sql`${t.state} = 'awaiting_upload'`),
   index("commission_files_unsent_idx").on(t.cleanAt, t.id).where(sql`${t.state} = 'clean'`),
   index("commission_files_purge_idx").on(t.updatedAt, t.id).where(sql`${t.state} in ('rejected','scan_failed','expired','discarded','deleted','clean','attached') and (${t.quarantinePurgedAt} is null or (${t.cleanPurgedAt} is null and ${t.state} in ('rejected','scan_failed','expired','discarded','deleted')))`),
-  check("commission_files_context_check", sql`${t.context} = 'brief' and ${t.packageId} is not null`),
+  check("commission_files_context_check", sql`(${t.context} = 'brief' and ${t.packageId} is not null and ${t.uploadOrderId} is null)
+    or (${t.context} in ('thread','submission') and ${t.packageId} is null and ${t.uploadOrderId} is not null)`),
   check("commission_files_state_check", sql`${t.state} in (${sql.raw(states)}) and ${t.version} > 0 and ${t.scanAttempts} between 0 and 1000`),
   check("commission_files_order_check", sql`(${t.state} in ('attached','deleted')) = (${t.orderId} is not null and ${t.attachedAt} is not null)`),
-  check("commission_files_size_check", sql`${t.declaredBytes} between 1 and 26214400`),
+  check("commission_files_size_check", sql`${t.declaredBytes} between 1 and case when ${t.context} = 'submission' then 262144000 else 26214400 end`),
   check("commission_files_key_check", sql`${t.objectKey} = 'commission/' || ${t.id}::text`),
   check("commission_files_filename_check", sql`case when ${t.orderId} is null and ${t.state} in ('rejected','scan_failed','expired','discarded') then ${t.filenameEnvelope} is null else ${commissionEnvelopeCheck(t.filenameEnvelope)} end`),
-  check("commission_files_type_check", sql`${t.detectedType} is null or ${t.detectedType} in ('jpeg','png','webp','gif','pdf')`),
+  check("commission_files_type_check", sql`${t.detectedType} is null or ${t.detectedType} in ('jpeg','png','webp','gif','pdf')
+    or (${t.context} = 'submission' and ${t.detectedType} in ('psd','clip','zip'))`),
   check("commission_files_digest_check", sql`${t.sha256} is null or ${t.sha256} ~ '^sha256:[a-f0-9]{64}$'`),
   check("commission_files_clean_evidence_check", sql`(${t.state} not in ('clean','attached','deleted') or (${t.sha256} is not null and ${t.detectedType} is not null and ${t.cleanVersionId} is not null and ${t.cleanAt} is not null))
     and (${t.state} not in ('awaiting_upload','scanning') or (${t.sha256} is null and ${t.detectedType} is null and ${t.cleanVersionId} is null and ${t.cleanAt} is null))`),
@@ -87,6 +92,40 @@ export const commissionFileAttachments = pgTable("commission_file_attachments", 
 }, (t) => [
   uniqueIndex("commission_file_attachment_position_uidx").on(t.targetKind, t.targetId, t.position),
   index("commission_file_attachment_order_idx").on(t.orderId, t.targetKind, t.targetId),
-  check("commission_file_attachment_target_check", sql`${t.targetKind} = 'brief' and ${t.targetId} = ${t.orderId}`),
-  check("commission_file_attachment_position_check", sql`${t.position} between 0 and 9`),
+  check("commission_file_attachment_target_check", sql`(${t.targetKind} = 'brief' and ${t.targetId} = ${t.orderId} and ${t.position} between 0 and 9)
+    or (${t.targetKind} = 'message' and ${t.position} between 0 and 9) or (${t.targetKind} = 'submission' and ${t.position} between 0 and 19)`),
+]);
+
+export const commissionThreads = pgTable("commission_threads", {
+  orderId: uuid("order_id").primaryKey().references(() => commissionOrders.id, { onDelete: "restrict" }),
+  nextSequence: integer("next_sequence").notNull().default(1),
+  createdAt: time("created_at").notNull(),
+  updatedAt: time("updated_at").notNull(),
+}, (t) => [
+  check("commission_threads_sequence_check", sql`${t.nextSequence} > 0`),
+]);
+
+export const commissionThreadEntries = pgTable("commission_thread_entries", {
+  orderId: uuid("order_id").notNull().references(() => commissionThreads.orderId, { onDelete: "restrict" }),
+  sequence: integer("sequence").notNull(),
+  kind: text("kind").notNull(),
+  entryId: uuid("entry_id").notNull(),
+  createdAt: time("created_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.orderId, t.sequence] }),
+  uniqueIndex("commission_thread_entries_entry_uidx").on(t.kind, t.entryId),
+  index("commission_thread_entries_order_idx").on(t.orderId, t.sequence.desc()),
+  check("commission_thread_entries_check", sql`${t.kind} in ('message','submission') and ${t.sequence} > 0`),
+]);
+
+export const commissionMessages = pgTable("commission_messages", {
+  id: uuid("id").primaryKey(),
+  orderId: uuid("order_id").notNull().references(() => commissionOrders.id, { onDelete: "restrict" }),
+  authorUserId: text("author_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict" }),
+  authorSessionId: text("author_session_id").notNull(),
+  textEnvelope: jsonb("text_envelope").$type<EncryptionEnvelope<"commission_messages", "text">>(),
+  requestId: text("request_id").notNull(),
+  createdAt: time("created_at").notNull(),
+}, (t) => [
+  check("commission_messages_text_check", sql`${t.textEnvelope} is null or ${commissionEnvelopeCheck(t.textEnvelope)}`),
 ]);

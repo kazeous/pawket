@@ -7,7 +7,10 @@ export {
   commissionAcceptances, commissionReservations, commissionEvents, commissionSubmissions, commissionFulfillmentPauses,
   type CommissionPublicTerms, type CommissionDraftDocument,
 } from "./schema.js";
-export { COMMISSION_FILE_STATES, commissionFileAttachments, commissionFiles, type CommissionFileState } from "./schema.js";
+export {
+  COMMISSION_FILE_CONTEXTS_DB, COMMISSION_FILE_STATES, commissionFileAttachments, commissionFiles,
+  commissionThreads, commissionThreadEntries, commissionMessages, type CommissionFileState,
+} from "./schema.js";
 export {
   paymentsSepayConnections, paymentsSepayConnectionRevisions, paymentsSepayOAuthAttempts,
   paymentsSepayAccountCutovers, paymentsSepayInbox, paymentsSepayInboxConflicts,
