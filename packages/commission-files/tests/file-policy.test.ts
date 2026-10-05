@@ -1,12 +1,30 @@
 import { describe, expect, test } from "vitest";
 import {
-  COMMISSION_FILE_POLICY, CommissionFileError, commissionFileContentDisposition, commissionFileObjectKey, commissionFileRetryDelayMs,
+  COMMISSION_FILE_CONTENT_TYPES, COMMISSION_FILE_CONTEXTS, COMMISSION_FILE_CONTEXT_TYPES, COMMISSION_FILE_ERRORS, COMMISSION_FILE_POLICY,
+  COMMISSION_FILE_TYPES, CommissionFileError, commissionFileContentDisposition, commissionFileMaxBytes, commissionFileObjectKey, commissionFileRetryDelayMs,
   isInlinePreviewAllowed, normalizeCommissionFileName,
 } from "../src/index.js";
 
 const utf8 = (value: string) => new TextEncoder().encode(value).byteLength;
 
 describe("commission file policy", () => {
+  test("bounds thread and submission files and the order quota", () => {
+    expect(commissionFileMaxBytes("brief")).toBe(26_214_400);
+    expect(commissionFileMaxBytes("thread")).toBe(26_214_400);
+    expect(commissionFileMaxBytes("submission")).toBe(262_144_000);
+    expect(COMMISSION_FILE_POLICY).toMatchObject({ submissionFileMaxBytes: 262_144_000, maxSubmissionFiles: 20,
+      maxMessageFiles: 10, orderQuotaBytes: 1_073_741_824, completedRetentionMs: 180 * 86_400_000 });
+  });
+  test("allows artwork and archives only in submissions", () => {
+    expect(COMMISSION_FILE_CONTEXTS).toEqual(["brief", "thread", "submission"]);
+    expect(COMMISSION_FILE_CONTEXT_TYPES.brief).toEqual(["jpeg", "png", "webp", "gif", "pdf"]);
+    expect(COMMISSION_FILE_CONTEXT_TYPES.thread).toEqual(COMMISSION_FILE_CONTEXT_TYPES.brief);
+    expect(COMMISSION_FILE_TYPES).toEqual(["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"]);
+    expect(COMMISSION_FILE_CONTEXT_TYPES.submission).toEqual(COMMISSION_FILE_TYPES);
+    expect(COMMISSION_FILE_CONTENT_TYPES).toMatchObject({ psd: "image/vnd.adobe.photoshop", clip: "application/octet-stream", zip: "application/zip" });
+    for (const type of ["psd", "clip", "zip"] as const) expect(isInlinePreviewAllowed(type, 1024)).toBe(false);
+    for (const code of ["order_quota_exceeded", "fulfillment_disabled", "invalid_attachment_files"]) expect(COMMISSION_FILE_ERRORS).toContain(code);
+  });
   test("keeps the approved limits", () => {
     expect(COMMISSION_FILE_POLICY).toMatchObject({ briefFileMaxBytes: 25 * 1024 * 1024, maxBriefFiles: 10, maxUnsentReferences: 10, maxPendingPerActor: 10,
       uploadGrantMs: 15 * 60_000, downloadGrantSeconds: 300, scanDeadlineMs: 86_400_000, signatureMaxAgeMs: 86_400_000, closedUnpaidRetentionMs: 30 * 86_400_000 });

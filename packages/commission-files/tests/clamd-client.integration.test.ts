@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createClamdClient } from "../src/index.js";
+import { classifyCommissionFile, createClamdClient, createCommissionFileInspector } from "../src/index.js";
 import { storedZip } from "./zip-fixtures.js";
 
 const host = process.env.COMMISSION_FILES_CLAMD_HOST ?? "127.0.0.1";
@@ -10,6 +10,12 @@ const EICAR = new TextEncoder().encode(String.raw`X5O!P%@AP[4\PZX54(P^)7CC)7}$EI
 async function* once(bytes: Uint8Array) { yield bytes; }
 
 describe("real clamd", () => {
+  test("EICAR inside a ZIP submission is malware", async () => {
+    const archive = storedZip([{ name: "eicar.txt", data: EICAR }]);
+    const inspector = createCommissionFileInspector(); inspector.update(archive);
+    expect(classifyCommissionFile("submission", inspector.finish())).toEqual({ kind: "allowed", type: "zip" });
+    await expect(client.scan(once(archive))).resolves.toMatchObject({ kind: "found", reason: "malware" });
+  });
   test("reports its signature date", async () => {
     const version = await client.version();
     expect(version.signatureVersion).toBeGreaterThan(0);
