@@ -9,3 +9,6 @@ export * from "./file-names.js";
 export * from "./file-service.js";
 export * from "./attachment-port.js";
 export * from "./maintenance.js";
+export * from "./message-text.js";
+export * from "./thread-port.js";
+export * from "./thread-service.js";
