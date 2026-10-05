@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createCommissionFileAttachmentPort } from "@pawket/commission-files";
-import { commissionCommandFingerprint, createCommissionOrderService, normalizeCommissionBrief } from "@pawket/orders";
+import { commissionCommandFingerprint, createCommissionFileAccessPort, createCommissionOrderService, lockCommissionCreator, normalizeCommissionBrief } from "@pawket/orders";
 import { encryptSensitiveField } from "@pawket/security";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
 import { schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
@@ -27,6 +27,56 @@ async function setupWithFiles(mode: "enabled" | "disabled" = "enabled") {
   return { ...s, files, service: createCommissionOrderService({ ...s.input, files }) };
 }
 const ordersOf = async (buyerUserId: string) => fixture.db.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.buyerUserId, buyerUserId));
+
+describe("fulfillment file access port", () => {
+  test("returns party facts, refuses strangers and the owner, and handles unavailable orders", async () => {
+    const p = await fixture.paidOrder(); const port = createCommissionFileAccessPort({ catalog: p.s.catalog });
+    for (const [actor, role] of [[p.buyer, "buyer"], [p.creator, "creator"]] as const) {
+      expect(await fixture.db.transaction((tx) => port.lockFulfillmentOrder(tx, { orderId: p.orderId, actorUserId: actor.userId })))
+        .toEqual({ role, state: "in_progress", creatorUserId: p.creator.userId });
+    }
+    const stranger = await p.s.buyer(); const owner = await p.s.buyer(); const at = new Date("2026-09-26T04:00:01Z");
+    await fixture.db.insert(schema.identityRoleGrants).values({ id: randomUUID(), userId: owner.userId, role: "owner", grantSource: "bootstrap_cli", grantedAt: at, createdAt: at, updatedAt: at });
+    for (const actor of [stranger, owner]) expect(await fixture.db.transaction((tx) => port.lockFulfillmentOrder(tx, { orderId: p.orderId, actorUserId: actor.userId }))).toBeNull();
+    for (const orderId of [randomUUID(), "invalid"]) expect(await fixture.db.transaction((tx) => port.lockFulfillmentOrder(tx, { orderId, actorUserId: p.buyer.userId }))).toBeNull();
+    expect((await port.retentionFacts(fixture.db, [p.orderId])).get(p.orderId)).toMatchObject({ completedAt: null });
+    expect((await port.retentionFacts(fixture.db, [])).size).toBe(0);
+  });
+  test("reads state after the creator fence and exposes completedAt for retention", async () => {
+    const p = await fixture.paidOrder(); const port = createCommissionFileAccessPort({ catalog: p.s.catalog });
+    const at = new Date("2026-09-26T04:00:02Z"); const completedAt = new Date(at.getTime() + 1_000);
+    let locked!: () => void; let waiting!: () => void;
+    const creatorLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const readerWaiting = new Promise<void>((resolve) => { waiting = resolve; });
+    const writer = fixture.db.transaction(async (tx) => {
+      await lockCommissionCreator(tx, p.creator.userId); locked(); await readerWaiting;
+      // Same normal-trigger delivery graph as commission-threads-schema.integration.test.ts.
+      const submissionId = randomUUID();
+      await tx.insert(schema.commissionThreads).values({ orderId: p.orderId, createdAt: at, updatedAt: at });
+      await tx.update(schema.commissionThreads).set({ nextSequence: 2 }).where(eq(schema.commissionThreads.orderId, p.orderId));
+      await tx.insert(schema.commissionSubmissions).values({ id: submissionId, orderId: p.orderId, kind: "final", actorSessionId: p.creator.sessionId, requestId: randomUUID(), submittedAt: at });
+      await tx.insert(schema.commissionThreadEntries).values({ orderId: p.orderId, sequence: 1, kind: "submission", entryId: submissionId, createdAt: at });
+      await tx.update(schema.commissionOrders).set({ state: "delivered", deliveredAt: at, reviewEndsAt: new Date(at.getTime() + 7 * 86_400_000), version: 3, updatedAt: at }).where(eq(schema.commissionOrders.id, p.orderId));
+      await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: p.orderId, orderVersion: 3, type: "delivered", requestId: randomUUID(), occurredAt: at });
+    });
+    await creatorLocked;
+    const reader = fixture.db.transaction(async (tx) => {
+      const execute = tx.execute.bind(tx); const select = vi.spyOn(tx, "select");
+      const fence = vi.spyOn(tx, "execute").mockImplementation((query) => { waiting(); return execute(query); });
+      try { const result = await port.lockFulfillmentOrder(tx, { orderId: p.orderId, actorUserId: p.buyer.userId });
+        expect(fence).toHaveBeenCalledTimes(1); expect(select).toHaveBeenCalledTimes(2); return result;
+      } finally { fence.mockRestore(); select.mockRestore(); }
+    });
+    const [, facts] = await Promise.all([writer, reader.finally(waiting)]);
+    expect(facts).toMatchObject({ state: "delivered" });
+    await fixture.db.transaction(async (tx) => {
+      await tx.update(schema.commissionOrders).set({ state: "completed", completedAt, completionKind: "buyer_accepted", version: 4, updatedAt: completedAt }).where(eq(schema.commissionOrders.id, p.orderId));
+      await tx.update(schema.commissionReservations).set({ state: "completed", releasedAt: completedAt }).where(eq(schema.commissionReservations.orderId, p.orderId));
+      await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: p.orderId, orderVersion: 4, type: "completed", requestId: randomUUID(), occurredAt: completedAt });
+    });
+    expect((await port.retentionFacts(fixture.db, [p.orderId])).get(p.orderId)).toMatchObject({ state: "completed", completedAt });
+  });
+});
 
 describe("brief reference files", () => {
   test("attaches clean references and shows them to both parties", async () => {

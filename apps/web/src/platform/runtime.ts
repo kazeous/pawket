@@ -468,7 +468,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     },
   });
   const commissionFiles = createCommissionFileService({ db: database.db, storage: commissionFileStorage, keyring, lookupHmacKey, mode: env.COMMISSION_FILES_MODE,
-    sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
+    fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
   const commissionFileHandlers = createCommissionFileHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, files: commissionFiles,
     onOperation: recordCommissionFileOperation,
     async throttle({ actorUserId, networkKeyHash, operation }) {

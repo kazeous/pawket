@@ -9,7 +9,7 @@ import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
 import { decryptCommissionFileName, encryptCommissionFileName } from "./file-names.js";
 import {
   COMMISSION_FILE_CONTENT_TYPES, COMMISSION_FILE_POLICY, CommissionFileError, commissionFileContentDisposition, commissionFileFail, commissionFileObjectKey,
-  commissionFileUuid, isInlinePreviewAllowed, normalizeCommissionFileName, type CommissionFileType,
+  commissionFileMaxBytes, commissionFileUuid, isInlinePreviewAllowed, normalizeCommissionFileName, type CommissionFileType,
 } from "./file-policy.js";
 import type { CommissionFileActor, CommissionFileOrderAccessPort, CommissionFileSessionPort } from "./ports.js";
 import { CommissionFileStorageError, type CommissionFileStoragePort } from "./storage-port.js";
@@ -23,7 +23,8 @@ export type CommissionFileView = Readonly<{
 }>;
 type Input = Readonly<{
   db: PawketDatabase; storage: Pick<CommissionFileStoragePort, "presignUpload" | "presignDownload">; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
-  mode: "disabled" | "enabled"; sessions: CommissionFileSessionPort; orders: Pick<CommissionFileOrderAccessPort, "briefPackage" | "orderAccess">;
+  mode: "disabled" | "enabled"; fulfillmentMode: "disabled" | "enabled"; sessions: CommissionFileSessionPort;
+  orders: Pick<CommissionFileOrderAccessPort, "briefPackage" | "orderAccess" | "lockFulfillmentOrder">;
   now?: () => Date; idFactory?: () => string;
 }>;
 
@@ -62,19 +63,24 @@ export function createCommissionFileService(input: Input) {
   }
 
   return {
-    async createUpload(command: Readonly<{ actor: CommissionFileActor; context: "brief"; packageId: string; fileName: unknown; declaredBytes: unknown; idempotencyKey: string; requestId: string }>) {
+    async createUpload(command: Readonly<{ actor: CommissionFileActor; fileName: unknown; declaredBytes: unknown; idempotencyKey: string; requestId: string }> &
+      (Readonly<{ context: "brief"; packageId: string }> | Readonly<{ context: "thread" | "submission"; orderId: string }>)) {
       actorValid(command.actor);
-      if (command.context !== "brief" || !commissionFileUuid(command.packageId) || typeof command.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(command.idempotencyKey) ||
+      if (!(command.context === "brief" ? commissionFileUuid(command.packageId) :
+        (command.context === "thread" || command.context === "submission") && commissionFileUuid(command.orderId)) ||
+        typeof command.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(command.idempotencyKey) ||
         typeof command.requestId !== "string" || !IDENTIFIER.test(command.requestId) || !Number.isSafeInteger(command.declaredBytes) || (command.declaredBytes as number) < 1) commissionFileFail("invalid_request");
       const declaredBytes = command.declaredBytes as number;
-      if (declaredBytes > COMMISSION_FILE_POLICY.briefFileMaxBytes) commissionFileFail("file_too_large");
+      if (command.context === "brief" && declaredBytes > commissionFileMaxBytes(command.context)) commissionFileFail("file_too_large");
       const name = normalizeCommissionFileName(command.fileName);
       if (input.mode !== "enabled") commissionFileFail("files_disabled");
+      if (command.context !== "brief" && input.fulfillmentMode !== "enabled") commissionFileFail("fulfillment_disabled");
       return boundary(() => input.db.transaction(async (tx) => {
         const startedAt = now(); await session(tx, command.actor);
         const started = await beginIdempotentCommand(tx, { actorUserId: command.actor.userId, commandScope: "commission-files.upload",
           keyHash: createLookupHmac({ key, context: "commission-file-command-key", value: command.idempotencyKey }),
-          requestFingerprint: createLookupHmac({ key, context: "commission-file-command", value: JSON.stringify([command.packageId, name, declaredBytes]) }),
+          requestFingerprint: createLookupHmac({ key, context: "commission-file-command", value: JSON.stringify(command.context === "brief"
+            ? [command.packageId, name, declaredBytes] : [command.context, command.orderId, name, declaredBytes]) }),
           now: startedAt, expiresAt: new Date(startedAt.getTime() + COMMISSION_FILE_POLICY.uploadGrantMs) });
         if (started.kind === "replay") {
           const row = await owned(tx, started.resultReference, command.actor);
@@ -84,18 +90,31 @@ export function createCommissionFileService(input: Input) {
           return { fileId: row.id, url: grant.url, requiredHeaders: { ...grant.requiredHeaders }, expiresAt: row.uploadExpiresAt.toISOString() };
         }
         if (started.kind !== "acquired") commissionFileFail("idempotency_conflict");
+        if (declaredBytes > commissionFileMaxBytes(command.context)) commissionFileFail("file_too_large");
+        if (command.context !== "brief") {
+          const order = await input.orders.lockFulfillmentOrder(tx, { orderId: command.orderId, actorUserId: command.actor.userId });
+          if (!order) commissionFileFail("not_available");
+          if (command.context === "thread" ? !["in_progress", "delivered"].includes(order.state) : order.role !== "creator" || order.state !== "in_progress") commissionFileFail("invalid_state");
+        }
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commission-files:owner:${command.actor.userId}`}, 0))`);
-        if (!await input.orders.briefPackage(tx, { packageId: command.packageId, actorUserId: command.actor.userId })) commissionFileFail("not_available");
+        if (command.context === "brief" && !await input.orders.briefPackage(tx, { packageId: command.packageId, actorUserId: command.actor.userId })) commissionFileFail("not_available");
         const at = now();
         const live = or(eq(commissionFiles.state, "scanning"), and(eq(commissionFiles.state, "awaiting_upload"), gt(commissionFiles.uploadExpiresAt, at)));
         const [pending] = await tx.select({ total: count() }).from(commissionFiles).where(and(eq(commissionFiles.ownerUserId, command.actor.userId), live));
         if ((pending?.total ?? 0) >= COMMISSION_FILE_POLICY.maxPendingPerActor) commissionFileFail("pending_limit");
-        const [unsent] = await tx.select({ total: count() }).from(commissionFiles).where(and(eq(commissionFiles.ownerUserId, command.actor.userId),
-          eq(commissionFiles.context, "brief"), or(live, eq(commissionFiles.state, "clean"))));
-        if ((unsent?.total ?? 0) >= COMMISSION_FILE_POLICY.maxUnsentReferences) commissionFileFail("unsent_limit");
+        if (command.context === "brief") {
+          const [unsent] = await tx.select({ total: count() }).from(commissionFiles).where(and(eq(commissionFiles.ownerUserId, command.actor.userId),
+            eq(commissionFiles.context, "brief"), or(live, eq(commissionFiles.state, "clean"))));
+          if ((unsent?.total ?? 0) >= COMMISSION_FILE_POLICY.maxUnsentReferences) commissionFileFail("unsent_limit");
+        } else {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commission-files:order:${command.orderId}`}, 0))`);
+          const usage = await tx.execute(sql`select commission_order_file_bytes(${command.orderId}::uuid) as bytes`);
+          if (Number(usage[0]!.bytes) + declaredBytes > COMMISSION_FILE_POLICY.orderQuotaBytes) commissionFileFail("order_quota_exceeded");
+        }
         const fileId = newId(); if (!commissionFileUuid(fileId)) commissionFileFail("dependency_unavailable");
         const objectKey = commissionFileObjectKey(fileId); const uploadExpiresAt = new Date(at.getTime() + COMMISSION_FILE_POLICY.uploadGrantMs);
-        await tx.insert(commissionFiles).values({ id: fileId, ownerUserId: command.actor.userId, context: "brief", packageId: command.packageId, declaredBytes,
+        await tx.insert(commissionFiles).values({ id: fileId, ownerUserId: command.actor.userId, context: command.context,
+          packageId: command.context === "brief" ? command.packageId : null, uploadOrderId: command.context === "brief" ? null : command.orderId, declaredBytes,
           filenameEnvelope: encryptCommissionFileName(input.keyring, fileId, name), objectKey, uploadExpiresAt, requestId: command.requestId, createdAt: at, updatedAt: at });
         const grant = await input.storage.presignUpload({ key: objectKey, contentLength: declaredBytes, expiresInSeconds: 900 });
         if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: fileId, completedAt: now() })) commissionFileFail("idempotency_conflict");

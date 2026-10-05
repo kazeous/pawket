@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { commissionFiles } from "@pawket/database";
-import { encryptCommissionFileName, noCommissionFileEvidenceHolds, runCommissionFileMaintenance, type CommissionFileOrderAccessPort } from "../src/index.js";
+import { encryptCommissionFileName, noCommissionFileEvidenceHolds, runCommissionFileMaintenance, type CommissionFileOrderAccessPort, type CommissionFileRetentionFacts } from "../src/index.js";
 import { createFakeCommissionFileStorage } from "./fakes.js";
 import { createCommissionFileFixture, fixtureAt, fixtureKeyring } from "./file-fixture.js";
 
@@ -10,7 +10,7 @@ const fixture = createCommissionFileFixture("maintenance");
 beforeAll(fixture.initialize, 60_000);
 afterAll(fixture.dispose);
 const HOUR = 3_600_000; const DAY = 24 * HOUR;
-const facts = new Map<string, { state: string; confirmedAt: Date | null; closedAt: Date | null }>();
+const facts = new Map<string, CommissionFileRetentionFacts>();
 const orders: Pick<CommissionFileOrderAccessPort, "retentionFacts"> = { retentionFacts: async (_db, ids) => new Map(ids.filter((id) => facts.has(id)).map((id) => [id, facts.get(id)!])) };
 function run(at: Date, options: Partial<Parameters<typeof runCommissionFileMaintenance>[0]> = {}) {
   const storage = createFakeCommissionFileStorage(); const enqueueScan = vi.fn(async () => undefined);
@@ -96,7 +96,7 @@ describe("commission file maintenance", () => {
   test("reports, then enforces, 30-day deletion for references of unpaid closed orders", async () => {
     const o = await fixture.order(); const fileId = await fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId });
     await fixture.attach(fileId, o.orderId);
-    facts.set(o.orderId, { state: "closed", confirmedAt: null, closedAt: fixtureAt });
+    facts.set(o.orderId, { state: "closed", confirmedAt: null, closedAt: fixtureAt, completedAt: null });
     expect(await run(new Date(fixtureAt.getTime() + 29 * DAY)).report).toMatchObject({ retentionDue: 0 });
     expect(await run(new Date(fixtureAt.getTime() + 30 * DAY)).report).toMatchObject({ retentionDue: 1, retentionDeleted: 0 });
     expect((await fixture.read(fileId)).state).toBe("attached");
@@ -127,7 +127,7 @@ describe("commission file maintenance", () => {
     // page past instead of starving on.
     const eligibleId = await fixture.file({ ownerUserId: closed.buyerUserId, packageId: closed.packageId });
     await fixture.attach(eligibleId, closed.orderId, 0, new Date(fixtureAt.getTime() + 10));
-    facts.set(closed.orderId, { state: "closed", confirmedAt: null, closedAt: fixtureAt });
+    facts.set(closed.orderId, { state: "closed", confirmedAt: null, closedAt: fixtureAt, completedAt: null });
     const at = new Date(fixtureAt.getTime() + 30 * DAY);
 
     const page1 = await run(at, { batchSize: 2 }).report;
