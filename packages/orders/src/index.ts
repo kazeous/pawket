@@ -1,6 +1,7 @@
 export * from "./contracts.js";
 export * from "./policy.js";
 export * from "./lifecycle.js";
+export * from "./fulfillment-timing.js";
 export * from "./payment-lifecycle.js";
 export * from "./policy-repository.js";
 export * from "./ports.js";

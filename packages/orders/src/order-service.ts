@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, count, desc, eq, inArray, lt, ne, or } from "drizzle-orm";
+import { and, count, desc, eq, inArray, lt, notInArray, or } from "drizzle-orm";
 import {
   appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent,
   commissionAcceptances, commissionBriefs, commissionEvents, commissionOrders, commissionPackageRevisions,
@@ -150,7 +150,7 @@ export function createCommissionOrderService(input: Input) {
         requireCommissionPolicy(data.policy, command.policyRevisionId);
         const route = data.revision.route;
         if (route !== "custom_quote" && command.acceptTerms !== true) commissionFail("invalid_terms");
-        const [open] = await tx.select({ count: count() }).from(commissionOrders).where(and(eq(commissionOrders.creatorUserId, candidate.creatorUserId), eq(commissionOrders.buyerUserId, command.actor.userId), ne(commissionOrders.state, "closed")));
+        const [open] = await tx.select({ count: count() }).from(commissionOrders).where(and(eq(commissionOrders.creatorUserId, candidate.creatorUserId), eq(commissionOrders.buyerUserId, command.actor.userId), notInArray(commissionOrders.state, ["closed", "completed"])));
         if ((open?.count ?? 0) >= COMMISSION_POLICY.maximumOpenPairOrders) commissionFail("request_limit");
         const terms = route === "custom_quote" ? null : normalizeCommissionTerms(data.revision.terms);
         const at = now(); const orderId = newId();

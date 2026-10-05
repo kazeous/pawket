@@ -33,7 +33,7 @@ export function createCommissionPaymentLifecyclePort(input: Input) {
       const at = commissionTime(command.at);
       await lockCommissionCreator(tx, command.creatorUserId);
       const [order] = await tx.select().from(commissionOrders).where(and(eq(commissionOrders.id, command.orderId), eq(commissionOrders.creatorUserId, command.creatorUserId))).limit(1);
-      if (!order || (order.state !== "awaiting_payment" && order.state !== "in_progress") ||
+      if (!order || !["awaiting_payment", "in_progress", "delivered", "completed"].includes(order.state) ||
         (order.state === "awaiting_payment" && (!order.expiresAt || order.expiresAt <= command.at)) ||
         !await input.eligibility.lockSettlementParticipants(tx, { creatorUserId: order.creatorUserId, buyerUserId: order.buyerUserId, at: command.at })) return false;
       const bindings = locked.get(tx) ?? new Map();
