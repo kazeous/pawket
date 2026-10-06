@@ -5,8 +5,9 @@ import { CommissionError, commissionFail, type CommissionCloseReason } from "./c
 import { commissionIdentifier, commissionInteger, commissionTime, commissionUuid } from "./policy.js";
 import { lockCommissionCreator } from "./payment-lifecycle.js";
 import { commissionExpiredReason, createCommissionOrderPersistence } from "./order-persistence.js";
-import type { CommissionIdentityPort, CommissionPaymentsPort } from "./ports.js";
+import type { CommissionCompletionHoldPort, CommissionIdentityPort, CommissionPaymentsPort } from "./ports.js";
 import { readCommissionOperationalReport } from "./order-operations.js";
+import { createCommissionFulfillmentMaintenance } from "./fulfillment-maintenance.js";
 
 /** No intake/confirmation mode gates: cleanup must continue through emergency pauses. */
 export function createCommissionOrderMaintenanceService(input: {
@@ -14,15 +15,17 @@ export function createCommissionOrderMaintenanceService(input: {
   identity: Pick<CommissionIdentityPort, "lockSettlementParticipants">;
   trust: { lockCommissionPage(tx: PawketTransaction, creatorUserId: string): Promise<boolean> };
   payments: Pick<CommissionPaymentsPort, "closeIntent" | "hasCurrentDestination">;
+  holds?: CommissionCompletionHoldPort;
 }) {
   if (!commissionIdentifier(input.applicationRevision)) commissionFail("invalid_request");
   const now = () => { const at = (input.now ?? (() => new Date()))(); commissionTime(at); return new Date(at); };
   const newId = () => { const id = (input.idFactory ?? randomUUID)(); if (!commissionUuid(id)) commissionFail("dependency_unavailable"); return id; };
-  const { closeOrder } = createCommissionOrderPersistence({ ...input, newId });
+  const { closeOrder, completeCommissionOrder } = createCommissionOrderPersistence({ ...input, newId });
   async function boundary<T>(run: () => Promise<T>): Promise<T> {
     try { return await run(); } catch (error) { if (error instanceof CommissionError) throw error; return commissionFail("dependency_unavailable"); }
   }
   return {
+    ...createCommissionFulfillmentMaintenance({ boundary, now, newId, completeCommissionOrder }, input),
     readOperationalReport: () => boundary(() => readCommissionOperationalReport(input.db, now())),
     async expireDue(limit = 100) {
       commissionInteger(limit, 1, 500);
