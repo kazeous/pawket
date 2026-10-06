@@ -198,6 +198,30 @@ describe("commission threads and file contexts", () => {
     await fixture.client`update commission_files set clean_purged_at = ${confirmedAt.toISOString()}, version = version + 1 where id = ${id}`;
     expect(await bytes(f.orderId)).toBe(0);
   });
+  test("a closed copy-intent row no longer counts toward the order quota", async () => {
+    const f = await paidOrder(); const copyBytes = 209_715_200; const quotaBytes = 1_073_741_824;
+    const id = await newFile(f, "submission", copyBytes);
+    for (let i = 0; i < 4; i++) await newFile(f, "submission", copyBytes);
+    await newFile(f, "submission", 25_165_824);
+    await fixture.client`update commission_files set state = 'scanning', uploaded_at = ${at.toISOString()},
+      scan_deadline_at = ${new Date(at.getTime() + 86_400_000).toISOString()}, clean_copy_intent = true,
+      updated_at = ${confirmedAt.toISOString()}, version = version + 1 where id = ${id}`;
+    await fixture.client`update commission_files set state = 'discarded', ended_at = ${confirmedAt.toISOString()},
+      updated_at = ${confirmedAt.toISOString()}, version = version + 1 where id = ${id}`;
+    await fixture.client`update commission_files set quarantine_purged_at = ${confirmedAt.toISOString()}, version = version + 1 where id = ${id}`;
+    expect(await bytes(f.orderId)).toBe(quotaBytes);
+    await expectSqlState(newFile(f, "submission", copyBytes), "23514", "Commission order file quota exceeded");
+    const closedAt = new Date(confirmedAt.getTime() + 86_400_000);
+    await fixture.client`update commission_files set clean_purged_at = ${closedAt.toISOString()},
+      updated_at = ${closedAt.toISOString()}, version = version + 1 where id = ${id}`;
+    expect(await fixture.client`select state, clean_copy_intent,
+      quarantine_purged_at is not null as quarantine_purged, clean_purged_at is not null as clean_purged,
+      ended_at <= updated_at - interval '24 hours' as aged from commission_files where id = ${id}`)
+      .toEqual([{ state: "discarded", clean_copy_intent: true, quarantine_purged: true, clean_purged: true, aged: true }]);
+    await newFile(f, "submission", copyBytes);
+    expect(await bytes(f.orderId)).toBe(quotaBytes);
+    await expectSqlState(newFile(f, "submission", 1), "23514", "Commission order file quota exceeded");
+  });
   test("quota counts attached brief files and all upload contexts only once", async () => {
     const f = await paidOrder(); const brief = await newFile(f, "brief", 10, f.buyerUserId); await cleanFile(brief);
     await fixture.client.begin(async (tx) => { await attach(tx, brief, f.orderId, "brief", f.orderId); });
