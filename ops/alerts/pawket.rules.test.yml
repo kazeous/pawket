@@ -4,6 +4,58 @@ rule_files:
 evaluation_interval: 1s
 
 tests:
+  - name: fulfillment missing first success fires after five minutes even while paused
+    interval: 1m
+    input_series:
+      - series: pawket_commission_fulfillment_configured
+        values: '1x6'
+      - series: pawket_commission_fulfillment_paused
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PawketCommissionFulfillmentUnhealthy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PawketCommissionFulfillmentUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Commission fulfillment is missing unhealthy or stale
+              runbook: ops/runbooks/commission-operations.md
+
+  - name: stale fulfillment fires after five minutes and fresh success stays quiet
+    interval: 1m
+    input_series:
+      - series: 'pawket_commission_fulfillment_configured{job="worker",instance="stale"}'
+        values: '1x21'
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="stale",scan="commission_fulfillment"}'
+        values: '1x21'
+      - series: 'pawket_worker_last_success_timestamp_seconds{job="worker",instance="stale",scan="commission_fulfillment"}'
+        values: '0x21'
+      - series: 'pawket_commission_fulfillment_configured{job="worker",instance="healthy"}'
+        values: '1x21'
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="healthy",scan="commission_fulfillment"}'
+        values: '1x21'
+      - series: 'pawket_worker_last_success_timestamp_seconds{job="worker",instance="healthy",scan="commission_fulfillment"}'
+        values: '0+60x21'
+      - series: 'pawket_commission_fulfillment_configured{job="worker",instance="unconfigured"}'
+        values: '0x21'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: PawketCommissionFulfillmentUnhealthy
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PawketCommissionFulfillmentUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: worker
+              instance: stale
+            exp_annotations:
+              summary: Commission fulfillment is missing unhealthy or stale
+              runbook: ops/runbooks/commission-operations.md
+
   - name: disabled SePay recovery does not alert on missing scan
     interval: 1m
     input_series:

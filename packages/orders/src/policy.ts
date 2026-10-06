@@ -2,6 +2,10 @@ import { types as nodeTypes } from "node:util";
 import { commissionFail, type CommissionBrief, type CommissionTerms } from "./contracts.js";
 
 const DAY_MS = 86_400_000;
+export const COMMISSION_FULFILLMENT_POLICY = Object.freeze({
+  maximumNoteCodePoints: 2_000, maximumSubmissionFiles: 20,
+  pauseGraceMs: 172_800_000, completedFileRetentionMs: 15_552_000_000,
+});
 export const COMMISSION_POLICY = Object.freeze({
   version: "commission-v1",
   minimumVnd: 50_000, maximumVnd: 50_000_000,
@@ -35,10 +39,17 @@ export function readCommissionRecord(value: unknown, keys: readonly string[]): R
 }
 
 export function commissionText(value: unknown, minimum: number, maximum: number): string {
+  return normalizeCommissionText(value, minimum, maximum, false);
+}
+export function commissionPlainText(value: unknown, minimum: number, maximum: number): string {
+  return normalizeCommissionText(value, minimum, maximum, true);
+}
+function normalizeCommissionText(value: unknown, minimum: number, maximum: number, allowAngleBrackets: boolean): string {
   if (typeof value !== "string") commissionFail("invalid_request");
   const text = value.normalize("NFC").replace(/\r\n?/gu, "\n").trim();
   if ([...text].length < minimum || [...text].length > maximum ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069<>]/u.test(text) ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(text) ||
+    (!allowAngleBrackets && /[<>]/u.test(text)) ||
     /\p{Cs}/u.test(text) || Buffer.byteLength(JSON.stringify(text), "utf8") > COMMISSION_POLICY.maximumPlaintextBytes) commissionFail("invalid_request");
   return text;
 }

@@ -1,7 +1,9 @@
 export const COMMISSION_ROUTES = ["fixed_immediate", "fixed_approval", "custom_quote"] as const;
 export type CommissionRoute = typeof COMMISSION_ROUTES[number];
-export const COMMISSION_STATES = ["requested", "quoted", "awaiting_payment", "in_progress", "closed"] as const;
+export const COMMISSION_STATES = ["requested", "quoted", "awaiting_payment", "in_progress", "delivered", "completed", "closed"] as const;
 export type CommissionState = typeof COMMISSION_STATES[number];
+export const COMMISSION_COMPLETION_KINDS = ["buyer_accepted", "review_window_elapsed"] as const;
+export type CommissionCompletionKind = typeof COMMISSION_COMPLETION_KINDS[number];
 export const COMMISSION_CLOSE_REASONS = [
   "buyer_withdrawn", "creator_declined", "quote_withdrawn", "quote_declined",
   "request_expired", "quote_expired", "buyer_cancelled", "creator_cancelled",
@@ -14,6 +16,7 @@ export const COMMISSION_ERRORS = [
   "request_limit", "expired", "invalid_transition", "idempotency_conflict", "evidence_mismatch",
   "recent_auth_required", "totp_required", "rate_limited", "dependency_unavailable",
   "files_disabled", "invalid_reference_files",
+  "fulfillment_disabled", "revisions_exhausted", "completion_held", "invalid_attachment_files",
 ] as const;
 export type CommissionErrorCode = typeof COMMISSION_ERRORS[number];
 export class CommissionError extends Error {

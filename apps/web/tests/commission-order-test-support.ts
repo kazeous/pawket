@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { createCommissionPackageService } from "@pawket/catalog";
 import { commissionPolicyChecksum, createCommissionOrderService, createCommissionPolicyReadPort, type CommissionRoute } from "@pawket/orders";
-import { createCommissionPaymentIntentPort, createTipReceivingAccountEligibilityPort } from "@pawket/payments";
+import { createCommissionPaymentIntentPort, createCreatorCommissionPaymentService, createTipReceivingAccountEligibilityPort } from "@pawket/payments";
 import { commandIds, createSePayIntegrationFixture, fixtureHash, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const at = new Date("2026-09-26T04:00:00Z");
@@ -17,7 +17,7 @@ export function createCommissionOrderTestFixture(label: string) {
       checksum: commissionPolicyChecksum(facts), effectiveAt: at, createdAt: at });
     await base.db.update(schema.commissionPolicyCurrent).set({ revisionId: policyId, updatedAt: at });
   }
-  async function setup(route: CommissionRoute = "fixed_immediate") {
+  async function setup(route: CommissionRoute = "fixed_immediate", options: { revisionAllowance?: number; reviewWindowDays?: number } = {}) {
     const creator = await base.creator(); creator.setNow(at);
     const users = new Map([[creator.actor.userId, creator.actor.sessionId]]); const gates = { eligible: true, visible: true };
     async function buyer() {
@@ -40,7 +40,7 @@ export function createCommissionOrderTestFixture(label: string) {
       visibility: { resolveVisibleReportTarget: async (_tx, target) => gates.visible ? { target, pageId, creatorUserId: creator.actor.userId, canonicalHandle: handle,
         displayName: "Artist", showcaseTitle: null, mediaAssetIds: [] } : null },
     });
-    const terms = { amountVnd: 500_000, turnaroundDays: 7, revisionAllowance: 2, reviewWindowDays: 7, scope: "Portrait", deliverables: "PNG", usageRights: "Personal", artistTerms: "Public artist terms", policyRevisionId: policyId };
+    const terms = { amountVnd: 500_000, turnaroundDays: 7, revisionAllowance: options.revisionAllowance ?? 2, reviewWindowDays: options.reviewWindowDays ?? 7, scope: "Portrait", deliverables: "PNG", usageRights: "Personal", artistTerms: "Public artist terms", policyRevisionId: policyId };
     const draft = { title: "Portrait", description: "One portrait", discipline: "illustration", route, briefInstructions: "Describe your idea", terms: route === "custom_quote" ? null : terms, showcaseId: null };
     const packageId = await catalog.saveDraft({ actor: creator.actor, pageId, packageId: null, expectedVersion: 0, draft, ...commandIds() });
     await catalog.changePackage({ actor: creator.actor, packageId, expectedVersion: 1, action: "publish", policyRevisionId: policyId, ...commandIds() });
@@ -48,11 +48,24 @@ export function createCommissionOrderTestFixture(label: string) {
     const [pkg] = await base.db.select().from(schema.commissionPackages).where(eq(schema.commissionPackages.id, packageId));
     const payments = createCommissionPaymentIntentPort({ ...creator.common, paymentsMode: "manual_only" });
     const input: Parameters<typeof createCommissionOrderService>[0] = { ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", identity, catalog, payments, policy,
+      fulfillmentMode: "disabled",
       trust: { lockCommissionPage: async () => true } };
     const service = createCommissionOrderService(input);
     const request = (actor = buyerActor) => ({ actor, packageId, revisionId: pkg!.publishedRevisionId!, policyRevisionId: policyId, acceptTerms: route !== "custom_quote",
       brief: { text: "Private commission brief", referenceLinks: ["https://example.invalid/reference"] }, abuseKeyHash: fixtureHash(), ...commandIds() });
     return { creator, buyerActor, buyer, gates, users, catalog, input, service, payments, terms, draft, pageId, packageId, revisionId: pkg!.publishedRevisionId!, policyId, request };
   }
-  return { ...base, initialize, setup, policyId };
+  async function paidOrder(options: { revisionAllowance?: number; reviewWindowDays?: number } = {}) {
+    const s = await setup("fixed_immediate", options);
+    const orderId = await s.service.request(s.request()); s.creator.advance(1_000);
+    const order = await s.service.getOrder({ actor: s.buyerActor, orderId });
+    if (!order.payment) throw new Error("Synthetic commission payment missing");
+    // Payments owns one db.transaction and calls lockSettlement and confirmPayment on this lifecycle port.
+    const payments = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i7", paymentsMode: "manual_only",
+      recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
+    await payments.confirm({ actor: s.creator.actor, paymentIntentId: order.payment.id, observedAmountVnd: order.payment.amountVnd,
+      observedTransferReference: order.payment.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
+    return { orderId, service: s.service, buyer: s.buyerActor, creator: s.creator.actor, s };
+  }
+  return { ...base, initialize, setup, paidOrder, policyId };
 }

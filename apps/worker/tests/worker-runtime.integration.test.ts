@@ -48,8 +48,13 @@ import { createWorkerHealthState } from "../src/worker-health.js";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const valkeyUrl = process.env.TEST_VALKEY_URL;
 const emptyCommissionReport = async () => ({ requested: 0, quoted: 0, awaitingPayment: 0, inProgress: 0,
+  delivered: 0, completed: 0, completedBuyer: 0, completedAutomatic: 0, completionBacklog: 0, lateDeliveries: 0, draftSubmissions: 0, finalSubmissions: 0,
   expiredRequests: 0, expiredQuotes: 0, expiredPayments: 0, oldestExpiryLagSeconds: 0, overdue: 0,
   retentionUnacceptedClosed: 0, retentionAccepted: 0 });
+const pausedCommissionMaintenance = {
+  observeFulfillmentMode: async () => ({ change: "none" as const, paused: true }),
+  completeDue: async () => ({ scanned: 0, completed: 0, held: 0, waiting: 0, nextAfter: null }),
+};
 
 const incrementThreeTerminalEvents = [
   "creator.page_initialized.v1",
@@ -1365,7 +1370,7 @@ describe("worker shutdown", () => {
     const handle = await startWorker({ databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
       concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger, healthState: state,
       tipPayments: { mode: "disabled", batchSize: 25, scanIntervalMs: 5_000, tips: { expireTip: vi.fn() } },
-      commissions: { batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) },
+      commissions: { fulfillmentMode: "disabled", batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ ...pausedCommissionMaintenance, expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) },
       dependencies: { ...doubles.dependencies, dispatch: vi.fn().mockRejectedValue(new Error("queue unavailable")) } });
     try {
       await vi.advanceTimersByTimeAsync(0); expect(state.lastCommissionCleanupSucceededAt).toBeNull();
@@ -1419,7 +1424,7 @@ describe("worker shutdown", () => {
     const expireDue = vi.fn(() => scan.promise); const recoverInvalidations = vi.fn().mockResolvedValue({ scanned: 0, invalidated: 0, deferred: 0, nextAfterId: null });
     const options = { databaseUrl: "postgresql://unused:unused@127.0.0.1:5432/unused", valkeyUrl: "redis://127.0.0.1:6379/15",
       concurrency: 1, batchSize: 10, leaseMs: 30_000, signalSource: doubles.signalSource, logger: { info: vi.fn(), error: vi.fn() },
-      commissions: { batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) }, dependencies: doubles.dependencies };
+      commissions: { fulfillmentMode: "disabled" as const, batchSize: 2, scanIntervalMs: 5_000, createService: () => ({ ...pausedCommissionMaintenance, expireDue, recoverInvalidations, readOperationalReport: emptyCommissionReport }) }, dependencies: doubles.dependencies };
     await expect(startWorker({ ...options, commissions: { ...options.commissions, batchSize: 501 } })).rejects.toThrow("Invalid commission worker configuration");
     expect(doubles.acquisitions).toHaveLength(0); const handle = await startWorker(options);
     try {

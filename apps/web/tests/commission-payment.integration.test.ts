@@ -87,6 +87,37 @@ describe("commission payments share the existing financial boundary", () => {
     expect(f.order.state).toBe("awaiting_payment"); expect(f.slot.state).toBe("reserved"); expect(f.intent.state).toBe("awaiting_transfer");
     expect(f.confirmations).toHaveLength(0); expect(f.outbox).toHaveLength(0); expect(f.events).toHaveLength(1);
   });
+  test.each(["delivered", "completed"] as const)("confirmation replay for a %s order is recognised and changes nothing", async (state) => {
+    const p = await commissionFixture(fixture, await fixture.creator()); p.creator.advance(1_000);
+    const port = createCommissionPaymentLifecyclePort({ eligibility }); await service(p, port).confirm(command(p));
+    p.creator.advance(2 * 86_400_000); const deliveredAt = p.creator.now();
+    await fixture.db.transaction(async (tx) => {
+      await lockCommissionCreator(tx, p.creator.actor.userId);
+      const [order] = await tx.execute<{ version: number }>(sql`update commission_orders set state = 'delivered', version = version + 1,
+        delivered_at = ${deliveredAt.toISOString()}, review_ends_at = ${deliveredAt.toISOString()}::timestamptz + ${p.terms.reviewWindowDays} * interval '24 hours',
+        updated_at = ${deliveredAt.toISOString()} where id = ${p.orderId} returning version`);
+      await tx.execute(sql`insert into commission_submissions (id, order_id, kind, actor_session_id, request_id, submitted_at)
+        values (${randomUUID()}, ${p.orderId}, 'final', ${p.creator.actor.sessionId}, ${randomUUID()}, ${deliveredAt.toISOString()})`);
+      await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: p.orderId, orderVersion: order!.version, type: "delivered",
+        actorUserId: p.creator.actor.userId, actorSessionId: p.creator.actor.sessionId, requestId: randomUUID(), occurredAt: deliveredAt });
+      if (state === "completed") {
+        p.creator.advance(1_000); const completedAt = p.creator.now();
+        const [completed] = await tx.execute<{ version: number }>(sql`update commission_orders set state = 'completed', version = version + 1,
+          completed_at = ${completedAt.toISOString()}, completion_kind = 'buyer_accepted', updated_at = ${completedAt.toISOString()} where id = ${p.orderId} returning version`);
+        await tx.update(schema.commissionReservations).set({ state: "completed", releasedAt: completedAt }).where(eq(schema.commissionReservations.orderId, p.orderId));
+        await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: p.orderId, orderVersion: completed!.version, type: "completed",
+          actorUserId: p.buyerUserId, actorSessionId: "synthetic-buyer-session", requestId: randomUUID(), occurredAt: completedAt });
+      }
+    });
+    const before = await facts(p); expect(before.order.state).toBe(state);
+    await fixture.db.transaction(async (tx) => {
+      expect(await port.lockSettlement(tx, { orderId: p.orderId, creatorUserId: p.creator.actor.userId, at: p.creator.now() })).toBe(true);
+      expect(await port.confirmPayment(tx, { orderId: p.orderId, creatorUserId: p.creator.actor.userId, paymentIntentId: p.payment.id,
+        amountVnd: p.payment.amountVnd, actor: p.creator.actor, requestId: randomUUID(), at: p.creator.now() })).toBe(false);
+    });
+    // Compare privately so assertion failures cannot print encrypted records or payment details.
+    expect(JSON.stringify(await facts(p)) === JSON.stringify(before)).toBe(true);
+  });
   test("manual bank transaction identity is shared by tips and commissions in both directions", async () => {
     for (const first of ["tip", "commission"] as const) {
       const creator = await fixture.creator(); const tip = await creator.createIntent(); const p = await commissionFixture(fixture, creator); creator.advance(1_000);

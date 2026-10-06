@@ -8,9 +8,10 @@ import { createCommissionTrustPort } from "@pawket/trust";
 import type { CommissionWorkerConfiguration } from "./worker-runtime.js";
 
 export function createWorkerCommissionConfiguration(env: Pick<ServerEnv, "APP_REVISION" | "PII_LOOKUP_HMAC_KEY" | "COMMISSION_PAYMENTS_MODE" |
-  "COMMISSION_SCAN_BATCH_SIZE" | "COMMISSION_SCAN_INTERVAL_MS">, keyring: EncryptionKeyring, identityProvider: OidcSessionProvider): CommissionWorkerConfiguration {
+  "COMMISSION_FULFILLMENT_MODE" | "COMMISSION_SCAN_BATCH_SIZE" | "COMMISSION_SCAN_INTERVAL_MS">, keyring: EncryptionKeyring, identityProvider: OidcSessionProvider): CommissionWorkerConfiguration {
   return {
     paymentsMode: env.COMMISSION_PAYMENTS_MODE,
+    fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     batchSize: env.COMMISSION_SCAN_BATCH_SIZE, scanIntervalMs: env.COMMISSION_SCAN_INTERVAL_MS,
     createService(db) {
       return createCommissionOrderMaintenanceService({ db, applicationRevision: env.APP_REVISION,

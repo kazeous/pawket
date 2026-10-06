@@ -3,25 +3,34 @@ const HOUR_MS = 3_600_000;
 
 export const COMMISSION_FILE_POLICY = Object.freeze({
   briefFileMaxBytes: 25 * MIB, maxBriefFiles: 10, maxUnsentReferences: 10, maxPendingPerActor: 10,
+  submissionFileMaxBytes: 250 * MIB, maxSubmissionFiles: 20, maxMessageFiles: 10, orderQuotaBytes: 1024 * MIB,
   uploadGrantMs: 15 * 60_000, downloadGrantSeconds: 300, scanDeadlineMs: 24 * HOUR_MS, signatureMaxAgeMs: 24 * HOUR_MS,
   unsentTtlMs: 24 * HOUR_MS, closedUnpaidRetentionMs: 30 * 24 * HOUR_MS, inlinePreviewMaxBytes: 25 * MIB,
+  completedRetentionMs: 180 * 24 * HOUR_MS,
   scanLeaseMs: 10 * 60_000, retryBaseMs: 60_000, retryMaxMs: 30 * 60_000, filenameMaxBytes: 255,
 });
-export const COMMISSION_FILE_TYPES = ["jpeg", "png", "webp", "gif", "pdf"] as const;
+export const COMMISSION_FILE_TYPES = ["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"] as const;
 export type CommissionFileType = typeof COMMISSION_FILE_TYPES[number];
-export const COMMISSION_FILE_CONTEXTS = ["brief"] as const;
+export const COMMISSION_FILE_CONTEXTS = ["brief", "thread", "submission"] as const;
 export type CommissionFileContext = typeof COMMISSION_FILE_CONTEXTS[number];
 export const COMMISSION_FILE_CONTENT_TYPES: Readonly<Record<CommissionFileType, string>> = Object.freeze({
   jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf",
+  psd: "image/vnd.adobe.photoshop", clip: "application/octet-stream", zip: "application/zip",
 });
 export const COMMISSION_FILE_CONTEXT_TYPES: Readonly<Record<CommissionFileContext, readonly CommissionFileType[]>> = Object.freeze({
   brief: Object.freeze(["jpeg", "png", "webp", "gif", "pdf"] as const),
+  thread: Object.freeze(["jpeg", "png", "webp", "gif", "pdf"] as const),
+  submission: Object.freeze([...COMMISSION_FILE_TYPES]),
 });
+export function commissionFileMaxBytes(context: CommissionFileContext): number {
+  return context === "submission" ? COMMISSION_FILE_POLICY.submissionFileMaxBytes : COMMISSION_FILE_POLICY.briefFileMaxBytes;
+}
 const PREVIEW_TYPES: readonly CommissionFileType[] = ["jpeg", "png", "webp", "gif"];
 
 export const COMMISSION_FILE_ERRORS = [
   "invalid_request", "not_available", "not_authorized", "files_disabled", "file_too_large", "pending_limit", "unsent_limit",
   "upload_expired", "invalid_state", "idempotency_conflict", "preview_not_allowed", "storage_unavailable", "dependency_unavailable",
+  "order_quota_exceeded", "fulfillment_disabled", "invalid_attachment_files",
 ] as const;
 export type CommissionFileErrorCode = typeof COMMISSION_FILE_ERRORS[number];
 export class CommissionFileError extends Error {

@@ -5,10 +5,12 @@ const closeReasons: Readonly<Record<CommissionState, readonly CommissionCloseRea
   quoted: ["buyer_withdrawn", "quote_withdrawn", "quote_declined", "quote_expired", "security_invalidated", "eligibility_invalidated"],
   awaiting_payment: ["buyer_cancelled", "creator_cancelled", "payment_expired", "security_invalidated", "eligibility_invalidated"],
   in_progress: [],
+  delivered: [],
+  completed: [],
   closed: [],
 });
 
-/** Payment confirmation is distinct from delivery. I6 has no paid-order terminal transition. */
+/** Paid-order completion follows delivery; completed orders are terminal. */
 export function requireCommissionTransition(from: CommissionState, to: CommissionState, reason?: CommissionCloseReason): void {
   if (to === "closed") {
     if (!reason || !closeReasons[from]?.includes(reason)) commissionFail("invalid_transition");
@@ -17,6 +19,8 @@ export function requireCommissionTransition(from: CommissionState, to: Commissio
   if (reason !== undefined || !(
     (from === "requested" && (to === "quoted" || to === "awaiting_payment")) ||
     (from === "quoted" && (to === "quoted" || to === "awaiting_payment")) ||
-    (from === "awaiting_payment" && to === "in_progress")
+    (from === "awaiting_payment" && to === "in_progress") ||
+    (from === "in_progress" && (to === "delivered" || to === "in_progress")) ||
+    (from === "delivered" && (to === "in_progress" || to === "completed"))
   )) commissionFail("invalid_transition");
 }

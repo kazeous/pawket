@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
 import type { createCommissionPackageService } from "@pawket/catalog";
+import { CommissionFileError, type CommissionThreadService } from "@pawket/commission-files";
 import { CommissionError, commissionIdempotencyKey, type CommissionActor, type CommissionOrderService } from "@pawket/orders";
 import { TipPaymentError, type createCreatorCommissionPaymentService } from "@pawket/payments";
 import { createLookupHmac } from "@pawket/security";
@@ -18,17 +19,20 @@ const draft = z.strictObject({ pageId: uuid, packageId: uuid.nullable(), expecte
 const change = z.strictObject({ packageId: uuid, expectedVersion: version, action: z.enum(["publish", "pause", "archive"]), policyRevisionId: uuid });
 const settings = z.strictObject({ expectedVersion: z.number().int().min(0).max(2_147_483_646), enabled: z.boolean(), capacityLimit: z.number().int().min(1).max(20) });
 const confirmation = z.strictObject({ observedAmountVnd: z.number().int(), observedTransferReference: z.string().max(128), observedBankTransactionId: z.string().max(128), attestedReceived: z.literal(true) });
+const message = z.strictObject({ text: z.string().max(20_000).optional(), fileIds: z.array(uuid).max(10).optional() });
+const submission = z.strictObject({ expectedVersion: version, kind: z.enum(["draft", "final"]), note: z.string().max(20_000).optional(), fileIds: z.array(uuid).min(1).max(20) });
+const response = z.strictObject({ expectedVersion: version, response: z.enum(["approve", "request_changes", "accept"]), note: z.string().max(20_000).optional() });
 export class CommissionHttpFailure extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
 const invalid = (): never => { throw new CommissionHttpFailure(400, "invalid_request"); };
 function failure(error: unknown): Response {
   if (error instanceof CommissionHttpFailure) return commissionJson(error.status, { code: error.code });
-  if (error instanceof CommissionError || error instanceof TipPaymentError) {
+  if (error instanceof CommissionError || error instanceof TipPaymentError || error instanceof CommissionFileError) {
     const code = error.code;
     if (["not_authorized", "not_available"].includes(code)) return commissionJson(404, { code: "not_available" });
     if (["recent_auth_required", "totp_required"].includes(code)) return commissionJson(403, { code });
-    if (["invalid_request", "invalid_terms", "invalid_brief", "invalid_amount", "invalid_reference_files"].includes(code)) return commissionJson(400, { code });
+    if (["invalid_request", "invalid_terms", "invalid_brief", "invalid_amount", "invalid_reference_files", "invalid_attachment_files"].includes(code)) return commissionJson(400, { code });
     if (code === "rate_limited") return commissionJson(429, { code });
-    if (["intake_disabled", "payments_disabled", "dependency_unavailable", "files_disabled"].includes(code)) return commissionJson(503, { code });
+    if (["intake_disabled", "payments_disabled", "dependency_unavailable", "files_disabled", "fulfillment_disabled"].includes(code)) return commissionJson(503, { code });
     return commissionJson(409, { code });
   }
   return commissionJson(503, { code: "dependency_unavailable" });
@@ -66,12 +70,13 @@ export function commissionNetworkKey(request: Request, key: Uint8Array): string 
   if (mapped) { const a = parseInt(mapped[1]!, 16); const b = parseInt(mapped[2]!, 16); normalized = `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`; }
   return createLookupHmac({ key, context: "commission-network", value: normalized });
 }
-type Operation = "read" | "request" | "command" | "confirm";
+type Operation = "read" | "request" | "command" | "confirm" | "message";
 type Input = {
   appBaseUrl: string; lookupHmacKey: Uint8Array;
   intakeMode: "disabled" | "enabled"; paymentsMode: "disabled" | "manual_only" | "sepay_optional";
+  fulfillmentMode: "disabled" | "enabled"; thread?: CommissionThreadService;
   authenticate(headers: Headers): Promise<CommissionActor | null>;
-  throttle(command: { actorUserId: string | null; networkKeyHash: string; operation: Operation }): Promise<boolean>;
+  throttle(command: { actorUserId: string | null; networkKeyHash: string; operation: Operation; orderId?: string }): Promise<boolean>;
   orders: CommissionOrderService; catalog: ReturnType<typeof createCommissionPackageService>;
   manual: ReturnType<typeof createCreatorCommissionPaymentService>;
   onOperation?: (event: { operation: string; outcome: string }) => void;
@@ -81,23 +86,24 @@ export function createCommissionHttpHandlers(input: Input) {
   const metric = (operation: Operation, outcome: string) => {
     if (operation !== "read") { try { input.onOperation?.({ operation, outcome }); } catch { /* Telemetry cannot change command results. */ } }
   };
-  async function run(request: Request, method: "GET" | "POST", operation: Operation, action: (actor: CommissionActor | null, network: string) => Promise<unknown>, publicRead = false): Promise<Response> {
+  async function run(request: Request, method: "GET" | "POST", operation: Operation, action: (actor: CommissionActor | null, network: string) => Promise<unknown>, publicRead = false, orderId?: string): Promise<Response> {
     try {
       if (request.method !== method) throw new CommissionHttpFailure(405, "method_not_allowed");
-      if (request.headers.get("sec-fetch-site") === "cross-site" || (method === "POST" && request.headers.get("origin") !== origin)) throw new CommissionHttpFailure(403, "untrusted_origin");
+      const requestOrigin = request.headers.get("origin");
+      if (request.headers.get("sec-fetch-site") === "cross-site" || ((method === "POST" || (!publicRead && requestOrigin !== null)) && requestOrigin !== origin)) throw new CommissionHttpFailure(403, "untrusted_origin");
       const actor = publicRead ? null : await input.authenticate(request.headers);
       if (!publicRead && !actor) throw new CommissionHttpFailure(401, "authentication_required");
       const network = commissionNetworkKey(request, key);
-      if (await input.throttle({ actorUserId: actor?.userId ?? null, networkKeyHash: network, operation }) !== true) throw new CommissionHttpFailure(429, "rate_limited");
+      if (await input.throttle({ actorUserId: actor?.userId ?? null, networkKeyHash: network, operation, ...(orderId === undefined ? {} : { orderId }) }) !== true) throw new CommissionHttpFailure(429, "rate_limited");
       const result = await action(actor ? { userId: actor.userId, sessionId: actor.sessionId } : null, network);
       if (operation !== "confirm") metric(operation, "accepted");
       return commissionJson(200, result);
     } catch (error) {
-      const code = error instanceof CommissionError || error instanceof TipPaymentError || error instanceof CommissionHttpFailure ? error.code : "dependency_unavailable";
+      const code = error instanceof CommissionError || error instanceof TipPaymentError || error instanceof CommissionFileError || error instanceof CommissionHttpFailure ? error.code : "dependency_unavailable";
       const outcome = code === "dependency_unavailable" ? "failed" : operation === "confirm"
         ? ["bank_transaction_conflict", "idempotency_conflict", "evidence_mismatch"].includes(code) ? "conflict" : "rejected"
         : code === "capacity_full" && operation === "request" ? "capacity_full" : code === "version_conflict" && operation === "command" ? "version_conflict"
-        : code === "rate_limited" ? "rate_limited" : ["intake_disabled", "payments_disabled"].includes(code) ? "disabled" : "rejected";
+        : code === "rate_limited" ? "rate_limited" : ["intake_disabled", "payments_disabled", "fulfillment_disabled"].includes(code) ? "disabled" : "rejected";
       metric(operation, outcome); return failure(error);
     }
   }
@@ -121,7 +127,27 @@ export function createCommissionHttpHandlers(input: Input) {
       return { orders: await input.orders.listOrders({ actor: actor!, role, limit: integerQuery(p.get("limit"), 50), ...(beforeId !== null ? { before: { id: beforeId, createdAt: beforeAt! } } : {}) }) };
     }),
     detail: (request: Request, orderId: string, role: "buyer" | "creator") => run(request, "GET", "read", async (actor) => {
-      query(request, []); return { order: await roleOrder(actor!, orderId, role), controls: { intakeMode: input.intakeMode, paymentsMode: input.paymentsMode } };
+      query(request, []); return { order: await roleOrder(actor!, orderId, role), controls: { intakeMode: input.intakeMode, paymentsMode: input.paymentsMode, fulfillmentMode: input.fulfillmentMode } };
+    }),
+    thread: (request: Request, orderId: string, role: "buyer" | "creator") => run(request, "GET", "read", async (actor) => {
+      const p = query(request, ["before", "limit"]); await roleOrder(actor!, orderId, role);
+      return { thread: await input.orders.getThread({ actor: actor!, orderId, beforeSequence: integerQuery(p.get("before"), 2_147_483_647), limit: integerQuery(p.get("limit"), 50) }) };
+    }),
+    message: (request: Request, orderId: string, role: "buyer" | "creator") => run(request, "POST", "message", async (actor) => {
+      const base = { ...command(request, actor!), orderId }; await roleOrder(actor!, orderId, role);
+      const body = await readCommissionBody(request, message);
+      if (!input.thread) throw new CommissionHttpFailure(503, "fulfillment_disabled");
+      return { message: await input.thread.sendMessage({ ...base, text: body.text, fileIds: body.fileIds }) };
+    }, false, orderId),
+    submit: (request: Request, orderId: string) => run(request, "POST", "command", async (actor) => {
+      const base = { ...command(request, actor!), orderId }; await roleOrder(actor!, orderId, "creator");
+      const body = await readCommissionBody(request, submission);
+      return { orderId: await input.orders.submit({ ...base, ...body, note: body.note }) };
+    }),
+    respond: (request: Request, orderId: string, submissionId: string) => run(request, "POST", "command", async (actor) => {
+      const base = { ...command(request, actor!), orderId, submissionId }; await roleOrder(actor!, orderId, "buyer");
+      const body = await readCommissionBody(request, response);
+      return { orderId: await input.orders.respondToSubmission({ ...base, ...body, note: body.note }) };
     }),
     history: (request: Request, orderId: string, role: "buyer" | "creator", kind: "quotes" | "timeline") => run(request, "GET", "read", async (actor) => {
       const p = query(request, ["before", "limit"]); await roleOrder(actor!, orderId, role);

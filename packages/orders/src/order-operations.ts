@@ -4,6 +4,8 @@ import { commissionTime } from "./policy.js";
 
 export type CommissionOperationalReport = {
   requested: number; quoted: number; awaitingPayment: number; inProgress: number;
+  delivered: number; completed: number; completedBuyer: number; completedAutomatic: number;
+  completionBacklog: number; lateDeliveries: number; draftSubmissions: number; finalSubmissions: number;
   expiredRequests: number; expiredQuotes: number; expiredPayments: number;
   oldestExpiryLagSeconds: number; overdue: number;
   retentionUnacceptedClosed: number; retentionAccepted: number;
@@ -23,6 +25,15 @@ export async function readCommissionOperationalReport(db: PawketDatabase, at: Da
         count(*) filter (where state = 'quoted') as "quoted",
         count(*) filter (where state = 'awaiting_payment') as "awaitingPayment",
         count(*) filter (where state = 'in_progress') as "inProgress",
+        count(*) filter (where state = 'delivered') as "delivered",
+        count(*) filter (where state = 'completed') as "completed",
+        count(*) filter (where state = 'completed' and completion_kind = 'buyer_accepted') as "completedBuyer",
+        count(*) filter (where state = 'completed' and completion_kind = 'review_window_elapsed') as "completedAutomatic",
+        count(*) filter (where state = 'delivered' and review_ends_at <= ${instant}::timestamptz) as "completionBacklog",
+        (select count(*) from commission_submissions s join commission_orders o on o.id = s.order_id
+          where s.kind = 'final' and s.submitted_at > o.due_at) as "lateDeliveries",
+        (select count(*) from commission_submissions where kind = 'draft') as "draftSubmissions",
+        (select count(*) from commission_submissions where kind = 'final') as "finalSubmissions",
         count(*) filter (where state = 'requested' and expires_at <= ${instant}::timestamptz) as "expiredRequests",
         count(*) filter (where state = 'quoted' and expires_at <= ${instant}::timestamptz) as "expiredQuotes",
         count(*) filter (where state = 'awaiting_payment' and expires_at <= ${instant}::timestamptz) as "expiredPayments",

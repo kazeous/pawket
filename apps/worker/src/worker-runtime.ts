@@ -31,6 +31,8 @@ import {
   recordCommissionOperation,
   setCommissionOperationalMetrics,
   setCommissionCleanupConfiguredMetric,
+  setCommissionFulfillmentConfiguredMetric,
+  setCommissionFulfillmentPausedMetric,
   recordCommissionFileOperation,
   setCommissionFileBacklogMetrics,
   setCommissionFileScannerMetric,
@@ -92,6 +94,7 @@ import type { WorkerHealthState } from "./worker-health.js";
 import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-email.js";
 import { materializeTipNotification } from "./tip-notification.js";
 import { COMMISSION_OUTBOX_EVENTS, validateCommissionOutboxEvent } from "./commission-events.js";
+import { commissionUuid } from "@pawket/orders";
 
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
@@ -169,6 +172,7 @@ export type SePayWorkerService = {
 };
 export type CommissionWorkerConfiguration = {
   paymentsMode?: TipPaymentsMode;
+  fulfillmentMode: "disabled" | "enabled";
   batchSize: number;
   scanIntervalMs: number;
   createService(db: DatabaseResource["db"]): CommissionOrderMaintenanceService;
@@ -634,6 +638,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     (options.tipPayments && options.tipPayments.mode !== options.sepay.mode) ||
     (options.commissions?.paymentsMode !== undefined && options.commissions.paymentsMode !== (options.sepay.commissionMode ?? "disabled")))) throw new Error("Invalid SePay worker configuration");
   if (options.commissions && (!Number.isInteger(options.commissions.batchSize) || options.commissions.batchSize < 1 || options.commissions.batchSize > 500 ||
+    !["disabled", "enabled"].includes(options.commissions.fulfillmentMode) ||
     (options.commissions.paymentsMode !== undefined && !["disabled", "manual_only", "sepay_optional"].includes(options.commissions.paymentsMode)) ||
     !Number.isInteger(options.commissions.scanIntervalMs) || options.commissions.scanIntervalMs < 5_000 || options.commissions.scanIntervalMs > 300_000 ||
     typeof options.commissions.createService !== "function")) throw new Error("Invalid commission worker configuration");
@@ -781,6 +786,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let currentCommissionScan: Promise<void> | undefined;
   let lastCommissionScanAt = 0;
   let commissionScanCursor: string | null = null;
+  let currentCommissionFulfillmentScan: Promise<void> | undefined;
+  let lastCommissionFulfillmentScanAt = 0;
+  let commissionCompletionCursor: { reviewEndsAt: Date; id: string } | null = null;
   let currentCommissionFilesScan: Promise<void> | undefined;
   let currentScannerProbe: Promise<void> | undefined;
   let lastCommissionFilesScanAt = 0;
@@ -810,12 +818,16 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   const tipExpiryEnabled = options.tipPayments !== undefined && isTipPaymentsEnabled(options.tipPayments.mode);
   const sepayRecoveryEnabled = options.sepay?.mode === "sepay_optional" || options.sepay?.commissionMode === "sepay_optional";
   setCommissionCleanupConfiguredMetric(options.commissions !== undefined);
+  setCommissionFulfillmentConfiguredMetric(options.commissions !== undefined);
   setSePayRecoveryEnabledMetric(sepayRecoveryEnabled);
   setTipPaymentsEnabledMetric(tipExpiryEnabled);
   if (options.healthState) {
     options.healthState.commissionCleanupConfigured = options.commissions !== undefined;
     options.healthState.commissionCleanupMaximumAgeMs = options.commissions ? options.commissions.scanIntervalMs * 3 : null;
     options.healthState.lastCommissionCleanupSucceededAt = null;
+    options.healthState.commissionFulfillmentConfigured = options.commissions !== undefined;
+    options.healthState.commissionFulfillmentMaximumAgeMs = options.commissions ? options.commissions.scanIntervalMs * 3 : null;
+    options.healthState.lastCommissionFulfillmentSucceededAt = null;
     options.healthState.tipExpiryConfigured = tipExpiryEnabled;
     options.healthState.tipExpiryMaximumAgeMs = tipExpiryEnabled ? options.tipPayments!.scanIntervalMs * 3 : null;
     options.healthState.sepayRecoveryConfigured = sepayRecoveryEnabled;
@@ -834,6 +846,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     setWorkerScanHealthMetric({ scan: "public_media_cleanup", healthy: false });
   }
   if (options.commissionFiles) setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
+  if (options.commissions) setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -1061,6 +1074,33 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanCommissionFulfillmentIfDue = async (scanAt: number): Promise<void> => {
+    const config = options.commissions;
+    if (!running || !config || !commissionService || scanAt - lastCommissionFulfillmentScanAt < config.scanIntervalMs) return;
+    lastCommissionFulfillmentScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
+    try {
+      const observation = await commissionService.observeFulfillmentMode(config.fulfillmentMode);
+      if (!["opened", "closed", "none"].includes(observation.change) || typeof observation.paused !== "boolean" ||
+        observation.paused !== (config.fulfillmentMode === "disabled")) throw new Error("Invalid commission fulfillment observation");
+      setCommissionFulfillmentPausedMetric(observation.paused);
+      if (config.fulfillmentMode === "enabled") {
+        const result = await commissionService.completeDue({ limit: config.batchSize, after: commissionCompletionCursor });
+        if (![result.scanned, result.completed, result.held, result.waiting].every((n) => Number.isInteger(n) && n >= 0 && n <= config.batchSize) ||
+          result.completed + result.held + result.waiting > result.scanned ||
+          (result.nextAfter !== null && (result.scanned !== config.batchSize || !commissionUuid(result.nextAfter.id) ||
+            !(result.nextAfter.reviewEndsAt instanceof Date) || !Number.isFinite(result.nextAfter.reviewEndsAt.getTime())))) throw new Error("Invalid commission completion result");
+        commissionCompletionCursor = result.nextAfter;
+      }
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "commission_fulfillment", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastCommissionFulfillmentSucceededAt = succeededAt;
+    } catch {
+      logger.error({ category: "commission_fulfillment_failed" }, "Commission fulfillment failed");
+    }
+  };
+
   const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
     const config = options.commissionFiles; const queueResource = commissionFileQueue;
     if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
@@ -1219,6 +1259,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (!currentCommissionScan) {
         currentCommissionScan = scanCommissionsIfDue(Date.now()).finally(() => { currentCommissionScan = undefined; });
       }
+      if (!currentCommissionFulfillmentScan) {
+        currentCommissionFulfillmentScan = scanCommissionFulfillmentIfDue(Date.now()).finally(() => { currentCommissionFulfillmentScan = undefined; });
+      }
       if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
       if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
@@ -1269,6 +1312,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentDispatch;
       await currentSePayScan;
       await currentCommissionScan;
+      await currentCommissionFulfillmentScan;
       await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());

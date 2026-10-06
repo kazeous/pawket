@@ -16,6 +16,9 @@ export function detectCommissionFileType(head: Uint8Array): CommissionFileType |
   if (ascii("RIFF") && ascii("WEBP", 8)) return "webp";
   if (ascii("GIF87a") || ascii("GIF89a")) return "gif";
   if (ascii("%PDF-")) return "pdf";
+  if (ascii("8BPS")) return "psd";
+  if (ascii("CSFCHUNK")) return "clip";
+  if (startsWith([0x50, 0x4b, 0x03, 0x04])) return "zip";
   return null;
 }
 
@@ -54,6 +57,10 @@ export function createCommissionFileInspector() {
 export function classifyCommissionFile(context: CommissionFileContext, inspection: CommissionFileInspection):
   Readonly<{ kind: "allowed"; type: CommissionFileType }> | Readonly<{ kind: "rejected"; reason: "type_not_allowed" }> {
   const type = detectCommissionFileType(inspection.head);
-  if (!type || !COMMISSION_FILE_CONTEXT_TYPES[context].includes(type) || hasZipDirectory(inspection.tail)) return { kind: "rejected", reason: "type_not_allowed" };
+  if (!type || !COMMISSION_FILE_CONTEXT_TYPES[context].includes(type)) return { kind: "rejected", reason: "type_not_allowed" };
+  const zipDirectory = hasZipDirectory(inspection.tail);
+  if ((type === "zip" && !zipDirectory) || (["jpeg", "png", "webp", "gif", "pdf"].includes(type) && zipDirectory)) {
+    return { kind: "rejected", reason: "type_not_allowed" };
+  }
   return { kind: "allowed", type };
 }

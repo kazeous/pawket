@@ -1,7 +1,7 @@
 "use client";
 import { ReferenceFileList } from "./reference-files";
 
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -15,10 +15,12 @@ import { closeLabels, commissionPath, commissionRead, detailSchema, orderResultS
   type OrderView, type QuotesView, type TermsView, type TimelineView } from "./commission-client";
 import { CommandFeedback, useCommissionCommand, useCommissionSession } from "./commission-session";
 import { Acceptance, CommissionTerms, TermsFields, termsFromForm } from "./commission-terms";
+import { CommissionThread } from "./commission-thread";
 
 export function CommissionDetail({ initial }: Readonly<{ initial: OrderView }>) {
   const [view, setView] = useState(initial); const [loading, setLoading] = useState(false); const [failed, setFailed] = useState(false);
   const [close, setClose] = useState(false); const [accepted, setAccepted] = useState(false); const [localExpired, setLocalExpired] = useState(false);
+  const [reviewExpired, setReviewExpired] = useState(false); const refreshing = useRef(false);
   const command = useCommissionCommand(); const verify = useCommissionSession(); const order = view.order; const payment = order.payment;
   const base = `/api/v1${commissionPath(order.role)}/${order.id}`;
   useEffect(() => {
@@ -29,11 +31,18 @@ export function CommissionDetail({ initial }: Readonly<{ initial: OrderView }>) 
     document.addEventListener("visibilitychange", check);
     return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", check); };
   }, [order.expiresAt]);
-  async function refresh() {
-    if (loading) return; setLoading(true);
+  useEffect(() => {
+    const due = order.fulfillment?.completionDueAt;
+    const check = () => setReviewExpired(order.state === "delivered" && (!due || Date.now() >= Date.parse(due)));
+    check(); const timer = due ? setTimeout(check, Math.max(0, Math.min(Date.parse(due) - Date.now(), 2_147_483_647))) : undefined;
+    document.addEventListener("visibilitychange", check);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", check); };
+  }, [order.state, order.fulfillment?.completionDueAt]);
+  const refresh = useCallback(async () => {
+    if (refreshing.current) return; refreshing.current = true; setLoading(true);
     try { await verify(); const next = await commissionRead(base, detailSchema); await verify(); setView(next); setAccepted(false); setClose(false); setLocalExpired(next.order.deadlinePassed || (!!next.order.expiresAt && Date.now() >= Date.parse(next.order.expiresAt))); setFailed(false); }
-    catch { setFailed(true); } finally { setLoading(false); }
-  }
+    catch { setFailed(true); } finally { refreshing.current = false; setLoading(false); }
+  }, [base, verify]);
   const refreshResult = (value: unknown) => { const result = parseCommission(orderResultSchema, value); if (result.orderId !== order.id) throw new Error("Invalid commission result"); void refresh(); };
   const mutate = (action: string, data: object = {}) => command.execute(`${base}/${action}`, { expectedVersion: order.version, ...data }, refreshResult);
   const locked = command.locked || loading || failed;
@@ -43,14 +52,18 @@ export function CommissionDetail({ initial }: Readonly<{ initial: OrderView }>) 
   const mayQuote = order.role === "creator" && order.route === "custom_quote" && ["requested", "quoted"].includes(order.state);
   const intake = view.controls.intakeMode === "enabled";
   const paymentEnabled = view.controls.paymentsMode !== "disabled";
+  const fulfillment = order.fulfillment;
+  const hasThread = ["in_progress", "delivered", "completed"].includes(order.state);
   return <div className="flex min-w-0 flex-col gap-6">
-    <header className="flex min-w-0 flex-col gap-3"><p className="eyebrow">{routeLabels[order.route]}</p><h1 className="wrap-anywhere">{order.package.title}</h1><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{stateLabels[order.state]}</Badge>{order.overdue ? <Badge variant="outline">Đã quá hạn thực hiện</Badge> : null}<Button variant="outline" size="sm" disabled={command.locked || loading} onClick={() => void refresh()}>Cập nhật trạng thái</Button></div><p className="text-sm text-muted-foreground">Tạo lúc {formatTipTime(order.createdAt)} · giờ Việt Nam</p></header>
+    <header className="flex min-w-0 flex-col gap-3"><p className="eyebrow">{routeLabels[order.route]}</p><h1 className="wrap-anywhere">{order.package.title}</h1><div className="flex flex-wrap items-center gap-2"><span data-order-state aria-live="polite" aria-atomic="true"><Badge variant="secondary">{stateLabels[order.state]}</Badge></span>{order.overdue && order.state === "in_progress" ? <Badge variant="outline">Đã quá hạn thực hiện</Badge> : null}{fulfillment?.lateDelivery ? <Badge variant="outline">Giao trễ hạn</Badge> : null}<Button variant="outline" size="sm" disabled={command.locked || loading} onClick={() => void refresh()}>Cập nhật trạng thái</Button></div><p className="text-sm text-muted-foreground">Tạo lúc {formatTipTime(order.createdAt)} · giờ Việt Nam</p></header>
     <CommandFeedback command={command} />
     {failed ? <Alert variant="destructive"><AlertTitle>Chưa tải được trạng thái mới</AlertTitle><AlertDescription>Thao tác có thể đã được lưu. Kiểm tra lại trạng thái trước khi tiếp tục.<Button variant="outline" onClick={() => void refresh()}>Kiểm tra trạng thái</Button></AlertDescription></Alert> : null}
     {expired && unpaid ? <Alert><AlertTitle>Đã qua thời hạn</AlertTitle><AlertDescription>Không tiếp tục chuyển tiền theo hướng dẫn cũ. Hệ thống đang cập nhật trạng thái đóng đơn.</AlertDescription></Alert> : null}
     {!intake || !paymentEnabled ? <Alert><AlertTitle>Commission đang tạm giới hạn</AlertTitle><AlertDescription>{!intake ? "Tạm ngừng yêu cầu, báo giá và chốt đơn mới. " : ""}{!paymentEnabled ? "Thanh toán và xác nhận tiền đang tạm dừng. " : ""}Bạn vẫn xem được lịch sử. Thời hạn đơn không được gia hạn.</AlertDescription></Alert> : null}
     {order.state === "closed" ? <Alert><AlertTitle>{closeLabels[order.closeReason ?? ""] ?? "Đơn đã đóng"}</AlertTitle><AlertDescription>Đơn này không còn nhận thanh toán. Nếu đã chuyển tiền, liên hệ nghệ sĩ để đối chiếu. Trạng thái đóng không có nghĩa là đã hoàn tiền.</AlertDescription></Alert> : null}
     {order.state === "in_progress" ? <Alert><AlertTitle>Đã xác nhận thanh toán · đang thực hiện</AlertTitle><AlertDescription>{order.dueAt ? `Hạn thực hiện: ${formatTipTime(order.dueAt)}. ` : ""}Việc xác nhận tiền chưa đồng nghĩa commission đã hoàn tất.</AlertDescription></Alert> : null}
+    {order.state === "delivered" && fulfillment?.completionDueAt ? <Alert><AlertDescription>Hạn duyệt: {formatTipTime(fulfillment.completionDueAt)} (giờ Việt Nam). Nếu bạn không phản hồi trước hạn, đơn sẽ tự hoàn tất.</AlertDescription></Alert> : null}
+    {order.state === "completed" && fulfillment?.completedAt && fulfillment.fileDeletionAt ? <Alert><AlertDescription>Hoàn tất lúc {formatTipTime(fulfillment.completedAt)} · {fulfillment.completionKind === "buyer_accepted" ? "Người đặt đã chấp nhận" : "Tự hoàn tất khi hết hạn duyệt"}. Tệp sẽ bị xóa vào {new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date(fulfillment.fileDeletionAt))}; hãy tải bản giao cuối về máy.</AlertDescription></Alert> : null}
     <div className="grid min-w-0 items-start gap-6 lg:grid-cols-2">
       <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={2}>Brief đã gửi</CardTitle><CardDescription>Brief được giữ nguyên theo yêu cầu ban đầu.</CardDescription></CardHeader><CardContent className="flex min-w-0 flex-col gap-4"><p className="whitespace-pre-wrap wrap-anywhere">{order.brief.text}</p>{order.brief.referenceLinks.length ? <ul className="flex min-w-0 list-inside list-disc flex-col gap-2">{order.brief.referenceLinks.map((link, i) => <li key={link}><a href={link} target="_blank" rel="noopener noreferrer external" referrerPolicy="no-referrer" className="break-all text-sm underline">Tham khảo {i + 1}: {link}</a></li>)}</ul> : null}<ReferenceFileList order={order} /></CardContent></Card>
       <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={2}>{order.acceptedAt ? "Điều khoản đã chốt" : order.quote ? `Báo giá lần ${order.quote.revisionNumber}` : "Điều khoản gói đã chọn"}</CardTitle><CardDescription>{order.expiresAt && unpaid ? `Hạn phản hồi hoặc thanh toán: ${formatTipTime(order.expiresAt)}` : "Nội dung được lưu theo phiên bản của đơn."}</CardDescription></CardHeader><CardContent className="flex min-w-0 flex-col gap-5"><CommissionTerms terms={order.terms} policy={order.policy?.document} />
@@ -74,7 +87,7 @@ export function CommissionDetail({ initial }: Readonly<{ initial: OrderView }>) 
     {unpaid && !expired ? <section className="flex flex-col items-start gap-3"><Button variant="outline" disabled={locked} onClick={() => setClose(true)}>{order.role === "buyer" ? "Rút hoặc hủy yêu cầu" : "Từ chối hoặc hủy yêu cầu"}</Button>
       {close ? <Alert><AlertTitle>Đóng yêu cầu này?</AlertTitle><AlertDescription><p>{order.state === "awaiting_payment" ? "Chỉ đóng khi chưa được xác nhận tiền. Hướng dẫn thanh toán sẽ bị hủy và suất đang giữ được trả lại. Nếu đã chuyển tiền, cần liên hệ nghệ sĩ để đối chiếu; thao tác này không hoàn tiền." : "Yêu cầu và điều khoản được giữ trong lịch sử. Bạn không thể tiếp tục chốt đơn này sau khi đóng."}</p><div className="flex flex-wrap gap-2"><Button disabled={locked} onClick={() => mutate("close")}>Xác nhận đóng yêu cầu</Button><Button disabled={locked} variant="outline" onClick={() => setClose(false)}>Giữ yêu cầu</Button></div></AlertDescription></Alert> : null}
     </section> : null}
-    <CommissionHistory key={`history:${order.id}:${order.version}`} base={base} />
+    {hasThread ? <CommissionThread key={order.id} order={order} fulfillmentMode={view.controls.fulfillmentMode} disabled={locked} reviewExpired={reviewExpired} onRefresh={refresh} /> : <CommissionHistory key={`history:${order.id}:${order.version}`} base={base} />}
     <a href={commissionPath(order.role)} className={buttonVariants({ variant: "outline", className: "self-start" })}>Về danh sách commission</a>
   </div>;
 }

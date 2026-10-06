@@ -13,6 +13,7 @@ export type CommissionFileMaintenanceReport = Readonly<{
   scanning: number; oldestScanningSeconds: number | null;
 }>;
 const TERMINAL = ["rejected", "scan_failed", "expired", "discarded", "deleted"] as const;
+const COPY_INTENT_CLOSURE_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * Run periodically by the worker. Every step below is its own statement (never one enclosing
@@ -97,14 +98,14 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   // simply fails to match, and the row is left for the next sweep, counted as neither purged nor
   // failed.
   let purged = 0; let purgeFailures = 0;
-  // Immutable creation order makes failed rows and perpetual reconciliation tombstones fair:
+  // Immutable creation order makes failed rows and pending copy reconciliation fair:
   // every full page advances, and a short page wraps so earlier failures remain retryable.
   // PostgreSQL defaults can have microseconds; JS Date cursors only retain milliseconds.
   // Normalize BOTH sort and seek, otherwise a fractional first page can repeat forever.
   const purgeCreatedAt = sql`date_trunc('milliseconds', ${commissionFiles.createdAt})`;
   const purgeCursor = input.purgeAfter;
   const purgeCandidates = await input.db.select().from(commissionFiles).where(and(or(
-    and(inArray(commissionFiles.state, [...TERMINAL]), or(isNull(commissionFiles.quarantinePurgedAt), isNull(commissionFiles.cleanPurgedAt), eq(commissionFiles.cleanCopyIntent, true))),
+    and(inArray(commissionFiles.state, [...TERMINAL]), or(isNull(commissionFiles.quarantinePurgedAt), isNull(commissionFiles.cleanPurgedAt))),
     and(inArray(commissionFiles.state, ["clean", "attached"]), isNull(commissionFiles.quarantinePurgedAt), lte(commissionFiles.cleanAt, new Date(at.getTime() - 300_000))),
   ), purgeCursor ? sql`(${purgeCreatedAt} > ${purgeCursor.createdAt.toISOString()}::timestamptz or
     (${purgeCreatedAt} = ${purgeCursor.createdAt.toISOString()}::timestamptz and ${commissionFiles.id} > ${purgeCursor.id}::uuid))` : undefined))
@@ -112,8 +113,8 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   for (const file of purgeCandidates) {
     const terminal = (TERMINAL as readonly string[]).includes(file.state);
     const needsQuarantine = !file.quarantinePurgedAt;
-    const needsClean = terminal && (!file.cleanPurgedAt || file.cleanCopyIntent);
-    const canMarkClean = needsClean && !file.cleanCopyIntent;
+    const needsClean = terminal && !file.cleanPurgedAt;
+    const canMarkClean = needsClean && (!file.cleanCopyIntent || (file.endedAt !== null && file.endedAt.getTime() <= at.getTime() - COPY_INTENT_CLOSURE_MS));
     try {
       if (needsQuarantine) await input.storage.deleteAllVersions("quarantine", file.objectKey);
       if (needsClean) await input.storage.deleteAllVersions("clean", file.objectKey);
@@ -123,8 +124,8 @@ export async function runCommissionFileMaintenance(input: Readonly<{
       );
       const [marked] = await input.db.update(commissionFiles).set({
         ...(needsQuarantine ? { quarantinePurgedAt: at } : {}),
-        // A cancelled CopyObject can still complete provider-side. Never claim final purge
-        // after any copy intent: repeat only for permanent terminal rows, never live winners.
+        // A cancelled copy can finish provider-side, so reconcile terminal intent rows for
+        // 24 hours before recording final purge. S3 calls are capped at 60 seconds.
         ...(canMarkClean ? { cleanPurgedAt: at } : {}),
         ...bump,
       }).where(and(eq(commissionFiles.id, file.id), eq(commissionFiles.state, file.state), guard)).returning({ id: commissionFiles.id });
@@ -134,8 +135,8 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   const purgeNextAfter: CommissionFilePurgeCursor | null = purgeCandidates.length === input.batchSize
     ? { createdAt: purgeCandidates[purgeCandidates.length - 1]!.createdAt, id: purgeCandidates[purgeCandidates.length - 1]!.id } : null;
 
-  // I7 Stage A: only references of orders closed before payment expire. Stage B adds the
-  // terminal-order rule. Files attached to open or already-paid orders stay `attached` forever, so
+  // Closed-unpaid references and completed-order files have distinct retention periods.
+  // Files attached to orders without an eligible terminal outcome stay `attached`, so
   // a plain unbounded scan would let that backlog fill every batch once it exceeds batchSize and
   // never reach closed-unpaid files attached afterwards. Keyset pagination on (attachedAt, id) walks
   // past that backlog across runs instead: `retentionNextAfter` is only set when the page was full
@@ -154,7 +155,12 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   const facts = await input.orders.retentionFacts(input.db, attached.map((file) => file.orderId!));
   for (const file of attached) {
     const order = facts.get(file.orderId!);
-    if (!order || order.state !== "closed" || order.confirmedAt !== null || !order.closedAt || order.closedAt.getTime() + COMMISSION_FILE_POLICY.closedUnpaidRetentionMs > at.getTime()) continue;
+    if (!order) continue;
+    const closedUnpaidDue = order.state === "closed" && order.confirmedAt === null && order.closedAt !== null
+      && order.closedAt.getTime() + COMMISSION_FILE_POLICY.closedUnpaidRetentionMs <= at.getTime();
+    const completedDue = order.state === "completed" && order.completedAt !== null
+      && order.completedAt.getTime() + COMMISSION_FILE_POLICY.completedRetentionMs <= at.getTime();
+    if (!closedUnpaidDue && !completedDue) continue;
     if (await input.holds.hasEvidenceHold(input.db, file.orderId!)) continue;
     retentionDue += 1;
     if (input.retentionMode !== "enforce") continue;

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { COMMISSION_POLICY, createCommissionOrderService } from "@pawket/orders";
+import { COMMISSION_POLICY, createCommissionOrderService, lockCommissionCreator } from "@pawket/orders";
 import { createCreatorCommissionPaymentService } from "@pawket/payments";
 import { commandIds, deferred, fixtureHash, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
@@ -28,6 +28,43 @@ async function rowsFor(s: Setup) {
 }
 
 describe("commission order workflows", () => {
+  test.each([undefined, { revisionAllowance: 0, reviewWindowDays: 3 }])("paidOrder fixture locks the requested terms through Orders and Payments, case %#", async (options) => {
+    const p = await f.paidOrder(options);
+    const order = await p.service.getOrder({ actor: p.buyer, orderId: p.orderId });
+    expect(order.state).toBe("in_progress"); expect(order.version).toBe(2);
+    expect(order.terms?.revisionAllowance).toBe(options?.revisionAllowance ?? 2);
+    expect(order.terms?.reviewWindowDays).toBe(options?.reviewWindowDays ?? 7);
+    expect(order.payment?.state).toBe("confirmed");
+    const rows = await rowsFor(p.s); expect(rows.slots[0]?.state).toBe("occupied");
+    expect(await f.db.select({ id: schema.paymentConfirmations.id }).from(schema.paymentConfirmations)
+      .where(eq(schema.paymentConfirmations.paymentIntentId, order.payment!.id))).toHaveLength(1);
+    expect(p.creator.userId === p.s.creator.actor.userId).toBe(true);
+  });
+  test("three completed orders do not block a fourth request", async () => {
+    const p = await f.paidOrder(); const s = p.s;
+    for (let index = 0; index < 3; index++) {
+      const orderId = index === 0 ? p.orderId : await s.service.request(s.request());
+      if (index > 0) { s.creator.advance(1_000); await confirm(s, orderId); }
+      s.creator.advance(1_000); const deliveredAt = s.creator.now(); const completedAt = new Date(deliveredAt.getTime() + 1_000);
+      await f.db.transaction(async (tx) => {
+        await lockCommissionCreator(tx, s.creator.actor.userId);
+        const [order] = await tx.update(schema.commissionOrders).set({ state: "delivered", version: 3, deliveredAt,
+          reviewEndsAt: new Date(deliveredAt.getTime() + s.terms.reviewWindowDays * 86_400_000), updatedAt: deliveredAt })
+          .where(eq(schema.commissionOrders.id, orderId)).returning();
+        await tx.insert(schema.commissionSubmissions).values({ id: randomUUID(), orderId, kind: "final", actorSessionId: s.creator.actor.sessionId,
+          requestId: randomUUID(), submittedAt: deliveredAt });
+        await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId, orderVersion: order!.version, type: "delivered", requestId: randomUUID(), occurredAt: deliveredAt });
+        await tx.update(schema.commissionOrders).set({ state: "completed", version: order!.version + 1, completedAt, completionKind: "buyer_accepted", updatedAt: completedAt })
+          .where(eq(schema.commissionOrders.id, orderId));
+        await tx.update(schema.commissionReservations).set({ state: "completed", releasedAt: completedAt }).where(eq(schema.commissionReservations.orderId, orderId));
+        await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId, orderVersion: order!.version + 1, type: "completed", requestId: randomUUID(), occurredAt: completedAt });
+      });
+      s.creator.setNow(completedAt);
+    }
+    const orderId = await s.service.request(s.request());
+    expect((await detail(s, orderId)).state).toBe("awaiting_payment");
+    expect((await rowsFor(s)).orders.map((order) => order.state).sort()).toEqual(["awaiting_payment", "completed", "completed", "completed"]);
+  });
   test.each(["fixed_immediate", "fixed_approval", "custom_quote"] as const)("%s reaches in_progress with immutable terms and provenance", async (route) => {
     const s = await f.setup(route); const command = s.request(); const orderId = await s.service.request(command);
     expect(await s.service.request(command)).toBe(orderId);

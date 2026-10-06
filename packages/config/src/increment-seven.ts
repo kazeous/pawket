@@ -13,6 +13,8 @@ const referencePattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 
 export const incrementSevenEnvShape = {
   COMMISSION_FILES_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
+  COMMISSION_FULFILLMENT_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
+  COMMISSION_MESSAGE_LIMIT: integer(1, 1_000).default(60),
   COMMISSION_FILE_RETENTION_MODE: z.enum(["report_only", "enforce"]).default("report_only"),
   COMMISSION_FILE_RETENTION_ACCEPTANCE_REFERENCE: z.preprocess(blankToUndefined, z.string().regex(referencePattern).optional()),
   COMMISSION_FILES_S3_ENDPOINT: optionalText(2_048),
@@ -33,6 +35,7 @@ export const incrementSevenEnvShape = {
 type Parsed = z.infer<z.ZodObject<typeof incrementSevenEnvShape>>;
 export type IncrementSevenServerEnv = Parsed;
 export type CommissionFilesMode = Parsed["COMMISSION_FILES_MODE"];
+export type CommissionFulfillmentMode = Parsed["COMMISSION_FULFILLMENT_MODE"];
 export type CommissionFileRetentionMode = Parsed["COMMISSION_FILE_RETENTION_MODE"];
 export class IncrementSevenConfigError extends Error {
   constructor(readonly failures: ReadonlyArray<{ field: string; reason: string }>) {
@@ -45,6 +48,9 @@ export function resolveIncrementSevenEnv(parsed: Parsed & {
   PII_ACTIVE_KEY_ID?: string; PII_KEYRING_JSON?: Record<string, string>; PII_LOOKUP_HMAC_KEY?: string;
 }): IncrementSevenServerEnv {
   const failures: Array<{ field: string; reason: string }> = [];
+  if (parsed.COMMISSION_FULFILLMENT_MODE === "enabled" && parsed.COMMISSION_FILES_MODE !== "enabled") {
+    failures.push({ field: "COMMISSION_FULFILLMENT_MODE", reason: "requires COMMISSION_FILES_MODE=enabled" });
+  }
   if (parsed.COMMISSION_FILES_MODE === "enabled") {
     if (!parsed.PII_ACTIVE_KEY_ID || !parsed.PII_KEYRING_JSON?.[parsed.PII_ACTIVE_KEY_ID] || !parsed.PII_LOOKUP_HMAC_KEY) {
       failures.push({ field: "COMMISSION_FILES_MODE", reason: "requires the validated encryption keyring and lookup HMAC key" });

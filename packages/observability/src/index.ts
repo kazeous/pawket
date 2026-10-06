@@ -28,6 +28,8 @@ export {
   recordCommissionOperation,
   setCommissionOperationalMetrics,
   setCommissionCleanupConfiguredMetric,
+  setCommissionFulfillmentConfiguredMetric,
+  setCommissionFulfillmentPausedMetric,
   recordCommissionFileOperation,
   setCommissionFileScannerMetric,
   setCommissionFileBacklogMetrics,
