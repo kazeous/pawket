@@ -13,13 +13,17 @@ type Input = Readonly<{
   files: CommissionFileService; onOperation?: (event: { operation: Metric; outcome: string }) => void;
 }>;
 const uuid = z.uuid();
-const createUpload = z.strictObject({ context: z.literal("brief"), packageId: uuid, fileName: z.string().min(1).max(4096), declaredBytes: z.number().int() });
+const uploadFields = { fileName: z.string().min(1).max(4096), declaredBytes: z.number().int() };
+const createUpload = z.discriminatedUnion("context", [
+  z.strictObject({ context: z.literal("brief"), packageId: uuid, ...uploadFields }),
+  z.strictObject({ context: z.enum(["thread", "submission"]), orderId: uuid, ...uploadFields }),
+]);
 const empty = z.strictObject({});
 function statusFor(code: string): number {
   if (code === "not_available") return 404;
   if (code === "authentication_required") return 401;
-  if (code === "invalid_request" || code === "file_too_large" || code === "preview_not_allowed") return 400;
-  if (code === "files_disabled" || code === "storage_unavailable" || code === "dependency_unavailable") return 503;
+  if (code === "invalid_request" || code === "file_too_large" || code === "preview_not_allowed" || code === "invalid_attachment_files") return 400;
+  if (code === "files_disabled" || code === "fulfillment_disabled" || code === "storage_unavailable" || code === "dependency_unavailable") return 503;
   return 409;
 }
 function noQuery(request: Request): void {
@@ -46,7 +50,7 @@ export function createCommissionFileHttpHandlers(input: Input) {
     } catch (error) {
       const raw = error instanceof CommissionHttpFailure || error instanceof CommissionFileError ? error.code : "dependency_unavailable";
       const code = raw === "not_authorized" ? "authentication_required" : raw; // an expired or revoked session, never a hint about the file
-      report(metric, code === "files_disabled" ? "disabled" : code === "rate_limited" ? "rate_limited" : code === "dependency_unavailable" || code === "storage_unavailable" ? "failed" : "rejected");
+      report(metric, code === "files_disabled" || code === "fulfillment_disabled" ? "disabled" : code === "rate_limited" ? "rate_limited" : code === "dependency_unavailable" || code === "storage_unavailable" ? "failed" : "rejected");
       return commissionJson(error instanceof CommissionHttpFailure ? error.status : statusFor(code), { code });
     }
   }

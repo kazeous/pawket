@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, test, vi } from "vitest";
-import { CommissionFileError } from "@pawket/commission-files";
+import { CommissionFileError, type CommissionFileService } from "@pawket/commission-files";
 import { createCommissionFileHttpHandlers } from "../src/platform/commission-file-http";
 
 const origin = "https://pawket.example"; const actor = { userId: "user-buyer-1", sessionId: "session-1" };
 function handlers(overrides: Partial<Parameters<typeof createCommissionFileHttpHandlers>[0]> = {}) {
-  const files = { createUpload: vi.fn(async () => ({ fileId: randomUUID(), url: "https://bucket.invalid/put", requiredHeaders: { "content-type": "application/octet-stream" }, expiresAt: new Date().toISOString() })),
+  const files = { createUpload: vi.fn<CommissionFileService["createUpload"]>(async () => ({ fileId: randomUUID(), url: "https://bucket.invalid/put", requiredHeaders: { "content-type": "application/octet-stream" }, expiresAt: new Date().toISOString() })),
     completeUpload: vi.fn(async () => ({ state: "scanning" })), discard: vi.fn(async () => ({ state: "discarded" })), getFile: vi.fn(async () => ({ state: "clean" })),
     downloadGrant: vi.fn(async () => ({ url: "https://bucket.invalid/get?signed=1" })) };
   const onOperation = vi.fn();
@@ -17,6 +17,27 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
 const get = (path: string, headers: Record<string, string> = {}) => new Request(`${origin}${path}`, { headers: { "x-real-ip": "203.0.113.5", ...headers } });
 
 describe("commission file HTTP", () => {
+  test.each(["thread", "submission"] as const)("accepts an order-bound %s upload without a package", async (context) => {
+    const { http, files } = handlers(); const orderId = randomUUID();
+    const response = await http.createUpload(post("/api/v1/commission-files", { context, orderId, fileName: "synthetic.png", declaredBytes: 10 }));
+    expect(response.status).toBe(200);
+    expect(files.createUpload).toHaveBeenCalledWith(expect.objectContaining({ actor, context, orderId, declaredBytes: 10 }));
+    expect("packageId" in files.createUpload.mock.calls[0]![0]!).toBe(false);
+  });
+  test("refuses a package-bound thread grant and reports the submission byte limit without echoing input", async () => {
+    const { http, files } = handlers();
+    expect((await http.createUpload(post("/api/v1/commission-files", { context: "thread", packageId: randomUUID(), fileName: "synthetic.png", declaredBytes: 10 }))).status).toBe(400);
+    expect(files.createUpload).not.toHaveBeenCalled();
+    files.createUpload.mockRejectedValueOnce(new CommissionFileError("file_too_large"));
+    const response = await http.createUpload(post("/api/v1/commission-files", { context: "submission", orderId: randomUUID(), fileName: "synthetic.psd", declaredBytes: 262_144_001 }));
+    expect(response.status).toBe(400); expect(await response.json()).toEqual({ code: "file_too_large" });
+    expect(files.createUpload).toHaveBeenCalledOnce();
+  });
+  test.each([["fulfillment_disabled", 503], ["order_quota_exceeded", 409]] as const)("maps %s for order file grants", async (code, status) => {
+    const { http, files } = handlers(); files.createUpload.mockRejectedValueOnce(new CommissionFileError(code));
+    const response = await http.createUpload(post("/api/v1/commission-files", { context: "thread", orderId: randomUUID(), fileName: "synthetic.png", declaredBytes: 10 }));
+    expect(response.status).toBe(status); expect(await response.json()).toEqual({ code });
+  });
   test("serializes redacted terminal status with a null filename and no cache", async () => {
     const fileId = randomUUID();
     const { http } = handlers({ files: { getFile: async () => ({ fileId, state: "discarded", name: null }) } as never });

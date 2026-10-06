@@ -60,7 +60,7 @@ import {
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation, recordCommissionFileOperation } from "@pawket/observability";
 import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort } from "@pawket/orders";
-import { createCommissionFileAttachmentPort, createCommissionFileService, createS3CommissionFileStorage, type CommissionFileStoragePort } from "@pawket/commission-files";
+import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -451,19 +451,23 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
-    files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
+    files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }), thread: createCommissionThreadPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
+  const commissionThread = createCommissionThreadService({ db: database.db, keyring, lookupHmacKey, filesMode: env.COMMISSION_FILES_MODE,
+    fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
     mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
     onCommitted: (replayed) => recordCommissionOperation({ operation: "confirm", outcome: replayed ? "replayed" : "creator_manual" }) });
   const commissionHandlers = createCommissionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, intakeMode: env.COMMISSION_INTAKE_MODE,
-    paymentsMode: env.COMMISSION_PAYMENTS_MODE, authenticate, orders: commissions, catalog: commissionCatalog, manual: commissionManual,
-    onOperation: recordCommissionOperation,
-    async throttle({ actorUserId, networkKeyHash, operation }) {
+    paymentsMode: env.COMMISSION_PAYMENTS_MODE, fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, authenticate, orders: commissions, thread: commissionThread, catalog: commissionCatalog, manual: commissionManual,
+    onOperation: ({ operation, outcome }) => recordCommissionOperation({ operation: operation === "message" ? "command" : operation, outcome }),
+    async throttle({ actorUserId, networkKeyHash, operation, orderId }) {
       const maximumAttempts = operation === "read" ? env.COMMISSION_READ_LIMIT : operation === "request" ? env.COMMISSION_REQUEST_LIMIT : env.COMMISSION_COMMAND_LIMIT;
       const policy = { action: `commission_${operation}`, now: new Date(), windowMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, blockMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, maximumAttempts };
       const results = await Promise.all([
         recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
         ...(actorUserId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) })] : []),
+        ...(operation === "message" && actorUserId && orderId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", maximumAttempts: env.COMMISSION_MESSAGE_LIMIT,
+          subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-message-order", value: `${actorUserId}:${orderId}` }) })] : []),
       ]);
       return results.every((result) => result.allowed);
     },

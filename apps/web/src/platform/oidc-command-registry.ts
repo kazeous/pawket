@@ -27,6 +27,13 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
   if (path === "/api/v1/creator/commissions/packages") return make("catalog.commission_package", false, "Lưu gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.savePackage(q));
   if (path === "/api/v1/creator/commissions/packages/change") return make("catalog.commission_publish", false, "Cập nhật gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.changePackage(q));
   if (path === "/api/v1/creator/commissions/settings") return make("catalog.commission_settings", false, "Cập nhật nhận commission", "/creator/commissions", (r, q) => r.commissionHandlers.saveSettings(q));
+  if ((match = new RegExp(`^/api/v1/creator/commissions/${uuid}/submissions$`, "u").exec(path))) {
+    const id = match[1]!; return make("orders.commission_submit", false, "Cập nhật commission", `/creator/commissions/${id}`, (r, q) => r.commissionHandlers.submit(q, id));
+  }
+  if ((match = new RegExp(`^/api/v1/commissions/${uuid}/submissions/${uuid}/respond$`, "u").exec(path))) {
+    const id = match[1]!; const submissionId = match[2]!;
+    return make("orders.commission_respond", false, "Cập nhật commission", `/commissions/${id}`, (r, q) => r.commissionHandlers.respond(q, id, submissionId));
+  }
   if ((match = new RegExp(`^/api/v1/(creator/)?commissions/${uuid}/(accept|quote|close|claim|confirm)$`, "u").exec(path))) {
     const creator = Boolean(match[1]); const id = match[2]!; const operation = match[3]!;
     if ((operation === "quote" || operation === "confirm") && !creator) return null;
