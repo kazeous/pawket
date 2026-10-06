@@ -3,6 +3,7 @@ import { UnsafeStructuredDataError } from "@pawket/security/structured-data";
 import { metricsRegistry, recordCommissionOperation, setCommissionCleanupConfiguredMetric, setCommissionOperationalMetrics } from "../src/index.js";
 
 const report = { requested: 2, quoted: 1, awaitingPayment: 3, inProgress: 4, expiredRequests: 1, expiredQuotes: 0, expiredPayments: 2,
+  delivered: 0, completed: 0, completedBuyer: 0, completedAutomatic: 0, completionBacklog: 0, lateDeliveries: 0, draftSubmissions: 0, finalSubmissions: 0,
   oldestExpiryLagSeconds: 600, overdue: 1, retentionUnacceptedClosed: 6, retentionAccepted: 7 };
 test("commission metrics reject private labels, invalid counts and inconsistent snapshots", () => {
   for (const value of [{ operation: "order-private-id", outcome: "accepted" }, { operation: "confirm", outcome: "PW00000000000000000001" },

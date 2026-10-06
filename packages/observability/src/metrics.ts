@@ -16,6 +16,12 @@ const commissionOutcomes: Readonly<Record<string, readonly string[]>> = {
   event: ["validated", "failed"],
 };
 const commissionCleanupConfigured = new Gauge({ name: "pawket_commission_cleanup_configured", help: "Commission cleanup is configured independently of intake and payment pauses.", registers: [metricsRegistry] });
+const commissionFulfillmentConfigured = new Gauge({ name: "pawket_commission_fulfillment_configured", help: "Commission fulfillment observation is configured, including while paused.", registers: [metricsRegistry] });
+const commissionFulfillmentPaused = new Gauge({ name: "pawket_commission_fulfillment_paused", help: "Whether the last durable fulfillment mode observation found an open pause.", registers: [metricsRegistry] });
+const commissionCompletions = new Gauge({ name: "pawket_commission_completions", help: "Completed commission inventory by fixed completion kind.", labelNames: ["kind"], registers: [metricsRegistry] });
+const commissionCompletionBacklog = new Gauge({ name: "pawket_commission_completion_backlog", help: "Delivered commissions past their original review deadline, including held or paused orders.", registers: [metricsRegistry] });
+const commissionLateDeliveries = new Gauge({ name: "pawket_commission_late_deliveries", help: "Final submissions delivered after the immutable order deadline.", registers: [metricsRegistry] });
+const commissionSubmissions = new Gauge({ name: "pawket_commission_submissions", help: "Commission submission inventory by fixed kind.", labelNames: ["kind"], registers: [metricsRegistry] });
 const commissionOrdersCurrent = new Gauge({ name: "pawket_commission_orders_current", help: "Current commission orders by fixed lifecycle state.", labelNames: ["state"], registers: [metricsRegistry] });
 const commissionExpiryBacklog = new Gauge({ name: "pawket_commission_expiry_backlog", help: "Commission orders past their closing deadline by fixed state.", labelNames: ["state"], registers: [metricsRegistry] });
 const commissionExpiryLag = new Gauge({ name: "pawket_commission_expiry_oldest_lag_seconds", help: "Seconds since the oldest pending commission closing deadline.", registers: [metricsRegistry] });
@@ -25,20 +31,41 @@ export function setCommissionCleanupConfiguredMetric(configured: boolean): void 
   if (typeof configured !== "boolean") rejectUnsafeMetric();
   commissionCleanupConfigured.set(configured ? 1 : 0);
 }
+export function setCommissionFulfillmentConfiguredMetric(configured: boolean): void {
+  if (typeof configured !== "boolean") rejectUnsafeMetric();
+  commissionFulfillmentConfigured.set(configured ? 1 : 0);
+}
+export function setCommissionFulfillmentPausedMetric(paused: boolean): void {
+  if (typeof paused !== "boolean") rejectUnsafeMetric();
+  commissionFulfillmentPaused.set(paused ? 1 : 0);
+}
 export function setCommissionOperationalMetrics(input: {
   requested: number; quoted: number; awaitingPayment: number; inProgress: number;
+  delivered: number; completed: number; completedBuyer: number; completedAutomatic: number;
+  completionBacklog: number; lateDeliveries: number; draftSubmissions: number; finalSubmissions: number;
   expiredRequests: number; expiredQuotes: number; expiredPayments: number;
   oldestExpiryLagSeconds: number; overdue: number;
   retentionUnacceptedClosed: number; retentionAccepted: number;
 }): void {
   assertSafeStructuredData(input, "metric");
-  const counts = [input.requested, input.quoted, input.awaitingPayment, input.inProgress, input.expiredRequests, input.expiredQuotes, input.expiredPayments, input.overdue, input.retentionUnacceptedClosed, input.retentionAccepted];
+  const counts = [input.requested, input.quoted, input.awaitingPayment, input.inProgress, input.delivered, input.completed, input.completedBuyer, input.completedAutomatic,
+    input.completionBacklog, input.lateDeliveries, input.draftSubmissions, input.finalSubmissions,
+    input.expiredRequests, input.expiredQuotes, input.expiredPayments, input.overdue, input.retentionUnacceptedClosed, input.retentionAccepted];
   if (!counts.every((n) => Number.isSafeInteger(n) && n >= 0) || !Number.isFinite(input.oldestExpiryLagSeconds) || input.oldestExpiryLagSeconds < 0 ||
-    input.expiredRequests > input.requested || input.expiredQuotes > input.quoted || input.expiredPayments > input.awaitingPayment || input.overdue > input.inProgress) rejectUnsafeMetric();
+    input.expiredRequests > input.requested || input.expiredQuotes > input.quoted || input.expiredPayments > input.awaitingPayment || input.overdue > input.inProgress ||
+    input.completedBuyer + input.completedAutomatic !== input.completed || input.completionBacklog > input.delivered) rejectUnsafeMetric();
   commissionOrdersCurrent.set({ state: "requested" }, input.requested);
   commissionOrdersCurrent.set({ state: "quoted" }, input.quoted);
   commissionOrdersCurrent.set({ state: "awaiting_payment" }, input.awaitingPayment);
   commissionOrdersCurrent.set({ state: "in_progress" }, input.inProgress);
+  commissionOrdersCurrent.set({ state: "delivered" }, input.delivered);
+  commissionOrdersCurrent.set({ state: "completed" }, input.completed);
+  commissionCompletions.set({ kind: "buyer_accepted" }, input.completedBuyer);
+  commissionCompletions.set({ kind: "review_window_elapsed" }, input.completedAutomatic);
+  commissionCompletionBacklog.set(input.completionBacklog);
+  commissionLateDeliveries.set(input.lateDeliveries);
+  commissionSubmissions.set({ kind: "draft" }, input.draftSubmissions);
+  commissionSubmissions.set({ kind: "final" }, input.finalSubmissions);
   commissionExpiryBacklog.set({ state: "requested" }, input.expiredRequests);
   commissionExpiryBacklog.set({ state: "quoted" }, input.expiredQuotes);
   commissionExpiryBacklog.set({ state: "awaiting_payment" }, input.expiredPayments);
@@ -444,7 +471,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "oidc_cleanup", "commission_files"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "oidc_cleanup", "commission_files"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",

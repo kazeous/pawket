@@ -221,6 +221,14 @@ groups:
         annotations:
           summary: Commission cleanup is missing unhealthy or stale even during payment pauses
           runbook: ops/runbooks/commission-operations.md
+      - alert: PawketCommissionFulfillmentUnhealthy
+        expr: (pawket_commission_fulfillment_configured == 1) unless on(job, instance) (pawket_worker_scan_healthy{scan="commission_fulfillment"} == 1 and on(job, instance) (time() - pawket_worker_last_success_timestamp_seconds{scan="commission_fulfillment"} < 900))
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Commission fulfillment is missing unhealthy or stale
+          runbook: ops/runbooks/commission-operations.md
       - alert: PawketCommissionExpiryDelayed
         expr: pawket_commission_expiry_oldest_lag_seconds > 900
         for: 5m
