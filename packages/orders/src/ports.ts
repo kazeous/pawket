@@ -44,3 +44,21 @@ export type CommissionFilesPort = Readonly<{
   attachBriefFiles(tx: PawketTransaction, command: Readonly<{ orderId: string; buyerUserId: string; packageId: string; fileIds: readonly string[]; at: Date }>): Promise<"attached" | "invalid" | "disabled">;
   describeBriefFiles(tx: PawketTransaction, command: Readonly<{ orderId: string; viewer: "buyer" | "creator"; withdrawn: boolean }>): Promise<readonly CommissionReferenceFileView[]>;
 }>;
+
+export type CommissionAttachmentTarget = Readonly<{ kind: "message" | "submission"; id: string }>;
+export type CommissionAttachedFileView = Readonly<{
+  fileId: string; name: string | null; sizeBytes: number; detectedType: "jpeg" | "png" | "webp" | "gif" | "pdf" | "psd" | "clip" | "zip"; sha256: string;
+  previewable: boolean; availability: "available" | "deleted";
+}>;
+export type CommissionThreadEntry = Readonly<{ sequence: number; kind: "message" | "submission"; entryId: string; createdAt: Date }>;
+/** Implemented structurally by @pawket/commission-files. All operations share the caller's transaction. */
+export type CommissionThreadPort = Readonly<{
+  appendEntry(tx: PawketTransaction, command: Readonly<{ orderId: string; kind: "message" | "submission"; entryId: string; at: Date }>): Promise<number>;
+  attachOrderFiles(tx: PawketTransaction, command: Readonly<{ orderId: string; ownerUserId: string; context: "thread" | "submission";
+    target: CommissionAttachmentTarget; fileIds: readonly string[]; at: Date }>): Promise<"attached" | "invalid" | "disabled">;
+  describeAttachedFiles(tx: PawketTransaction, command: Readonly<{ orderId: string; targets: readonly CommissionAttachmentTarget[] }>): Promise<ReadonlyMap<string, readonly CommissionAttachedFileView[]>>;
+  listEntries(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number }>): Promise<readonly CommissionThreadEntry[]>;
+  describeMessages(tx: PawketTransaction, command: Readonly<{ orderId: string; messageIds: readonly string[] }>): Promise<ReadonlyMap<string, Readonly<{ authorUserId: string; text: string | null; createdAt: Date }>>>;
+}>;
+export type CommissionCompletionHoldPort = Readonly<{ hasActiveCompletionHold(tx: PawketTransaction, orderId: string): Promise<boolean> }>;
+export const noCommissionCompletionHolds: CommissionCompletionHoldPort = Object.freeze({ hasActiveCompletionHold: async () => false });

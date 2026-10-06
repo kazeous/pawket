@@ -449,6 +449,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
         forcePathStyle: env.COMMISSION_FILES_S3_FORCE_PATH_STYLE })
     : unavailableCommissionFileStorage();
   const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
+    fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
     files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,

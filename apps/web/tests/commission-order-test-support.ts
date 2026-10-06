@@ -48,6 +48,7 @@ export function createCommissionOrderTestFixture(label: string) {
     const [pkg] = await base.db.select().from(schema.commissionPackages).where(eq(schema.commissionPackages.id, packageId));
     const payments = createCommissionPaymentIntentPort({ ...creator.common, paymentsMode: "manual_only" });
     const input: Parameters<typeof createCommissionOrderService>[0] = { ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", identity, catalog, payments, policy,
+      fulfillmentMode: "disabled",
       trust: { lockCommissionPage: async () => true } };
     const service = createCommissionOrderService(input);
     const request = (actor = buyerActor) => ({ actor, packageId, revisionId: pkg!.publishedRevisionId!, policyRevisionId: policyId, acceptTerms: route !== "custom_quote",

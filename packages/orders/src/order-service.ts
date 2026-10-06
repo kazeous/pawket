@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { and, count, desc, eq, inArray, lt, notInArray, or } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull, lt, notInArray, or } from "drizzle-orm";
 import {
   appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent,
   commissionAcceptances, commissionBriefs, commissionEvents, commissionOrders, commissionPackageRevisions,
-  commissionPolicyRevisions, commissionQuoteRevisions, commissionReservations, commissionTermsSnapshots,
+  commissionPolicyRevisions, commissionQuoteRevisions, commissionReservations, commissionSubmissions, commissionTermsSnapshots,
   type PawketDatabase, type PawketTransaction,
 } from "@pawket/database";
 import { createLookupHmac, type EncryptionKeyring } from "@pawket/security";
@@ -14,9 +14,11 @@ import { createCommissionPaymentLifecyclePort, lockCommissionCreator } from "./p
 import { decryptCommissionBrief, decryptCommissionTerms, encryptCommissionBrief, encryptCommissionTerms } from "./private-content.js";
 import { commissionExpiredReason as expiredReason, createCommissionOrderPersistence } from "./order-persistence.js";
 import { createCommissionOrderMaintenanceService } from "./order-maintenance.js";
+import { createCommissionFulfillmentService, readCommissionCompletionDueAt } from "./fulfillment-service.js";
+import { commissionFileDeletionAt } from "./fulfillment-timing.js";
 import { commissionCommandFingerprint } from "./command-fingerprint.js";
 import { requireCommissionPolicy, type CommissionPolicyReadPort } from "./policy-repository.js";
-import type { CommissionCatalogPort, CommissionFilesPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort } from "./ports.js";
+import type { CommissionCatalogPort, CommissionCompletionHoldPort, CommissionFilesPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort, CommissionThreadPort } from "./ports.js";
 
 type Order = typeof commissionOrders.$inferSelect;
 type Quote = typeof commissionQuoteRevisions.$inferSelect;
@@ -25,6 +27,7 @@ type ExistingCommand = Command & Readonly<{ orderId: string; expectedVersion: nu
 type Input = Readonly<{
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; applicationRevision: string;
   intakeMode: "disabled" | "enabled"; paymentsMode: "disabled" | "manual_only" | "sepay_optional";
+  fulfillmentMode: "disabled" | "enabled"; thread?: CommissionThreadPort; holds?: CommissionCompletionHoldPort;
   identity: CommissionIdentityPort; catalog: CommissionCatalogPort; payments: CommissionPaymentsPort; policy: CommissionPolicyReadPort;
   trust: { lockCommissionPage(tx: PawketTransaction, creatorUserId: string): Promise<boolean> };
   files?: CommissionFilesPort;
@@ -76,7 +79,7 @@ export function createCommissionOrderService(input: Input) {
   async function participants(tx: PawketTransaction, creatorUserId: string, buyerUserId: string) {
     if (creatorUserId === buyerUserId || !await eligibility.lockSettlementParticipants(tx, { creatorUserId, buyerUserId, at: now() })) commissionFail("not_available");
   }
-  const { record, closeOrder } = createCommissionOrderPersistence({ ...input, newId });
+  const { record, closeOrder, completeCommissionOrder } = createCommissionOrderPersistence({ ...input, newId });
   async function mutate(command: Command, scope: string, payload: unknown,
     creator: (tx: PawketTransaction) => Promise<string>, apply: (tx: PawketTransaction) => Promise<Change>): Promise<string> {
     actorValid(command.actor);
@@ -258,6 +261,7 @@ export function createCommissionOrderService(input: Input) {
       });
     },
     ...createCommissionOrderMaintenanceService(input),
+    ...createCommissionFulfillmentService({ mutate, owned, session, record, boundary, now, newId }, { ...input, completeCommissionOrder }),
     async getOrder(command: { actor: CommissionActor; orderId: string }) {
       actorValid(command.actor); if (!commissionUuid(command.orderId)) commissionFail("not_authorized");
       return boundary(() => input.db.transaction(async (tx) => {
@@ -278,12 +282,17 @@ export function createCommissionOrderService(input: Input) {
         const payment = await input.payments.projectPayment(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now(), includeInstructions: canShowInstructions });
         const role = order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const;
         const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" }) : [];
+        const completionDueAt = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, order.reviewEndsAt) : null;
         const at = now(); if (proofExpiry <= at) commissionFail("not_authorized");
         const effectivePayment = payment && payment.state === "awaiting_transfer" && new Date(payment.expiresAt) <= at
           ? { ...payment, state: "expired" as const, instruction: null } : payment;
         return { id: order.id, version: order.version, role,
           state: order.state as CommissionState, route: order.route, closeReason: order.closeReason, createdAt: order.createdAt.toISOString(), expiresAt: order.expiresAt?.toISOString() ?? null,
           acceptedAt: order.acceptedAt?.toISOString() ?? null, confirmedAt: order.confirmedAt?.toISOString() ?? null, dueAt: order.dueAt?.toISOString() ?? null,
+          fulfillment: order.confirmedAt && snapshot ? { deliveredAt: order.deliveredAt?.toISOString() ?? null, reviewEndsAt: order.reviewEndsAt?.toISOString() ?? null,
+            completionDueAt: completionDueAt?.toISOString() ?? null, completedAt: order.completedAt?.toISOString() ?? null, completionKind: order.completionKind,
+            revisionsUsed: order.revisionsUsed, revisionAllowance: snapshot.revisionAllowance, lateDelivery: !!order.deliveredAt && !!order.dueAt && order.deliveredAt > order.dueAt,
+            fileDeletionAt: order.completedAt ? commissionFileDeletionAt(order.completedAt).toISOString() : null } : null,
           overdue: !!order.dueAt && order.dueAt <= at, deadlinePassed: !!order.expiresAt && order.expiresAt <= at && ["requested", "quoted", "awaiting_payment"].includes(order.state),
           package: { id: order.packageId, revisionId: order.packageRevisionId, title: revision.title }, brief: decryptCommissionBrief(input.keyring, order.id, brief), referenceFiles,
           terms, policy: policy ?? null, currentPolicy: currentPolicy ? { revisionId: currentPolicy.revisionId, document: currentPolicy.document, acceptsOrders: currentPolicy.acceptsOrders } : null,
@@ -329,13 +338,18 @@ export function createCommissionOrderService(input: Input) {
       return boundary(() => input.db.transaction(async (tx) => {
         const proofExpiry = await session(tx, command.actor);
         const rows = await tx.select({ id: commissionOrders.id, state: commissionOrders.state, version: commissionOrders.version, route: commissionOrders.route,
-          amountVnd: commissionOrders.amountVnd, createdAt: commissionOrders.createdAt, expiresAt: commissionOrders.expiresAt, dueAt: commissionOrders.dueAt,
+          amountVnd: commissionOrders.amountVnd, createdAt: commissionOrders.createdAt, expiresAt: commissionOrders.expiresAt, dueAt: commissionOrders.dueAt, reviewEndsAt: commissionOrders.reviewEndsAt,
           title: commissionPackageRevisions.title }).from(commissionOrders).innerJoin(commissionPackageRevisions, eq(commissionPackageRevisions.id, commissionOrders.packageRevisionId))
           .where(and(eq(command.role === "buyer" ? commissionOrders.buyerUserId : commissionOrders.creatorUserId, command.actor.userId),
             cursor ? or(lt(commissionOrders.createdAt, new Date(cursor.createdAt)), and(eq(commissionOrders.createdAt, new Date(cursor.createdAt)), lt(commissionOrders.id, cursor.id))) : undefined))
           .orderBy(desc(commissionOrders.createdAt), desc(commissionOrders.id)).limit(limit + 1);
-        if (proofExpiry <= now()) commissionFail("not_authorized");
-        const items = rows.slice(0, limit).map((row) => ({ ...row, createdAt: row.createdAt.toISOString(), expiresAt: row.expiresAt?.toISOString() ?? null, dueAt: row.dueAt?.toISOString() ?? null }));
+        const page = rows.slice(0, limit);
+        const drafts = page.length ? await tx.select({ orderId: commissionSubmissions.orderId }).from(commissionSubmissions)
+          .where(and(inArray(commissionSubmissions.orderId, page.map((row) => row.id)), eq(commissionSubmissions.kind, "draft"), isNull(commissionSubmissions.response))) : [];
+        const awaiting = new Set(drafts.map((draft) => draft.orderId));
+        const at = now(); if (proofExpiry <= at) commissionFail("not_authorized");
+        const items = page.map((row) => ({ ...row, createdAt: row.createdAt.toISOString(), expiresAt: row.expiresAt?.toISOString() ?? null, dueAt: row.dueAt?.toISOString() ?? null,
+          reviewEndsAt: row.reviewEndsAt?.toISOString() ?? null, awaitingBuyer: row.state === "delivered" || awaiting.has(row.id), overdue: row.state === "in_progress" && !!row.dueAt && row.dueAt <= at }));
         const last = items.at(-1); return { items, nextBefore: rows.length > limit && last ? { id: last.id, createdAt: last.createdAt } : null };
       }));
     },
