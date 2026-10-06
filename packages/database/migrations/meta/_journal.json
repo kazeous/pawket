@@ -302,6 +302,13 @@
       "when": 1791173631274,
       "tag": "0042_increment_7_threads",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791268974293,
+      "tag": "0043_increment_7_copy_intent_closure",
+      "breakpoints": true
     }
   ]
 }

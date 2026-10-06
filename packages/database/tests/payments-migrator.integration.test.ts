@@ -110,7 +110,7 @@ async function expectPaymentsHead(
   const [journal] = await client.unsafe<{ count: number }[]>(
     `select count(*)::int as count from "${journalSchema}"."__drizzle_migrations"`,
   );
-  expect(journal?.count).toBe(43);
+  expect(journal?.count).toBe(44);
 }
 
 afterAll(async () => {

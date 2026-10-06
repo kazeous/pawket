@@ -9,6 +9,9 @@ import { createCommissionFileFixture, fixtureAt, fixtureKeyring } from "./file-f
 const fixture = createCommissionFileFixture("maintenance");
 beforeAll(fixture.initialize, 60_000);
 afterAll(fixture.dispose);
+const task10Fixture = createCommissionFileFixture("maintenance_task10");
+beforeAll(task10Fixture.initialize, 60_000);
+afterAll(task10Fixture.dispose);
 const HOUR = 3_600_000; const DAY = 24 * HOUR;
 const facts = new Map<string, CommissionFileRetentionFacts>();
 const orders: Pick<CommissionFileOrderAccessPort, "retentionFacts"> = { retentionFacts: async (_db, ids) => new Map(ids.filter((id) => facts.has(id)).map((id) => [id, facts.get(id)!])) };
@@ -18,7 +21,104 @@ function run(at: Date, options: Partial<Parameters<typeof runCommissionFileMaint
     retentionMode: "report_only", batchSize: 100, enqueueScan, now: () => at, ...options }) };
 }
 
+function runTask10(at: Date, options: Partial<Parameters<typeof runCommissionFileMaintenance>[0]> = {}) {
+  return run(at, { db: task10Fixture.db, ...options });
+}
+
+async function completedFile() {
+  const o = await task10Fixture.order(); const fileId = await task10Fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId });
+  await task10Fixture.attach(fileId, o.orderId);
+  facts.set(o.orderId, { state: "completed", confirmedAt: fixtureAt, closedAt: null, completedAt: fixtureAt });
+  return { orderId: o.orderId, fileId };
+}
+async function terminalCopyIntent(endedAt: Date) {
+  const o = await task10Fixture.order(); const id = await task10Fixture.file({ ownerUserId: o.buyerUserId, packageId: o.packageId, state: "scanning", at: endedAt });
+  await task10Fixture.db.update(commissionFiles).set({ cleanCopyIntent: true, version: 3, updatedAt: endedAt }).where(eq(commissionFiles.id, id));
+  await task10Fixture.db.update(commissionFiles).set({ state: "discarded", endedAt, version: 4, updatedAt: endedAt }).where(eq(commissionFiles.id, id));
+  return id;
+}
+
 describe("commission file maintenance", () => {
+  test("files of a completed order are reported 180 days after completion", async () => {
+    const { orderId } = await completedFile();
+    try { expect((await runTask10(new Date(fixtureAt.getTime() + 180 * DAY)).report).retentionDue).toBe(1); }
+    finally { facts.delete(orderId); }
+  });
+  test("completed-order files at 179 days are not due", async () => {
+    const { orderId } = await completedFile();
+    try { expect((await runTask10(new Date(fixtureAt.getTime() + 179 * DAY)).report).retentionDue).toBe(0); }
+    finally { facts.delete(orderId); }
+  });
+  test("an evidence hold skips completed-order files", async () => {
+    const { orderId, fileId } = await completedFile(); const hasEvidenceHold = vi.fn(async () => true);
+    try {
+      const report = await runTask10(new Date(fixtureAt.getTime() + 180 * DAY), { retentionMode: "enforce", holds: { hasEvidenceHold } }).report;
+      expect(report.retentionDue).toBe(0); expect(report.retentionDeleted).toBe(0);
+      expect(hasEvidenceHold.mock.calls.length).toBe(1);
+      expect((await task10Fixture.read(fileId)).state).toBe("attached");
+    } finally { facts.delete(orderId); }
+  });
+  test("report_only never deletes completed-order files", async () => {
+    const { orderId, fileId } = await completedFile();
+    try {
+      const sweep = runTask10(new Date(fixtureAt.getTime() + 180 * DAY)); const remove = vi.spyOn(sweep.storage.port, "deleteAllVersions");
+      expect((await sweep.report).retentionDeleted).toBe(0);
+      expect((await task10Fixture.read(fileId)).state).toBe("attached");
+      expect(remove.mock.calls.filter(([area]) => area === "clean").length).toBe(0);
+    } finally { facts.delete(orderId); }
+  });
+  test("enforce marks completed-order files deleted", async () => {
+    const { orderId, fileId } = await completedFile();
+    try {
+      const report = await runTask10(new Date(fixtureAt.getTime() + 180 * DAY), { retentionMode: "enforce" }).report;
+      expect(report.retentionDue).toBe(1); expect(report.retentionDeleted).toBe(1);
+      const row = await task10Fixture.read(fileId);
+      expect(row.state).toBe("deleted"); expect(row.endedAt?.getTime()).toBe(fixtureAt.getTime() + 180 * DAY);
+      expect(row.filenameEnvelope !== null).toBe(true); expect(row.sha256 !== null).toBe(true);
+    } finally { facts.delete(orderId); }
+  });
+  test("a terminal copy-intent row is closed after 24 h and leaves the purge loop", async () => {
+    const id = await terminalCopyIntent(fixtureAt); const at = new Date(fixtureAt.getTime() + DAY);
+    const storage = createFakeCommissionFileStorage(); const key = `commission/${id}`;
+    storage.put("clean", key, new Uint8Array([1])); storage.put("clean", key, new Uint8Array([2]));
+    const remove = vi.spyOn(storage.port, "deleteAllVersions");
+    const first = await runTask10(at, { storage: storage.port }).report;
+    const row = await task10Fixture.read(id);
+    expect(row.cleanCopyIntent).toBe(true); expect(row.cleanPurgedAt?.getTime()).toBe(at.getTime());
+    expect(storage.has("clean", key)).toBe(false); expect(first.purged).toBeGreaterThan(0);
+    const candidateCount = remove.mock.calls.filter(([area, objectKey]) => area === "clean" && objectKey === key).length;
+    expect(candidateCount).toBe(1);
+    const second = await runTask10(at, { storage: storage.port, batchSize: 1 }).report;
+    expect(second.purged).toBe(0);
+    expect(second.purgeNextAfter === null).toBe(true);
+    expect(remove.mock.calls.filter(([area, objectKey]) => area === "clean" && objectKey === key).length).toBe(candidateCount);
+    expect((await task10Fixture.read(id)).version).toBe(row.version);
+  });
+  test("a terminal copy-intent row younger than 24 h is still reconciled and not closed", async () => {
+    const id = await terminalCopyIntent(new Date(fixtureAt.getTime() + 2 * DAY)); const at = new Date(fixtureAt.getTime() + 3 * DAY - 1);
+    const storage = createFakeCommissionFileStorage(); const remove = vi.spyOn(storage.port, "deleteAllVersions"); const key = `commission/${id}`;
+    await runTask10(at, { storage: storage.port }).report;
+    expect((await task10Fixture.read(id)).cleanPurgedAt === null).toBe(true);
+    storage.put("clean", key, new Uint8Array([1]));
+    await runTask10(at, { storage: storage.port }).report;
+    expect((await task10Fixture.read(id)).cleanPurgedAt === null).toBe(true);
+    expect(storage.has("clean", key)).toBe(false);
+    expect(remove.mock.calls.filter(([area, objectKey]) => area === "clean" && objectKey === key).length).toBe(2);
+  });
+  test("a failed clean purge does not close an aged copy-intent row", async () => {
+    const endedAt = new Date(fixtureAt.getTime() + 4 * DAY); const id = await terminalCopyIntent(endedAt);
+    const at = new Date(endedAt.getTime() + DAY); const storage = createFakeCommissionFileStorage();
+    const actualDelete = storage.port.deleteAllVersions;
+    vi.spyOn(storage.port, "deleteAllVersions").mockImplementation(async (area, key) => {
+      if (area === "clean") throw new Error("storage unavailable");
+      return actualDelete(area, key);
+    });
+    const report = await runTask10(at, { storage: storage.port }).report;
+    expect(report.purgeFailures).toBeGreaterThan(0); expect(report.purged).toBe(0);
+    expect((await task10Fixture.read(id)).cleanPurgedAt === null).toBe(true);
+    await runTask10(at).report;
+    expect((await task10Fixture.read(id)).cleanPurgedAt?.getTime()).toBe(at.getTime());
+  });
   test("advances past a full failed page with database microsecond creation timestamps", async () => {
     const o = await fixture.order(); const ids = [randomUUID(), randomUUID(), randomUUID()].sort();
     const preciseAt = "2026-09-28T03:00:00.000123Z";
