@@ -81,4 +81,5 @@ export { createCreatorCommissionPaymentService, type ConfirmCreatorCommissionCom
 export { COMMISSION_REFUND_POLICY, createRefundReference, normalizeBankReference, CommissionRefundError,
   type CommissionRefundSource, type CommissionRefundState } from "./commission-refund-policy.js";
 export { createCommissionRefundPort, type CommissionRefundPort } from "./commission-refund-port.js";
+export { createCommissionRefundService, type CommissionRefundService, type CommissionRefundFilesPort } from "./commission-refund-service.js";
 export { createCommissionPaymentFactsPort, type CommissionPaymentFactsPort } from "./commission-payment-facts.js";

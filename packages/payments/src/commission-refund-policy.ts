@@ -5,7 +5,8 @@ export const COMMISSION_REFUND_POLICY = Object.freeze({ sendBusinessDays: 5, con
 export type CommissionRefundSource = "agreement" | "ruling" | "correction" | "late_payment" | "late_payment_provider" | "suspension_cancel" | "fulfillment_freeze";
 export type CommissionRefundState = "awaiting_destination" | "awaiting_send" | "sent" | "received" | "presumed_received" | "not_received" | "waived";
 export class CommissionRefundError extends Error {
-  constructor(readonly code: "invalid_request" | "not_available" | "invalid_transition" | "version_conflict" | "dependency_unavailable") {
+  constructor(readonly code: "invalid_request" | "not_available" | "invalid_destination" | "invalid_transition" | "version_conflict"
+    | "recent_auth_required" | "totp_required" | "idempotency_conflict" | "resolution_disabled" | "dependency_unavailable") {
     super(code); this.name = "CommissionRefundError";
   }
 }
