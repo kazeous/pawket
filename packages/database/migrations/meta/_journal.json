@@ -316,6 +316,13 @@
       "when": 1791274112724,
       "tag": "0044_increment_7_quota_closed_copy_intents",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791359747776,
+      "tag": "0045_increment_8_order_exits",
+      "breakpoints": true
     }
   ]
 }
