@@ -26,5 +26,6 @@ export default defineConfig({
     schemaPath("platform-tip-policy.ts"),
     schemaPath("commissions.ts"),
     schemaPath("commission-files.ts"),
+    schemaPath("commission-refunds.ts"),
   ],
 });

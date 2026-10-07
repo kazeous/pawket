@@ -6,6 +6,14 @@ export const VIETQR_RECEIVING_BANKS: Readonly<Record<string, string>> = Object.f
   "970415": "VietinBank",
   "970436": "Vietcombank",
 });
+// Reviewed against the public directory on 2026-10-07: https://api.vietqr.io/v2/banks.
+// Only exact BIN/shortName matches from the owner-approved candidate list are retained.
+export const VIETQR_REFUND_BANKS: Readonly<Record<string, string>> = Object.freeze({
+  "970415": "VietinBank", "970436": "Vietcombank", "970418": "BIDV", "970405": "Agribank",
+  "970407": "Techcombank", "970416": "ACB", "970432": "VPBank", "970423": "TPBank",
+  "970403": "Sacombank", "970437": "HDBank", "970441": "VIB", "970443": "SHB",
+  "970431": "Eximbank", "970426": "MSB", "970448": "OCB", "970440": "SeABank", "970449": "LPBank",
+});
 export const VIETQR_MAX_AMOUNT_VND = 9_999_999_999_999;
 export const VIETQR_MAX_REFERENCE_LENGTH = 25;
 
@@ -30,9 +38,9 @@ export type VietQrTransferInstruction = VietQrTransferInput & Readonly<{
   payload: string;
 }>;
 
-export function isVietQrDestinationSupported(destination: VietQrDestination): boolean {
+export function isVietQrDestinationSupported(destination: VietQrDestination, banks: Readonly<Record<string, string>> = VIETQR_RECEIVING_BANKS): boolean {
   return typeof destination.bankBin === "string" &&
-    Object.hasOwn(VIETQR_RECEIVING_BANKS, destination.bankBin) &&
+    Object.hasOwn(banks, destination.bankBin) &&
     typeof destination.accountNumber === "string" &&
     destination.accountNumber.trim() === destination.accountNumber &&
     /^[0-9]{6,19}$/u.test(destination.accountNumber);
@@ -57,11 +65,11 @@ export function vietQrCrc16(bytes: Uint8Array): string {
 }
 
 /** Encodes locked, normalized facts without modifying or transmitting them. */
-export function createVietQrTransferInstruction(input: VietQrTransferInput): VietQrTransferInstruction {
-  if (typeof input.bankBin !== "string" || !Object.hasOwn(VIETQR_RECEIVING_BANKS, input.bankBin)) {
+export function createVietQrTransferInstruction(input: VietQrTransferInput, banks: Readonly<Record<string, string>> = VIETQR_RECEIVING_BANKS): VietQrTransferInstruction {
+  if (typeof input.bankBin !== "string" || !Object.hasOwn(banks, input.bankBin)) {
     throw new VietQrError("unsupported_bank");
   }
-  if (!isVietQrDestinationSupported(input)) throw new VietQrError("invalid_account");
+  if (!isVietQrDestinationSupported(input, banks)) throw new VietQrError("invalid_account");
   let amountVnd: IntegerVnd;
   try {
     amountVnd = requireIntegerVnd(input.amountVnd, { minimumVnd: 1, maximumVnd: VIETQR_MAX_AMOUNT_VND });
@@ -80,7 +88,7 @@ export function createVietQrTransferInstruction(input: VietQrTransferInput): Vie
     tlv("62", tlv("08", reference)) + "6304";
   return Object.freeze({
     bankBin: input.bankBin,
-    bankName: VIETQR_RECEIVING_BANKS[input.bankBin]!,
+    bankName: banks[input.bankBin]!,
     accountNumber: input.accountNumber,
     amountVnd,
     currency: "VND",

@@ -330,6 +330,13 @@
       "when": 1791362911483,
       "tag": "0046_increment_8_trust_cases",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791382370710,
+      "tag": "0047_increment_8_commission_refunds",
+      "breakpoints": true
     }
   ]
 }

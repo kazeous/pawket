@@ -1,5 +1,6 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
 export { TRUST_CASE_KINDS, trustCases, trustCaseEvents, trustCaseAccessLog } from "./schema.js";
+export { commissionRefundObligations, commissionRefundSends, commissionRefundEvents } from "./schema.js";
 export { identityOidcTransactions, identityOidcSessions, identityOidcRevocations, identityOidcLogoutEvents, identityOidcOwnerLinks, identityOidcPendingCommands, identityOidcProofBindings, identityOidcCutover } from "./schema.js";
 export {
   COMMISSION_POLICY_BOOTSTRAP_ID, COMMISSION_SUBMISSION_RESPONSES, COMMISSION_POST_PAYMENT_CLOSE_REASONS, commissionPolicyRevisions, commissionPolicyCurrent,
@@ -27,6 +28,8 @@ export {
   type NewAdminAuditEvent,
 } from "./admin-audit-repository.js";
 export {
+  addVietnamBusinessDays,
+  calculateStoredBusinessDayDeadline,
   calculateBusinessDayWindow,
   calculateStoredReceiptBusinessDayWindow,
   importBusinessCalendarVersion,

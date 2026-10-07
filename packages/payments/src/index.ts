@@ -50,6 +50,7 @@ export {
   createVietQrTransferInstruction,
   isVietQrDestinationSupported,
   VIETQR_RECEIVING_BANKS,
+  VIETQR_REFUND_BANKS,
   VIETQR_MAX_AMOUNT_VND,
   VIETQR_MAX_REFERENCE_LENGTH,
   VietQrError,
@@ -77,3 +78,7 @@ export { createSePayHttpHandlers } from "./sepay-http.js";
 export { readPaymentPurpose, isTipPayment, type PaymentPurpose, type CommissionPaymentLifecyclePort, type CommissionSettlementCommand } from "./payment-purpose.js";
 export { createCommissionPaymentIntentPort, type CommissionPaymentIntentPort, type CommissionPaymentProjection, type CommissionPaymentMode } from "./commission-intent-port.js";
 export { createCreatorCommissionPaymentService, type ConfirmCreatorCommissionCommand } from "./creator-commission-service.js";
+export { COMMISSION_REFUND_POLICY, createRefundReference, normalizeBankReference, CommissionRefundError,
+  type CommissionRefundSource, type CommissionRefundState } from "./commission-refund-policy.js";
+export { createCommissionRefundPort, type CommissionRefundPort } from "./commission-refund-port.js";
+export { createCommissionPaymentFactsPort, type CommissionPaymentFactsPort } from "./commission-payment-facts.js";
