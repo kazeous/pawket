@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { importConfiguredBusinessCalendarVersion, calculateStoredBusinessDayDeadline } from "@pawket/database";
 import { createSePayIntegrationFixture, fixtureEnvelope, fixtureKeyring, fixtureHash, schema } from "./sepay-integration-fixture.js";
@@ -11,9 +11,11 @@ const parsed = new URL(process.env.TEST_DATABASE_URL ?? "invalid:");
 if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || !/test|ci/iu.test(parsed.pathname)) throw new Error("Refund port tests require a dedicated local test database");
 const fixture = createSePayIntegrationFixture("refund_port");
 const calendarVersion = "vn-refund-test";
+const currentCalendarVersion = "vn-refund-current";
 beforeAll(async () => {
   await fixture.initialize();
   await fixture.db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, { version: calendarVersion, holidayDates: ["2026-10-12"] }));
+  await fixture.db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, { version: currentCalendarVersion, holidayDates: ["2026-10-19"] }));
 }, 30_000); afterAll(fixture.dispose, 30_000);
 const at = new Date("2026-10-09T04:00:00Z");
 const port = createCommissionRefundPort({ keyring: fixtureKeyring, calendarVersion });
@@ -93,15 +95,16 @@ async function destination(id: string) {
       version: current.version + 1, updatedAt: at }).where(eq(schema.commissionRefundObligations.id, id));
   });
 }
-async function sent(c: Awaited<ReturnType<typeof create>>) {
-  await destination(c.obligationId); const id = randomUUID();
+async function sent(c: Awaited<ReturnType<typeof create>>, recordedAt = at) {
+  if ((await row(c.obligationId)).state === "awaiting_destination") await destination(c.obligationId);
+  const id = randomUUID();
   await fixture.db.transaction(async (tx) => {
     const current = await row(c.obligationId);
     await tx.insert(schema.commissionRefundSends).values({ id, obligationId: c.obligationId, transferDate: "2026-10-09",
       referenceEnvelope: fixtureEnvelope("commission_refund_send", id, "bank_reference", "SYNTHETIC-1"), actorUserId: c.p.creator.userId,
-      actorSessionId: c.p.creator.sessionId, requestId: randomUUID(), recordedAt: at });
-    await tx.update(schema.commissionRefundObligations).set({ state: "sent", currentSendId: id, confirmBy: new Date(at.getTime() + 604_800_000),
-      version: current.version + 1, updatedAt: at }).where(eq(schema.commissionRefundObligations.id, c.obligationId));
+      actorSessionId: c.p.creator.sessionId, requestId: randomUUID(), recordedAt });
+    await tx.update(schema.commissionRefundObligations).set({ state: "sent", currentSendId: id, confirmBy: new Date(recordedAt.getTime() + 604_800_000),
+      version: current.version + 1, updatedAt: recordedAt }).where(eq(schema.commissionRefundObligations.id, c.obligationId));
   });
   return id;
 }
@@ -133,6 +136,93 @@ describe("commission refund port", () => {
     const until = new Date(at.getTime() + 2_592_000_000);
     await fixture.db.transaction((tx) => port.extendDeadline(tx, { ...command(c.obligationId), until }));
     expect((await row(c.obligationId)).dueAt?.getTime()).toBe(until.getTime());
+  });
+  test.each(["awaiting_destination", "awaiting_send"] as const)("an amount adjustment from %s replays its recorded result after a later send", async (state) => {
+    const c = await create(); const adjustment = { ...command(c.obligationId), newAmountVnd: 200_000 };
+    if (state === "awaiting_send") await destination(c.obligationId);
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe("adjusted");
+    await sent(c, new Date(at.getTime() + 1_000));
+    const before = await row(c.obligationId);
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe("adjusted");
+    expect((await row(c.obligationId)).version).toBe(before.version);
+  });
+  test("an amount adjustment replay keeps its result when a later send shares its timestamp", async () => {
+    const c = await create(); await destination(c.obligationId);
+    const adjustment = { ...command(c.obligationId), newAmountVnd: 200_000 };
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe("adjusted");
+    await sent(c);
+    const before = await row(c.obligationId);
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe("adjusted");
+    expect((await row(c.obligationId)).version).toBe(before.version);
+  });
+  test.each([
+    ["adjusted", "amount_adjusted"], ["recorded_only", "amount_recorded"], ["waived", "waived"],
+  ] as const)("adjustAmount persists %s as %s and replays it after a later adjustment", async (result, action) => {
+    const c = await create();
+    if (result === "recorded_only") await sent(c);
+    const adjustment = { ...command(c.obligationId), at: new Date(at.getTime() + 1_000), newAmountVnd: result === "waived" ? 0 : 200_000 };
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe(result);
+    const [recorded] = await fixture.db.select({ action: schema.commissionRefundEvents.action }).from(schema.commissionRefundEvents)
+      .where(and(eq(schema.commissionRefundEvents.obligationId, c.obligationId), eq(schema.commissionRefundEvents.requestId, adjustment.requestId)));
+    expect(recorded?.action).toBe(action);
+    await fixture.db.transaction((tx) => port.adjustAmount(tx, { ...command(c.obligationId), at: new Date(at.getTime() + 2_000), newAmountVnd: 100_000 }));
+    const before = await row(c.obligationId);
+    const events = () => fixture.db.select({ id: schema.commissionRefundEvents.id }).from(schema.commissionRefundEvents)
+      .where(eq(schema.commissionRefundEvents.obligationId, c.obligationId));
+    const countBefore = (await events()).length;
+    expect(await fixture.db.transaction((tx) => port.adjustAmount(tx, adjustment))).toBe(result);
+    expect((await row(c.obligationId)).version).toBe(before.version);
+    expect((await events()).length).toBe(countBefore);
+  });
+  test.each(["adjustAmount", "waive", "extendDeadline", "acceptReceiptEvidence", "requireResend", "presumeReceived"] as const)(
+    "%s replays before the stale timestamp check and writes nothing", async (method) => {
+      const c = await create(); const original = { ...command(c.obligationId), at: new Date(at.getTime() + 1_000) };
+      if (method === "extendDeadline") await destination(c.obligationId);
+      if (["acceptReceiptEvidence", "requireResend", "presumeReceived"].includes(method)) await sent(c);
+      if (["acceptReceiptEvidence", "requireResend"].includes(method)) await fixture.db.update(schema.commissionRefundObligations)
+        .set({ state: "not_received", version: (await row(c.obligationId)).version + 1 }).where(eq(schema.commissionRefundObligations.id, c.obligationId));
+      if (method === "presumeReceived") original.at = new Date(at.getTime() + COMMISSION_REFUND_POLICY.confirmWindowMs);
+      const execute = () => fixture.db.transaction(async (tx) => {
+        if (method === "adjustAmount") return port.adjustAmount(tx, { ...original, newAmountVnd: 200_000 });
+        if (method === "extendDeadline") return port.extendDeadline(tx, { ...original, until: new Date("2026-10-26T04:00:00Z") });
+        return port[method](tx, original);
+      });
+      const result = await execute();
+      await fixture.db.transaction((tx) => port.adjustAmount(tx, { ...command(c.obligationId),
+        newAmountVnd: 100_000, at: new Date(original.at.getTime() + 1_000) }));
+      const before = await row(c.obligationId);
+      const eventsBefore = await fixture.db.select({ id: schema.commissionRefundEvents.id }).from(schema.commissionRefundEvents)
+        .where(eq(schema.commissionRefundEvents.obligationId, c.obligationId));
+      expect(await execute()).toBe(result);
+      expect((await row(c.obligationId)).version).toBe(before.version);
+      const eventsAfter = await fixture.db.select({ id: schema.commissionRefundEvents.id }).from(schema.commissionRefundEvents)
+        .where(eq(schema.commissionRefundEvents.obligationId, c.obligationId));
+      expect(eventsAfter.length).toBe(eventsBefore.length);
+      await expect(fixture.db.transaction((tx) => port.adjustAmount(tx, { ...original, requestId: randomUUID(), newAmountVnd: 0 })))
+        .rejects.toMatchObject({ code: "invalid_request" });
+    },
+  );
+  test("adjustAmount refuses an increase after a send, including after a resend is required", async () => {
+    const c = await create(); await sent(c);
+    const refusesIncrease = () => expect(fixture.db.transaction((tx) => port.adjustAmount(tx, { ...command(c.obligationId), newAmountVnd: 600_000 })))
+      .rejects.toMatchObject({ code: "invalid_request" });
+    await refusesIncrease();
+    await fixture.db.update(schema.commissionRefundObligations).set({ state: "not_received", version: 4 })
+      .where(eq(schema.commissionRefundObligations.id, c.obligationId));
+    await fixture.db.transaction((tx) => port.requireResend(tx, command(c.obligationId)));
+    await refusesIncrease();
+    expect((await row(c.obligationId)).amountVnd).toBe(500_000);
+  });
+  test("requireResend stores the current calendar version and uses its holidays", async () => {
+    const c = await create(); await sent(c);
+    expect((await row(c.obligationId)).calendarVersion).toBe(calendarVersion);
+    await fixture.db.update(schema.commissionRefundObligations).set({ state: "not_received", version: 4 })
+      .where(eq(schema.commissionRefundObligations.id, c.obligationId));
+    const currentPort = createCommissionRefundPort({ keyring: fixtureKeyring, calendarVersion: currentCalendarVersion });
+    await fixture.db.transaction((tx) => currentPort.requireResend(tx, { ...command(c.obligationId), at: new Date("2026-10-16T04:00:00Z") }));
+    const current = await row(c.obligationId);
+    expect(current.calendarVersion).toBe(currentCalendarVersion);
+    expect(current.dueAt?.toISOString()).toBe("2026-10-26T16:59:59.999Z");
   });
   test("requireResend keeps the earlier send row and returns to awaiting_send with a new deadline", async () => {
     const c = await create(); const sendId = await sent(c);
@@ -179,7 +269,7 @@ describe("commission refund port", () => {
     expect((await port.readConfirmationCandidates(fixture.db, { at: later, limit: 10 })).some((r) => r.obligationId === c.obligationId)).toBe(true);
     await fixture.db.transaction((tx) => port.presumeReceived(tx, { obligationId: c.obligationId, requestId: randomUUID(), at: later }));
     expect((await row(c.obligationId)).state).toBe("presumed_received");
-    const view = await fixture.db.transaction((tx) => port.listForOrder(tx, { orderId: c.p.orderId, viewer: "creator" }));
+    const view = await fixture.db.transaction((tx) => port.listForOrder(tx, { orderId: c.p.orderId }));
     expect(JSON.stringify(view).includes("envelope")).toBe(false);
     const reveal = await fixture.db.transaction((tx) => port.revealForCase(tx, c.obligationId));
     expect(reveal?.accountNumber === "000000123456" && reveal?.holderName === "SYNTHETIC BUYER").toBe(true);

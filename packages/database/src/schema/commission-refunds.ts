@@ -109,7 +109,7 @@ export const commissionRefundEvents = pgTable("commission_refund_events", {
 }, (table) => [
   index("commission_refund_events_timeline_idx").on(table.obligationId, table.occurredAt, table.id),
   uniqueIndex("commission_refund_events_request_action_uidx").on(table.obligationId, table.requestId, table.action),
-  check("commission_refund_events_action_check", sql`${table.action} in ('created','destination_entered','destination_revealed','sent_recorded','receipt_confirmed','receipt_denied','presumed_received','resend_required','deadline_extended','amount_adjusted','waived','destination_purged')`),
+  check("commission_refund_events_action_check", sql`${table.action} in ('created','destination_entered','destination_revealed','sent_recorded','receipt_confirmed','receipt_denied','presumed_received','resend_required','deadline_extended','amount_adjusted','amount_recorded','waived','destination_purged')`),
   check("commission_refund_events_state_check", sql`(${table.fromState} is null or ${table.fromState} in ('awaiting_destination','awaiting_send','sent','received','presumed_received','not_received','waived'))
     and ${table.toState} in ('awaiting_destination','awaiting_send','sent','received','presumed_received','not_received','waived')`),
   check("commission_refund_events_actor_check", sql`(${table.actorUserId} is null and ${table.actorSessionId} is null)

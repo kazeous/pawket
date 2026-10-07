@@ -7,12 +7,13 @@ export const VIETQR_RECEIVING_BANKS: Readonly<Record<string, string>> = Object.f
   "970436": "Vietcombank",
 });
 // Reviewed against the public directory on 2026-10-07: https://api.vietqr.io/v2/banks.
-// Only exact BIN/shortName matches from the owner-approved candidate list are retained.
+// Owner-approved BINs use directory shortName labels, including MBBank, NamABank and VietCapitalBank (R6).
 export const VIETQR_REFUND_BANKS: Readonly<Record<string, string>> = Object.freeze({
-  "970415": "VietinBank", "970436": "Vietcombank", "970418": "BIDV", "970405": "Agribank",
+  "970415": "VietinBank", "970436": "Vietcombank", "970418": "BIDV", "970405": "Agribank", "970422": "MBBank",
   "970407": "Techcombank", "970416": "ACB", "970432": "VPBank", "970423": "TPBank",
   "970403": "Sacombank", "970437": "HDBank", "970441": "VIB", "970443": "SHB",
   "970431": "Eximbank", "970426": "MSB", "970448": "OCB", "970440": "SeABank", "970449": "LPBank",
+  "970428": "NamABank", "970454": "VietCapitalBank",
 });
 export const VIETQR_MAX_AMOUNT_VND = 9_999_999_999_999;
 export const VIETQR_MAX_REFERENCE_LENGTH = 25;

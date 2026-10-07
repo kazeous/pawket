@@ -337,6 +337,13 @@
       "when": 1791382370710,
       "tag": "0047_increment_8_commission_refunds",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791383889847,
+      "tag": "0048_increment_8_refund_calendar_version",
+      "breakpoints": true
     }
   ]
 }

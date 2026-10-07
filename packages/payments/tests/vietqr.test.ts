@@ -50,7 +50,13 @@ describe("local domestic VietQR contract", () => {
     expect(Object.keys(VIETQR_RECEIVING_BANKS)).toEqual(["970415", "970436"]);
   });
   it("every refund BIN is six digits and every name non-empty", () => {
-    expect(Object.keys(VIETQR_REFUND_BANKS).length).toBeGreaterThan(2);
+    expect(VIETQR_REFUND_BANKS).toEqual({
+      "970415": "VietinBank", "970436": "Vietcombank", "970418": "BIDV", "970405": "Agribank", "970422": "MBBank",
+      "970407": "Techcombank", "970416": "ACB", "970432": "VPBank", "970423": "TPBank",
+      "970403": "Sacombank", "970437": "HDBank", "970441": "VIB", "970443": "SHB",
+      "970431": "Eximbank", "970426": "MSB", "970448": "OCB", "970440": "SeABank", "970449": "LPBank",
+      "970428": "NamABank", "970454": "VietCapitalBank",
+    });
     for (const [bin, name] of Object.entries(VIETQR_REFUND_BANKS)) {
       expect(bin).toMatch(/^[0-9]{6}$/u); expect(name.trim().length).toBeGreaterThan(0);
     }

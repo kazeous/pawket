@@ -31,12 +31,15 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
     time(command.at);
     const [row] = await tx.select().from(commissionRefundObligations).where(eq(commissionRefundObligations.id, command.obligationId)).limit(1).for("update");
     if (!row) refundFail("not_available");
-    if (command.at < row.updatedAt) refundFail("invalid_request");
     return row;
   }
-  async function recorded(tx: PawketTransaction, command: Command, action: string) {
-    const [row] = await tx.select({ toState: commissionRefundEvents.toState, fromState: commissionRefundEvents.fromState }).from(commissionRefundEvents)
-      .where(and(eq(commissionRefundEvents.obligationId, command.obligationId), eq(commissionRefundEvents.requestId, command.requestId), eq(commissionRefundEvents.action, action))).limit(1);
+  function fresh(row: Obligation, command: Command) {
+    if (command.at < row.updatedAt) refundFail("invalid_request");
+  }
+  async function recorded(tx: PawketTransaction, command: Command, action: string | readonly string[]) {
+    const [row] = await tx.select({ action: commissionRefundEvents.action }).from(commissionRefundEvents)
+      .where(and(eq(commissionRefundEvents.obligationId, command.obligationId), eq(commissionRefundEvents.requestId, command.requestId),
+        inArray(commissionRefundEvents.action, typeof action === "string" ? [action] : action))).limit(1);
     return row ?? null;
   }
   async function change(tx: PawketTransaction, row: Obligation, command: Command, action: string, values: Partial<typeof commissionRefundObligations.$inferInsert>) {
@@ -46,7 +49,8 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
     await event(tx, row, command, action, updated.state);
   }
   async function hasSend(tx: PawketTransaction, id: string) {
-    const [send] = await tx.select({ id: commissionRefundSends.id }).from(commissionRefundSends).where(eq(commissionRefundSends.obligationId, id)).limit(1);
+    const [send] = await tx.select({ id: commissionRefundSends.id }).from(commissionRefundSends)
+      .where(eq(commissionRefundSends.obligationId, id)).limit(1);
     return Boolean(send);
   }
   async function findBySource(tx: PawketTransaction, command: { source: CommissionRefundSource; sourceId: string }) {
@@ -56,7 +60,9 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
     return row ?? null;
   }
   return {
+    /** Caller must have checked the obligation's order and party, or its case. */
     findBySource,
+    /** Caller must have checked the obligation's order and parties, or its case. */
     async createObligation(tx: PawketTransaction, command: Readonly<{ orderId: string; paymentIntentId: string; creatorUserId: string; buyerUserId: string;
       source: CommissionRefundSource; sourceId: string; amountVnd: number; requestId: string; at: Date }>): Promise<{ obligationId: string; created: boolean }> {
       if (!uuid(command.orderId) || !uuid(command.paymentIntentId) || !identifier(command.creatorUserId) || !identifier(command.buyerUserId)
@@ -77,47 +83,58 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
       await event(tx, row, { obligationId: row.id, actor: null, requestId: command.requestId, at: command.at }, "created");
       return { obligationId: row.id, created: true };
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async adjustAmount(tx: PawketTransaction, command: Command & Readonly<{ newAmountVnd: number }>): Promise<"adjusted" | "waived" | "recorded_only"> {
       if (!Number.isSafeInteger(command.newAmountVnd) || command.newAmountVnd < 0 || command.newAmountVnd > 50_000_000) refundFail("invalid_request");
       const row = await lock(tx, command);
-      if (await recorded(tx, command, "waived")) return "waived";
-      const prior = await recorded(tx, command, "amount_adjusted");
-      const sent = await hasSend(tx, row.id);
-      if (prior) return sent || !["awaiting_destination", "awaiting_send"].includes(prior.fromState ?? "") ? "recorded_only" : "adjusted";
-      if (sent || !["awaiting_destination", "awaiting_send"].includes(row.state)) {
-        await change(tx, row, command, "amount_adjusted", {}); return "recorded_only";
-      }
+      const prior = await recorded(tx, command, ["amount_adjusted", "amount_recorded", "waived"]);
+      if (prior) return prior.action === "amount_adjusted" ? "adjusted" : prior.action === "amount_recorded" ? "recorded_only" : "waived";
+      fresh(row, command);
       if (command.newAmountVnd > row.amountVnd) refundFail("invalid_request");
+      const sent = await hasSend(tx, row.id);
+      if (sent || !["awaiting_destination", "awaiting_send"].includes(row.state)) {
+        await change(tx, row, command, "amount_recorded", {}); return "recorded_only";
+      }
       if (command.newAmountVnd === 0) {
         await change(tx, row, command, "waived", { state: "waived", endedAt: command.at }); return "waived";
       }
       await change(tx, row, command, "amount_adjusted", { amountVnd: command.newAmountVnd }); return "adjusted";
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async waive(tx: PawketTransaction, command: Command): Promise<void> {
       const row = await lock(tx, command); if (await recorded(tx, command, "waived")) return;
+      fresh(row, command);
       if (!["awaiting_destination", "awaiting_send", "not_received"].includes(row.state)) refundFail("invalid_transition");
       await change(tx, row, command, "waived", { state: "waived", endedAt: command.at });
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async extendDeadline(tx: PawketTransaction, command: Command & Readonly<{ until: Date }>): Promise<void> {
       time(command.until); const row = await lock(tx, command); if (await recorded(tx, command, "deadline_extended")) return;
+      fresh(row, command);
       if (row.state !== "awaiting_send" || !row.dueAt) refundFail("invalid_transition");
       if (command.until <= row.dueAt || command.until <= command.at || command.until.getTime() > command.at.getTime() + COMMISSION_REFUND_POLICY.maxExtensionMs) refundFail("invalid_request");
       await change(tx, row, command, "deadline_extended", { dueAt: command.until });
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async acceptReceiptEvidence(tx: PawketTransaction, command: Command): Promise<void> {
       const row = await lock(tx, command); if (await recorded(tx, command, "receipt_confirmed")) return;
+      fresh(row, command);
       if (row.state !== "not_received") refundFail("invalid_transition");
       await change(tx, row, command, "receipt_confirmed", { state: "received", endedAt: command.at });
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async requireResend(tx: PawketTransaction, command: Command): Promise<void> {
       const row = await lock(tx, command); if (await recorded(tx, command, "resend_required")) return;
+      fresh(row, command);
       if (row.state !== "not_received") refundFail("invalid_transition");
-      const dueAt = await calculateStoredBusinessDayDeadline(tx, { from: command.at, businessDays: COMMISSION_REFUND_POLICY.sendBusinessDays, calendarVersion: row.calendarVersion });
-      await change(tx, row, command, "resend_required", { state: "awaiting_send", currentSendId: null, confirmBy: null, dueAt });
+      const dueAt = await calculateStoredBusinessDayDeadline(tx, { from: command.at, businessDays: COMMISSION_REFUND_POLICY.sendBusinessDays, calendarVersion: input.calendarVersion });
+      await change(tx, row, command, "resend_required", { state: "awaiting_send", currentSendId: null, confirmBy: null, dueAt, calendarVersion: input.calendarVersion });
     },
+    /** Caller must have checked the obligation's order and party, or its case. */
     async presumeReceived(tx: PawketTransaction, command: Omit<Command, "actor">): Promise<void> {
       const full = { ...command, actor: null }; const row = await lock(tx, full);
       if (await recorded(tx, full, "presumed_received")) return;
+      fresh(row, full);
       if (row.state !== "sent" || !row.confirmBy || row.confirmBy > command.at) refundFail("invalid_transition");
       await change(tx, row, full, "presumed_received", { state: "presumed_received", endedAt: command.at });
     },
@@ -152,8 +169,9 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
         return rows.length;
       });
     },
-    async listForOrder(tx: PawketTransaction, command: { orderId: string; viewer: "buyer" | "creator" | "owner" }) {
-      if (!uuid(command.orderId) || !["buyer", "creator", "owner"].includes(command.viewer)) refundFail("invalid_request");
+    /** Caller must have checked the obligations' order and party, or their case. */
+    async listForOrder(tx: PawketTransaction, command: { orderId: string }) {
+      if (!uuid(command.orderId)) refundFail("invalid_request");
       // Account plaintext and envelopes are available only through authorized reveals.
       return tx.select({ obligationId: commissionRefundObligations.id, source: commissionRefundObligations.source, sourceId: commissionRefundObligations.sourceId,
         amountVnd: commissionRefundObligations.amountVnd, reference: commissionRefundObligations.reference, state: commissionRefundObligations.state,
@@ -163,6 +181,7 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
         version: commissionRefundObligations.version, createdAt: commissionRefundObligations.createdAt }).from(commissionRefundObligations)
         .where(eq(commissionRefundObligations.orderId, command.orderId)).orderBy(asc(commissionRefundObligations.createdAt), asc(commissionRefundObligations.id));
     },
+    /** Caller must have checked the obligation's order and authorized case, with same-transaction access logging. */
     async revealForCase(tx: PawketTransaction, obligationId: string) {
       // Trust authorizes an open case and writes its access log in this same transaction.
       if (!uuid(obligationId)) refundFail("invalid_request");

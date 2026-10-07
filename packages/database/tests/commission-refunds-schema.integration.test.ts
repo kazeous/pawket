@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createCommissionResolutionTestFixture } from "../../../apps/web/tests/commission-resolution-test-support.js";
 import { fixtureEnvelope } from "../../payments/tests/sepay-integration-fixture.js";
-import { importConfiguredBusinessCalendarVersion } from "@pawket/database";
+import { calculateStoredBusinessDayDeadline, importConfiguredBusinessCalendarVersion } from "@pawket/database";
 
 const parsed = new URL(process.env.TEST_DATABASE_URL ?? "invalid:");
 if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || !/test|ci/iu.test(parsed.pathname)) {
@@ -12,6 +12,7 @@ const fixture = createCommissionResolutionTestFixture("refund_schema");
 beforeAll(async () => {
   await fixture.initialize();
   await fixture.db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, { version: "vn-test", holidayDates: [] }));
+  await fixture.db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, { version: "vn-test-current", holidayDates: ["2026-10-12"] }));
 }, 30_000); afterAll(fixture.dispose, 30_000);
 const at = "2026-10-09T04:00:00Z";
 const end = "2026-10-16T04:00:00Z";
@@ -27,13 +28,14 @@ async function obligation(sourceId = randomUUID()) {
       ${sourceId}, 500000, ${`PKR${id.replaceAll("-", "").slice(0, 12).toUpperCase()}`}, 'vn-test', ${at}, ${at})`;
   return { id, p, sourceId };
 }
-async function destination(id: string) {
+async function destination(id: string, calendarVersion = "vn-test", enteredAt = at) {
   const account = fixtureEnvelope("commission_refund_obligation", id, "account_number", "000000123456");
   const holder = fixtureEnvelope("commission_refund_obligation", id, "holder_name", "SYNTHETIC BUYER");
+  const dueAt = await fixture.db.transaction((tx) => calculateStoredBusinessDayDeadline(tx, { from: new Date(enteredAt), businessDays: 5, calendarVersion }));
   await fixture.client`update commission_refund_obligations set state = 'awaiting_send', destination_bank_bin = '970436',
     destination_bank_name = 'Vietcombank', destination_account_envelope = ${JSON.stringify(account)}::jsonb,
-    destination_holder_envelope = ${JSON.stringify(holder)}::jsonb, destination_suffix = '3456', destination_entered_at = ${at},
-    due_at = '2026-10-16T16:59:59.999Z', version = version + 1 where id = ${id}`;
+    destination_holder_envelope = ${JSON.stringify(holder)}::jsonb, destination_suffix = '3456', destination_entered_at = ${enteredAt},
+    due_at = ${dueAt.toISOString()}, calendar_version = ${calendarVersion}, updated_at = ${enteredAt}, version = version + 1 where id = ${id}`;
 }
 async function sent(c: Awaited<ReturnType<typeof obligation>>) {
   await destination(c.id); const sendId = randomUUID();
@@ -46,6 +48,25 @@ async function sent(c: Awaited<ReturnType<typeof obligation>>) {
   return sendId;
 }
 describe("commission refund database boundaries", () => {
+  test.each([false, true])("destination entry/correction (correction=%s) stores the current calendar and its deadline", async (correction) => {
+    const c = await obligation();
+    if (correction) await destination(c.id);
+    await destination(c.id, "vn-test-current", "2026-10-09T04:00:01Z");
+    const [current] = await fixture.client<{ calendar_version: string; due_at: string }[]>`
+      select calendar_version, due_at from commission_refund_obligations where id = ${c.id}`;
+    expect(current?.calendar_version).toBe("vn-test-current");
+    expect(new Date(current!.due_at).toISOString()).toBe("2026-10-19T16:59:59.999Z");
+  });
+  test("calendar changes are refused outside destination entry/correction and require-resend", async () => {
+    const c = await obligation();
+    await refused(fixture.client`update commission_refund_obligations set calendar_version = 'vn-test-current', version = version + 1 where id = ${c.id}`);
+    await destination(c.id);
+    await refused(fixture.client`update commission_refund_obligations set calendar_version = 'vn-test-current', due_at = '2026-10-19T16:59:59.999Z',
+      version = version + 1 where id = ${c.id}`);
+    const s = await obligation(); await sent(s);
+    await refused(fixture.client`update commission_refund_obligations set calendar_version = 'vn-test-current', state = 'not_received',
+      version = version + 1 where id = ${s.id}`);
+  });
   test.each(["awaiting_destination", "awaiting_send", "sent", "not_received", "received", "presumed_received", "waived"])("%s column rules are enforced", async (state) => {
     const c = await obligation();
     if (state === "awaiting_destination") {
@@ -83,6 +104,17 @@ describe("commission refund database boundaries", () => {
     await refused(fixture.client`delete from commission_refund_events where id = ${eventId}`);
     await refused(fixture.client`update commission_refund_sends set request_id = ${randomUUID()} where id = ${sendId}`);
     await refused(fixture.client`delete from commission_refund_sends where id = ${sendId}`);
+  });
+  test("amount_recorded is an append-only refund event action and unknown actions are refused", async () => {
+    const c = await obligation(); await sent(c); const eventId = randomUUID();
+    await fixture.client`insert into commission_refund_events (id, obligation_id, action, from_state, to_state, request_id, occurred_at)
+      values (${eventId}, ${c.id}, 'amount_recorded', 'sent', 'sent', ${randomUUID()}, ${at})`;
+    const [event] = await fixture.client<{ action: string }[]>`select action from commission_refund_events where id = ${eventId}`;
+    expect(event?.action).toBe("amount_recorded");
+    await refused(fixture.client`insert into commission_refund_events (id, obligation_id, action, from_state, to_state, request_id, occurred_at)
+      values (${randomUUID()}, ${c.id}, 'unknown', 'sent', 'sent', ${randomUUID()}, ${at})`);
+    await refused(fixture.client`update commission_refund_events set action = 'amount_adjusted' where id = ${eventId}`);
+    await refused(fixture.client`delete from commission_refund_events where id = ${eventId}`);
   });
   test("one obligation per source", async () => {
     const c = await obligation(); await refused(obligation(c.sourceId), "23505");
