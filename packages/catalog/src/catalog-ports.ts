@@ -1,4 +1,5 @@
 import type { PawketDatabase, PawketTransaction } from "@pawket/database";
+export type { CommissionIntakeFencePort } from "@pawket/orders";
 
 export type CreatorSeed = Readonly<{
   userId: string;

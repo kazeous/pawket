@@ -8,10 +8,11 @@ import { createLookupHmac } from "@pawket/security";
 import {
   COMMISSION_POLICY, CommissionError, commissionFail, commissionIdentifier, commissionIdempotencyKey, commissionInteger,
   commissionCommandFingerprint,
-  commissionText, commissionTime, commissionUuid, lockCommissionCreator, normalizeCommissionTerms, readCommissionRecord,
+  commissionText, commissionTime, commissionUuid, lockCommissionCreator, noCommissionIntakeFence, normalizeCommissionTerms, readCommissionRecord,
   requireCommissionPolicy, type CommissionActor, type CommissionPackageDraft, type CommissionPolicyReadPort,
 } from "@pawket/orders";
 import { DISCIPLINES } from "./catalog-policy.js";
+import type { CommissionIntakeFencePort } from "./catalog-ports.js";
 import type { createPublicCatalogQuery } from "./public-catalog-query.js";
 
 type Package = typeof commissionPackages.$inferSelect;
@@ -23,6 +24,7 @@ type Input = Readonly<{
   publishingMode: "disabled" | "general_audience";
   identity: { lockCreator(tx: PawketTransaction, actor: CommissionActor, at: Date): Promise<{ sessionExpiresAt: Date } | null> };
   policy: CommissionPolicyReadPort;
+  intakeFence?: CommissionIntakeFencePort;
   authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   receivingAccount: { getCurrentTipReceivingAccount(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<{ accountVersionId: string } | null> };
@@ -45,6 +47,7 @@ function actorValid(actor: CommissionActor) {
 export function createCommissionPackageService(input: Input) {
   if (!commissionIdentifier(input.applicationRevision) || input.lookupHmacKey.length < 32) commissionFail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date()); const id = input.idFactory ?? randomUUID;
+  const intakeFence = input.intakeFence ?? noCommissionIntakeFence;
   const now = () => { const at = clock(); commissionTime(at); return new Date(at); };
   const digest = (context: string, value: string) => createLookupHmac({ key, context, value });
   const newId = () => { const value = id(); if (!commissionUuid(value)) commissionFail("dependency_unavailable"); return value; };
@@ -178,8 +181,9 @@ export function createCommissionPackageService(input: Input) {
         const availableShowcases = [];
         for (const showcase of showcases) if ((await visible(tx, page!.id, actor.userId, showcase.id))?.showcaseId === showcase.id) availableShowcases.push(showcase);
         const policy = await input.policy.readCurrent(tx, now());
+        const intakePause = await intakeFence.describe(tx, actor.userId, now());
         return { pageId: page?.id ?? null, showcases: availableShowcases, policy: policy ? { revisionId: policy.revisionId, document: policy.document, acceptsOrders: policy.acceptsOrders } : null,
-          settings: { version: settings?.version ?? 0, enabled: settings?.enabled ?? false, capacityLimit: settings?.capacityLimit ?? 3, used: await usage(tx, actor.userId) }, packages };
+          settings: { version: settings?.version ?? 0, enabled: settings?.enabled ?? false, capacityLimit: settings?.capacityLimit ?? 3, used: await usage(tx, actor.userId) }, packages, intakePause };
       });
     },
     /** Orders calls after its participant assurance; old fixed requests can retain a prior revision. */
@@ -190,6 +194,7 @@ export function createCommissionPackageService(input: Input) {
       const [candidate] = await tx.select().from(commissionPackages).where(eq(commissionPackages.id, command.packageId)).limit(1);
       if (!candidate) commissionFail("not_available");
       await lockCommissionCreator(tx, candidate.creatorUserId);
+      if (await intakeFence.isIntakePaused(tx, candidate.creatorUserId, command.at)) commissionFail("intake_paused");
       const policy = await input.policy.readCurrent(tx, command.at);
       const row = await owned(tx, candidate.creatorUserId, candidate.id);
       if (row.state !== "open") commissionFail("not_available");
@@ -219,6 +224,7 @@ export function createCommissionPackageService(input: Input) {
           .innerJoin(commissionPackageRevisions, eq(commissionPackageRevisions.id, commissionPackages.publishedRevisionId))
           .where(and(eq(commissionPackages.creatorUserId, page.userId), inArray(commissionPackages.state, ["open", "paused"]))).orderBy(asc(commissionPackages.createdAt), asc(commissionPackages.id)).limit(12);
         const used = await usage(tx, page.userId);
+        const intakePaused = await intakeFence.isIntakePaused(tx, page.userId, now());
         const receiving = input.paymentsMode === "disabled" ? null : await input.receivingAccount.getCurrentTipReceivingAccount(tx, page.userId, now());
         const result = [];
         for (const entry of packages) {
@@ -227,7 +233,7 @@ export function createCommissionPackageService(input: Input) {
           result.push({ id: entry.package.id, revisionId: revision.id, title: revision.title, description: revision.description, discipline: revision.discipline,
             route: revision.route, briefInstructions: revision.briefInstructions, terms: revision.terms, showcaseId: linked?.showcaseId ?? null,
             policy: policy?.revisionId === revision.policyRevisionId ? { revisionId: policy.revisionId, document: policy.document, checksum: policy.checksum } : null,
-            accepting: entry.package.state === "open" && !!settings?.enabled && !!policy?.acceptsOrders && policy.revisionId === revision.policyRevisionId &&
+            accepting: !intakePaused && entry.package.state === "open" && !!settings?.enabled && !!policy?.acceptsOrders && policy.revisionId === revision.policyRevisionId &&
               (revision.route !== "fixed_immediate" || !!receiving),
             capacityAvailable: !!settings && used < settings.capacityLimit });
         }

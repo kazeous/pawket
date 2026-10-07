@@ -11,3 +11,4 @@ export * from "./order-maintenance.js";
 export * from "./order-operations.js";
 export * from "./command-fingerprint.js";
 export * from "./file-access-port.js";
+export * from "./resolution-port.js";

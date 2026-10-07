@@ -281,8 +281,8 @@ export function createCommissionOrderService(input: Input) {
           await paymentsLifecycle.lockSettlement(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now() });
         const payment = await input.payments.projectPayment(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now(), includeInstructions: canShowInstructions });
         const role = order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const;
-        const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" }) : [];
-        const completionDueAt = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, order.reviewEndsAt) : null;
+        const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" && !order.confirmedAt }) : [];
+        const completionDueAt = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
         const at = now(); if (proofExpiry <= at) commissionFail("not_authorized");
         const effectivePayment = payment && payment.state === "awaiting_transfer" && new Date(payment.expiresAt) <= at
           ? { ...payment, state: "expired" as const, instruction: null } : payment;
@@ -290,7 +290,7 @@ export function createCommissionOrderService(input: Input) {
           state: order.state as CommissionState, route: order.route, closeReason: order.closeReason, createdAt: order.createdAt.toISOString(), expiresAt: order.expiresAt?.toISOString() ?? null,
           acceptedAt: order.acceptedAt?.toISOString() ?? null, confirmedAt: order.confirmedAt?.toISOString() ?? null, dueAt: order.dueAt?.toISOString() ?? null,
           fulfillment: order.confirmedAt && snapshot ? { deliveredAt: order.deliveredAt?.toISOString() ?? null, reviewEndsAt: order.reviewEndsAt?.toISOString() ?? null,
-            completionDueAt: completionDueAt?.toISOString() ?? null, completedAt: order.completedAt?.toISOString() ?? null, completionKind: order.completionKind,
+            completionFloorAt: order.completionFloorAt?.toISOString() ?? null, completionDueAt: completionDueAt?.toISOString() ?? null, completedAt: order.completedAt?.toISOString() ?? null, completionKind: order.completionKind,
             revisionsUsed: order.revisionsUsed, revisionAllowance: snapshot.revisionAllowance, lateDelivery: !!order.deliveredAt && !!order.dueAt && order.deliveredAt > order.dueAt,
             fileDeletionAt: order.completedAt ? commissionFileDeletionAt(order.completedAt).toISOString() : null } : null,
           overdue: !!order.dueAt && order.dueAt <= at, deadlinePassed: !!order.expiresAt && order.expiresAt <= at && ["requested", "quoted", "awaiting_payment"].includes(order.state),

@@ -48,7 +48,7 @@ export function createCommissionFulfillmentMaintenance(kit: Kit, input: Readonly
             await lockCommissionCreator(tx, candidate.creatorUserId);
             const [order] = await tx.select().from(commissionOrders).where(eq(commissionOrders.id, candidate.id)).limit(1);
             if (!order || order.state !== "delivered" || !order.reviewEndsAt) return "changed";
-            const due = await readCommissionCompletionDueAt(tx, order.reviewEndsAt); const at = kit.now();
+            const due = await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }); const at = kit.now();
             if (due === null || due > at) return "waiting";
             if (await holds.hasActiveCompletionHold(tx, order.id)) return "held";
             await kit.completeCommissionOrder(tx, order, "review_window_elapsed", null, `commission-completion:${kit.newId()}`, at);

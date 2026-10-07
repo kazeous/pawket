@@ -1,15 +1,19 @@
+import { COMMISSION_POST_PAYMENT_CLOSE_REASONS } from "@pawket/database";
+
 export const COMMISSION_ROUTES = ["fixed_immediate", "fixed_approval", "custom_quote"] as const;
 export type CommissionRoute = typeof COMMISSION_ROUTES[number];
 export const COMMISSION_STATES = ["requested", "quoted", "awaiting_payment", "in_progress", "delivered", "completed", "closed"] as const;
 export type CommissionState = typeof COMMISSION_STATES[number];
-export const COMMISSION_COMPLETION_KINDS = ["buyer_accepted", "review_window_elapsed"] as const;
+export const COMMISSION_COMPLETION_KINDS = ["buyer_accepted", "review_window_elapsed", "agreement", "ruling"] as const;
 export type CommissionCompletionKind = typeof COMMISSION_COMPLETION_KINDS[number];
 export const COMMISSION_CLOSE_REASONS = [
   "buyer_withdrawn", "creator_declined", "quote_withdrawn", "quote_declined",
   "request_expired", "quote_expired", "buyer_cancelled", "creator_cancelled",
   "payment_expired", "security_invalidated", "eligibility_invalidated",
+  ...COMMISSION_POST_PAYMENT_CLOSE_REASONS,
 ] as const;
 export type CommissionCloseReason = typeof COMMISSION_CLOSE_REASONS[number];
+export type PostPaymentCloseReason = typeof COMMISSION_POST_PAYMENT_CLOSE_REASONS[number];
 export const COMMISSION_ERRORS = [
   "not_authorized", "not_available", "intake_disabled", "payments_disabled", "invalid_request",
   "invalid_terms", "invalid_brief", "version_conflict", "policy_changed", "capacity_full",
@@ -17,6 +21,7 @@ export const COMMISSION_ERRORS = [
   "recent_auth_required", "totp_required", "rate_limited", "dependency_unavailable",
   "files_disabled", "invalid_reference_files",
   "fulfillment_disabled", "revisions_exhausted", "completion_held", "invalid_attachment_files",
+  "intake_paused", "dispute_open",
 ] as const;
 export type CommissionErrorCode = typeof COMMISSION_ERRORS[number];
 export class CommissionError extends Error {

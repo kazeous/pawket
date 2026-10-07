@@ -1,52 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
-import { createCommissionThreadPort, createCommissionThreadService, encryptCommissionFileName } from "@pawket/commission-files";
+import { createCommissionThreadPort, createCommissionThreadService } from "@pawket/commission-files";
 import { createCommissionFileAccessPort, createCommissionOrderService } from "@pawket/orders";
 import { createCreatorCommissionPaymentService } from "@pawket/payments";
 import { decryptSensitiveField } from "@pawket/security";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
+import { service, cleanFile, submitCommand, submit, responseCommand, respond } from "./commission-resolution-test-support.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const fixture = createCommissionOrderTestFixture("i7fulfillment");
 beforeAll(fixture.initialize, 60_000); afterAll(fixture.dispose);
 const HOUR = 3_600_000; const DAY = 24 * HOUR;
 type Paid = Awaited<ReturnType<typeof fixture.paidOrder>>;
-type Options = Partial<Parameters<typeof createCommissionOrderService>[0]>;
-function service(p: Paid, options: Options = {}) {
-  return createCommissionOrderService({ ...p.s.input, fulfillmentMode: "enabled",
-    thread: createCommissionThreadPort({ keyring: p.s.input.keyring, mode: "enabled" }), ...options });
-}
 const order = (p: Paid) => fixture.db.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.id, p.orderId)).then((rows) => rows[0]!);
 const submissions = (p: Paid) => fixture.db.select().from(schema.commissionSubmissions).where(eq(schema.commissionSubmissions.orderId, p.orderId));
 const events = (p: Paid) => fixture.db.select().from(schema.commissionEvents).where(eq(schema.commissionEvents.orderId, p.orderId)).orderBy(asc(schema.commissionEvents.orderVersion));
-async function cleanFile(p: Paid, options: { context?: "thread" | "submission"; ownerUserId?: string; state?: "scanning" | "clean" } = {}) {
-  const id = randomUUID(); const at = p.s.creator.now();
-  await fixture.db.insert(schema.commissionFiles).values({ id, ownerUserId: options.ownerUserId ?? p.creator.userId,
-    context: options.context ?? "submission", uploadOrderId: p.orderId, declaredBytes: 16,
-    filenameEnvelope: encryptCommissionFileName(p.s.input.keyring, id, "Synthetic artwork"), objectKey: `commission/${id}`,
-    uploadExpiresAt: new Date(at.getTime() + 900_000), requestId: "fixture", createdAt: at, updatedAt: at });
-  await fixture.db.update(schema.commissionFiles).set({ state: "scanning", uploadedAt: at, scanDeadlineAt: new Date(at.getTime() + DAY), version: 2, updatedAt: at }).where(eq(schema.commissionFiles.id, id));
-  if (options.state !== "scanning") await fixture.db.update(schema.commissionFiles).set({ state: "clean", sha256: `sha256:${"d".repeat(64)}`,
-    detectedType: "png", quarantineVersionId: "q", cleanVersionId: "c", cleanAt: at, version: 3, updatedAt: at }).where(eq(schema.commissionFiles.id, id));
-  return id;
-}
-async function submitCommand(p: Paid, kind: "draft" | "final" = "draft") {
-  return { actor: p.creator, orderId: p.orderId, expectedVersion: (await order(p)).version,
-    kind, note: "Synthetic note <3", fileIds: [await cleanFile(p)], ...commandIds() };
-}
-async function submit(p: Paid, kind: "draft" | "final" = "draft", instance = service(p)) {
-  const command = await submitCommand(p, kind);
-  expect(await instance.submit(command)).toBe(p.orderId);
-  return (await submissions(p)).find((row) => row.requestId === command.requestId)!;
-}
-async function responseCommand(p: Paid, submissionId: string, response: "approve" | "request_changes" | "accept" = "accept") {
-  return { actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version, submissionId, response,
-    note: response === "request_changes" ? "Synthetic change request" : undefined, ...commandIds() };
-}
-async function respond(p: Paid, submissionId: string, response: "approve" | "request_changes" | "accept", instance = service(p)) {
-  return instance.respondToSubmission(await responseCommand(p, submissionId, response));
-}
 async function pause(startedAt: Date, endedAt: Date | null) {
   const id = randomUUID(); await fixture.db.insert(schema.commissionFulfillmentPauses).values({ id, startedAt });
   if (endedAt) await fixture.db.update(schema.commissionFulfillmentPauses).set({ endedAt }).where(eq(schema.commissionFulfillmentPauses.id, id));
@@ -175,7 +144,7 @@ describe("commission submissions and buyer acceptance", () => {
   test("a fake completion hold blocks acceptance inside the completing transaction", async () => {
     const p = await fixture.paidOrder(); const final = await submit(p, "final");
     const hold = vi.fn(async () => true);
-    await expect(respond(p, final.id, "accept", service(p, { holds: { hasActiveCompletionHold: hold } }))).rejects.toMatchObject({ code: "completion_held" });
+    await expect(respond(p, final.id, "accept", service(p, { holds: { hasOpenDispute: async () => false, hasActiveCompletionHold: hold } }))).rejects.toMatchObject({ code: "completion_held" });
     expect(hold).toHaveBeenCalledTimes(1); expect((await order(p)).state).toBe("delivered");
   });
   test.each([47, 48])("pause grace permits acceptance at resume + %ih only before the boundary", async (hours) => {
@@ -201,11 +170,11 @@ describe("commission submissions and buyer acceptance", () => {
     const p = await fixture.paidOrder(); const final = await submit(p, "final");
     const due = new Date((await service(p).getOrder({ actor: p.buyer, orderId: p.orderId })).fulfillment!.completionDueAt!);
     p.s.creator.setNow(new Date(due.getTime() - 1));
-    const holds = { hasActiveCompletionHold: async () => { p.s.creator.setNow(due); return false; } };
+    const holds = { hasOpenDispute: async () => false, hasActiveCompletionHold: async () => { p.s.creator.setNow(due); return false; } };
     await expect(respond(p, final.id, "accept", service(p, { holds }))).rejects.toMatchObject({ code: "expired" });
     expect((await order(p)).state).toBe("delivered");
     p.s.creator.setNow(new Date(due.getTime() - HOUR));
-    const delayed = { hasActiveCompletionHold: async () => { p.s.creator.advance(60_000); return false; } };
+    const delayed = { hasOpenDispute: async () => false, hasActiveCompletionHold: async () => { p.s.creator.advance(60_000); return false; } };
     await expect(respond(p, final.id, "accept", service(p, { holds: delayed }))).rejects.toMatchObject({ code: "not_authorized" });
     expect((await order(p)).state).toBe("delivered");
   });

@@ -60,7 +60,7 @@ test("not yet due is untouched", async () => {
 test("a held order is counted held and stays delivered", async () => {
   const p = await delivered(); p.s.creator.setNow((await order(p)).reviewEndsAt!);
   const hold = vi.fn(async () => true); const before = await order(p);
-  expect(await maintenance(p, { holds: { hasActiveCompletionHold: hold } }).completeDue()).toEqual({ scanned: 1, completed: 0, held: 1, waiting: 0, nextAfter: null });
+  expect(await maintenance(p, { holds: { hasOpenDispute: async () => false, hasActiveCompletionHold: hold } }).completeDue()).toEqual({ scanned: 1, completed: 0, held: 1, waiting: 0, nextAfter: null });
   expect(hold).toHaveBeenCalledTimes(1); expect(hold.mock.calls[0]).toHaveLength(2);
   expect(await order(p)).toEqual(before); expect((await reservation(p)).state).toBe("occupied");
 });
@@ -68,7 +68,7 @@ test("an open pause covering the deadline means waiting", async () => {
   const p = await delivered(); const instance = maintenance(p); const due = (await order(p)).reviewEndsAt!;
   p.s.creator.setNow(new Date(due.getTime() - HOUR)); await instance.observeFulfillmentMode("disabled");
   p.s.creator.setNow(due); const before = await order(p); const hold = vi.fn(async () => false);
-  expect(await maintenance(p, { holds: { hasActiveCompletionHold: hold } }).completeDue()).toEqual({ scanned: 1, completed: 0, held: 0, waiting: 1, nextAfter: null });
+  expect(await maintenance(p, { holds: { hasOpenDispute: async () => false, hasActiveCompletionHold: hold } }).completeDue()).toEqual({ scanned: 1, completed: 0, held: 0, waiting: 1, nextAfter: null });
   expect(hold).not.toHaveBeenCalled(); expect(await order(p)).toEqual(before);
   await instance.observeFulfillmentMode("enabled");
 });
@@ -85,7 +85,7 @@ test("after resume, completion waits 48 h", async () => {
 test("held and waiting orders do not starve later ones", async () => {
   const orders = await Promise.all([delivered(), delivered(), delivered()]);
   orders.sort((a, b) => a.orderId.localeCompare(b.orderId)); const due = (await order(orders[0]!)).reviewEndsAt!;
-  const instance = maintenance(orders[0]!, { now: () => due, holds: { hasActiveCompletionHold: async (_tx, id) => id === orders[0]!.orderId } });
+  const instance = maintenance(orders[0]!, { now: () => due, holds: { hasOpenDispute: async () => false, hasActiveCompletionHold: async (_tx, id) => id === orders[0]!.orderId } });
   const first = await instance.completeDue({ limit: 1 }); expect(first).toMatchObject({ scanned: 1, completed: 0, held: 1, waiting: 0, nextAfter: { id: orders[0]!.orderId, reviewEndsAt: due } });
   const second = await instance.completeDue({ limit: 1, after: first.nextAfter }); expect(second).toMatchObject({ scanned: 1, completed: 1, nextAfter: { id: orders[1]!.orderId } });
   const third = await instance.completeDue({ limit: 1, after: second.nextAfter }); expect(third).toMatchObject({ scanned: 1, completed: 1, nextAfter: { id: orders[2]!.orderId } });

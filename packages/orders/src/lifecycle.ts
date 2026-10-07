@@ -1,11 +1,12 @@
+import { COMMISSION_POST_PAYMENT_CLOSE_REASONS } from "@pawket/database";
 import { commissionFail, type CommissionCloseReason, type CommissionState } from "./contracts.js";
 
 const closeReasons: Readonly<Record<CommissionState, readonly CommissionCloseReason[]>> = Object.freeze({
   requested: ["buyer_withdrawn", "creator_declined", "request_expired", "security_invalidated", "eligibility_invalidated"],
   quoted: ["buyer_withdrawn", "quote_withdrawn", "quote_declined", "quote_expired", "security_invalidated", "eligibility_invalidated"],
   awaiting_payment: ["buyer_cancelled", "creator_cancelled", "payment_expired", "security_invalidated", "eligibility_invalidated"],
-  in_progress: [],
-  delivered: [],
+  in_progress: COMMISSION_POST_PAYMENT_CLOSE_REASONS,
+  delivered: COMMISSION_POST_PAYMENT_CLOSE_REASONS,
   completed: [],
   closed: [],
 });

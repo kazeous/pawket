@@ -60,5 +60,13 @@ export type CommissionThreadPort = Readonly<{
   listEntries(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number }>): Promise<readonly CommissionThreadEntry[]>;
   describeMessages(tx: PawketTransaction, command: Readonly<{ orderId: string; messageIds: readonly string[] }>): Promise<ReadonlyMap<string, Readonly<{ authorUserId: string; text: string | null; createdAt: Date }>>>;
 }>;
-export type CommissionCompletionHoldPort = Readonly<{ hasActiveCompletionHold(tx: PawketTransaction, orderId: string): Promise<boolean> }>;
-export const noCommissionCompletionHolds: CommissionCompletionHoldPort = Object.freeze({ hasActiveCompletionHold: async () => false });
+export type CommissionCompletionHoldPort = Readonly<{
+  hasActiveCompletionHold(tx: PawketTransaction, orderId: string): Promise<boolean>;
+  hasOpenDispute(tx: PawketTransaction, orderId: string): Promise<boolean>;
+}>;
+export const noCommissionCompletionHolds: CommissionCompletionHoldPort = Object.freeze({ hasActiveCompletionHold: async () => false, hasOpenDispute: async () => false });
+export type CommissionIntakeFencePort = Readonly<{
+  isIntakePaused(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<boolean>;
+  describe(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<Readonly<{ paused: boolean; overdue: readonly Readonly<{ obligationId: string; dueAt: string }>[] }>>;
+}>;
+export const noCommissionIntakeFence: CommissionIntakeFencePort = Object.freeze({ isIntakePaused: async () => false, describe: async () => ({ paused: false, overdue: [] }) });
