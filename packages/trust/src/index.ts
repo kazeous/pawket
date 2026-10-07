@@ -29,3 +29,6 @@ export type {
 } from "./trust-ports.js";
 export { createTrustHttpHandlers, type TrustHttpHandlers } from "./trust-http.js";
 export { createCommissionTrustPort } from "./commission-trust-port.js";
+export { createTrustCasePort, TrustCaseError, type TrustCasePort, type TrustCaseActor, type TrustCaseKind, type TrustCaseSourceType } from "./case-port.js";
+export { createTrustCaseService, type TrustCaseService, type TrustCaseEvidencePort } from "./case-service.js";
+export { createCaseEvidenceHoldPort, TRUST_CASE_EVIDENCE_TAIL_MS } from "./case-evidence-hold.js";

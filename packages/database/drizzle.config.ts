@@ -18,6 +18,7 @@ export default defineConfig({
     schemaPath("creator-catalog.ts"),
     schemaPath("public-media.ts"),
     schemaPath("public-trust.ts"),
+    schemaPath("trust-cases.ts"),
     schemaPath("payments.ts"),
     schemaPath("tips.ts"),
     schemaPath("sepay.ts"),
