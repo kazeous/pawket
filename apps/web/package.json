@@ -23,6 +23,7 @@
     "@pawket/payments": "workspace:*",
     "@pawket/public-media": "workspace:*",
     "@pawket/queue": "workspace:*",
+    "@pawket/resolutions": "workspace:*",
     "@pawket/security": "workspace:*",
     "@pawket/tips": "workspace:*",
     "@pawket/trust": "workspace:*",

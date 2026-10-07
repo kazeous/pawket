@@ -27,5 +27,6 @@ export default defineConfig({
     schemaPath("commissions.ts"),
     schemaPath("commission-files.ts"),
     schemaPath("commission-refunds.ts"),
+    schemaPath("resolutions.ts"),
   ],
 });
