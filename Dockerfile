@@ -24,6 +24,7 @@ COPY packages/orders/package.json packages/orders/package.json
 COPY packages/payments/package.json packages/payments/package.json
 COPY packages/public-media/package.json packages/public-media/package.json
 COPY packages/queue/package.json packages/queue/package.json
+COPY packages/resolutions/package.json packages/resolutions/package.json
 COPY packages/security/package.json packages/security/package.json
 COPY packages/tips/package.json packages/tips/package.json
 COPY packages/trust/package.json packages/trust/package.json

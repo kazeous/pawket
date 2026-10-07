@@ -40,16 +40,16 @@ export function createResolutionCommandKit(input: Input) {
       await lockCommissionCreator(tx, await creatorOf(tx));
       const at = now(); const proof = await input.session.getTipSessionAssurance(tx, actor, at);
       if (!proof || !(proof.sessionExpiresAt instanceof Date) || !Number.isFinite(proof.sessionExpiresAt.getTime()) || proof.sessionExpiresAt <= at) resolutionFail("not_authorized");
+      if (started.kind === "replay") {
+        if (proof.sessionExpiresAt <= now()) resolutionFail("not_authorized");
+        await input.authorizeCommand?.(tx, actor);
+        return started.resultReference;
+      }
       if (stepUp) {
         let accepted = false;
         try { accepted = await input.consumeStepUpProof?.(tx, { proofId: stepUp.proofId, ...actor, actionClass: stepUp.actionClass, now: at }) ?? false; }
         catch { resolutionFail("owner_step_up_required"); }
         if (!accepted) resolutionFail("owner_step_up_required");
-      }
-      if (started.kind === "replay") {
-        if (proof.sessionExpiresAt <= now()) resolutionFail("not_authorized");
-        await input.authorizeCommand?.(tx, actor);
-        return started.resultReference;
       }
       const changed = await apply(tx); const completedAt = now();
       commissionTime(changed.at); if (changed.guardUntil !== undefined) commissionTime(changed.guardUntil);
@@ -63,7 +63,7 @@ export function createResolutionCommandKit(input: Input) {
   return {
     mutate: (command: ResolutionCommand, scope: string, payload: unknown, creatorOf: (tx: PawketTransaction) => Promise<string>, apply: (tx: PawketTransaction) => Promise<Change>) =>
       mutate(command, scope, payload, creatorOf, apply),
-    ownerMutate(command: ResolutionOwnerCommand, scope: string, payload: unknown, creatorOf: (tx: PawketTransaction) => Promise<string>, actionClass: string, apply: (tx: PawketTransaction) => Promise<Change>) {
+    async ownerMutate(command: ResolutionOwnerCommand, scope: string, payload: unknown, creatorOf: (tx: PawketTransaction) => Promise<string>, actionClass: string, apply: (tx: PawketTransaction) => Promise<Change>) {
       if (!commissionIdentifier(command.stepUpProofId) || !commissionIdentifier(actionClass)) resolutionFail("invalid_request");
       return mutate({ ...command, actor: command.owner }, scope, payload, creatorOf, apply, { proofId: command.stepUpProofId, actionClass });
     },

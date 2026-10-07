@@ -79,12 +79,50 @@ describe("resolution command transaction boundaries", () => {
     expect(await fixture.db.select().from(schema.commissionResolutionPauses)).toHaveLength(0);
     expect(await fixture.db.select().from(schema.systemCommandIdempotency).where(eq(schema.systemCommandIdempotency.commandScope, "resolutions.commission.test_owner"))).toHaveLength(0);
   });
-  test("a rejected owner proof prevents apply", async () => {
+  test("an owner replay returns the recorded result without consuming an already-used proof", async () => {
+    const p = fixture.commandContext(); let consumedTx: unknown;
+    const consumeStepUpProof = vi.fn<NonNullable<Parameters<typeof createResolutionCommandKit>[0]["consumeStepUpProof"]>>()
+      .mockImplementationOnce(async (tx) => { consumedTx = tx; return true; })
+      .mockResolvedValue(false);
+    const authorizeCommand = vi.fn(async () => undefined);
+    const instance = kit(p, { consumeStepUpProof, authorizeCommand });
+    const command = { owner: p.creator, stepUpProofId: randomUUID(), ...commandIds() };
+    const creatorOf = vi.fn(async () => p.creator.userId);
+    const apply = vi.fn(async (tx: PawketTransaction) => {
+      expect(tx).toBe(consumedTx); expect(consumeStepUpProof).toHaveBeenCalledTimes(1);
+      return { resultReference: p.orderId, at: p.now() };
+    });
+    expect(await instance.ownerMutate(command, "test_owner_replay", [p.orderId], creatorOf, "owner.commission_ruling", apply)).toBe(p.orderId);
+    expect(await instance.ownerMutate(command, "test_owner_replay", [p.orderId], creatorOf, "owner.commission_ruling", apply)).toBe(p.orderId);
+    expect(consumeStepUpProof).toHaveBeenCalledTimes(1); expect(apply).toHaveBeenCalledTimes(1);
+    expect(creatorOf).toHaveBeenCalledTimes(2); expect(authorizeCommand).toHaveBeenCalledTimes(2);
+    const records = await fixture.db.select().from(schema.systemCommandIdempotency)
+      .where(eq(schema.systemCommandIdempotency.commandScope, "resolutions.commission.test_owner_replay"));
+    expect(records).toHaveLength(1); expect(records[0]?.status).toBe("completed"); expect(records[0]?.resultReference).toBe(p.orderId);
+  });
+  test("a fresh owner command with a rejected proof writes nothing", async () => {
     const p = fixture.commandContext(); const instance = kit(p, { consumeStepUpProof: async () => false });
-    const apply = vi.fn(async () => ({ resultReference: p.orderId, at: p.now() }));
+    const apply = vi.fn(async (tx: PawketTransaction) => {
+      await marker(p, tx); return { resultReference: p.orderId, at: p.now() };
+    });
     await expect(instance.ownerMutate({ owner: p.creator, stepUpProofId: randomUUID(), ...commandIds() }, "test_proof", [p.orderId],
       async () => p.creator.userId, "owner.commission_ruling", apply)).rejects.toMatchObject({ code: "owner_step_up_required" });
     expect(apply).not.toHaveBeenCalled();
+    expect(await fixture.db.select().from(schema.commissionResolutionPauses)).toHaveLength(0);
+    expect(await fixture.db.select().from(schema.systemCommandIdempotency).where(eq(schema.systemCommandIdempotency.commandScope, "resolutions.commission.test_proof"))).toHaveLength(0);
+  });
+  test.each(["proof", "action"])("invalid owner %s input rejects without throwing synchronously", async (invalid) => {
+    const p = fixture.commandContext(); const instance = kit(p);
+    const command = { owner: p.creator, stepUpProofId: invalid === "proof" ? "" : randomUUID(), ...commandIds() };
+    const apply = vi.fn(async () => ({ resultReference: p.orderId, at: p.now() }));
+    let pending: Promise<string> | undefined;
+    expect(() => {
+      pending = instance.ownerMutate(command, "test_owner_invalid", [p.orderId], async () => p.creator.userId,
+        invalid === "action" ? "" : "owner.commission_ruling", apply);
+    }).not.toThrow();
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+    expect(apply).not.toHaveBeenCalled();
+    expect(await fixture.db.select().from(schema.systemCommandIdempotency).where(eq(schema.systemCommandIdempotency.commandScope, "resolutions.commission.test_owner_invalid"))).toHaveLength(0);
   });
   test("encrypted text is bound to record identity and field", async () => {
     const p = fixture.commandContext(); const instance = kit(p); const id = randomUUID();
