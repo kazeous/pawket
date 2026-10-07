@@ -99,7 +99,7 @@ describe("commission effective security invalidation", () => {
       VALKEY_URL: process.env.TEST_VALKEY_URL, METRICS_TOKEN: "synthetic-metrics-token-0000000000", APP_BASE_URL: origin, AUTH_TRUSTED_ORIGINS: origin });
     const envSpy = vi.spyOn(config, "loadServerEnv").mockReturnValue({ ...env, PII_ACTIVE_KEY_ID: "sepay-services-test",
       PII_KEYRING_JSON: { "sepay-services-test": Buffer.from(fixtureKey).toString("base64") }, PII_LOOKUP_HMAC_KEY: Buffer.from(fixtureKey).toString("base64"),
-      COMMISSION_INTAKE_MODE: "enabled", COMMISSION_PAYMENTS_MODE: "manual_only", COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_FILES_MODE: "enabled", COMMISSION_MESSAGE_LIMIT: 2 });
+      COMMISSION_INTAKE_MODE: "enabled", COMMISSION_PAYMENTS_MODE: "manual_only", COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_RESOLUTION_MODE: "enabled", COMMISSION_FILES_MODE: "enabled", COMMISSION_MESSAGE_LIMIT: 2 });
     const oidcSpy = vi.spyOn(config, "parseOidcEnv").mockReturnValue({ ...syntheticOidcProvider, clientSecret: "synthetic-client-secret-0000000000",
       redirectUri: `${origin}/api/v1/auth/oidc/callback`, accountPortalUrl: "https://idp.example.invalid/if/user/" });
     const dbSpy = vi.spyOn(database, "createDatabase").mockReturnValue({ db: f.db, close: async () => undefined });

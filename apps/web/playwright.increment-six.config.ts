@@ -15,6 +15,7 @@ export default defineConfig({ ...base, globalSetup: "./tests/increment-six-globa
       TIP_PAYMENTS_MODE: "disabled", COMMISSION_INTAKE_MODE: port === 4181 ? "enabled" : "disabled", COMMISSION_PAYMENTS_MODE: port === 4181 ? "manual_only" : "disabled",
       COMMISSION_FILES_MODE: port === 4181 ? "enabled" : "disabled",
       COMMISSION_FULFILLMENT_MODE: port === 4181 ? "enabled" : "disabled",
+      COMMISSION_RESOLUTION_MODE: port === 4181 ? "enabled" : "disabled",
       COMMISSION_FILES_S3_ENDPOINT: process.env.COMMISSION_FILES_S3_ENDPOINT ?? "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
       COMMISSION_FILES_S3_ACCESS_KEY_ID: process.env.COMMISSION_FILES_S3_ACCESS_KEY_ID ?? "local-commission-files-key", COMMISSION_FILES_S3_SECRET_ACCESS_KEY: process.env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY ?? "local-commission-files-secret",
       COMMISSION_FILES_QUARANTINE_BUCKET: process.env.COMMISSION_FILES_QUARANTINE_BUCKET ?? "pawket-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: process.env.COMMISSION_FILES_CLEAN_BUCKET ?? "pawket-commission-clean", COMMISSION_FILES_S3_FORCE_PATH_STYLE: "true",

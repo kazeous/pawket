@@ -9,6 +9,9 @@ const base = { NODE_ENV: "test", APP_ENV: "test", APP_REVISION: "synthetic",
 const shape = z.object(incrementSixEnvShape);
 const dependencies = { PII_ACTIVE_KEY_ID: "synthetic", PII_KEYRING_JSON: { synthetic: "synthetic-only" }, PII_LOOKUP_HMAC_KEY: "synthetic-only",
   AUTH_PRIMARY_STEP_UP_TTL_SECONDS: 3600, AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS: 3600 };
+const storage = { COMMISSION_FILES_S3_ENDPOINT: "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
+  COMMISSION_FILES_S3_ACCESS_KEY_ID: "synthetic-key", COMMISSION_FILES_S3_SECRET_ACCESS_KEY: "synthetic-secret",
+  COMMISSION_FILES_QUARANTINE_BUCKET: "pawket-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: "pawket-commission-clean" };
 
 describe("commission operational controls", () => {
   test.each(["COMMISSION_RECENT_AUTH_SECONDS", "COMMISSION_TOTP_AUTH_SECONDS"] as const)("defaults and bounds %s at one hour", (field) => {
@@ -19,7 +22,9 @@ describe("commission operational controls", () => {
   test("defaults disabled and keeps intake, payments, tip and publishing independent", () => {
     expect(parseServerEnv(base)).toMatchObject({ COMMISSION_INTAKE_MODE: "disabled", COMMISSION_PAYMENTS_MODE: "disabled" });
     for (const intake of ["disabled", "enabled"]) for (const payment of ["disabled", "manual_only", "sepay_optional"]) {
-      expect(parseServerEnv({ ...base, COMMISSION_INTAKE_MODE: intake, COMMISSION_PAYMENTS_MODE: payment })).toMatchObject({
+      const paidMode = payment === "disabled" ? "disabled" : "enabled";
+      expect(parseServerEnv({ ...base, ...storage, COMMISSION_INTAKE_MODE: intake, COMMISSION_PAYMENTS_MODE: payment,
+        COMMISSION_FILES_MODE: paidMode, COMMISSION_FULFILLMENT_MODE: paidMode, COMMISSION_RESOLUTION_MODE: paidMode })).toMatchObject({
         COMMISSION_INTAKE_MODE: intake, COMMISSION_PAYMENTS_MODE: payment, TIP_PAYMENTS_MODE: "disabled", CREATOR_PUBLISHING_MODE: "disabled", SEPAY_INGRESS_MODE: "disabled",
       });
     }
