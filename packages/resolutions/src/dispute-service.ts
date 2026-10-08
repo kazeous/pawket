@@ -24,14 +24,15 @@ function exact(command: unknown, keys: readonly string[]) {
 export async function evaluateDisputeTrigger(tx: PawketTransaction, orders: Pick<ResolutionOrderPort, "completionDueAt">,
   order: CommissionResolutionOrderFacts, actor: ResolutionActor, at: Date): Promise<Trigger | null> {
   if (order.state !== "in_progress" && order.state !== "delivered") return null;
+  const due = order.state === "delivered" ? await orders.completionDueAt(tx, order.id) : null;
+  if (order.state === "delivered" && (!due || at >= due)) return null;
   const withdrawn = await tx.select().from(commissionDisputes).where(and(eq(commissionDisputes.orderId, order.id),
     eq(commissionDisputes.openerUserId, actor.userId), eq(commissionDisputes.state, "withdrawn"))).orderBy(desc(commissionDisputes.closedAt));
   // Reopening needs an event newer than the withdrawn dispute's opening. A proposal may end while it is open.
   const consumedAt = withdrawn[0]?.openedAt ?? null;
   const buyer = order.buyerUserId === actor.userId;
   if (buyer && order.state === "delivered" && order.deliveredAt && at >= order.deliveredAt && (!consumedAt || order.deliveredAt > consumedAt)) {
-    const due = await orders.completionDueAt(tx, order.id);
-    if (due && at < due) return { kind: "final_delivery", at: order.deliveredAt, endsAt: due };
+    return { kind: "final_delivery", at: order.deliveredAt, endsAt: due };
   }
   if (buyer && order.state === "in_progress" && order.dueAt && withdrawn.length === 0) {
     const triggerAt = new Date(order.dueAt.getTime() + RESOLUTION_POLICY.overdueTriggerMs);
@@ -43,7 +44,7 @@ export async function evaluateDisputeTrigger(tx: PawketTransaction, orders: Pick
   for (const row of ended) {
     if (!row.endedAt || row.endedAt > at || (consumedAt && row.endedAt <= consumedAt)) continue;
     const endsAt = await effectiveResolutionDeadline(tx, new Date(row.endedAt.getTime() + RESOLUTION_POLICY.proposalTriggerWindowMs));
-    if (endsAt && at <= endsAt) return { kind: "proposal_declined", at: row.endedAt, endsAt };
+    if (endsAt && at <= endsAt) return { kind: "proposal_declined", at: row.endedAt, endsAt: due && due < endsAt ? due : endsAt };
   }
   return null;
 }
@@ -110,14 +111,14 @@ export function createDisputeService(kit: Kit, input: Input) {
           const [open] = await tx.select({ id: commissionDisputes.id }).from(commissionDisputes)
             .where(and(eq(commissionDisputes.orderId, order.id), eq(commissionDisputes.state, "open"))).limit(1);
           if (open) resolutionFail("dispute_open");
+          const due = order.state === "delivered" ? await input.orders.completionDueAt(tx, order.id) : null;
+          if (order.state === "delivered") {
+            if (!due) resolutionFail("resolution_disabled");
+            if (at >= due) resolutionFail("deadline_passed");
+          }
           const trigger = await evaluateDisputeTrigger(tx, input.orders, order, command.actor, at);
           if (!trigger) resolutionFail("dispute_not_allowed");
-          let remainingReviewMs: number | null = null;
-          if (order.state === "delivered") {
-            const due = await input.orders.completionDueAt(tx, order.id);
-            if (!due) resolutionFail("resolution_disabled");
-            remainingReviewMs = Math.max(0, due.getTime() - at.getTime());
-          }
+          const remainingReviewMs = due ? due.getTime() - at.getTime() : null;
           const disputeId = randomUUID();
           const [row] = await tx.insert(commissionDisputes).values({ id: disputeId, orderId: order.id, openerUserId: command.actor.userId,
             openerRole: order.buyerUserId === command.actor.userId ? "buyer" : "creator", trigger: trigger.kind, triggerAt: trigger.at,
@@ -130,7 +131,8 @@ export function createDisputeService(kit: Kit, input: Input) {
           await insertOutboxEvent(tx, { eventType: "resolution.dispute_opened.v1", eventVersion: 1, aggregateType: "commission_dispute", aggregateId: disputeId,
             payload: { disputeId, orderId: order.id }, occurredAt: at });
           // The proposal window includes its final millisecond; the completion window does not.
-          const guardUntil = trigger.endsAt ? new Date(trigger.endsAt.getTime() + (trigger.kind === "proposal_declined" ? 1 : 0)) : undefined;
+          const triggerGuardUntil = trigger.endsAt ? new Date(trigger.endsAt.getTime() + (trigger.kind === "proposal_declined" ? 1 : 0)) : undefined;
+          const guardUntil = due && (!triggerGuardUntil || due < triggerGuardUntil) ? due : triggerGuardUntil;
           return { resultReference: `${disputeId}:${opened.caseId}`, at, guardUntil };
         }));
     },

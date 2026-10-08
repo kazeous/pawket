@@ -44,6 +44,16 @@ async function endedProposal(p: Paid, actor = p.creator, ending: "declined" | "e
   }
   return { ...made, endedAt: p.s.creator.now() };
 }
+async function deliveredProposalTrigger(role: "buyer" | "creator") {
+  const p = await f.deliveredOrder();
+  if (role === "buyer") {
+    const instance = disputeService(p); const opened = await instance.openDispute(await opening(p));
+    p.s.creator.advance(1); await instance.withdrawDispute(withdrawal(p, opened.disputeId));
+  }
+  p.s.creator.advance(1); const ended = await endedProposal(p);
+  const due = await f.db.transaction((tx) => orderPort().completionDueAt(tx, p.orderId));
+  return { p, ended, due: due! };
+}
 function refundService(p: Paid) {
   return createCommissionRefundService({ ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion: "vn-proposals-test",
     mode: "enabled", recentAuthMs: HOUR, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: createTrustCasePort(),
@@ -57,10 +67,52 @@ describe("commission disputes and completion holds", () => {
   test("buyer final-delivery trigger opens at completionDueAt - 1 ms and fails at the deadline", async () => {
     const p = await f.deliveredOrder(); const due = await f.db.transaction((tx) => orderPort().completionDueAt(tx, p.orderId));
     p.s.creator.setNow(due!);
-    await expect(disputeService(p).openDispute(await opening(p))).rejects.toMatchObject({ code: "dispute_not_allowed" });
+    await expect(disputeService(p).openDispute(await opening(p))).rejects.toMatchObject({ code: "deadline_passed" });
     p.s.creator.setNow(new Date(due!.getTime() - 1));
     await disputeService(p).openDispute(await opening(p));
     expect(await disputes(p)).toMatchObject([{ trigger: "final_delivery", triggerAt: (await order(p)).deliveredAt, remainingReviewMs: 1 }]);
+  });
+  test.each(["buyer", "creator"] as const)("%s delivered proposal trigger refuses opening at completionDueAt and allows one millisecond before", async (role) => {
+    const { p, ended, due } = await deliveredProposalTrigger(role); const before = await order(p);
+    expect(due.getTime()).toBeLessThan(ended.endedAt.getTime() + RESOLUTION_POLICY.proposalTriggerWindowMs);
+    p.s.creator.setNow(due);
+    await expect(disputeService(p).openDispute(await opening(p, p[role]))).rejects.toMatchObject({ code: "deadline_passed" });
+    expect((await disputes(p)).filter((row) => row.state === "open")).toHaveLength(0); expect(await order(p)).toEqual(before);
+    p.s.creator.setNow(new Date(due.getTime() - 1));
+    const opened = await disputeService(p).openDispute(await opening(p, p[role]));
+    expect((await disputes(p)).find((row) => row.id === opened.disputeId)).toMatchObject({ trigger: "proposal_declined", remainingReviewMs: 1 });
+  });
+  test.each(["buyer", "creator"] as const)("%s delivered proposal view bounds its trigger by completionDueAt", async (role) => {
+    const { p, due } = await deliveredProposalTrigger(role); p.s.creator.setNow(due);
+    expect((await viewService(p).getOrderResolution({ actor: p[role], orderId: p.orderId })).actions)
+      .toMatchObject({ canOpenDispute: false, disputeTrigger: null, disputeTriggerEndsAt: null });
+    p.s.creator.setNow(new Date(due.getTime() - 1));
+    expect((await viewService(p).getOrderResolution({ actor: p[role], orderId: p.orderId })).actions)
+      .toMatchObject({ canOpenDispute: true, disputeTrigger: "proposal_declined", disputeTriggerEndsAt: due.toISOString() });
+  });
+  test.each(["buyer", "creator"] as const)("%s delivered opening and view require a non-null completion deadline", async (role) => {
+    const p = await f.deliveredOrder(); if (role === "creator") await endedProposal(p);
+    const pauseId = randomUUID(); const startedAt = p.s.creator.now();
+    await f.db.insert(schema.commissionFulfillmentPauses).values({ id: pauseId, startedAt });
+    try {
+      expect(await f.db.transaction((tx) => orderPort().completionDueAt(tx, p.orderId))).toBeNull();
+      await expect(disputeService(p).openDispute(await opening(p, p[role]))).rejects.toMatchObject({ code: "resolution_disabled" });
+      expect((await viewService(p).getOrderResolution({ actor: p[role], orderId: p.orderId })).actions.canOpenDispute).toBe(false);
+      expect(await disputes(p)).toHaveLength(0); expect(await cases(p)).toHaveLength(0);
+    } finally {
+      await f.db.update(schema.commissionFulfillmentPauses).set({ endedAt: new Date(startedAt.getTime() + 1) })
+        .where(eq(schema.commissionFulfillmentPauses.id, pauseId));
+    }
+  });
+  test("delivered proposal-trigger opening rolls back when its commit reaches completionDueAt", async () => {
+    const { p, due } = await deliveredProposalTrigger("creator"); const before = await order(p);
+    p.s.creator.setNow(new Date(due.getTime() - 1));
+    const casesPort = createTrustCasePort(); const openCase = casesPort.openCase;
+    vi.spyOn(casesPort, "openCase").mockImplementation(async (tx, command) => {
+      const result = await openCase(tx, command); p.s.creator.advance(1); return result;
+    });
+    await expect(disputeService(p, { cases: casesPort }).openDispute(await opening(p, p.creator))).rejects.toMatchObject({ code: "deadline_passed" });
+    expect(await disputes(p)).toHaveLength(0); expect(await cases(p)).toHaveLength(0); expect(await order(p)).toEqual(before);
   });
   test("buyer overdue trigger opens at dueAt + 7 days and fails one millisecond before", async () => {
     const p = await f.paidOrder(); const at = new Date((await order(p)).dueAt!.getTime() + 7 * DAY);
@@ -195,13 +247,12 @@ describe("commission disputes and completion holds", () => {
     expect(events.map((event) => event.payload)).toEqual([{ disputeId: opened.disputeId, orderId: p.orderId, state: "settled" }]);
   });
   test("a pending delivered proposal holds buyer acceptance and automatic completion", async () => {
-    const p = await f.deliveredOrder(); await resolutions(p).propose({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version,
+    const p = await f.deliveredOrder({ reviewWindowDays: 3 }); await resolutions(p).propose({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version,
       kind: "cancel_with_refund", refundAmountVnd: 0, note: "Synthetic proposal", ...commandIds() });
     await expect(respond(p, p.finalId, "accept")).rejects.toMatchObject({ code: "completion_held" });
     const due = await f.db.transaction((tx) => orderPort().completionDueAt(tx, p.orderId)); p.s.creator.setNow(due!);
-    expect(await service(p).completeDue()).toMatchObject({ held: expect.any(Number) });
+    expect(await service(p).completeDue()).toMatchObject({ held: 1 });
     expect((await order(p)).state).toBe("delivered");
-    expect((await service(p).completeDue()).held).toBeGreaterThanOrEqual(1);
   });
   test("a proposal made in progress does not hold completion after final delivery", async () => {
     const p = await f.paidOrder(); await resolutions(p).propose({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version,
