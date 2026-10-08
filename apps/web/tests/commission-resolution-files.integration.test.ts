@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import * as files from "@pawket/commission-files";
-import { createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
+import { createCommissionFileAccessPort, createCommissionOrderService, createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
 import { createCommissionPaymentFactsPort, createCommissionRefundPort, createCommissionRefundService } from "@pawket/payments";
 import * as resolutions from "@pawket/resolutions";
 import { createCaseEvidenceHoldPort, createTrustCasePort } from "@pawket/trust";
@@ -45,9 +45,10 @@ async function closePaid(p: Context) {
   await f.db.transaction((tx) => orderPort().closePaidOrder(tx, { orderId: p.orderId, expectedVersion: current.version,
     reason: "cancelled_by_agreement", actor: p.buyer, requestId: randomUUID(), at: p.s.creator.now() }));
 }
-async function closedUnpaid() {
+async function closedUnpaid(withBrief = false) {
   const s = await f.setup(); const orderId = await s.service.request(s.request());
   const p = { s, orderId, buyer: s.buyerActor, creator: s.creator.actor };
+  if (withBrief) await briefFile(p);
   s.creator.setNow((await order(p)).expiresAt!); await s.service.expireDue(); return p;
 }
 function claims(p: Context, mode: "enabled" | "disabled" = "enabled") {
@@ -63,15 +64,28 @@ async function awaitingSend(existing?: Awaited<ReturnType<typeof f.paidOrder>>) 
   const { obligationId } = await f.db.transaction((tx) => refundPort(p).createObligation(tx, { orderId: p.orderId,
     paymentIntentId: p.confirmationCommand.paymentIntentId, creatorUserId: p.creator.userId, buyerUserId: p.buyer.userId,
     source: "agreement", sourceId: randomUUID(), amountVnd: 500_000, requestId: randomUUID(), at: p.s.creator.now() }));
+  return refundAwaitingSend(p, obligationId);
+}
+async function refundAwaitingSend<T extends Context>(p: T, obligationId: string) {
   const instance = createCommissionRefundService({ ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion, mode: "enabled",
     recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: createTrustCasePort(), files: evidencePort(p),
     assurance: { getTipSessionAssurance: async (_tx, actor, at) => p.s.users.get(actor.userId) === actor.sessionId
       ? { primaryAuthenticatedAt: at, mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 60_000) } : null } });
   await instance.enterDestination({ actor: p.buyer, obligationId, expectedVersion: 1, bankBin: "970422",
     accountNumber: "000000123456", accountHolder: "SYNTHETIC BUYER", ...commandIds() });
-  const sending = (fileIds: readonly string[]) => ({ actor: p.creator, obligationId, expectedVersion: 2, transferDate: "2026-09-26",
+  const sending = (fileIds: readonly string[]) => ({ actor: p.creator, obligationId, expectedVersion: 2, transferDate: p.s.creator.now().toISOString().slice(0, 10),
     bankReference: "SYNTHETIC_REF", fileIds, ...commandIds() });
   return { p, instance, sending };
+}
+async function unpaidEvidence() {
+  const p = await closedUnpaid(true); const buyerEvidence = await evidenceFile(p, p.buyer); const instance = claims(p);
+  const { claimId } = await instance.fileLateClaim(filing(p, [buyerEvidence]));
+  await instance.answerLateClaim({ actor: p.creator, claimId, received: true, receivedAmountVnd: 500_000, ...commandIds() });
+  const [obligation] = await f.db.select().from(schema.commissionRefundObligations).where(eq(schema.commissionRefundObligations.orderId, p.orderId));
+  const c = await refundAwaitingSend(p, obligation!.id); const creatorEvidence = await evidenceFile(p);
+  await c.instance.recordSend(c.sending([creatorEvidence]));
+  const [brief] = await f.db.select().from(schema.commissionFileAttachments).where(and(eq(schema.commissionFileAttachments.orderId, p.orderId), eq(schema.commissionFileAttachments.targetKind, "brief")));
+  return { p, briefId: brief!.fileId, buyerEvidence, creatorEvidence };
 }
 
 test("the creator uploads an evidence image for an awaiting_send obligation and attaches it when recording the send; it counts toward the 1 GiB quota", async () => {
@@ -167,6 +181,12 @@ async function threadFiles(p: Awaited<ReturnType<typeof f.paidOrder>>) {
   const buyerFile = await cleanFile(p, { context: "thread", ownerUserId: p.buyer.userId });
   const creatorFile = await cleanFile(p, { context: "thread" });
   for (const [actor, fileId] of [[p.buyer, buyerFile], [p.creator, creatorFile]] as const) await thread.sendMessage({ actor, orderId: p.orderId, text: "Synthetic text", fileIds: [fileId], ...commandIds() });
+  const briefId = await briefFile(p);
+  const draft = await submit(p, "draft");
+  const [attached] = await f.db.select().from(schema.commissionFileAttachments).where(eq(schema.commissionFileAttachments.targetId, draft.id));
+  return { thread, buyerFiles: [buyerFile, briefId], creatorFiles: [creatorFile, attached!.fileId] };
+}
+async function briefFile(p: Context) {
   const briefId = randomUUID(); const at = p.s.creator.now();
   await f.db.insert(schema.commissionFiles).values({ id: briefId, ownerUserId: p.buyer.userId, context: "brief", packageId: p.s.packageId,
     declaredBytes: 16, filenameEnvelope: files.encryptCommissionFileName(p.s.input.keyring, briefId, "Synthetic reference"), objectKey: `commission/${briefId}`,
@@ -174,21 +194,31 @@ async function threadFiles(p: Awaited<ReturnType<typeof f.paidOrder>>) {
   await fileService(p).instance.completeUpload({ actor: p.buyer, fileId: briefId, requestId: randomUUID() }); await markClean(p, briefId);
   await f.db.transaction((tx) => files.createCommissionFileAttachmentPort({ keyring: p.s.input.keyring, mode: "enabled" }).attachBriefFiles(tx, {
     orderId: p.orderId, buyerUserId: p.buyer.userId, packageId: p.s.packageId, fileIds: [briefId], at }));
-  const draft = await submit(p, "draft");
-  const [attached] = await f.db.select().from(schema.commissionFileAttachments).where(eq(schema.commissionFileAttachments.targetId, draft.id));
-  return { thread, buyerFiles: [buyerFile, briefId], creatorFiles: [creatorFile, attached!.fileId] };
+  return briefId;
 }
 
-test("after a paid close the buyer downloads their own thread attachment and brief reference, is refused every creator file, and the creator downloads everything", async () => {
+test("after a paid close the buyer downloads their own files and creator refund evidence, is refused creator thread attachments and submissions, and the creator downloads everything", async () => {
   const p = await f.paidOrder(); const attached = await threadFiles(p); const c = await awaitingSend(p);
-  const evidence = await evidenceFile(p); await c.instance.recordSend(c.sending([evidence])); attached.creatorFiles.push(evidence);
+  const evidence = await evidenceFile(p); await c.instance.recordSend(c.sending([evidence]));
   const { instance, storage } = fileService(p);
-  for (const actor of [p.buyer, p.creator]) for (const fileId of [...attached.buyerFiles, ...attached.creatorFiles]) {
+  for (const actor of [p.buyer, p.creator]) for (const fileId of [...attached.buyerFiles, ...attached.creatorFiles, evidence]) {
     const command = { actor, orderId: p.orderId, fileId, disposition: "attachment" as const };
     if (actor === p.buyer && attached.creatorFiles.includes(fileId)) {
       const calls = storage.presignDownload.mock.calls.length; await expect(instance.downloadGrant(command)).rejects.toMatchObject({ code: "not_available" });
       expect(storage.presignDownload).toHaveBeenCalledTimes(calls);
       await expect(instance.downloadGrant({ ...command, disposition: "inline" })).rejects.toMatchObject({ code: "not_available" });
+    } else for (const disposition of ["attachment", "inline"] as const) expect((await instance.downloadGrant({ ...command, disposition })).url !== undefined).toBe(true);
+  }
+});
+
+test("on an unpaid close the creator downloads buyer claim evidence and their own refund evidence but is refused brief references", async () => {
+  const { p, briefId, buyerEvidence, creatorEvidence } = await unpaidEvidence(); const { instance, storage } = fileService(p);
+  expect(await order(p)).toMatchObject({ state: "closed", confirmedAt: null });
+  for (const actor of [p.buyer, p.creator]) for (const fileId of [briefId, buyerEvidence, creatorEvidence]) for (const disposition of ["attachment", "inline"] as const) {
+    const command = { actor, orderId: p.orderId, fileId, disposition };
+    if (actor === p.creator && fileId === briefId) {
+      const calls = storage.presignDownload.mock.calls.length; await expect(instance.downloadGrant(command)).rejects.toMatchObject({ code: "not_available" });
+      expect(storage.presignDownload).toHaveBeenCalledTimes(calls);
     } else expect((await instance.downloadGrant(command)).url !== undefined).toBe(true);
   }
 });
@@ -211,6 +241,12 @@ test.each([false, true])("both parties read the paid-close thread without action
   }
 });
 
+test("both parties are refused the unpaid-close thread with invalid_transition", async () => {
+  const p = await closedUnpaid(); const instance = createCommissionOrderService({ ...p.s.input, fulfillmentMode: "enabled",
+    thread: files.createCommissionThreadPort({ keyring: p.s.input.keyring, mode: "enabled" }) });
+  for (const actor of [p.buyer, p.creator]) await expect(instance.getThread({ actor, orderId: p.orderId })).rejects.toMatchObject({ code: "invalid_transition" });
+});
+
 test("an evidence upload grant replay is refused once its obligation no longer awaits a send", async () => {
   const c = await awaitingSend(); const { instance } = fileService(c.p, true); const command = uploadCommand(c.p);
   await instance.createUpload(command); await c.instance.recordSend(c.sending([]));
@@ -225,13 +261,38 @@ async function retention(p: Context, at: Date) {
   return report.retentionDue;
 }
 test("files of an order closed after payment become due 180 days after closedAt", async () => {
-  const p = await f.paidOrder(); const attached = await threadFiles(p); await closePaid(p); const at = p.s.creator.now();
+  const p = await f.paidOrder(); const attached = await threadFiles(p); const c = await awaitingSend(p);
+  const evidence = await evidenceFile(p); await c.instance.recordSend(c.sending([evidence])); const at = (await order(p)).closedAt!;
+  expect(await retention(p, new Date(at.getTime() + 30 * DAY))).toBe(0);
   expect(await retention(p, new Date(at.getTime() + 180 * DAY - 1))).toBe(0);
-  expect(await retention(p, new Date(at.getTime() + 180 * DAY))).toBe(4);
-  for (const fileId of [...attached.buyerFiles, ...attached.creatorFiles]) expect((await file(fileId)).state).toBe("attached");
+  expect(await retention(p, new Date(at.getTime() + 180 * DAY))).toBe(5);
+  for (const fileId of [...attached.buyerFiles, ...attached.creatorFiles, evidence]) expect((await file(fileId)).state).toBe("attached");
 });
-test("an evidence hold keeps them until 30 days after the last case resolved", async () => {
-  const p = await f.paidOrder(); await threadFiles(p); await closePaid(p); const at = p.s.creator.now(); const cases = createTrustCasePort();
+test("unpaid-close brief references become due at 30 days and claim and refund evidence at 180 days after closedAt", async () => {
+  const { p, briefId, buyerEvidence, creatorEvidence } = await unpaidEvidence(); const at = (await order(p)).closedAt!;
+  expect(await retention(p, new Date(at.getTime() + 30 * DAY - 1))).toBe(0);
+  expect(await retention(p, new Date(at.getTime() + 30 * DAY))).toBe(1);
+  expect(await retention(p, new Date(at.getTime() + 180 * DAY - 1))).toBe(1);
+  expect(await retention(p, new Date(at.getTime() + 180 * DAY))).toBe(3);
+  for (const fileId of [briefId, buyerEvidence, creatorEvidence]) expect((await file(fileId)).state).toBe("attached");
+});
+test("completed-order files including refund evidence remain due 180 days after completedAt", async () => {
+  const p = await f.paidOrder(); await threadFiles(p); const final = await submit(p, "final"); await respond(p, final.id, "accept");
+  const at = (await order(p)).completedAt!; p.s.creator.advance(DAY);
+  const { obligationId } = await f.db.transaction((tx) => refundPort(p).createObligation(tx, { orderId: p.orderId,
+    paymentIntentId: p.confirmationCommand.paymentIntentId, creatorUserId: p.creator.userId, buyerUserId: p.buyer.userId,
+    source: "agreement", sourceId: randomUUID(), amountVnd: 500_000, requestId: randomUUID(), at: p.s.creator.now() }));
+  const c = await refundAwaitingSend(p, obligationId); const evidence = await evidenceFile(p); await c.instance.recordSend(c.sending([evidence]));
+  expect(await retention(p, new Date(at.getTime() + 180 * DAY - 1))).toBe(0);
+  expect(await retention(p, new Date(at.getTime() + 180 * DAY))).toBe(6);
+  expect((await file(evidence)).state).toBe("attached");
+});
+test.each([false, true])("an evidence hold keeps files until 30 days after the last case resolved (paid=%s)", async (paid) => {
+  let p: Context;
+  if (paid) { const paidOrder = await f.paidOrder(); await threadFiles(paidOrder); const c = await awaitingSend(paidOrder);
+    await c.instance.recordSend(c.sending([await evidenceFile(paidOrder)])); p = paidOrder; }
+  else p = (await unpaidEvidence()).p;
+  const at = (await order(p)).closedAt!; const cases = createTrustCasePort();
   const caseIds: string[] = [];
   for (const day of [180, 190]) {
     const { caseId } = await f.db.transaction((tx) => cases.openCase(tx, { kind: "dispute", orderId: p.orderId, sourceType: "commission_dispute",
@@ -241,7 +302,7 @@ test("an evidence hold keeps them until 30 days after the last case resolved", a
   for (const [index, caseId] of caseIds.entries()) await f.db.transaction((tx) => cases.resolveCase(tx, { caseId, resolutionKind: "withdrawn",
     actor: null, reason: null, requestId: randomUUID(), at: new Date(at.getTime() + (180 + index * 10) * DAY) }));
   expect(await retention(p, new Date(at.getTime() + 220 * DAY - 1))).toBe(0);
-  expect(await retention(p, new Date(at.getTime() + 220 * DAY))).toBe(4);
+  expect(await retention(p, new Date(at.getTime() + 220 * DAY))).toBe(paid ? 5 : 3);
 });
 
 test("the upload HTTP adapter accepts the evidence context", async () => {

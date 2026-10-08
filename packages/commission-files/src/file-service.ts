@@ -179,8 +179,9 @@ export function createCommissionFileService(input: Input) {
           .where(and(eq(commissionFileAttachments.fileId, command.fileId), eq(commissionFileAttachments.orderId, command.orderId), inArray(commissionFiles.state, ["attached"]))).limit(1);
         if (!row || row.file.cleanPurgedAt || !row.file.cleanVersionId || !row.file.detectedType) commissionFileFail("not_available");
         // Brief references: the creator loses access once the request closes before payment (spec §12).
-        if (access.role === "creator" && access.state === "closed" && access.confirmedAt === null) commissionFileFail("not_available");
-        if (access.role === "buyer" && access.state === "closed" && access.confirmedAt !== null && row.file.ownerUserId !== command.actor.userId) commissionFileFail("not_available");
+        if (access.role === "creator" && access.state === "closed" && access.confirmedAt === null && row.file.context === "brief") commissionFileFail("not_available");
+        if (access.role === "buyer" && access.state === "closed" && access.confirmedAt !== null && row.file.ownerUserId !== command.actor.userId
+          && (row.file.context === "thread" || row.file.context === "submission")) commissionFileFail("not_available");
         const type = row.file.detectedType as CommissionFileType;
         if (command.disposition === "inline" && !isInlinePreviewAllowed(type, row.file.declaredBytes)) commissionFileFail("preview_not_allowed");
         const grant = await input.storage.presignDownload({ key: row.file.objectKey, versionId: row.file.cleanVersionId, contentType: COMMISSION_FILE_CONTENT_TYPES[type],
