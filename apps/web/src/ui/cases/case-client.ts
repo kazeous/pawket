@@ -13,7 +13,7 @@ export const caseDetailSchema = z.object({ case: summary.extend({ creatorStandin
   orderState: z.enum(["requested", "quoted", "awaiting_payment", "in_progress", "delivered", "completed", "closed"]), amountVnd: amount.nullable(),
   disputeOpenedAt: time.nullable(), respondBy: time.nullable(), nextDeadline: time.nullable().optional(),
   ruling: z.object({ id: uuid, outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, ruledAt: time, correctionEndsAt: time.nullable() }).nullable(),
-  events: z.array(z.object({ id: uuid, action: z.string(), reason: z.string().nullable(), fromState: z.string().nullable(), toState: z.string(), occurredAt: time, resultingVersion: z.number().int().positive() })),
+  events: z.array(z.object({ id: uuid, action: z.string(), reason: z.string().nullable(), beforeState: z.string().nullable(), afterState: z.string(), occurredAt: time, resultingVersion: z.number().int().positive() })),
   accessLog: z.array(z.object({ id: uuid, itemType: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination", "file"]), itemId: uuid,
     ownerUserId: z.string(), ownerSessionId: z.string(), accessedAt: time })).max(100) }) });
 export const agingSchema = z.object({ refunds: z.array(z.object({ orderId: uuid, amountVnd: amount, ageDays: z.number().int().nonnegative() })).max(100) });

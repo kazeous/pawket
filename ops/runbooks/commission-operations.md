@@ -1,5 +1,8 @@
 # Commission operations — Increments 6 and 7
 
+For Increment 8 Stage A order exits, switch dependencies, case-scoped owner
+access and commission refund alerts, follow [Commission resolution](commission-resolution.md).
+
 ## Release and activation
 
 Ship with `COMMISSION_INTAKE_MODE=disabled` and `COMMISSION_PAYMENTS_MODE=disabled`

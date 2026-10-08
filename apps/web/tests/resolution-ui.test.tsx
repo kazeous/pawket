@@ -109,6 +109,13 @@ test("buyer sees the D7 file notice after a paid close", () => {
   expect(render(initial, { ...order, state: "closed" })).toContain("Đơn đã hủy nên bạn không còn tải được tệp của nghệ sĩ. Pawket không thể thu hồi các bản bạn đã tải về.");
   expect(render(initial, { ...order, state: "closed", confirmedAt: null })).not.toContain("Pawket không thể thu hồi");
 });
+
+test("presumed receipt describes an expired confirmation window without repeating receipt wording", () => {
+  const refund = { ...fixtureRefund, state: "presumed_received" as const, hasRecordedSend: true };
+  const markup = renderToStaticMarkup(createElement(RefundPanel, { order, refund, disabled: false, onRefresh: async () => undefined }));
+  expect(markup).toContain("Hết hạn xác nhận hoàn tiền");
+  expect(markup).not.toContain("xác nhận nhận tiền");
+});
 test.each([false, true])("suspension cancel follows canCancelAfterSuspension=%s", (canCancelAfterSuspension) => {
   expect(render({ ...initial, resolution: { ...initial.resolution, actions: { ...initial.resolution.actions, canCancelAfterSuspension } } }).includes("Hủy đơn và yêu cầu hoàn tiền toàn bộ")).toBe(canCancelAfterSuspension);
 });

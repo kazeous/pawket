@@ -50,5 +50,5 @@ export function disputeBefore(trigger: string | null, endsAt: string): string {
 export const resolutionText = (value: string, maximum: number) => { const text = value.normalize("NFC").replace(/\r\n?/gu, "\n").trim(); return !!text && [...text].length <= maximum && !/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}]/u.test(text); };
 export const proposalStateLabels = { pending: "Đang chờ phản hồi", accepted: "Đã đồng ý", declined: "Đã từ chối", withdrawn: "Đã rút", expired: "Đã hết hạn", lapsed: "Không còn phù hợp", superseded: "Đã thay thế" };
 export const refundStateLabels = { awaiting_destination: "Chờ tài khoản nhận hoàn tiền", awaiting_send: "Chờ chuyển hoàn tiền", sent: "Nghệ sĩ đã ghi nhận chuyển", received: "Đã nhận tiền",
-  presumed_received: "Hết hạn xác nhận nhận tiền", not_received: "Đã báo chưa nhận tiền · Pawket đang xem xét", waived: "Khoản hoàn tiền đã được miễn" };
+  presumed_received: "Hết hạn xác nhận hoàn tiền", not_received: "Đã báo chưa nhận tiền · Pawket đang xem xét", waived: "Khoản hoàn tiền đã được miễn" };
 export const claimStateLabels = { awaiting_creator: "Chờ nghệ sĩ đối chiếu", escalated: "Pawket đang xem xét", refund_owed: "Đã xác nhận khoản cần hoàn", rejected: "Yêu cầu không được chấp nhận" };

@@ -11,7 +11,9 @@ import { createCommissionPaymentFactsPort, createCommissionRefundPort, createCom
 import { createDisputeService, createOwnerResolutionService, createResolutionCommandKit, createResolutionViewService } from "@pawket/resolutions";
 import { createTrustCasePort, createTrustCaseService } from "@pawket/trust";
 import { createCaseEvidencePort } from "../src/platform/case-evidence.js";
+import { createCaseHttpHandlers } from "../src/platform/case-http.js";
 import { getPlatformRuntime } from "../src/platform/runtime.js";
+import { caseDetailSchema } from "../src/ui/cases/case-client.js";
 import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-support.js";
 import { createCommissionResolutionTestFixture, service, submit } from "./commission-resolution-test-support.js";
 import { commandIds, fixtureKey, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
@@ -71,6 +73,30 @@ test("queue deadlines and owner ruling metadata use no private evidence or acces
   expect((await c.instance.listQueue({ state: "resolved" })).find((row) => row.caseId === c.caseId)?.nextDeadline).toBeNull();
   expect(await accesses(c.caseId)).toHaveLength(0);
 }, 30_000);
+test("real open and resolved case HTTP details satisfy the browser contract with timeline and access entries", async () => {
+  const c = await setup(); const origin = "https://pawket.example.invalid";
+  type Input = Parameters<typeof createCaseHttpHandlers>[0];
+  const http = createCaseHttpHandlers({ appBaseUrl: origin, authorizeOwner: async () => "authorized", authenticate: async () => c.actor,
+    issueOwnerStepUpProof: vi.fn(), cases: c.instance, owner: c.owner, lateClaims: {} as Input["lateClaims"], suspension: {} as Input["suspension"],
+    refunds: { readAging: (command) => c.refunds.readAging(f.db, command) }, standing: { readForOrder: async () => "suspended" },
+    orderMetadata: { readForOrder: async () => { const facts = await order(c.p);
+      return { creatorUserId: facts.creatorUserId, buyerUserId: facts.buyerUserId, orderState: facts.state, amountVnd: facts.amountVnd }; } },
+    resolutionMetadata: { readForCase: (row) => resolutions.createResolutionCaseMetadataPort().readForCase(f.db, row) } });
+  async function read() {
+    const response = await http.detail(new Request(`${origin}/api/v1/admin/cases/${c.caseId}`), c.caseId);
+    expect(response.status).toBe(200);
+    const parsed = caseDetailSchema.safeParse(await response.json()); expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("Case detail does not satisfy the browser contract");
+    return parsed.data.case;
+  }
+  const opened = await read(); expect(opened.state).toBe("open"); expect(opened.events.map((event) => event.action)).toEqual(["opened"]);
+  expect(opened.accessLog).toHaveLength(0); expect(await accesses(c.caseId)).toHaveLength(0);
+  await c.read("order_summary"); const viewed = await read(); expect(viewed.accessLog.map((entry) => entry.itemType)).toEqual(["order_summary"]);
+  await c.rule(); const resolved = await read(); expect(resolved.state).toBe("resolved"); expect(resolved.orderState).toBe("closed");
+  expect(resolved.events.map((event) => event.action)).toEqual(["opened", "resolved"]); expect(resolved.ruling).not.toBeNull();
+  expect(await accesses(c.caseId)).toHaveLength(1);
+}, 30_000);
+
 test("after the case resolves the same call fails not_available without another log", async () => {
   const c = await setup(); await c.read("order_summary"); await c.rule();
   for (const section of ["order_summary", "thread_page", "resolution_records"] as const) await expect(c.read(section)).rejects.toMatchObject({ code: "not_available" });

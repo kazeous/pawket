@@ -89,8 +89,8 @@ export function CommissionDetail({ initial, initialResolution = null, refundBank
     {unpaid && !expired ? <section className="flex flex-col items-start gap-3"><Button variant="outline" disabled={locked} onClick={() => setClose(true)}>{order.role === "buyer" ? "Rút hoặc hủy yêu cầu" : "Từ chối hoặc hủy yêu cầu"}</Button>
       {close ? <Alert><AlertTitle>Đóng yêu cầu này?</AlertTitle><AlertDescription><p>{order.state === "awaiting_payment" ? "Chỉ đóng khi chưa được xác nhận tiền. Hướng dẫn thanh toán sẽ bị hủy và suất đang giữ được trả lại. Nếu đã chuyển tiền, cần liên hệ nghệ sĩ để đối chiếu; thao tác này không hoàn tiền." : "Yêu cầu và điều khoản được giữ trong lịch sử. Bạn không thể tiếp tục chốt đơn này sau khi đóng."}</p><div className="flex flex-wrap gap-2"><Button disabled={locked} onClick={() => mutate("close")}>Xác nhận đóng yêu cầu</Button><Button disabled={locked} variant="outline" onClick={() => setClose(false)}>Giữ yêu cầu</Button></div></AlertDescription></Alert> : null}
     </section> : null}
-    <OrderResolutionPanel key={order.id} order={order} initial={initialResolution} banks={refundBanks} disabled={locked} onRefresh={refresh} />
-    {hasThread ? <CommissionThread key={order.id} order={order} fulfillmentMode={view.controls.fulfillmentMode} disabled={locked} reviewExpired={reviewExpired} onRefresh={refresh} /> : <CommissionHistory key={`history:${order.id}:${order.version}`} base={base} />}
+    <OrderResolutionPanel key={`resolution:${order.id}`} order={order} initial={initialResolution} banks={refundBanks} disabled={locked} onRefresh={refresh} />
+    {hasThread ? <CommissionThread key={`thread:${order.id}`} order={order} fulfillmentMode={view.controls.fulfillmentMode} disabled={locked} reviewExpired={reviewExpired} onRefresh={refresh} /> : <CommissionHistory key={`history:${order.id}:${order.version}`} base={base} />}
     <a href={commissionPath(order.role)} className={buttonVariants({ variant: "outline", className: "self-start" })}>Về danh sách commission</a>
   </div>;
 }

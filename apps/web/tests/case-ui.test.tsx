@@ -16,7 +16,7 @@ const at = "2026-10-08T00:00:00.000Z";
 const detail: CaseDetailView = { caseId: id, orderId: id, sourceId: id, sourceType: "commission_dispute", kind: "dispute", state: "open",
   resolutionKind: null, policyRevisionId: id, version: 1, openedAt: at, resolvedAt: null, creatorStanding: "active", creatorUserId: "synthetic-creator",
   buyerUserId: "synthetic-buyer", orderState: "in_progress", amountVnd: 500_000, disputeOpenedAt: at, respondBy: at, nextDeadline: at, ruling: null,
-  events: [{ id, action: "opened", reason: null, fromState: null, toState: "open", occurredAt: at, resultingVersion: 1 }],
+  events: [{ id, action: "opened", reason: null, beforeState: null, afterState: "open", occurredAt: at, resultingVersion: 1 }],
   accessLog: [{ id, itemType: "thread_page", itemId: id, ownerUserId: "synthetic-owner", ownerSessionId: "synthetic-session", accessedAt: at }] };
 const markup = (element: Parameters<typeof renderToStaticMarkup>[0]) => { const node = document.createElement("div"); node.innerHTML = renderToStaticMarkup(element); return node; };
 afterEach(() => { request.mockReset(); vi.unstubAllGlobals(); });
@@ -30,6 +30,33 @@ test("queue shows kind, age, next deadline and metadata filters", () => {
   expect(node.querySelector('a[href="/admin/cases/' + id + '"]')).not.toBeNull();
   for (const label of ["Loại vụ việc", "Tuổi vụ việc", "Hạn tiếp theo"]) expect(node.textContent).toContain(label);
 });
+test.each(["active", "suspended"] as const)("loading real case event fields keeps evidence and %s creator actions available", async (creatorStanding) => {
+  // TrustCaseService serializes the database's beforeState/afterState fields.
+  const response = { ...detail, creatorStanding, events: [{ id, action: "opened", reason: null, beforeState: null, afterState: "open", occurredAt: at, resultingVersion: 1 }] };
+  request.mockImplementation(async (path: string) => path.endsWith("/evidence") ? { evidence: { brief: { text: "Synthetic private evidence" } } } : { case: response });
+  vi.useFakeTimers();
+  try {
+    await mounted(createElement(CaseDetail, { caseId: id, actorUserId: "synthetic-owner" }), async (node) => {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+      const buttons = (label: string) => Array.from(node.querySelectorAll("button")).filter((button) => button.textContent === label);
+      expect(buttons("Xem bằng chứng")).toHaveLength(1); expect(buttons("Xem bằng chứng")[0]!.disabled).toBe(false);
+      expect(node.textContent?.includes("Chưa mở được vụ việc")).toBe(false);
+      expect(node.textContent?.includes("Synthetic private evidence")).toBe(false);
+      expect(request.mock.calls.map(([path]) => path)).toEqual([`/api/v1/admin/cases/${id}`]);
+      expect(node.querySelector('[name="reasoning"]')).not.toBeNull();
+      const freeze = node.querySelector<HTMLTextAreaElement>('[name="freezeReason"]');
+      expect(freeze !== null).toBe(creatorStanding === "suspended");
+      if (freeze) { expect(freeze.disabled).toBe(false); expect(freeze.labels?.[0]?.textContent?.startsWith("Lý do")).toBe(true); }
+      await act(async () => buttons("Xem bằng chứng")[0]!.click());
+      expect(buttons("Ẩn bằng chứng")).toHaveLength(1);
+      expect(node.textContent?.includes("Synthetic private evidence")).toBe(true);
+      expect(request.mock.calls.map(([path]) => path)).toEqual([`/api/v1/admin/cases/${id}`, `/api/v1/admin/cases/${id}/evidence`, `/api/v1/admin/cases/${id}`]);
+      await act(async () => buttons("Lịch sử vụ việc")[0]!.click());
+      expect(node.querySelector("ol")?.textContent).toContain("Mở vụ việc");
+    });
+  } finally { vi.useRealTimers(); }
+});
+
 test("evidence is fetched only after an explicit opening; closing and reopening logs a fresh view", async () => {
   request.mockImplementation(async (path: string) => path.endsWith("/evidence") ? { evidence: { brief: { text: "Synthetic private evidence" } } } : { case: detail });
   await mounted(createElement(CaseDetail, { initial: detail, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {
