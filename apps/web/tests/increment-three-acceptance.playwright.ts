@@ -536,6 +536,7 @@ async function verifyOperationalEvidence(
     publicMediaCleanupScan: "up",
     commissionCleanupScan: "up",
     commissionFulfillmentScan: "up",
+    commissionResolutionScan: "up",
     commissionFilesScan: "not_configured",
     commissionFileScanner: "not_configured",
     revision: candidateRevision,
