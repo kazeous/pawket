@@ -84,6 +84,24 @@ const resolve = (c: Awaited<ReturnType<typeof open>>) => fixture.db.transaction(
 }));
 
 describe("case-scoped owner evidence", () => {
+  test("readCase returns unlocked metadata in open and resolved states, or null", async () => {
+    const c = await open();
+    const expected = { caseId: c.caseId, kind: "dispute", orderId: c.p.orderId, sourceType: "commission_dispute",
+      sourceId: c.command.sourceId, state: "open", resolutionKind: null, version: 1, policyRevisionId: c.p.policyId };
+    expect(await fixture.db.transaction((tx) => c.port.readCase(tx, c.caseId))).toEqual(expected);
+    // Holding the case row must not block this metadata-only read.
+    await fixture.db.transaction(async (tx) => {
+      await tx.select().from(schema.trustCases).where(eq(schema.trustCases.id, c.caseId)).for("update");
+      expect(await fixture.db.transaction(async (reader) => {
+        await reader.execute(sql`set local lock_timeout = '200ms'`);
+        return c.port.readCase(reader, c.caseId);
+      })).toEqual(expected);
+    });
+    await resolve(c);
+    expect(await fixture.db.transaction((tx) => c.port.readCase(tx, c.caseId)))
+      .toEqual({ ...expected, state: "resolved", resolutionKind: "ruled", version: 2 });
+    expect(await fixture.db.transaction((tx) => c.port.readCase(tx, randomUUID()))).toBeNull();
+  });
   test("openCase is idempotent and writes trust.case_opened.v1 with ids only", async () => {
     const c = await open();
     const replay = await fixture.db.transaction((tx) => c.port.openCase(tx, c.command));

@@ -19,7 +19,7 @@ function setup() {
   const refunds: ResolutionRefundPort = { createObligation: vi.fn(), adjustAmount: vi.fn(), waive: vi.fn(), extendDeadline: vi.fn(),
     acceptReceiptEvidence: vi.fn(), requireResend: vi.fn(), awaitingSendDeadlines: vi.fn(), listForOrder: vi.fn() };
   const payments: ResolutionPaymentFactsPort = { paidIntent: vi.fn(), closedIntent: vi.fn() };
-  const cases: ResolutionCasePort = { openCase: vi.fn(), resolveCase: vi.fn(), recordCaseEvent: vi.fn(), findOpenCase: vi.fn() };
+  const cases: ResolutionCasePort = { readCase: vi.fn(), openCase: vi.fn(), resolveCase: vi.fn(), recordCaseEvent: vi.fn(), findOpenCase: vi.fn() };
   // These tests isolate boundary validation, target authorization and recorded results; integration tests exercise writes.
   const kit: ReturnType<typeof createResolutionCommandKit> = { mutate: vi.fn(async (_command, scope) => scope === "propose"
     ? proposalId : `${proposalId}:3`), ownerMutate: vi.fn(),

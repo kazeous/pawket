@@ -71,6 +71,15 @@ export function createTrustCasePort(input: { newId?(): string } = {}) {
   }
   return {
     findOpenCase,
+    /** Metadata only, without a row lock; callers take the order's creator fence before mutations. */
+    async readCase(tx: PawketTransaction, caseId: string) {
+      if (!validUuid(caseId)) caseFail("invalid_request");
+      const [row] = await tx.select({ caseId: trustCases.id, kind: trustCases.kind, orderId: trustCases.orderId,
+        sourceType: trustCases.sourceType, sourceId: trustCases.sourceId, state: trustCases.state,
+        resolutionKind: trustCases.resolutionKind, version: trustCases.version, policyRevisionId: trustCases.policyRevisionId })
+        .from(trustCases).where(eq(trustCases.id, caseId)).limit(1);
+      return row ?? null;
+    },
     async openCase(tx: PawketTransaction, command: Readonly<{ kind: TrustCaseKind; orderId: string; sourceType: TrustCaseSourceType; sourceId: string; policyRevisionId: string | null; requestId: string; at: Date }>): Promise<{ caseId: string; created: boolean }> {
       if (!caseKind(command.kind) || command.sourceType !== sourceType(command.kind) || !validUuid(command.orderId) || !validUuid(command.sourceId)
         || (command.policyRevisionId !== null && !validUuid(command.policyRevisionId)) || !caseIdentifier(command.requestId)) caseFail("invalid_request");

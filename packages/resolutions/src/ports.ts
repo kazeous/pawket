@@ -33,6 +33,8 @@ export type ResolutionRefundPort = Readonly<{
 type CaseKind = "dispute" | "refund_not_received" | "refund_overdue" | "late_payment";
 type CaseCommand = Readonly<{ caseId: string; actor: ResolutionActor | null; reason: string | null; requestId: string; at: Date }>;
 export type ResolutionCasePort = Readonly<{
+  readCase(tx: PawketTransaction, caseId: string): Promise<Readonly<{ caseId: string; kind: string; orderId: string;
+    sourceType: string; sourceId: string; state: string; resolutionKind: string | null; version: number; policyRevisionId: string | null }> | null>;
   openCase(tx: PawketTransaction, command: Readonly<{ kind: CaseKind; orderId: string;
     sourceType: "commission_dispute" | "commission_refund_obligation" | "commission_late_payment_claim";
     sourceId: string; policyRevisionId: string | null; requestId: string; at: Date }>): Promise<{ caseId: string; created: boolean }>;
