@@ -21,6 +21,7 @@ export default defineConfig({
     "commission-journey.playwright.ts",
     "commission-reference-files.playwright.ts",
     "commission-fulfillment.playwright.ts",
+    "commission-resolution.playwright.ts",
     "ui-foundation.playwright.ts",
     "ui-regression.playwright.ts",
     "resolution-ui.playwright.ts",
