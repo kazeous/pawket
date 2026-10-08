@@ -40,10 +40,11 @@ export type CommissionSubmissionItem = Readonly<{
 export type CommissionThreadView = Readonly<{ items: readonly (CommissionMessageItem | CommissionSubmissionItem)[]; nextBeforeSequence: number | null; writable: boolean }>;
 
 /** Read pauses in the same transaction as the order projection or command. */
-export async function readCommissionCompletionDueAt(tx: PawketTransaction, reviewEndsAt: Date): Promise<Date | null> {
+export async function readCommissionCompletionDueAt(tx: PawketTransaction, order: Readonly<{ reviewEndsAt: Date; completionFloorAt: Date | null }>): Promise<Date | null> {
+  const base = order.completionFloorAt && order.completionFloorAt > order.reviewEndsAt ? order.completionFloorAt : order.reviewEndsAt;
   const pauses = await tx.select({ startedAt: commissionFulfillmentPauses.startedAt, endedAt: commissionFulfillmentPauses.endedAt })
-    .from(commissionFulfillmentPauses).where(or(isNull(commissionFulfillmentPauses.endedAt), gt(commissionFulfillmentPauses.endedAt, reviewEndsAt)));
-  return commissionCompletionDueAt(reviewEndsAt, pauses);
+    .from(commissionFulfillmentPauses).where(or(isNull(commissionFulfillmentPauses.endedAt), gt(commissionFulfillmentPauses.endedAt, base)));
+  return commissionCompletionDueAt(base, pauses);
 }
 function existingValid(command: ExistingCommand) {
   if (!commissionUuid(command.orderId)) commissionFail("invalid_request");
@@ -83,6 +84,7 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
         const order = await kit.owned(tx, command.orderId, command.actor);
         if (order.creatorUserId !== command.actor.userId) commissionFail("not_authorized");
         if (order.version !== command.expectedVersion) commissionFail("version_conflict");
+        if (await holds.hasOpenDispute(tx, order.id)) commissionFail("dispute_open");
         if (order.state !== "in_progress") commissionFail("invalid_transition");
         const [snapshot] = await tx.select().from(commissionTermsSnapshots).where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
         if (!snapshot) commissionFail("dependency_unavailable");
@@ -119,10 +121,11 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
         const [submission] = await tx.select().from(commissionSubmissions).where(and(eq(commissionSubmissions.orderId, order.id), eq(commissionSubmissions.id, command.submissionId))).limit(1);
         if (!submission || submission.response !== null ||
           (submission.kind === "draft" ? order.state !== "in_progress" || command.response === "accept" : order.state !== "delivered" || command.response === "approve")) commissionFail("invalid_transition");
+        if (command.response !== "accept" && await holds.hasOpenDispute(tx, order.id)) commissionFail("dispute_open");
         const at = kit.now(); let guardUntil: Date | undefined;
         if (submission.kind === "final") {
           if (!order.reviewEndsAt) commissionFail("invalid_transition");
-          const due = await readCommissionCompletionDueAt(tx, order.reviewEndsAt);
+          const due = await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt });
           if (due === null) commissionFail("fulfillment_disabled");
           requireCommissionBeforeDeadline(at, due); guardUntil = due;
         }
@@ -140,7 +143,7 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
           .where(and(eq(commissionSubmissions.id, submission.id), isNull(commissionSubmissions.response)));
         if (response === "changes_requested") {
           requireCommissionTransition(order.state as CommissionState, "in_progress");
-          const [reopened] = await tx.update(commissionOrders).set({ state: "in_progress", revisionsUsed: order.revisionsUsed + 1, deliveredAt: null, reviewEndsAt: null,
+          const [reopened] = await tx.update(commissionOrders).set({ state: "in_progress", revisionsUsed: order.revisionsUsed + 1, deliveredAt: null, reviewEndsAt: null, completionFloorAt: null,
             version: order.version + 1, updatedAt: at }).where(and(eq(commissionOrders.id, order.id), eq(commissionOrders.version, order.version))).returning();
           if (!reopened) commissionFail("version_conflict");
           await kit.record(tx, reopened, command.actor, command.requestId, submission.kind === "draft" ? "draft_changes_requested" : "final_changes_requested");
@@ -158,37 +161,47 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
       return kit.boundary(() => input.db.transaction(async (tx) => {
         const candidate = await kit.owned(tx, command.orderId, command.actor); await lockCommissionCreator(tx, candidate.creatorUserId);
         const proofExpiry = await kit.session(tx, command.actor); const order = await kit.owned(tx, command.orderId, command.actor);
-        if (!["in_progress", "delivered", "completed"].includes(order.state)) commissionFail("invalid_transition");
-        const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
-        const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
-        const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)
-          .where(and(eq(commissionSubmissions.orderId, order.id), inArray(commissionSubmissions.id, submissionIds))) : [];
-        const byId = new Map(submissions.map((submission) => [submission.id, submission]));
-        const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId) });
-        const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })) });
-        const due = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, order.reviewEndsAt) : null;
-        const at = kit.now(); if (proofExpiry <= at) commissionFail("not_authorized");
-        const items = page.map((entry): CommissionMessageItem | CommissionSubmissionItem => {
-          const attached = files.get(entry.kind + ":" + entry.entryId) ?? [];
-          if (entry.kind === "message") {
-            const message = messages.get(entry.entryId); if (!message) commissionFail("dependency_unavailable");
-            return { sequence: entry.sequence, kind: "message", id: entry.entryId, author: message.authorUserId === order.buyerUserId ? "buyer" : "creator",
-              text: message.text, files: attached, createdAt: message.createdAt.toISOString() };
-          }
-          const submission = byId.get(entry.entryId); if (!submission) commissionFail("dependency_unavailable");
-          const note = submission.noteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.noteEnvelope,
-            binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "note" } });
-          const responseNote = submission.responseNoteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.responseNoteEnvelope,
-            binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "response_note" } });
-          return { sequence: entry.sequence, kind: "submission", id: submission.id, submissionKind: submission.kind as SubmissionKind, note, files: attached,
-            submittedAt: submission.submittedAt.toISOString(), late: submission.kind === "final" && !!order.dueAt && submission.submittedAt > order.dueAt,
-            response: submission.response as SubmissionResponse | null, responseNote, respondedAt: submission.respondedAt?.toISOString() ?? null,
-            actionable: input.fulfillmentMode === "enabled" && command.actor.userId === order.buyerUserId && submission.response === null &&
-              (submission.kind === "draft" ? order.state === "in_progress" : order.state === "delivered" && due !== null && at < due) };
-        });
-        return { items, nextBeforeSequence: entries.length > limit ? items.at(-1)!.sequence : null,
-          writable: input.fulfillmentMode === "enabled" && (order.state === "in_progress" || order.state === "delivered") };
+        if (!["in_progress", "delivered", "completed"].includes(order.state) && !(order.state === "closed" && order.confirmedAt !== null)) commissionFail("invalid_transition");
+        const projection = await readCommissionThread(tx, input, order, { ...command, limit, now: kit.now });
+        if (proofExpiry <= kit.now()) commissionFail("not_authorized");
+        return projection;
       }));
     },
   };
+}
+
+/** Shared read-only projection; case callers supply no party actor or writable controls. */
+export async function readCommissionThread(tx: PawketTransaction, input: Pick<Input, "keyring" | "thread" | "fulfillmentMode">, order: Order,
+  command: Readonly<{ beforeSequence?: number; limit: number; actor?: CommissionActor; now(): Date }>): Promise<CommissionThreadView> {
+  const thread = input.thread; if (!thread) commissionFail("fulfillment_disabled");
+  const limit = command.limit;
+  const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
+  const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
+  const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)
+    .where(and(eq(commissionSubmissions.orderId, order.id), inArray(commissionSubmissions.id, submissionIds))) : [];
+  const byId = new Map(submissions.map((submission) => [submission.id, submission]));
+  const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId) });
+  const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })) });
+  const due = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
+  const at = command.now();
+  const items = page.map((entry): CommissionMessageItem | CommissionSubmissionItem => {
+    const attached = files.get(entry.kind + ":" + entry.entryId) ?? [];
+    if (entry.kind === "message") {
+      const message = messages.get(entry.entryId); if (!message) commissionFail("dependency_unavailable");
+      return { sequence: entry.sequence, kind: "message", id: entry.entryId, author: message.authorUserId === order.buyerUserId ? "buyer" : "creator",
+        text: message.text, files: attached, createdAt: message.createdAt.toISOString() };
+    }
+    const submission = byId.get(entry.entryId); if (!submission) commissionFail("dependency_unavailable");
+    const note = submission.noteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.noteEnvelope,
+      binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "note" } });
+    const responseNote = submission.responseNoteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.responseNoteEnvelope,
+      binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "response_note" } });
+    return { sequence: entry.sequence, kind: "submission", id: submission.id, submissionKind: submission.kind as SubmissionKind, note, files: attached,
+      submittedAt: submission.submittedAt.toISOString(), late: submission.kind === "final" && !!order.dueAt && submission.submittedAt > order.dueAt,
+      response: submission.response as SubmissionResponse | null, responseNote, respondedAt: submission.respondedAt?.toISOString() ?? null,
+      actionable: input.fulfillmentMode === "enabled" && command.actor?.userId === order.buyerUserId && submission.response === null &&
+        (submission.kind === "draft" ? order.state === "in_progress" : order.state === "delivered" && due !== null && at < due) };
+  });
+  return { items, nextBeforeSequence: entries.length > limit ? items.at(-1)!.sequence : null,
+    writable: command.actor !== undefined && input.fulfillmentMode === "enabled" && (order.state === "in_progress" || order.state === "delivered") };
 }

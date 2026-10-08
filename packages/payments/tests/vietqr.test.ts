@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { type IntegerVnd, requireIntegerVnd } from "../src/tip-contracts.js";
 import {
   createVietQrTransferInstruction, isVietQrDestinationSupported, VIETQR_MAX_AMOUNT_VND,
-  VIETQR_RECEIVING_BANKS, vietQrCrc16, VietQrError, type VietQrTransferInput,
+  VIETQR_RECEIVING_BANKS, VIETQR_REFUND_BANKS, vietQrCrc16, VietQrError, type VietQrTransferInput,
 } from "../src/vietqr.js";
 import golden from "./fixtures/vietqr-synthetic-golden.json" with { type: "json" };
 
@@ -39,6 +39,29 @@ function fields(payload: string): Map<string, string> {
 }
 
 describe("local domestic VietQR contract", () => {
+  it("Techcombank 970407 is refused by default and accepted with VIETQR_REFUND_BANKS", () => {
+    const input = { ...synthetic, bankBin: "970407" };
+    expect(isVietQrDestinationSupported(input)).toBe(false);
+    expect(() => createVietQrTransferInstruction(input)).toThrow(new VietQrError("unsupported_bank"));
+    expect(isVietQrDestinationSupported(input, VIETQR_REFUND_BANKS)).toBe(true);
+    expect(createVietQrTransferInstruction(input, VIETQR_REFUND_BANKS).bankName).toBe("Techcombank");
+  });
+  it("receiving banks are unchanged", () => {
+    expect(Object.keys(VIETQR_RECEIVING_BANKS)).toEqual(["970415", "970436"]);
+  });
+  it("every refund BIN is six digits and every name non-empty", () => {
+    expect(VIETQR_REFUND_BANKS).toEqual({
+      "970415": "VietinBank", "970436": "Vietcombank", "970418": "BIDV", "970405": "Agribank", "970422": "MBBank",
+      "970407": "Techcombank", "970416": "ACB", "970432": "VPBank", "970423": "TPBank",
+      "970403": "Sacombank", "970437": "HDBank", "970441": "VIB", "970443": "SHB",
+      "970431": "Eximbank", "970426": "MSB", "970448": "OCB", "970440": "SeABank", "970449": "LPBank",
+      "970428": "NamABank", "970454": "VietCapitalBank",
+    });
+    for (const [bin, name] of Object.entries(VIETQR_REFUND_BANKS)) {
+      expect(bin).toMatch(/^[0-9]{6}$/u); expect(name.trim().length).toBeGreaterThan(0);
+    }
+    expect(Object.isFrozen(VIETQR_REFUND_BANKS)).toBe(true);
+  });
   it.each(golden.vectors)("matches independently checked synthetic golden $transferReference", (vector) => {
     const { payload, ...input } = vector;
     const instruction = createVietQrTransferInstruction({ ...input, amountVnd: requireIntegerVnd(input.amountVnd) });

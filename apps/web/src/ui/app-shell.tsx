@@ -26,10 +26,12 @@ export function AppShell({
         <AccountSessionControl action={action} />
       </header>
       <main className={width === "narrow" ? "page-shell narrow-shell" : "page-shell"}>
+        {context === "Owner workspace" ? <nav className="button-row" aria-label="Điều hướng owner"><Link className="text-link" href="/admin/cases">Khiếu nại &amp; hoàn tiền</Link></nav> : null}
         {children}
       </main>
       <footer className="site-footer">
         <p>Pawket · công cụ cho nhà sáng tạo · 2026</p>
+        <Link href="/help">Trợ giúp</Link>
       </footer>
     </div>
   );

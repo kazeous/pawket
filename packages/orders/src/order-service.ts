@@ -14,7 +14,7 @@ import { createCommissionPaymentLifecyclePort, lockCommissionCreator } from "./p
 import { decryptCommissionBrief, decryptCommissionTerms, encryptCommissionBrief, encryptCommissionTerms } from "./private-content.js";
 import { commissionExpiredReason as expiredReason, createCommissionOrderPersistence } from "./order-persistence.js";
 import { createCommissionOrderMaintenanceService } from "./order-maintenance.js";
-import { createCommissionFulfillmentService, readCommissionCompletionDueAt } from "./fulfillment-service.js";
+import { createCommissionFulfillmentService, readCommissionCompletionDueAt, readCommissionThread } from "./fulfillment-service.js";
 import { commissionFileDeletionAt } from "./fulfillment-timing.js";
 import { commissionCommandFingerprint } from "./command-fingerprint.js";
 import { requireCommissionPolicy, type CommissionPolicyReadPort } from "./policy-repository.js";
@@ -135,6 +135,38 @@ export function createCommissionOrderService(input: Input) {
       ...encryptCommissionTerms(input.keyring, "commission_terms_snapshots", order.id, terms), buyerAcceptedAt: buyerAt, creatorAcceptedAt: creatorAt, createdAt: at });
     await input.payments.createIntent(tx, { orderId: order.id, creatorUserId: order.creatorUserId, accountVersionId: data.accountVersionId, amountVnd: terms.amountVnd,
       creator: { displayName: data.creator.displayName, handle: data.creator.canonicalHandle }, abuseKeyHash, requestId, at });
+  }
+  async function projectOrder(tx: PawketTransaction, order: Order, actor?: CommissionActor) {
+    const [brief] = await tx.select().from(commissionBriefs).where(eq(commissionBriefs.orderId, order.id)).limit(1);
+    const [revision] = await tx.select().from(commissionPackageRevisions).where(eq(commissionPackageRevisions.id, order.packageRevisionId)).limit(1);
+    const [snapshot] = await tx.select().from(commissionTermsSnapshots).where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
+    const [quote] = order.currentQuoteId ? await tx.select().from(commissionQuoteRevisions).where(eq(commissionQuoteRevisions.id, order.currentQuoteId)).limit(1) : [];
+    if (!brief || !revision) commissionFail("dependency_unavailable");
+    const terms = snapshot ? decryptCommissionTerms(input.keyring, "commission_terms_snapshots", order.id, snapshot)
+      : quote ? decryptCommissionTerms(input.keyring, "commission_quote_revisions", quote.id, quote) : revision.terms ? normalizeCommissionTerms(revision.terms) : null;
+    const [policy] = await tx.select({ id: commissionPolicyRevisions.id, document: commissionPolicyRevisions.document, checksum: commissionPolicyRevisions.checksum })
+      .from(commissionPolicyRevisions).where(eq(commissionPolicyRevisions.id, terms?.policyRevisionId ?? revision.policyRevisionId)).limit(1);
+    const currentPolicy = actor !== undefined && order.creatorUserId === actor.userId ? await input.policy.readCurrent(tx, now()) : null;
+    const canShowInstructions = actor !== undefined && order.buyerUserId === actor.userId && input.paymentsMode !== "disabled" && order.state === "awaiting_payment" &&
+      await paymentsLifecycle.lockSettlement(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now() });
+    const payment = await input.payments.projectPayment(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now(), includeInstructions: canShowInstructions });
+    const role = actor === undefined || order.buyerUserId === actor.userId ? "buyer" as const : "creator" as const;
+    const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" && !order.confirmedAt }) : [];
+    const completionDueAt = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
+    const at = now();
+    const effectivePayment = payment && payment.state === "awaiting_transfer" && new Date(payment.expiresAt) <= at
+      ? { ...payment, state: "expired" as const, instruction: null } : payment;
+    return { id: order.id, version: order.version,
+      state: order.state as CommissionState, route: order.route, closeReason: order.closeReason, createdAt: order.createdAt.toISOString(), expiresAt: order.expiresAt?.toISOString() ?? null,
+      acceptedAt: order.acceptedAt?.toISOString() ?? null, confirmedAt: order.confirmedAt?.toISOString() ?? null, dueAt: order.dueAt?.toISOString() ?? null,
+      fulfillment: order.confirmedAt && snapshot ? { deliveredAt: order.deliveredAt?.toISOString() ?? null, reviewEndsAt: order.reviewEndsAt?.toISOString() ?? null,
+        completionFloorAt: order.completionFloorAt?.toISOString() ?? null, completionDueAt: completionDueAt?.toISOString() ?? null, completedAt: order.completedAt?.toISOString() ?? null, completionKind: order.completionKind,
+        revisionsUsed: order.revisionsUsed, revisionAllowance: snapshot.revisionAllowance, lateDelivery: !!order.deliveredAt && !!order.dueAt && order.deliveredAt > order.dueAt,
+        fileDeletionAt: order.completedAt ? commissionFileDeletionAt(order.completedAt).toISOString() : null } : null,
+      overdue: !!order.dueAt && order.dueAt <= at, deadlinePassed: !!order.expiresAt && order.expiresAt <= at && ["requested", "quoted", "awaiting_payment"].includes(order.state),
+      package: { id: order.packageId, revisionId: order.packageRevisionId, title: revision.title }, brief: decryptCommissionBrief(input.keyring, order.id, brief), referenceFiles,
+      terms, policy: policy ?? null, currentPolicy: currentPolicy ? { revisionId: currentPolicy.revisionId, document: currentPolicy.document, acceptsOrders: currentPolicy.acceptsOrders } : null,
+      quote: quote ? { id: quote.id, revisionNumber: quote.revisionNumber, issuedAt: quote.issuedAt.toISOString(), expiresAt: quote.expiresAt.toISOString() } : null, payment: effectivePayment };
   }
   return {
     paymentsLifecycle,
@@ -262,41 +294,30 @@ export function createCommissionOrderService(input: Input) {
     },
     ...createCommissionOrderMaintenanceService(input),
     ...createCommissionFulfillmentService({ mutate, owned, session, record, boundary, now, newId }, { ...input, completeCommissionOrder }),
+    /** Internal evidence port: call only inside Trust's open-case, proof-consuming access transaction. */
+    async readOrderForCase(tx: PawketTransaction, orderId: string) {
+      if (!commissionUuid(orderId)) commissionFail("invalid_request");
+      const [order] = await tx.select().from(commissionOrders).where(eq(commissionOrders.id, orderId)).limit(1);
+      if (!order) commissionFail("not_available");
+      return { ...await projectOrder(tx, order), role: "owner" as const };
+    },
+    /** Internal evidence port; never an HTTP participant bypass. No creator lock behind the case share lock. */
+    async readThreadForCase(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number }>) {
+      if (!commissionUuid(command.orderId)) commissionFail("invalid_request");
+      commissionInteger(command.limit, 1, 50);
+      if (command.beforeSequence !== undefined) commissionInteger(command.beforeSequence, 1, 2_147_483_647);
+      const [order] = await tx.select().from(commissionOrders).where(eq(commissionOrders.id, command.orderId)).limit(1);
+      if (!order) commissionFail("not_available");
+      return readCommissionThread(tx, input, order, { ...command, now });
+    },
     async getOrder(command: { actor: CommissionActor; orderId: string }) {
       actorValid(command.actor); if (!commissionUuid(command.orderId)) commissionFail("not_authorized");
       return boundary(() => input.db.transaction(async (tx) => {
         const candidate = await owned(tx, command.orderId, command.actor); await lockCommissionCreator(tx, candidate.creatorUserId); const proofExpiry = await session(tx, command.actor);
         const order = await owned(tx, command.orderId, command.actor);
-        const [brief] = await tx.select().from(commissionBriefs).where(eq(commissionBriefs.orderId, order.id)).limit(1);
-        const [revision] = await tx.select().from(commissionPackageRevisions).where(eq(commissionPackageRevisions.id, order.packageRevisionId)).limit(1);
-        const [snapshot] = await tx.select().from(commissionTermsSnapshots).where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
-        const [quote] = order.currentQuoteId ? await tx.select().from(commissionQuoteRevisions).where(eq(commissionQuoteRevisions.id, order.currentQuoteId)).limit(1) : [];
-        if (!brief || !revision) commissionFail("dependency_unavailable");
-        const terms = snapshot ? decryptCommissionTerms(input.keyring, "commission_terms_snapshots", order.id, snapshot)
-          : quote ? decryptCommissionTerms(input.keyring, "commission_quote_revisions", quote.id, quote) : revision.terms ? normalizeCommissionTerms(revision.terms) : null;
-        const [policy] = await tx.select({ id: commissionPolicyRevisions.id, document: commissionPolicyRevisions.document, checksum: commissionPolicyRevisions.checksum })
-          .from(commissionPolicyRevisions).where(eq(commissionPolicyRevisions.id, terms?.policyRevisionId ?? revision.policyRevisionId)).limit(1);
-        const currentPolicy = order.creatorUserId === command.actor.userId ? await input.policy.readCurrent(tx, now()) : null;
-        const canShowInstructions = order.buyerUserId === command.actor.userId && input.paymentsMode !== "disabled" && order.state === "awaiting_payment" &&
-          await paymentsLifecycle.lockSettlement(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now() });
-        const payment = await input.payments.projectPayment(tx, { orderId: order.id, creatorUserId: order.creatorUserId, at: now(), includeInstructions: canShowInstructions });
-        const role = order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const;
-        const referenceFiles = input.files ? await input.files.describeBriefFiles(tx, { orderId: order.id, viewer: role, withdrawn: order.state === "closed" }) : [];
-        const completionDueAt = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, order.reviewEndsAt) : null;
-        const at = now(); if (proofExpiry <= at) commissionFail("not_authorized");
-        const effectivePayment = payment && payment.state === "awaiting_transfer" && new Date(payment.expiresAt) <= at
-          ? { ...payment, state: "expired" as const, instruction: null } : payment;
-        return { id: order.id, version: order.version, role,
-          state: order.state as CommissionState, route: order.route, closeReason: order.closeReason, createdAt: order.createdAt.toISOString(), expiresAt: order.expiresAt?.toISOString() ?? null,
-          acceptedAt: order.acceptedAt?.toISOString() ?? null, confirmedAt: order.confirmedAt?.toISOString() ?? null, dueAt: order.dueAt?.toISOString() ?? null,
-          fulfillment: order.confirmedAt && snapshot ? { deliveredAt: order.deliveredAt?.toISOString() ?? null, reviewEndsAt: order.reviewEndsAt?.toISOString() ?? null,
-            completionDueAt: completionDueAt?.toISOString() ?? null, completedAt: order.completedAt?.toISOString() ?? null, completionKind: order.completionKind,
-            revisionsUsed: order.revisionsUsed, revisionAllowance: snapshot.revisionAllowance, lateDelivery: !!order.deliveredAt && !!order.dueAt && order.deliveredAt > order.dueAt,
-            fileDeletionAt: order.completedAt ? commissionFileDeletionAt(order.completedAt).toISOString() : null } : null,
-          overdue: !!order.dueAt && order.dueAt <= at, deadlinePassed: !!order.expiresAt && order.expiresAt <= at && ["requested", "quoted", "awaiting_payment"].includes(order.state),
-          package: { id: order.packageId, revisionId: order.packageRevisionId, title: revision.title }, brief: decryptCommissionBrief(input.keyring, order.id, brief), referenceFiles,
-          terms, policy: policy ?? null, currentPolicy: currentPolicy ? { revisionId: currentPolicy.revisionId, document: currentPolicy.document, acceptsOrders: currentPolicy.acceptsOrders } : null,
-          quote: quote ? { id: quote.id, revisionNumber: quote.revisionNumber, issuedAt: quote.issuedAt.toISOString(), expiresAt: quote.expiresAt.toISOString() } : null, payment: effectivePayment };
+        const projection = await projectOrder(tx, order, command.actor);
+        if (proofExpiry <= now()) commissionFail("not_authorized");
+        return { ...projection, role: order.buyerUserId === command.actor.userId ? "buyer" as const : "creator" as const };
       }));
     },
     async listQuoteHistory(command: { actor: CommissionActor; orderId: string; beforeRevision?: number; limit?: number }) {

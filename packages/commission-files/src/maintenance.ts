@@ -135,7 +135,7 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   const purgeNextAfter: CommissionFilePurgeCursor | null = purgeCandidates.length === input.batchSize
     ? { createdAt: purgeCandidates[purgeCandidates.length - 1]!.createdAt, id: purgeCandidates[purgeCandidates.length - 1]!.id } : null;
 
-  // Closed-unpaid references and completed-order files have distinct retention periods.
+  // Closed-unpaid brief references keep 30 days; resolution evidence and paid terminal files keep 180 days.
   // Files attached to orders without an eligible terminal outcome stay `attached`, so
   // a plain unbounded scan would let that backlog fill every batch once it exceeds batchSize and
   // never reach closed-unpaid files attached afterwards. Keyset pagination on (attachedAt, id) walks
@@ -150,17 +150,19 @@ export async function runCommissionFileMaintenance(input: Readonly<{
         and(eq(commissionFiles.attachedAt, retentionCursor.attachedAt), gt(commissionFiles.id, retentionCursor.id)),
       ))
     : eq(commissionFiles.state, "attached");
-  const attached = await input.db.select({ id: commissionFiles.id, orderId: commissionFiles.orderId, attachedAt: commissionFiles.attachedAt }).from(commissionFiles)
+  const attached = await input.db.select({ id: commissionFiles.id, orderId: commissionFiles.orderId, context: commissionFiles.context, attachedAt: commissionFiles.attachedAt }).from(commissionFiles)
     .where(retentionWhere).orderBy(asc(commissionFiles.attachedAt), asc(commissionFiles.id)).limit(input.batchSize);
   const facts = await input.orders.retentionFacts(input.db, attached.map((file) => file.orderId!));
   for (const file of attached) {
     const order = facts.get(file.orderId!);
     if (!order) continue;
-    const closedUnpaidDue = order.state === "closed" && order.confirmedAt === null && order.closedAt !== null
+    const closedUnpaidDue = file.context === "brief" && order.state === "closed" && order.confirmedAt === null && order.closedAt !== null
       && order.closedAt.getTime() + COMMISSION_FILE_POLICY.closedUnpaidRetentionMs <= at.getTime();
     const completedDue = order.state === "completed" && order.completedAt !== null
       && order.completedAt.getTime() + COMMISSION_FILE_POLICY.completedRetentionMs <= at.getTime();
-    if (!closedUnpaidDue && !completedDue) continue;
+    const closedLongRetentionDue = order.state === "closed" && order.closedAt !== null && (order.confirmedAt !== null || file.context === "resolution_evidence")
+      && order.closedAt.getTime() + COMMISSION_FILE_POLICY.completedRetentionMs <= at.getTime();
+    if (!closedUnpaidDue && !completedDue && !closedLongRetentionDue) continue;
     if (await input.holds.hasEvidenceHold(input.db, file.orderId!)) continue;
     retentionDue += 1;
     if (input.retentionMode !== "enforce") continue;

@@ -50,7 +50,7 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
       clearInterval(timer);
       if (document.visibilityState !== "visible") { controller?.abort(); return; }
       void read(false);
-      if (order.state !== "completed") timer = setInterval(() => void read(true), 15_000);
+      if (order.state !== "completed" && order.state !== "closed") timer = setInterval(() => void read(true), 15_000);
     }
     visible(); document.addEventListener("visibilitychange", visible);
     return () => { active = false; clearInterval(timer); controller?.abort(); document.removeEventListener("visibilitychange", visible); };
@@ -68,12 +68,13 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
   }
   const updated = () => { setRefreshIndex((current) => current + 1); void onRefresh(); };
   const enabled = fulfillmentMode === "enabled";
-  const writable = enabled && !!thread?.writable && order.state !== "completed";
+  const writable = enabled && !!thread?.writable && order.state !== "completed" && order.state !== "closed";
   const locked = disabled || failed || busy;
   const due = order.fulfillment?.completionDueAt;
   const deadlinePassed = reviewExpired || order.state === "delivered" && !due;
   const latestSubmission = Math.max(0, ...(thread?.items ?? []).filter((item) => item.kind === "submission").map((item) => item.sequence));
-  const completionLabels: Record<string, string> = { buyer_accepted: "Người đặt đã chấp nhận", review_window_elapsed: "Tự hoàn tất khi hết hạn duyệt" };
+  const completionLabels: Record<string, string> = { buyer_accepted: "Người đặt đã chấp nhận", review_window_elapsed: "Tự hoàn tất khi hết hạn duyệt", agreement: "Hoàn tất theo thỏa thuận", ruling: "Hoàn tất theo kết luận của Pawket" };
+  const closedAt = order.state === "closed" ? timeline?.items.find((event) => event.type === "closed")?.occurredAt : null;
   const entries = [
     ...(thread?.items ?? []).map((item) => ({ key: `thread:${item.sequence}`, at: item.kind === "message" ? item.createdAt : item.submittedAt, sequence: item.sequence, item })),
     ...(timeline?.items ?? []).map((event) => ({ key: `event:${event.version}`, at: event.occurredAt, sequence: Number.MAX_SAFE_INTEGER, event })),
@@ -83,12 +84,13 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
     <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy} onClick={() => void older("quotes", null)}>Xem lịch sử báo giá</Button><Button variant="outline" disabled={busy} onClick={() => setRefreshIndex((current) => current + 1)}>Xem diễn biến đơn</Button></div>
     {!enabled ? <Alert><AlertDescription>Tạm dừng trao đổi và giao bài. Thời hạn duyệt sẽ được cộng thêm 48 giờ sau khi mở lại.</AlertDescription></Alert> : null}
     {order.state === "completed" ? <Alert><AlertDescription>Đơn đã hoàn tất. Cuộc trò chuyện chỉ còn để xem.</AlertDescription></Alert> : null}
+    {order.state === "closed" ? <Alert><AlertDescription>Đơn đã đóng. Cuộc trò chuyện chỉ còn để xem.{closedAt ? ` Tệp dự kiến được xóa từ ${formatTipTime(new Date(Date.parse(closedAt) + 180 * 86_400_000).toISOString())}; có thể được giữ lâu hơn khi Pawket đang xem xét yêu cầu.` : ""}</AlertDescription></Alert> : null}
     {failed ? <Alert variant="destructive"><AlertTitle>Chưa tải được lịch sử</AlertTitle><AlertDescription>Vui lòng thử lại.</AlertDescription></Alert> : null}
     <ol className="flex min-w-0 flex-col gap-4">{entries.map((entry) => <li key={entry.key} className="min-w-0">
       {"event" in entry ? <p className="text-sm text-muted-foreground"><time dateTime={entry.at}>{formatTipTime(entry.at)}</time> · {stateLabels[entry.event.type as keyof typeof stateLabels] ?? (entry.event.type === "confirmed" ? "Đã xác nhận tiền" : "Đã cập nhật đơn")}{entry.event.reason ? ` · ${closeLabels[entry.event.reason] ?? completionLabels[entry.event.reason] ?? "Điều kiện đơn thay đổi"}` : ""}</p>
         : entry.item.kind === "submission" ? <SubmissionCard submission={{ ...entry.item, actionable: enabled && entry.item.actionable && !deadlinePassed && entry.item.sequence === latestSubmission }} order={order} disabled={locked} onUpdated={updated} />
           : <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={3}><Badge variant="outline">{entry.item.author === "creator" ? "nghệ sĩ" : "người đặt"}</Badge></CardTitle><CardDescription><time dateTime={entry.at}>{formatTipTime(entry.at)}</time></CardDescription></CardHeader>
-            <CardContent className="flex min-w-0 flex-col gap-3">{entry.item.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{entry.item.text}</p> : null}<AttachedFileList order={order} files={entry.item.files} /></CardContent></Card>}
+            <CardContent className="flex min-w-0 flex-col gap-3">{entry.item.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{entry.item.text}</p> : null}<AttachedFileList order={order} files={entry.item.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer" && entry.item.author === "creator"} /></CardContent></Card>}
     </li>)}</ol>
     <div className="flex flex-wrap gap-2">{thread?.nextBeforeSequence ? <Button variant="outline" disabled={busy} onClick={() => void older("thread", thread.nextBeforeSequence)}>Diễn biến cũ hơn</Button> : null}{timeline?.nextBeforeVersion ? <Button variant="outline" disabled={busy} onClick={() => void older("timeline", timeline.nextBeforeVersion)}>Xem diễn biến đơn</Button> : null}</div>
     {quotes ? <div className="flex flex-col gap-3">{quotes.items.length ? quotes.items.map((quote) => <Card key={quote.id}><CardHeader><CardTitle role="heading" aria-level={3}>Báo giá lần {quote.revisionNumber}</CardTitle><CardDescription>{formatTipTime(quote.issuedAt)} · Hạn {formatTipTime(quote.expiresAt)}</CardDescription></CardHeader><CardContent><CommissionTerms terms={quote.terms} /></CardContent></Card>) : <p>Chưa có báo giá riêng.</p>}{quotes.nextBeforeRevision ? <Button variant="outline" disabled={busy} onClick={() => void older("quotes", quotes.nextBeforeRevision)}>Báo giá cũ hơn</Button> : null}</div> : null}

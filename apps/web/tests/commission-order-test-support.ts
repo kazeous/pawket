@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { createCommissionPackageService } from "@pawket/catalog";
-import { commissionPolicyChecksum, createCommissionOrderService, createCommissionPolicyReadPort, type CommissionRoute } from "@pawket/orders";
+import { commissionPolicyChecksum, createCommissionOrderService, createCommissionPolicyReadPort, type CommissionIntakeFencePort, type CommissionRoute } from "@pawket/orders";
 import { createCommissionPaymentIntentPort, createCreatorCommissionPaymentService, createTipReceivingAccountEligibilityPort } from "@pawket/payments";
 import { commandIds, createSePayIntegrationFixture, fixtureHash, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const at = new Date("2026-09-26T04:00:00Z");
+type SetupOptions = { revisionAllowance?: number; reviewWindowDays?: number; intakeFence?: CommissionIntakeFencePort };
 export function createCommissionOrderTestFixture(label: string) {
   const parsed = new URL(process.env.TEST_DATABASE_URL ?? "invalid:");
   if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || !/test|ci/iu.test(parsed.pathname)) throw new Error("Commission workflow tests require a dedicated local test database");
@@ -17,7 +18,7 @@ export function createCommissionOrderTestFixture(label: string) {
       checksum: commissionPolicyChecksum(facts), effectiveAt: at, createdAt: at });
     await base.db.update(schema.commissionPolicyCurrent).set({ revisionId: policyId, updatedAt: at });
   }
-  async function setup(route: CommissionRoute = "fixed_immediate", options: { revisionAllowance?: number; reviewWindowDays?: number } = {}) {
+  async function setup(route: CommissionRoute = "fixed_immediate", options: SetupOptions = {}) {
     const creator = await base.creator(); creator.setNow(at);
     const users = new Map([[creator.actor.userId, creator.actor.sessionId]]); const gates = { eligible: true, visible: true };
     async function buyer() {
@@ -30,11 +31,12 @@ export function createCommissionOrderTestFixture(label: string) {
     await base.db.insert(schema.creatorPublicationRevisions).values({ id: publicationId, pageId, revisionNumber: 1, canonicalHandle: handle, displayName: "Artist", shortIntroduction: "Art",
       primaryDiscipline: "illustration", secondaryDisciplines: [], actorUserId: creator.actor.userId, actorSessionId: creator.actor.sessionId, expectedDraftVersion: 1, requestId: randomUUID(), publishedAt: at });
     await base.db.update(schema.creatorPages).set({ publishedRevisionId: publicationId }).where(eq(schema.creatorPages.id, pageId));
+    await base.db.insert(schema.creatorHandleClaims).values({ id: randomUUID(), pageId, normalizedHandle: handle, kind: "canonical", claimedAt: at });
     const policy = createCommissionPolicyReadPort({ environment: "test" });
     const identity = { getTipSessionAssurance: async (_tx: unknown, actor: { userId: string; sessionId: string }, time: Date) => users.get(actor.userId) === actor.sessionId
       ? { sessionExpiresAt: new Date(time.getTime() + 60_000) } : null,
     lockSettlementParticipants: async (_tx: unknown, command: { buyerUserId: string; creatorUserId: string }) => gates.eligible && users.has(command.buyerUserId) && command.creatorUserId === creator.actor.userId };
-    const catalog = createCommissionPackageService({ ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", publishingMode: "general_audience", policy,
+    const catalog = createCommissionPackageService({ ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", publishingMode: "general_audience", policy, intakeFence: options.intakeFence,
       identity: { lockCreator: async (tx, actor, time) => actor.userId === creator.actor.userId ? identity.getTipSessionAssurance(tx, actor, time) : null },
       receivingAccount: createTipReceivingAccountEligibilityPort({ ...creator.common, paymentsMode: "manual_only" }),
       visibility: { resolveVisibleReportTarget: async (_tx, target) => gates.visible ? { target, pageId, creatorUserId: creator.actor.userId, canonicalHandle: handle,
@@ -53,9 +55,9 @@ export function createCommissionOrderTestFixture(label: string) {
     const service = createCommissionOrderService(input);
     const request = (actor = buyerActor) => ({ actor, packageId, revisionId: pkg!.publishedRevisionId!, policyRevisionId: policyId, acceptTerms: route !== "custom_quote",
       brief: { text: "Private commission brief", referenceLinks: ["https://example.invalid/reference"] }, abuseKeyHash: fixtureHash(), ...commandIds() });
-    return { creator, buyerActor, buyer, gates, users, catalog, input, service, payments, terms, draft, pageId, packageId, revisionId: pkg!.publishedRevisionId!, policyId, request };
+    return { creator, buyerActor, buyer, gates, users, catalog, input, service, payments, terms, draft, pageId, handle, packageId, revisionId: pkg!.publishedRevisionId!, policyId, request };
   }
-  async function paidOrder(options: { revisionAllowance?: number; reviewWindowDays?: number } = {}) {
+  async function paidOrder(options: SetupOptions = {}) {
     const s = await setup("fixed_immediate", options);
     const orderId = await s.service.request(s.request()); s.creator.advance(1_000);
     const order = await s.service.getOrder({ actor: s.buyerActor, orderId });
@@ -63,9 +65,10 @@ export function createCommissionOrderTestFixture(label: string) {
     // Payments owns one db.transaction and calls lockSettlement and confirmPayment on this lifecycle port.
     const payments = createCreatorCommissionPaymentService({ ...s.creator.common, applicationRevision: "synthetic-i7", paymentsMode: "manual_only",
       recentAuthMs: 900_000, mfaAuthMs: 300_000, assurance: s.creator.assurance, commissions: s.service.paymentsLifecycle });
-    await payments.confirm({ actor: s.creator.actor, paymentIntentId: order.payment.id, observedAmountVnd: order.payment.amountVnd,
-      observedTransferReference: order.payment.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() });
-    return { orderId, service: s.service, buyer: s.buyerActor, creator: s.creator.actor, s };
+    const confirmationCommand = { actor: s.creator.actor, paymentIntentId: order.payment.id, observedAmountVnd: order.payment.amountVnd,
+      observedTransferReference: order.payment.reference, observedBankTransactionId: randomUUID(), attestedReceived: true, ...commandIds() };
+    await payments.confirm(confirmationCommand);
+    return { orderId, service: s.service, buyer: s.buyerActor, creator: s.creator.actor, s, confirmationCommand, confirmationService: payments };
   }
   return { ...base, initialize, setup, paidOrder, policyId };
 }

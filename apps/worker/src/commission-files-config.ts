@@ -1,6 +1,7 @@
 import type { ServerEnv } from "@pawket/config";
-import { createClamdClient, createS3CommissionFileStorage, noCommissionFileEvidenceHolds } from "@pawket/commission-files";
+import { createClamdClient, createS3CommissionFileStorage } from "@pawket/commission-files";
 import { readCommissionFileRetentionFacts } from "@pawket/orders";
+import { createCaseEvidenceHoldPort } from "@pawket/trust";
 
 import type { CommissionFilesWorkerConfiguration } from "./worker-runtime.js";
 
@@ -26,6 +27,6 @@ export function createWorkerCommissionFilesConfiguration(env: Env): CommissionFi
     scannerProbe: createClamdClient({ host: env.COMMISSION_FILES_CLAMD_HOST, port: env.COMMISSION_FILES_CLAMD_PORT, timeoutMs: 5_000 }),
     concurrency: env.COMMISSION_FILES_SCAN_CONCURRENCY, batchSize: env.COMMISSION_FILES_MAINTENANCE_BATCH_SIZE,
     scanIntervalMs: env.COMMISSION_FILES_MAINTENANCE_INTERVAL_MS, retentionMode: env.COMMISSION_FILE_RETENTION_MODE,
-    orders: { retentionFacts: readCommissionFileRetentionFacts }, holds: noCommissionFileEvidenceHolds,
+    orders: { retentionFacts: readCommissionFileRetentionFacts }, holds: createCaseEvidenceHoldPort(),
   };
 }

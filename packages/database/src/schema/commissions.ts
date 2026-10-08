@@ -11,6 +11,7 @@ import { creatorPages } from "./creator-catalog";
 
 export const COMMISSION_POLICY_BOOTSTRAP_ID = "00000000-0000-4000-8000-000000000006";
 export const COMMISSION_SUBMISSION_RESPONSES = ["approved", "changes_requested", "superseded"] as const;
+export const COMMISSION_POST_PAYMENT_CLOSE_REASONS = ["cancelled_by_agreement", "cancelled_by_ruling", "buyer_cancelled_after_suspension", "fulfillment_frozen"] as const;
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const vnd = (name: string) => bigint(name, { mode: "number" });
 const routeCheck = (column: SQLWrapper) => sql`${column} in ('fixed_immediate','fixed_approval','custom_quote')`;
@@ -137,6 +138,7 @@ export const commissionOrders = pgTable("commission_orders", {
   dueAt: time("due_at"),
   deliveredAt: time("delivered_at"),
   reviewEndsAt: time("review_ends_at"),
+  completionFloorAt: time("completion_floor_at"),
   completedAt: time("completed_at"),
   completionKind: text("completion_kind"),
   revisionsUsed: integer("revisions_used").notNull().default(0),
@@ -161,16 +163,26 @@ export const commissionOrders = pgTable("commission_orders", {
     and (${t.state} <> 'quoted' or (${t.route} = 'custom_quote' and ${t.currentQuoteId} is not null))`),
   check("commission_orders_deadline_check", sql`(${t.state} not in ('requested','quoted','awaiting_payment') or (${t.expiresAt} is not null and ${t.expiresAt} > ${t.createdAt}))
     and (${t.state} not in ('in_progress','delivered','completed') or (${t.expiresAt} is not null and ${t.confirmedAt} < ${t.expiresAt}))`),
-  check("commission_orders_completion_check", sql`coalesce((${t.state} in ('in_progress','delivered','completed') and ${t.confirmedAt} is not null and ${t.dueAt} > ${t.confirmedAt})
-    or (${t.state} not in ('in_progress','delivered','completed') and ${t.confirmedAt} is null and ${t.dueAt} is null), false)`),
+  check("commission_orders_completion_check", sql`coalesce(((${t.state} in ('in_progress','delivered','completed')
+      or (${t.state} = 'closed' and ${t.closeReason} in ('cancelled_by_agreement','cancelled_by_ruling','buyer_cancelled_after_suspension','fulfillment_frozen')))
+      and ${t.confirmedAt} is not null and ${t.dueAt} > ${t.confirmedAt})
+    or ((${t.state} in ('requested','quoted','awaiting_payment')
+      or (${t.state} = 'closed' and ${t.closeReason} not in ('cancelled_by_agreement','cancelled_by_ruling','buyer_cancelled_after_suspension','fulfillment_frozen')))
+      and ${t.confirmedAt} is null and ${t.dueAt} is null), false)`),
   check("commission_orders_fulfillment_check", sql`${t.revisionsUsed} between 0 and 10 and coalesce(
-    (${t.state} in ('requested','quoted','awaiting_payment','closed') and ${t.revisionsUsed} = 0 and ${t.deliveredAt} is null and ${t.reviewEndsAt} is null and ${t.completedAt} is null and ${t.completionKind} is null)
+    ((${t.state} in ('requested','quoted','awaiting_payment') or (${t.state} = 'closed' and ${t.closeReason} not in ('cancelled_by_agreement','cancelled_by_ruling','buyer_cancelled_after_suspension','fulfillment_frozen')))
+      and ${t.revisionsUsed} = 0 and ${t.deliveredAt} is null and ${t.reviewEndsAt} is null and ${t.completedAt} is null and ${t.completionKind} is null)
+    or (${t.state} = 'closed' and ${t.closeReason} in ('cancelled_by_agreement','cancelled_by_ruling','buyer_cancelled_after_suspension','fulfillment_frozen')
+      and ${t.completedAt} is null and ${t.completionKind} is null
+      and ((${t.deliveredAt} is null and ${t.reviewEndsAt} is null) or (${t.deliveredAt} is not null and ${t.reviewEndsAt} > ${t.deliveredAt})))
     or (${t.state} = 'in_progress' and ${t.deliveredAt} is null and ${t.reviewEndsAt} is null and ${t.completedAt} is null and ${t.completionKind} is null)
     or (${t.state} = 'delivered' and ${t.deliveredAt} is not null and ${t.reviewEndsAt} > ${t.deliveredAt} and ${t.completedAt} is null and ${t.completionKind} is null)
     or (${t.state} = 'completed' and ${t.deliveredAt} is not null and ${t.reviewEndsAt} > ${t.deliveredAt} and ${t.completedAt} >= ${t.deliveredAt} and ${t.completedAt} = ${t.updatedAt}
-      and ${t.completionKind} in ('buyer_accepted','review_window_elapsed') and (${t.completionKind} <> 'review_window_elapsed' or ${t.completedAt} >= ${t.reviewEndsAt})), false)`),
+      and ${t.completionKind} in ('buyer_accepted','review_window_elapsed','agreement','ruling') and (${t.completionKind} <> 'review_window_elapsed' or ${t.completedAt} >= coalesce(${t.completionFloorAt}, ${t.reviewEndsAt}))), false)`),
+  check("commission_orders_floor_check", sql`${t.completionFloorAt} is null or coalesce(
+    ${t.deliveredAt} is not null and ${t.state} in ('delivered','completed','closed') and ${t.completionFloorAt} > ${t.reviewEndsAt}, false)`),
   check("commission_orders_closed_check", sql`(${t.state} = 'closed' and ${t.closedAt} is not null and ${t.closeReason} is not null
-    and ${t.closeReason} in ('buyer_withdrawn','creator_declined','quote_withdrawn','quote_declined','request_expired','quote_expired','buyer_cancelled','creator_cancelled','payment_expired','security_invalidated','eligibility_invalidated'))
+    and ${t.closeReason} in ('buyer_withdrawn','creator_declined','quote_withdrawn','quote_declined','request_expired','quote_expired','buyer_cancelled','creator_cancelled','payment_expired','security_invalidated','eligibility_invalidated','cancelled_by_agreement','cancelled_by_ruling','buyer_cancelled_after_suspension','fulfillment_frozen'))
     or (${t.state} <> 'closed' and ${t.closedAt} is null and ${t.closeReason} is null)`),
   check("commission_orders_time_check", sql`${t.updatedAt} >= ${t.createdAt} and (${t.acceptedAt} is null or ${t.acceptedAt} between ${t.createdAt} and ${t.updatedAt})
     and (${t.confirmedAt} is null or ${t.confirmedAt} between ${t.acceptedAt} and ${t.updatedAt}) and (${t.closedAt} is null or ${t.closedAt} = ${t.updatedAt})`),
@@ -266,7 +278,8 @@ export const commissionReservations = pgTable("commission_reservations", {
   check("commission_reservations_state_check", sql`(${t.state} = 'reserved' and ${t.occupiedAt} is null and ${t.releasedAt} is null)
     or (${t.state} = 'occupied' and ${t.occupiedAt} is not null and ${t.occupiedAt} >= ${t.reservedAt} and ${t.releasedAt} is null)
     or (${t.state} = 'released' and ${t.occupiedAt} is null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.reservedAt})
-    or (${t.state} = 'completed' and ${t.occupiedAt} is not null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.occupiedAt})`),
+    or (${t.state} = 'completed' and ${t.occupiedAt} is not null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.occupiedAt})
+    or (${t.state} = 'cancelled' and ${t.occupiedAt} is not null and ${t.releasedAt} is not null and ${t.releasedAt} >= ${t.occupiedAt})`),
 ]);
 
 export const commissionEvents = pgTable("commission_events", {

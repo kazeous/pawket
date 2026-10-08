@@ -471,7 +471,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "oidc_cleanup", "commission_files"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "commission_resolution", "oidc_cleanup", "commission_files"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",
@@ -911,4 +911,18 @@ export function setPublicMediaStorageAvailabilityMetric(input: {
     rejectUnsafeMetric();
   }
   publicMediaStorageAvailable.set({ area: input.area }, input.available ? 1 : 0);
+}
+
+const resolutionOperationsTotal = new Counter({ name: "pawket_resolution_operations_total", help: "Resolution maintenance and source validation by fixed operation and outcome.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const resolutionOutcomes: Readonly<Record<string, readonly string[]>> = { scan: ["completed", "failed"], event: ["validated", "failed"] };
+const resolutionPaused = new Gauge({ name: "pawket_commission_resolution_paused", help: "Whether the last durable resolution observation found an open pause.", registers: [metricsRegistry] });
+const commissionRefundOverdue = new Gauge({ name: "pawket_commission_refund_overdue", help: "Current refund obligations past their effective send deadline.", registers: [metricsRegistry] });
+export function recordResolutionOperation(input: { operation: string; outcome: string }): void {
+  if (!resolutionOutcomes[input.operation]?.includes(input.outcome)) throw new Error("Invalid resolution metric labels");
+  resolutionOperationsTotal.inc(input);
+}
+export function setResolutionPausedMetric(paused: boolean): void { resolutionPaused.set(paused ? 1 : 0); }
+export function setCommissionRefundOverdueMetric(count: number): void {
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error("Invalid refund overdue count");
+  commissionRefundOverdue.set(count);
 }

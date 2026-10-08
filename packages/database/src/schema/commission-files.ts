@@ -10,7 +10,7 @@ import { identityUsers } from "./identity-core";
 import { commissionEnvelopeCheck, commissionOrders, commissionPackages } from "./commissions";
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
-export const COMMISSION_FILE_CONTEXTS_DB = ["brief", "thread", "submission"] as const;
+export const COMMISSION_FILE_CONTEXTS_DB = ["brief", "thread", "submission", "resolution_evidence"] as const;
 export const COMMISSION_FILE_STATES = ["awaiting_upload", "scanning", "clean", "attached", "rejected", "scan_failed", "expired", "discarded", "deleted"] as const;
 export type CommissionFileState = typeof COMMISSION_FILE_STATES[number];
 const states = COMMISSION_FILE_STATES.map((state) => `'${state}'`).join(",");
@@ -57,13 +57,14 @@ export const commissionFiles = pgTable("commission_files", {
   index("commission_files_unsent_idx").on(t.cleanAt, t.id).where(sql`${t.state} = 'clean'`),
   index("commission_files_purge_idx").on(t.updatedAt, t.id).where(sql`${t.state} in ('rejected','scan_failed','expired','discarded','deleted','clean','attached') and (${t.quarantinePurgedAt} is null or (${t.cleanPurgedAt} is null and ${t.state} in ('rejected','scan_failed','expired','discarded','deleted')))`),
   check("commission_files_context_check", sql`(${t.context} = 'brief' and ${t.packageId} is not null and ${t.uploadOrderId} is null)
-    or (${t.context} in ('thread','submission') and ${t.packageId} is null and ${t.uploadOrderId} is not null)`),
+    or (${t.context} in ('thread','submission','resolution_evidence') and ${t.packageId} is null and ${t.uploadOrderId} is not null)`),
   check("commission_files_state_check", sql`${t.state} in (${sql.raw(states)}) and ${t.version} > 0 and ${t.scanAttempts} between 0 and 1000`),
   check("commission_files_order_check", sql`(${t.state} in ('attached','deleted')) = (${t.orderId} is not null and ${t.attachedAt} is not null)`),
   check("commission_files_size_check", sql`${t.declaredBytes} between 1 and case when ${t.context} = 'submission' then 262144000 else 26214400 end`),
   check("commission_files_key_check", sql`${t.objectKey} = 'commission/' || ${t.id}::text`),
   check("commission_files_filename_check", sql`case when ${t.orderId} is null and ${t.state} in ('rejected','scan_failed','expired','discarded') then ${t.filenameEnvelope} is null else ${commissionEnvelopeCheck(t.filenameEnvelope)} end`),
-  check("commission_files_type_check", sql`${t.detectedType} is null or ${t.detectedType} in ('jpeg','png','webp','gif','pdf')
+  check("commission_files_type_check", sql`${t.detectedType} is null or ${t.detectedType} in ('jpeg','png','webp','pdf')
+    or (${t.context} <> 'resolution_evidence' and ${t.detectedType} = 'gif')
     or (${t.context} = 'submission' and ${t.detectedType} in ('psd','clip','zip'))`),
   check("commission_files_digest_check", sql`${t.sha256} is null or ${t.sha256} ~ '^sha256:[a-f0-9]{64}$'`),
   check("commission_files_clean_evidence_check", sql`(${t.state} not in ('clean','attached','deleted') or (${t.sha256} is not null and ${t.detectedType} is not null and ${t.cleanVersionId} is not null and ${t.cleanAt} is not null))
@@ -93,7 +94,8 @@ export const commissionFileAttachments = pgTable("commission_file_attachments", 
   uniqueIndex("commission_file_attachment_position_uidx").on(t.targetKind, t.targetId, t.position),
   index("commission_file_attachment_order_idx").on(t.orderId, t.targetKind, t.targetId),
   check("commission_file_attachment_target_check", sql`(${t.targetKind} = 'brief' and ${t.targetId} = ${t.orderId} and ${t.position} between 0 and 9)
-    or (${t.targetKind} = 'message' and ${t.position} between 0 and 9) or (${t.targetKind} = 'submission' and ${t.position} between 0 and 19)`),
+    or (${t.targetKind} = 'message' and ${t.position} between 0 and 9) or (${t.targetKind} = 'submission' and ${t.position} between 0 and 19)
+    or (${t.targetKind} in ('refund_send','late_claim') and ${t.position} between 0 and 2)`),
 ]);
 
 export const commissionThreads = pgTable("commission_threads", {

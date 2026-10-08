@@ -100,7 +100,7 @@ describe("Pawket alert rules", () => {
     const source = await readFile(rulesUrl, "utf8");
     const alerts = [...source.matchAll(/^      - alert: ([A-Za-z][A-Za-z0-9]+)$/gmu)];
     const expressions = [...source.matchAll(/^        expr: (.+)$/gmu)];
-    const severities = [...source.matchAll(/^          severity: (warning|critical)$/gmu)];
+    const severities = [...source.matchAll(/^          severity: (info|warning|critical)$/gmu)];
     const runbooks = [...source.matchAll(/^          runbook: (ops\/runbooks\/[a-z0-9-]+[.]md)$/gmu)];
     expect(alerts.length).toBeGreaterThanOrEqual(23);
     expect(expressions).toHaveLength(alerts.length);

@@ -15,6 +15,9 @@ export type WorkerHealthState = {
   commissionFulfillmentConfigured: boolean;
   commissionFulfillmentMaximumAgeMs: number | null;
   lastCommissionFulfillmentSucceededAt: number | null;
+  commissionResolutionConfigured: boolean;
+  commissionResolutionMaximumAgeMs: number | null;
+  lastCommissionResolutionSucceededAt: number | null;
   sepayStatus: "disabled" | "not_configured" | "contract_pending" | "configured";
   sepayRecoveryConfigured: boolean;
   sepayRecoveryMaximumAgeMs: number | null;
@@ -46,6 +49,9 @@ export function createWorkerHealthState(): WorkerHealthState {
     commissionFulfillmentConfigured: false,
     commissionFulfillmentMaximumAgeMs: null,
     lastCommissionFulfillmentSucceededAt: null,
+    commissionResolutionConfigured: false,
+    commissionResolutionMaximumAgeMs: null,
+    lastCommissionResolutionSucceededAt: null,
     sepayStatus: "disabled",
     sepayRecoveryConfigured: false,
     sepayRecoveryMaximumAgeMs: null,
@@ -71,6 +77,7 @@ export type WorkerReadinessResult = RevisionAttestation & {
   tipExpiryScan: "up" | "down" | "not_configured";
   commissionCleanupScan: "up" | "down" | "not_configured";
   commissionFulfillmentScan: "up" | "down" | "not_configured";
+  commissionResolutionScan: "up" | "down" | "not_configured";
   sepay: WorkerHealthState["sepayStatus"];
   sepayRecoveryScan: "up" | "down" | "not_configured";
   publicMediaCleanupScan: "up" | "down" | "not_configured";
@@ -120,6 +127,7 @@ export function workerReadiness(input: {
   const tipExpiryScan = !input.state.tipExpiryConfigured ? "not_configured" : isFresh(input.state.lastTipExpiryScanSucceededAt, now, input.state.tipExpiryMaximumAgeMs ?? 180_000) ? "up" : "down";
   const commissionCleanupScan = !input.state.commissionCleanupConfigured ? "not_configured" : isFresh(input.state.lastCommissionCleanupSucceededAt, now, input.state.commissionCleanupMaximumAgeMs ?? 180_000) ? "up" : "down";
   const commissionFulfillmentScan = !input.state.commissionFulfillmentConfigured ? "not_configured" : isFresh(input.state.lastCommissionFulfillmentSucceededAt, now, input.state.commissionFulfillmentMaximumAgeMs ?? 180_000) ? "up" : "down";
+  const commissionResolutionScan = !input.state.commissionResolutionConfigured ? "not_configured" : isFresh(input.state.lastCommissionResolutionSucceededAt, now, input.state.commissionResolutionMaximumAgeMs ?? 180_000) ? "up" : "down";
   const sepayRecoveryScan = !input.state.sepayRecoveryConfigured ? "not_configured" : isFresh(input.state.lastSePayRecoverySucceededAt, now, input.state.sepayRecoveryMaximumAgeMs ?? 180_000) ? "up" : "down";
   const commissionFilesScan = !input.state.commissionFilesConfigured ? "not_configured" : isFresh(input.state.lastCommissionFilesMaintenanceSucceededAt, now, input.state.commissionFilesMaximumAgeMs ?? 300_000) ? "up" : "down";
   const ready =
@@ -129,6 +137,7 @@ export function workerReadiness(input: {
     tipExpiryScan !== "down" &&
     commissionCleanupScan !== "down" &&
     commissionFulfillmentScan !== "down" &&
+    commissionResolutionScan !== "down" &&
     sepayRecoveryScan !== "down" &&
     (!input.state.oidcCleanupConfigured || isFresh(input.state.lastOidcCleanupSucceededAt ?? null, now, 180_000)) &&
     publicMediaCleanupScan === "up" &&
@@ -144,6 +153,7 @@ export function workerReadiness(input: {
     tipExpiryScan,
     commissionCleanupScan,
     commissionFulfillmentScan,
+    commissionResolutionScan,
     sepay: input.state.sepayStatus,
     sepayRecoveryScan,
     publicMediaCleanupScan,

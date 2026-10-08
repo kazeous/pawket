@@ -41,6 +41,33 @@ function formatDateOnly(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
+export function addVietnamBusinessDays(input: { fromDate: string; businessDays: number; holidays: Iterable<string> }): string {
+  let cursor = parseDateOnly(input.fromDate);
+  if (!Number.isSafeInteger(input.businessDays) || input.businessDays < 0) throw new BusinessCalendarError("Business calendar is invalid");
+  const holidays = new Set([...input.holidays].map((holiday) => formatDateOnly(parseDateOnly(holiday))));
+  let count = 0;
+  while (count < input.businessDays) {
+    cursor = new Date(cursor.getTime() + 86_400_000);
+    const date = formatDateOnly(cursor);
+    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6 && !holidays.has(date)) count += 1;
+  }
+  return formatDateOnly(cursor);
+}
+
+export async function calculateStoredBusinessDayDeadline(
+  tx: PawketTransaction,
+  input: { from: Date; businessDays: number; calendarVersion: string },
+): Promise<Date> {
+  const fromDate = vietnamDateFromInstant(input.from);
+  const [version] = await tx.select({ version: systemBusinessCalendarVersions.version }).from(systemBusinessCalendarVersions)
+    .where(eq(systemBusinessCalendarVersions.version, input.calendarVersion)).limit(1);
+  if (!version) throw new BusinessCalendarError("Business calendar version was not found");
+  const holidays = await tx.select({ date: systemBusinessCalendarHolidays.holidayDate }).from(systemBusinessCalendarHolidays)
+    .where(eq(systemBusinessCalendarHolidays.calendarVersion, input.calendarVersion));
+  const date = addVietnamBusinessDays({ fromDate, businessDays: input.businessDays, holidays: holidays.map((holiday) => holiday.date) });
+  return new Date(`${date}T16:59:59.999Z`);
+}
+
 export function vietnamDateFromInstant(value: Date): string {
   if (Number.isNaN(value.getTime())) throw new BusinessCalendarError("Business calendar is invalid");
   const parts = new Intl.DateTimeFormat("en-US", {

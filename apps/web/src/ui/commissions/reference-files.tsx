@@ -11,7 +11,7 @@ import { commissionErrorText, type OrderView, type ReferenceFileView } from "./c
 import { useCommissionSession } from "./commission-session";
 
 const ACCEPT = "image/jpeg,image/png,image/webp,image/gif,application/pdf";
-type Target = Readonly<{ context: "brief"; packageId: string } | { context: "thread" | "submission"; orderId: string }>;
+type Target = Readonly<{ context: "brief"; packageId: string } | { context: "thread" | "submission" | "resolution_evidence"; orderId: string }>;
 const grantSchema = z.object({ upload: z.object({ fileId: z.uuid(), url: z.url(), requiredHeaders: z.record(z.string(), z.string()), expiresAt: z.string() }) });
 const fileSchema = z.object({ file: z.object({ fileId: z.uuid(), state: z.string(), rejectionReason: z.string().nullable() }) });
 const REJECTIONS: Record<string, string> = {
@@ -94,7 +94,7 @@ export function ReferenceFilePicker({ target, maxFiles, maxBytes, label = "Tệp
       await poll(entry.key, grant.fileId, actorUserId, signal);
     } catch (error) {
       if (signal.aborted) return;
-      update(entry.key, { status: "failed", message: commissionErrorText(error instanceof TipRequestError ? error.code : "dependency_unavailable", target.context) });
+      update(entry.key, { status: "failed", message: commissionErrorText(error instanceof TipRequestError ? error.code : "dependency_unavailable", target.context === "resolution_evidence" ? "brief" : target.context) });
     } finally { jobs.current.delete(entry.key); }
   }
   function choose(list: FileList | null) {
@@ -104,7 +104,7 @@ export function ReferenceFilePicker({ target, maxFiles, maxBytes, label = "Tệp
     const accepted = files.slice(0, Math.max(0, room));
     count.current += accepted.length;
     const added: Entry[] = accepted.map((file) => ({ key: crypto.randomUUID(), name: displayName(file.name), size: file.size, fileId: null, progress: 0,
-      status: file.size > maxBytes || file.size === 0 ? "rejected" : "uploading", message: file.size > maxBytes ? commissionErrorText("file_too_large", target.context) : file.size === 0 ? "Tệp trống." : null }));
+      status: file.size > maxBytes || file.size === 0 ? "rejected" : "uploading", message: file.size > maxBytes ? commissionErrorText("file_too_large", target.context === "resolution_evidence" ? "brief" : target.context) : file.size === 0 ? "Tệp trống." : null }));
     setEntries((current) => [...current, ...added]);
     added.forEach((entry, index) => { if (entry.status === "uploading") void upload(entry, accepted[index]!); });
     if (input.current) input.current.value = "";
@@ -118,9 +118,10 @@ export function ReferenceFilePicker({ target, maxFiles, maxBytes, label = "Tệp
   }
   return <Field data-disabled={disabled || undefined}>
     <FieldLabel htmlFor={`${id}-files`}>{label}</FieldLabel>
-    <Input ref={input} id={`${id}-files`} type="file" multiple accept={target.context === "submission" ? `${ACCEPT},.psd,.psb,.clip,.zip` : ACCEPT} disabled={disabled || entries.length >= maxFiles} aria-describedby={target.context === "brief" ? `${id}-files-help` : undefined}
+    <Input ref={input} id={`${id}-files`} type="file" multiple accept={target.context === "submission" ? `${ACCEPT},.psd,.psb,.clip,.zip` : target.context === "resolution_evidence" ? "image/jpeg,image/png,image/webp,application/pdf" : ACCEPT} disabled={disabled || entries.length >= maxFiles} aria-describedby={target.context === "brief" || target.context === "resolution_evidence" ? `${id}-files-help` : undefined}
       onChange={(event) => choose(event.currentTarget.files)} className="text-sm" />
     {target.context === "brief" ? <FieldDescription id={`${id}-files-help`}>Tối đa 10 tệp JPEG, PNG, WebP, GIF hoặc PDF, mỗi tệp tối đa 25 MB. Tệp chỉ gửi được sau khi kiểm tra mã độc xong.</FieldDescription> : null}
+    {target.context === "resolution_evidence" ? <FieldDescription id={`${id}-files-help`}>Tối đa 3 tệp JPEG, PNG, WebP hoặc PDF, mỗi tệp tối đa 25 MB. Chờ kiểm tra mã độc xong trước khi gửi.</FieldDescription> : null}
     {notice ? <p role="status" className="text-sm">{notice}</p> : null}
     {entries.length ? <ul className="flex flex-col gap-2" aria-live="polite">{entries.map((entry) => <li key={entry.key} className="flex flex-wrap items-center gap-2 text-sm">
       <span className="min-w-0 wrap-anywhere">{entry.name}</span><span className="text-muted-foreground">{sizeText(entry.size)}</span>
@@ -138,7 +139,7 @@ export function ReferenceFileList({ order }: Readonly<{ order: OrderView["order"
   return <div className="flex min-w-0 flex-col gap-3"><h3 className="text-sm font-medium">Tệp tham khảo</h3><AttachedFileList order={order} files={order.referenceFiles} brief /></div>;
 }
 
-export function AttachedFileList({ order, files, brief = false }: Readonly<{ order: Pick<OrderView["order"], "id" | "role">; files: readonly ReferenceFileView[]; brief?: boolean }>) {
+export function AttachedFileList({ order, files, brief = false, withdrawn = false }: Readonly<{ order: Pick<OrderView["order"], "id" | "role">; files: readonly ReferenceFileView[]; brief?: boolean; withdrawn?: boolean }>) {
   if (!files.length) return null;
   const base = `/api/v1${order.role === "creator" ? "/creator/commissions" : "/commissions"}/${order.id}/files`;
   return <ul className="flex min-w-0 flex-col gap-3">
@@ -146,7 +147,7 @@ export function AttachedFileList({ order, files, brief = false }: Readonly<{ ord
       {file.availability === "withdrawn" ? <p className="text-muted-foreground">Không còn quyền xem sau khi yêu cầu đóng.</p>
         : <>
           <div className="flex flex-wrap items-center gap-2"><span className="min-w-0 wrap-anywhere font-medium">{file.name}</span><span className="text-muted-foreground">{sizeText(file.sizeBytes)} · {file.detectedType.toUpperCase()}</span></div>
-          {file.availability === "deleted" ? <p className="text-muted-foreground">Tệp đã được xóa theo thời hạn lưu trữ.</p> : <>
+          {withdrawn ? <p className="text-muted-foreground">Không còn quyền tải tệp này sau khi đơn đã hủy.</p> : file.availability === "deleted" ? <p className="text-muted-foreground">Tệp đã được xóa theo thời hạn lưu trữ.</p> : <>
             {/* eslint-disable-next-line @next/next/no-img-element -- private presigned preview; next/image would proxy and cache it */}
             {file.previewable ? <img src={`${base}/${file.fileId}?disposition=inline`} alt={`Xem trước ${file.name}`} loading="lazy" referrerPolicy="no-referrer" className="max-h-64 w-auto max-w-full rounded-md border object-contain" /> : null}
             <a href={`${base}/${file.fileId}?disposition=attachment`} rel="noopener noreferrer" referrerPolicy="no-referrer" className={buttonVariants({ variant: "outline", size: "sm" })}>Tải xuống</a>

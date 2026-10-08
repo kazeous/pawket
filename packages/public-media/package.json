@@ -15,7 +15,7 @@
     "@pawket/object-storage": "workspace:*",
     "@pawket/security": "workspace:*",
     "drizzle-orm": "0.45.2",
-    "sharp": "0.35.4",
+    "sharp": "0.35.5",
     "zod": "4.4.3"
   }
 }

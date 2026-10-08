@@ -5,6 +5,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+import { EvidenceView } from "@/ui/cases/evidence-tabs";
+import { openCaseFile } from "@/ui/cases/case-client";
 
 type Review = { title: string; body: string; ready: boolean; returnPath: string; expiresAt: string };
 const labels: Record<string, string> = { observedAmountVnd: "Số tiền đã nhận (VND)", observedTransferReference: "Nội dung chuyển khoản", observedBankTransactionId: "Mã giao dịch ngân hàng",
@@ -15,8 +17,12 @@ const labels: Record<string, string> = { observedAmountVnd: "Số tiền đã nh
   expiresAt: "Hết hạn", operatingAccount: "Tài khoản nhận khoản xác minh", receivingAccount: "Tài khoản nhận tiền", maskedSuffix: "Số tài khoản đã che",
   artistDisplayName: "Tên nghệ sĩ", applicant: "Người đăng ký", contactEmail: "Email liên hệ", legalName: "Họ tên", phone: "Số điện thoại",
   portfolioLinks: "Liên kết portfolio", revision: "Hồ sơ", application: "Đơn đăng ký", state: "Trạng thái", status: "Trạng thái", reasonCode: "Lý do",
-  expectedVersion: "Phiên bản thông tin", outcome: "Kết quả", actualAmountVnd: "Số tiền thực gửi (VND)", outboundBankReference: "Mã giao dịch hoàn tiền", attentionReason: "Lý do cần xử lý" };
+  expectedVersion: "Phiên bản thông tin", outcome: "Kết quả", actualAmountVnd: "Số tiền thực gửi (VND)", outboundBankReference: "Mã giao dịch hoàn tiền", attentionReason: "Lý do cần xử lý",
+  section: "Mục bằng chứng", cursor: "Trang tin nhắn", disposition: "Cách tải tệp", refundAmountVnd: "Số tiền hoàn (VND)", reasoning: "Kết luận (hai bên sẽ thấy)",
+  internalNote: "Ghi chú nội bộ (chỉ owner thấy)", rulingId: "Mã kết luận", newRefundAmountVnd: "Tổng số tiền hoàn mới (VND)", until: "Hạn mới" };
 function detail(value: unknown): string { return typeof value === "boolean" ? value ? "Có" : "Không" : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value ?? "—"); }
+const caseValues: Record<string, string> = { rule: "Kết luận khiếu nại", correct: "Đính chính số tiền hoàn", question: "Gửi câu hỏi", extend: "Gia hạn phản hồi", accept_evidence: "Chấp nhận bằng chứng đã nhận tiền", require_resend: "Yêu cầu chuyển lại", waive: "Miễn nghĩa vụ hoàn tiền", extend_deadline: "Gia hạn chuyển hoàn tiền", rule_claim: "Kết luận thanh toán muộn",
+  complete: "Hoàn tất đơn", close: "Đóng đơn", refund_owed: "Cần hoàn tiền", rejected: "Từ chối yêu cầu", order_summary: "Thông tin đơn hàng", thread_page: "Tin nhắn và bàn giao", resolution_records: "Khiếu nại và hoàn tiền", refund_destination: "Tài khoản nhận hoàn tiền", attachment: "Tải xuống", inline: "Xem tệp" };
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 function PrivateDetails({ value }: { value: unknown }) {
   if (Array.isArray(value)) return <ul className="flex flex-col gap-2">{value.map((item, index) => <li key={index}><PrivateDetails value={item} /></li>)}</ul>;
@@ -63,7 +69,12 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
         if (destination.protocol !== "https:" || destination.origin !== new URL(accountPortalUrl).origin) throw new Error();
         window.location.assign(destination.href);
       } else if (kind === "cancel") window.location.replace(review.returnPath);
-      else { resultAt.current = Date.now(); setResult(record(value) ? value : null); setDone(true); setMessage("Đã xử lý yêu cầu. Kiểm tra kết quả bên dưới trước khi rời trang."); }
+      else {
+        // Case file grants are opened once and never enter React state or browser storage.
+        if (review.title === "Xem tệp của vụ việc") { openCaseFile(value); setResult(null); setMessage("Đã mở lượt tải tệp. Quay lại vụ việc để tiếp tục."); }
+        else { resultAt.current = Date.now(); setResult(record(value) ? value : null); setMessage("Đã xử lý yêu cầu. Kiểm tra kết quả bên dưới trước khi rời trang."); }
+        setDone(true);
+      }
     } catch { setMessage("Chưa thể hoàn tất yêu cầu. Xác thực lại nếu phiên đã hết hạn; nếu kết quả chưa rõ, quay lại kiểm tra trước khi tạo yêu cầu khác."); }
     finally { inFlight.current = false; setBusy(false); }
   }
@@ -79,7 +90,7 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
       {message ? <Alert variant={done ? "default" : "destructive"}><AlertDescription>{message}</AlertDescription></Alert> : null}
       {!review && !message ? <p role="status">Đang tải nội dung…</p> : null}
       {review && !done ? <><p className="text-sm text-muted-foreground">Có hiệu lực đến {new Date(review.expiresAt).toLocaleTimeString("vi-VN")}.</p>
-        <dl className="flex flex-col gap-3">{fields.map(([name, value]) => <div key={name}><dt className="text-sm font-medium">{labels[name] ?? name}</dt><dd className="whitespace-pre-wrap break-words text-sm text-muted-foreground">{detail(value)}</dd></div>)}</dl></> : null}
+        <dl className="flex flex-col gap-3">{fields.map(([name, value]) => <div key={name}><dt className="text-sm font-medium">{labels[name] ?? name}</dt><dd className="whitespace-pre-wrap break-words text-sm text-muted-foreground">{["action", "outcome", "section", "disposition"].includes(name) && typeof value === "string" ? caseValues[value] ?? detail(value) : detail(value)}</dd></div>)}</dl></> : null}
       {sepayUrl ? <a className={buttonVariants()} href={sepayUrl} referrerPolicy="no-referrer">Tiếp tục kết nối tại SePay</a> : null}
       {result?.restartRequired === true ? <p>Phiên kết nối trước đã dùng. Quay lại trang SePay để bắt đầu phiên mới.</p> : null}
       {secret ? <section className="flex flex-col gap-3" aria-label="Cấu hình SePay">
@@ -93,6 +104,9 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
         <PrivateDetails value={result[name]} />
         <Button variant="outline" onClick={() => setResult((current) => current ? { ...current, [name]: null } : null)}>Ẩn thông tin</Button>
       </section> : null) : null}
+      {result && "evidence" in result ? <section className="flex flex-col gap-3"><h2 className="font-medium">Bằng chứng của vụ việc</h2>
+        <p>Chỉ owner thấy. Nội dung sẽ ẩn sau 5 phút; quay lại vụ việc để tải tệp hoặc xem trang tin nhắn khác.</p><EvidenceView value={result.evidence} />
+        <Button variant="outline" onClick={() => setResult(null)}>Ẩn bằng chứng</Button></section> : null}
     </CardContent>
     <CardFooter className="flex flex-wrap gap-2">
       {review && !done ? <><Button variant={review.ready ? "outline" : "default"} disabled={busy} onClick={() => void perform("authenticate")}>Xác thực lại với reyuuGAMES</Button>

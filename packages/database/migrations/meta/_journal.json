@@ -316,6 +316,55 @@
       "when": 1791274112724,
       "tag": "0044_increment_7_quota_closed_copy_intents",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791359747776,
+      "tag": "0045_increment_8_order_exits",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1791362911483,
+      "tag": "0046_increment_8_trust_cases",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791382370710,
+      "tag": "0047_increment_8_commission_refunds",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791383889847,
+      "tag": "0048_increment_8_refund_calendar_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1791387092152,
+      "tag": "0049_increment_8_resolutions",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791443516515,
+      "tag": "0050_increment_8_resolution_deadline_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1791450022546,
+      "tag": "0051_increment_8_resolution_evidence",
+      "breakpoints": true
     }
   ]
 }

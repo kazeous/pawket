@@ -779,3 +779,61 @@ tests:
       - eval_time: 30m
         alertname: PawketCommissionFileMaintenanceUnhealthy
         exp_alerts: []
+
+  - name: commission refund overdue waits one hour
+    interval: 1m
+    input_series:
+      - series: 'pawket_commission_refund_overdue{job="worker",instance="synthetic-worker"}'
+        values: '1x61'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: PawketCommissionRefundOverdue
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PawketCommissionRefundOverdue
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              severity: info
+            exp_annotations:
+              summary: Commission refund obligations are overdue
+              runbook: ops/runbooks/commission-resolution.md
+
+  - name: commission resolution scan waits fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="synthetic-worker",scan="commission_resolution"}'
+        values: '0x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PawketCommissionResolutionScanStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PawketCommissionResolutionScanStale
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              scan: commission_resolution
+              severity: warning
+            exp_annotations:
+              summary: Commission resolution maintenance is unhealthy or stale
+              runbook: ops/runbooks/commission-operations.md
+
+  - name: commission resolution healthy and no overdue refunds stay quiet
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="synthetic-worker",scan="commission_resolution"}'
+        values: '1x61'
+      - series: 'pawket_worker_last_success_timestamp_seconds{job="worker",instance="synthetic-worker",scan="commission_resolution"}'
+        values: '0+60x61'
+      - series: 'pawket_commission_refund_overdue{job="worker",instance="synthetic-worker"}'
+        values: '0x61'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: PawketCommissionResolutionScanStale
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PawketCommissionRefundOverdue
+        exp_alerts: []

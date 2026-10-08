@@ -21,6 +21,7 @@ export const workspaceSchema = z.object({ controls: controlsSchema, workspace: z
   showcases: z.array(z.object({ id: uuid, title: text(100) })).max(12),
   policy: z.object({ revisionId: uuid, document: z.string().nullable(), acceptsOrders: z.boolean() }).nullable(),
   settings: z.object({ version: z.number().int().nonnegative(), enabled: z.boolean(), capacityLimit: z.number().int().min(1).max(20), used: z.number().int().nonnegative() }),
+  intakePause: z.object({ paused: z.boolean(), overdue: z.array(z.object({ obligationId: uuid, dueAt: time })) }).optional(),
   packages: z.array(z.object({ id: uuid, version: z.number().int().positive(), state: z.enum(["draft", "open", "paused"]),
     publishedRevisionId: uuid.nullable(), draft: draftSchema })).max(12) }) });
 const paymentSchema = z.object({ id: uuid, orderId: uuid, amountVnd: amount, state: z.enum(["awaiting_transfer", "confirmed", "expired", "rejected"]),
@@ -45,7 +46,7 @@ export const detailSchema = z.object({ controls: controlsSchema.extend({ fulfill
   state: stateSchema, route: routeSchema, closeReason: z.string().nullable(), createdAt: time, expiresAt: time.nullable(), acceptedAt: time.nullable(), confirmedAt: time.nullable(),
   dueAt: time.nullable(), overdue: z.boolean(), deadlinePassed: z.boolean(),
   fulfillment: z.object({ deliveredAt: time.nullable(), reviewEndsAt: time.nullable(), completionDueAt: time.nullable(), completedAt: time.nullable(),
-    completionKind: z.enum(["buyer_accepted", "review_window_elapsed"]).nullable(), revisionsUsed: z.number().int().min(0).max(10), revisionAllowance: z.number().int().min(0).max(10),
+    completionKind: z.enum(["buyer_accepted", "review_window_elapsed", "agreement", "ruling"]).nullable(), revisionsUsed: z.number().int().min(0).max(10), revisionAllowance: z.number().int().min(0).max(10),
     lateDelivery: z.boolean(), fileDeletionAt: time.nullable() }).nullable(), package: z.object({ id: uuid, revisionId: uuid, title: text(120) }),
   brief: z.object({ text: text(3000), referenceLinks: z.array(z.url({ protocol: /^https$/u })).max(5) }), referenceFiles: z.array(referenceFileSchema).max(10), terms: termsSchema.nullable(),
   policy: z.object({ id: uuid, document: z.string().nullable(), checksum: z.string() }).nullable(),
@@ -72,6 +73,7 @@ export const commissionPath = (role: Role) => role === "creator" ? "/creator/com
 export const routeLabels = { fixed_immediate: "Giá cố định · đặt ngay", fixed_approval: "Giá cố định · nghệ sĩ duyệt", custom_quote: "Báo giá riêng" };
 export const stateLabels = { requested: "Chờ nghệ sĩ", quoted: "Chờ duyệt báo giá", awaiting_payment: "Chờ thanh toán", in_progress: "Đang thực hiện", delivered: "Đã giao, chờ duyệt", completed: "Hoàn tất", closed: "Đã đóng" };
 export const closeLabels: Record<string, string> = { buyer_withdrawn: "Người đặt đã rút yêu cầu", creator_declined: "Nghệ sĩ đã từ chối", quote_withdrawn: "Nghệ sĩ đã rút báo giá", quote_declined: "Người đặt đã từ chối báo giá",
+  cancelled_by_agreement: "Đã hủy theo thỏa thuận", cancelled_by_ruling: "Đã hủy theo kết luận của Pawket", buyer_cancelled_after_suspension: "Người đặt đã hủy sau khi nghệ sĩ bị tạm ngưng", fulfillment_frozen: "Pawket đã dừng thực hiện đơn",
   request_expired: "Yêu cầu đã hết hạn", quote_expired: "Báo giá đã hết hạn", buyer_cancelled: "Người đặt đã hủy", creator_cancelled: "Nghệ sĩ đã hủy", payment_expired: "Hết hạn thanh toán", security_invalidated: "Đơn bị đóng do điều kiện an toàn", eligibility_invalidated: "Điều kiện nhận thanh toán đã thay đổi" };
 export function commissionErrorText(code: string, context: "brief" | "thread" | "submission" = "brief"): string {
   if (code === "OIDC_ACTOR_CHANGED") code = "account_changed";
@@ -87,6 +89,11 @@ export function commissionErrorText(code: string, context: "brief" | "thread" | 
     invalid_reference_files: "Một số tệp tham khảo chưa sẵn sàng hoặc không còn dùng được. Kiểm tra lại danh sách tệp.",
     files_disabled: "Tạm dừng nhận tệp tham khảo. Bạn vẫn có thể gửi brief chỉ có chữ và liên kết.",
     fulfillment_disabled: "Tạm dừng trao đổi và giao bài. Lịch sử vẫn được giữ.", revisions_exhausted: "Đã dùng hết lượt chỉnh sửa.",
+    resolution_disabled: "Tạm dừng xử lý hủy đơn, khiếu nại và hoàn tiền. Bạn vẫn xem được lịch sử.",
+    deadline_passed: "Đã quá thời hạn. Cập nhật trạng thái để kiểm tra.", proposal_stale: "Đơn đã thay đổi sau khi gửi đề nghị. Cập nhật trạng thái và xem lại.",
+    proposal_limit: "Bạn đã dùng hết 3 đề nghị cho đơn này.", statement_limit: "Bạn đã dùng hết 10 lần trình bày cho khiếu nại này.",
+    invalid_destination: "Kiểm tra lại ngân hàng, số tài khoản và tên chủ tài khoản nhận hoàn tiền.",
+    invalid_statement: "Trình bày cần 1–4.000 ký tự hợp lệ.", invalid_proposal: "Kiểm tra loại đề nghị, số tiền và lời nhắn.",
     completion_held: "Đơn đang được tạm giữ, chưa thể hoàn tất.", order_quota_exceeded: "Đơn đã dùng hết 1 GB dung lượng tệp.",
     invalid_attachment_files: "Một số tệp đính kèm chưa sẵn sàng hoặc không dùng được. Kiểm tra lại danh sách tệp.",
     file_too_large: context === "submission" ? "Tệp vượt quá 250 MB." : "Tệp vượt quá 25 MB.", pending_limit: "Đang có tối đa 10 tệp chờ tải hoặc kiểm tra. Đợi các tệp đó xong rồi thử lại.",

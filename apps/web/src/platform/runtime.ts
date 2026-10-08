@@ -27,6 +27,7 @@ import {
   createIdentityTipBuyerAccountPort,
   createIdentityTipAssurancePort,
   createIdentityCommissionAssurancePort,
+  createCreatorStandingPort,
   createIdentitySePayAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
@@ -47,6 +48,7 @@ import {
   createTipReceivingAccountEligibilityPort,
   createCreatorTipPaymentService,
   createCommissionPaymentIntentPort, createCreatorCommissionPaymentService,
+  createCommissionRefundService, createCommissionRefundPort, createCommissionPaymentFactsPort,
   createSePayConnectionService, createSePayInboxService, createSePayReconciliationService, createSePayReviewService,
   createSePayOAuthProvider, createSePayBudgetedProvider, createSePayHttpHandlers,
 } from "@pawket/payments";
@@ -59,19 +61,27 @@ import {
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation, recordCommissionFileOperation } from "@pawket/observability";
-import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort } from "@pawket/orders";
-import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, type CommissionFileStoragePort } from "@pawket/commission-files";
+import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
+import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
+import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
+  createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
+  createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort, effectiveResolutionDeadline } from "@pawket/resolutions";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
   createTriageService,
   createTrustHttpHandlers,
   createCommissionTrustPort,
+  createTrustCasePort,
+  createTrustCaseService,
 } from "@pawket/trust";
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
 import { createCommissionHttpHandlers } from "./commission-http.js";
 import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
+import { createResolutionHttpHandlers } from "./resolution-http.js";
+import { createCaseHttpHandlers } from "./case-http.js";
+import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
@@ -97,8 +107,11 @@ export type WebPlatformRuntime = {
   sepayHandlers: ReturnType<typeof createSePayHttpHandlers>;
   commissionHandlers: ReturnType<typeof createCommissionHttpHandlers>;
   commissionFileHandlers: ReturnType<typeof createCommissionFileHttpHandlers>;
+  resolutionHandlers: ReturnType<typeof createResolutionHttpHandlers>;
+  caseHandlers: ReturnType<typeof createCaseHttpHandlers>;
   commissions: ReturnType<typeof createCommissionOrderService>;
   commissionCatalog: ReturnType<typeof createCommissionPackageService>;
+  readCurrentCommissionPolicy(): Promise<CommissionPolicySnapshot | null>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
@@ -439,7 +452,14 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissionPolicy = createCommissionPolicyReadPort({ environment: env.APP_ENV });
   const commissionCommon = { db: database.db, applicationRevision: env.APP_REVISION, keyring, lookupHmacKey, authorizeCommand,
     intakeMode: env.COMMISSION_INTAKE_MODE, paymentsMode: env.COMMISSION_PAYMENTS_MODE };
+  const resolutionOrders = createCommissionResolutionOrderPort({ applicationRevision: env.APP_REVISION, newId: randomUUID });
+  const refunds = createCommissionRefundPort({ keyring, calendarVersion: env.VN_BUSINESS_CALENDAR_VERSION });
+  const resolutionPayments = createCommissionPaymentFactsPort(); const cases = createTrustCasePort();
+  const standing = createCreatorStandingPort();
+  const resolutionFiles = createCommissionEvidenceAttachmentPort({ keyring, mode: env.COMMISSION_RESOLUTION_MODE });
+  const intakeFence = createCommissionIntakeFencePort({ mode: env.COMMISSION_RESOLUTION_MODE, refunds });
   const commissionCatalog = createCommissionPackageService({ ...commissionCommon, identity: commissionIdentity, policy: commissionPolicy,
+    intakeFence,
     visibility: publicCatalog, publishingMode: env.CREATOR_PUBLISHING_MODE,
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.COMMISSION_PAYMENTS_MODE }) });
   const commissionFileStorage = env.COMMISSION_FILES_S3_ENDPOINT && env.COMMISSION_FILES_S3_REGION && env.COMMISSION_FILES_S3_ACCESS_KEY_ID && env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY &&
@@ -449,6 +469,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
         forcePathStyle: env.COMMISSION_FILES_S3_FORCE_PATH_STYLE })
     : unavailableCommissionFileStorage();
   const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
+    holds: createResolutionHoldPort(),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
     files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }), thread: createCommissionThreadPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
@@ -457,23 +478,66 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
     mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000, assurance: commissionIdentity, commissions: commissions.paymentsLifecycle,
     onCommitted: (replayed) => recordCommissionOperation({ operation: "confirm", outcome: replayed ? "replayed" : "creator_manual" }) });
+  const resolutionKit = createResolutionCommandKit({ db: database.db, keyring, lookupHmacKey, session: commissionIdentity, authorizeCommand });
+  const resolutionCommon = { orders: resolutionOrders, refunds, payments: resolutionPayments, cases, mode: env.COMMISSION_RESOLUTION_MODE };
+  const proposals = createProposalService(resolutionKit, resolutionCommon);
+  const disputes = createDisputeService(resolutionKit, resolutionCommon);
+  const lateClaims = createLateClaimService(resolutionKit, { ...resolutionCommon, files: resolutionFiles });
+  const suspension = createSuspensionService(resolutionKit, { ...resolutionCommon, standing });
+  const commissionRefunds = createCommissionRefundService({ db: database.db, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
+    mode: env.COMMISSION_RESOLUTION_MODE, lockCreator: lockCommissionCreator, calendarVersion: env.VN_BUSINESS_CALENDAR_VERSION,
+    recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000,
+    assurance: commissionIdentity, cases, files: resolutionFiles, effectiveDeadline: effectiveResolutionDeadline });
+  const resolutionView = createResolutionViewService({ db: database.db, keyring, orders: { ...resolutionOrders, listOrders: commissions.listOrders },
+    refunds: commissionRefunds, session: commissionIdentity, standing, lateClaims });
+  const commissionThrottle: Parameters<typeof createCommissionHttpHandlers>[0]["throttle"] = async ({ actorUserId, networkKeyHash, operation, orderId }) => {
+    const maximumAttempts = operation === "read" ? env.COMMISSION_READ_LIMIT : operation === "request" ? env.COMMISSION_REQUEST_LIMIT : env.COMMISSION_COMMAND_LIMIT;
+    const policy = { action: `commission_${operation}`, now: new Date(), windowMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, blockMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, maximumAttempts };
+    const results = await Promise.all([
+      recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
+      ...(actorUserId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) })] : []),
+      ...(operation === "message" && actorUserId && orderId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", maximumAttempts: env.COMMISSION_MESSAGE_LIMIT,
+        subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-message-order", value: `${actorUserId}:${orderId}` }) })] : []),
+    ]);
+    return results.every((result) => result.allowed);
+  };
+  const resolutionHandlers = createResolutionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, mode: env.COMMISSION_RESOLUTION_MODE,
+    authenticate, throttle: commissionThrottle, proposals, disputes, view: resolutionView, refunds: commissionRefunds, lateClaims, suspension, orders: commissions });
   const commissionHandlers = createCommissionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, intakeMode: env.COMMISSION_INTAKE_MODE,
     paymentsMode: env.COMMISSION_PAYMENTS_MODE, fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, authenticate, orders: commissions, thread: commissionThread, catalog: commissionCatalog, manual: commissionManual,
     onOperation: ({ operation, outcome }) => recordCommissionOperation({ operation: operation === "message" ? "command" : operation, outcome }),
-    async throttle({ actorUserId, networkKeyHash, operation, orderId }) {
-      const maximumAttempts = operation === "read" ? env.COMMISSION_READ_LIMIT : operation === "request" ? env.COMMISSION_REQUEST_LIMIT : env.COMMISSION_COMMAND_LIMIT;
-      const policy = { action: `commission_${operation}`, now: new Date(), windowMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, blockMs: env.COMMISSION_RATE_WINDOW_SECONDS * 1000, maximumAttempts };
-      const results = await Promise.all([
-        recordSecurityThrottleAttempt(database.db, { ...policy, scope: "network", subjectHmac: networkKeyHash }),
-        ...(actorUserId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-actor", value: actorUserId }) })] : []),
-        ...(operation === "message" && actorUserId && orderId ? [recordSecurityThrottleAttempt(database.db, { ...policy, scope: "account", maximumAttempts: env.COMMISSION_MESSAGE_LIMIT,
-          subjectHmac: createLookupHmac({ key: lookupHmacKey, context: "commission-message-order", value: `${actorUserId}:${orderId}` }) })] : []),
-      ]);
-      return results.every((result) => result.allowed);
-    },
+    throttle: commissionThrottle,
   });
   const commissionFiles = createCommissionFileService({ db: database.db, storage: commissionFileStorage, keyring, lookupHmacKey, mode: env.COMMISSION_FILES_MODE,
+    evidenceUploads: createCommissionEvidenceUploadPort({ orders: resolutionOrders, refunds, payments: resolutionPayments, mode: env.COMMISSION_RESOLUTION_MODE }),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
+  const ownerKit = createResolutionCommandKit({ db: database.db, keyring, lookupHmacKey, session: commissionIdentity,
+    consumeStepUpProof: commandContext.consumeOwnerProof,
+    async authorizeCommand(tx, actor) {
+      // Replays do not consume a new proof, but still require an active owner session.
+      if (!await resolveOwnerSessionPermission(tx, { ...actor, now: new Date() })) resolutionFail("not_authorized");
+      await commandContext.authorize(tx, actor);
+    } });
+  const ownerResolution = createOwnerResolutionService(ownerKit, { ...resolutionCommon, applicationRevision: env.APP_REVISION, standing });
+  const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
+    deadlines: createResolutionCaseDeadlinePort({ refunds }),
+    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles }) });
+  const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
+    issueOwnerStepUpProof: commandContext.issueOwnerProof,
+    async authorizeOwner(headers) {
+      const actor = await authenticate(headers); if (!actor) return "unauthenticated";
+      return await resolveOwnerSessionPermission(database.db, { ...actor, now: new Date() }) ? "authorized" : "forbidden";
+    },
+    refunds: { readAging: (command) => refunds.readAging(database.db, command) },
+    orderMetadata: { readForOrder: (orderId) => database.db.transaction(async (tx) => {
+      const order = await resolutionOrders.lockOrder(tx, orderId); if (!order) resolutionFail("not_available");
+      return { creatorUserId: order.creatorUserId, buyerUserId: order.buyerUserId, orderState: order.state, amountVnd: order.amountVnd };
+    }) },
+    resolutionMetadata: { readForCase: (row) => createResolutionCaseMetadataPort().readForCase(database.db, row) },
+    standing: { readForOrder: (orderId) => database.db.transaction(async (tx) => {
+      const order = await resolutionOrders.lockOrder(tx, orderId); if (!order) resolutionFail("not_available");
+      return standing.readCreatorStanding(tx, order.creatorUserId);
+    }) } });
   const commissionFileHandlers = createCommissionFileHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, files: commissionFiles,
     onOperation: recordCommissionFileOperation,
     async throttle({ actorUserId, networkKeyHash, operation }) {
@@ -608,8 +672,11 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     sepayHandlers: commandHttp.wrap(sepayHandlers),
     commissionHandlers: commandHttp.wrap(commissionHandlers),
     commissionFileHandlers,
+    resolutionHandlers: commandHttp.wrap(resolutionHandlers),
+    caseHandlers: commandHttp.wrap(caseHandlers),
     commissions,
     commissionCatalog,
+    readCurrentCommissionPolicy: () => database.db.transaction((tx) => commissionPolicy.readCurrent(tx, new Date())),
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,

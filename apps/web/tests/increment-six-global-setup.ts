@@ -24,7 +24,7 @@ export default async function setup() {
       const facts = { technicalVersion: "commission-v1", minimumVnd: 50_000, maximumVnd: 50_000_000, approvalKind: "synthetic", document: "CHỈ DỮ LIỆU KIỂM THỬ. Điều khoản tổng hợp để kiểm tra chấp thuận; không áp dụng thanh toán thật." };
       await tx.insert(commissionPolicyRevisions).values({ id: policyId, revisionNumber: 2, ...facts, source: "synthetic-increment-six-browser", checksum: commissionPolicyChecksum(facts), effectiveAt: at, createdAt: at });
       await tx.update(commissionPolicyCurrent).set({ revisionId: policyId, updatedAt: at });
-      for (let index = 0; index < 20; index++) {
+      for (let index = 0; index < 32; index++) {
         const userId = commissionBuyerId(index); const email = `${userId}@example.invalid`;
         await tx.insert(identityUsers).values({ id: userId, name: `Người đặt kiểm thử ${index}`, email, canonicalEmail: email, emailVerified: true, emailVerifiedAt: at, emailVerificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
         await tx.insert(identityEmailAddresses).values({ userId, displayEmail: email, canonicalEmail: email, status: "primary", verifiedAt: at, verificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
