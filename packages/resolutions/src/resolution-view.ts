@@ -88,14 +88,15 @@ export function createResolutionViewService(input: Input) {
         const live = order.state === "in_progress" || order.state === "delivered";
         const due = order.state === "delivered" ? await input.orders.completionDueAt(tx, order.id) : null;
         const resolutionEnabled = await effectiveResolutionDeadline(tx, at) !== null;
+        const canCancelAfterSuspension = resolutionEnabled && live && role === "buyer" && input.standing !== undefined
+          && await input.standing.readCreatorStanding(tx, order.creatorUserId) === "suspended";
         const lateClaim = await input.lateClaims?.readForOrder(tx, order.id) ?? null;
         if (expiry <= now()) resolutionFail("not_authorized");
         return { role, proposals: { pending, history: projected.filter((row) => row.state !== "pending") }, dispute: disputeView, lateClaim,
           actions: { canPropose: resolutionEnabled && live && !pending && proposals.filter((row) => row.proposerUserId === command.actor.userId).length < RESOLUTION_POLICY.maxProposalsPerParty
               && (order.state !== "delivered" || (due !== null && at < due)),
             canOpenDispute: resolutionEnabled && trigger !== null, disputeTrigger: trigger?.kind ?? null, disputeTriggerEndsAt: trigger?.endsAt?.toISOString() ?? null,
-            // R3: suspension composition is added by Task 12.
-            canCancelAfterSuspension: false } };
+            canCancelAfterSuspension } };
       });
       // Payments owns its read transaction and creator fence; do not call it while holding that fence here.
       const refunds = await readRefunds(command.actor, command.orderId);

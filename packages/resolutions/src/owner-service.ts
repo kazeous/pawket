@@ -8,17 +8,19 @@ import type { createResolutionCommandKit } from "./command-kit.js";
 import { effectiveResolutionDeadline } from "./deadlines.js";
 import { normalizeResolutionText, RESOLUTION_POLICY } from "./policy.js";
 import { isLatePaymentOrder, lateClaimAmountValid, readLatePaymentClaim, recordLateClaimState } from "./late-claim-service.js";
-import type { ResolutionOrderPort, ResolutionRefundPort, ResolutionPaymentFactsPort, ResolutionCasePort } from "./ports.js";
+import { closeSuspendedPaidOrder } from "./suspension-service.js";
+import type { ResolutionOrderPort, ResolutionRefundPort, ResolutionPaymentFactsPort, ResolutionCasePort, ResolutionStandingPort } from "./ports.js";
 
 type Kit = ReturnType<typeof createResolutionCommandKit>;
 type Input = Readonly<{ orders: ResolutionOrderPort; refunds: ResolutionRefundPort; payments: ResolutionPaymentFactsPort;
-  cases: ResolutionCasePort; mode: "disabled" | "enabled"; applicationRevision: string }>;
+  cases: ResolutionCasePort; mode: "disabled" | "enabled"; applicationRevision: string; standing?: ResolutionStandingPort }>;
 type Target = ResolutionOwnerCommand & Readonly<{ disputeId: string }>;
 type Rule = Target & Readonly<{ outcome: RulingOutcome; refundAmountVnd: number; reasoning: string; internalNote?: string }>;
 type Correct = ResolutionOwnerCommand & Readonly<{ rulingId: string; newRefundAmountVnd: number; reason: string }>;
 type RefundAction = "accept_evidence" | "require_resend" | "waive" | "extend_deadline";
 type Refund = ResolutionOwnerCommand & Readonly<{ caseId: string; action: RefundAction; until?: Date; reason: string }>;
 type LateClaim = ResolutionOwnerCommand & Readonly<{ claimId: string; outcome: "refund_owed" | "rejected"; amountVnd?: number; reason: string }>;
+type Freeze = ResolutionOwnerCommand & Readonly<{ creatorUserId: string; reason: string }>;
 type CorrectionEffect = "increased" | "reduced" | "waived" | "recorded_only";
 const effects: readonly CorrectionEffect[] = ["increased", "reduced", "waived", "recorded_only"];
 const commandKeys = ["owner", "stepUpProofId", "idempotencyKey", "requestId"];
@@ -73,6 +75,32 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
     if (at < row.openedAt) resolutionFail("invalid_request");
   }
   return {
+    async freezeFulfillment(command: Freeze): Promise<{ closedOrders: number }> {
+      enabled(); exact(command, ["creatorUserId", "reason"]);
+      if (!commissionIdentifier(command.creatorUserId)) resolutionFail("invalid_request");
+      const reason = normalizeResolutionText(command.reason, 1, RESOLUTION_POLICY.noteMaxCodePoints);
+      const reference = await kit.ownerMutate(command, "fulfillment_freeze", [command.creatorUserId, reason],
+        async () => command.creatorUserId, "owner.commission_fulfillment_freeze", async (tx) => {
+          if (!input.standing) resolutionFail("dependency_unavailable");
+          if (await input.standing.readCreatorStanding(tx, command.creatorUserId) !== "suspended") resolutionFail("invalid_transition");
+          const candidates = await input.orders.listLiveOrders(tx, command.creatorUserId); const at = kit.now();
+          for (const candidate of candidates) {
+            const facts = await order(tx, candidate.orderId);
+            if (facts.creatorUserId !== command.creatorUserId || !["in_progress", "delivered"].includes(facts.state)
+              || facts.version !== candidate.version) resolutionFail("version_conflict");
+            await closeSuspendedPaidOrder(tx, input, facts, { reason: "fulfillment_frozen", actor: command.owner, requestId: command.requestId, at });
+          }
+          const closedOrders = candidates.length;
+          await insertOutboxEvent(tx, { eventType: "resolution.fulfillment_frozen.v1", eventVersion: 1, aggregateType: "creator", aggregateId: command.creatorUserId,
+            payload: { creatorUserId: command.creatorUserId, closedOrders }, occurredAt: at });
+          await audit(tx, command, "owner.commission_fulfillment_freeze", "identity_user", command.creatorUserId,
+            { standing: "suspended", liveOrders: closedOrders }, { standing: "suspended", closedOrders }, at);
+          return { resultReference: String(closedOrders), at };
+        });
+      const closedOrders = Number(reference);
+      if (!Number.isSafeInteger(closedOrders) || closedOrders < 0 || String(closedOrders) !== reference) resolutionFail("dependency_unavailable");
+      return { closedOrders };
+    },
     async ruleLateClaim(command: LateClaim): Promise<{ claimId: string }> {
       enabled(); exact(command, ["claimId", "outcome", "reason"], ["amountVnd"]);
       if (!commissionUuid(command.claimId) || !["refund_owed", "rejected"].includes(command.outcome)

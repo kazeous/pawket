@@ -49,7 +49,7 @@ export type ResolutionPaymentFactsPort = Readonly<{
 export type ResolutionSessionPort = Readonly<{
   getTipSessionAssurance(tx: PawketTransaction, actor: ResolutionActor, at: Date): Promise<Readonly<{ sessionExpiresAt: Date }> | null>;
 }>;
-/** Implemented by Identity when suspension effects are added in Task 12. */
+/** Identity holds the capability and user share locks until the resolution transaction commits. */
 export type ResolutionStandingPort = Readonly<{
-  lockStanding(tx: PawketTransaction, creatorUserId: string): Promise<Readonly<{ suspended: boolean; suspendedAt: Date | null; versionId: string | null }>>;
+  readCreatorStanding(tx: PawketTransaction, creatorUserId: string): Promise<"active" | "suspended" | "none">;
 }>;
