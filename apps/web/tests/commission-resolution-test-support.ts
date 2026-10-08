@@ -5,7 +5,7 @@ import { createCommissionThreadPort, encryptCommissionFileName } from "@pawket/c
 import { importConfiguredBusinessCalendarVersion } from "@pawket/database";
 import { createCommissionOrderService, createCommissionResolutionOrderPort } from "@pawket/orders";
 import { createCommissionPaymentFactsPort, createCommissionRefundPort } from "@pawket/payments";
-import { createProposalService, createResolutionCommandKit, type ResolutionOrderPort, type ResolutionRefundPort,
+import { createProposalService, createResolutionCommandKit, createResolutionHoldPort, type ResolutionOrderPort, type ResolutionRefundPort,
   type ResolutionPaymentFactsPort, type ResolutionCasePort } from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
@@ -17,7 +17,7 @@ type Paid = Awaited<ReturnType<ReturnType<typeof createCommissionOrderTestFixtur
 type Options = Partial<Parameters<typeof createCommissionOrderService>[0]>;
 export function service(p: Paid, options: Options = {}) {
   return createCommissionOrderService({ ...p.s.input, fulfillmentMode: "enabled",
-    thread: createCommissionThreadPort({ keyring: p.s.input.keyring, mode: "enabled" }), ...options });
+    thread: createCommissionThreadPort({ keyring: p.s.input.keyring, mode: "enabled" }), holds: createResolutionHoldPort(), ...options });
 }
 type ProposalOptions = Partial<Parameters<typeof createProposalService>[1]>;
 type KitOptions = Partial<Parameters<typeof createResolutionCommandKit>[0]>;

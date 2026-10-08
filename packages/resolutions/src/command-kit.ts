@@ -22,10 +22,11 @@ export function createResolutionCommandKit(input: Input) {
       if (error instanceof Error && error.name === "CommissionError" && "code" in error && error.code === "expired") resolutionFail("deadline_passed");
       if (error instanceof Error && ["CommissionError", "CommissionRefundError", "TrustCaseError"].includes(error.name) && "code" in error &&
         (RESOLUTION_ERRORS as readonly unknown[]).includes(error.code)) resolutionFail(error.code as ResolutionErrorCode);
-      // Drizzle wraps postgres-js failures in cause; map only this domain's pending constraint.
+      // Drizzle wraps postgres-js failures in cause; map this domain's active-record constraints.
       let cause: unknown = error;
       for (let depth = 0; depth < 8 && cause instanceof Error; depth++) {
         if ("code" in cause && cause.code === "23505" && "constraint_name" in cause && cause.constraint_name === "commission_proposals_pending_uidx") resolutionFail("proposal_pending");
+        if ("code" in cause && cause.code === "23505" && "constraint_name" in cause && cause.constraint_name === "commission_disputes_open_uidx") resolutionFail("dispute_open");
         cause = cause.cause;
       }
       return resolutionFail("dependency_unavailable");

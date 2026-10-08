@@ -5,3 +5,6 @@ export * from "./intake-fence.js";
 export * from "./command-kit.js";
 export * from "./ports.js";
 export * from "./proposal-service.js";
+export * from "./dispute-service.js";
+export * from "./hold-port.js";
+export * from "./resolution-view.js";

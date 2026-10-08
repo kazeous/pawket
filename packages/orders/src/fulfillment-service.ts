@@ -84,8 +84,8 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
         const order = await kit.owned(tx, command.orderId, command.actor);
         if (order.creatorUserId !== command.actor.userId) commissionFail("not_authorized");
         if (order.version !== command.expectedVersion) commissionFail("version_conflict");
-        if (order.state !== "in_progress") commissionFail("invalid_transition");
         if (await holds.hasOpenDispute(tx, order.id)) commissionFail("dispute_open");
+        if (order.state !== "in_progress") commissionFail("invalid_transition");
         const [snapshot] = await tx.select().from(commissionTermsSnapshots).where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
         if (!snapshot) commissionFail("dependency_unavailable");
         const at = kit.now(); const submissionId = kit.newId();
@@ -121,6 +121,7 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
         const [submission] = await tx.select().from(commissionSubmissions).where(and(eq(commissionSubmissions.orderId, order.id), eq(commissionSubmissions.id, command.submissionId))).limit(1);
         if (!submission || submission.response !== null ||
           (submission.kind === "draft" ? order.state !== "in_progress" || command.response === "accept" : order.state !== "delivered" || command.response === "approve")) commissionFail("invalid_transition");
+        if (command.response !== "accept" && await holds.hasOpenDispute(tx, order.id)) commissionFail("dispute_open");
         const at = kit.now(); let guardUntil: Date | undefined;
         if (submission.kind === "final") {
           if (!order.reviewEndsAt) commissionFail("invalid_transition");
@@ -133,7 +134,6 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
           await input.completeCommissionOrder(tx, order, "buyer_accepted", command.actor, command.requestId, at);
           return { orderId: order.id, at, guardUntil };
         }
-        if (await holds.hasOpenDispute(tx, order.id)) commissionFail("dispute_open");
         const [snapshot] = await tx.select().from(commissionTermsSnapshots).where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
         if (!snapshot) commissionFail("dependency_unavailable");
         if (command.response === "request_changes" && order.revisionsUsed >= snapshot.revisionAllowance) commissionFail("revisions_exhausted");

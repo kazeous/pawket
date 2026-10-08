@@ -100,6 +100,8 @@ export function createProposalService(kit: Kit, input: Input) {
     const openCase = await input.cases.findOpenCase(tx, { kind: "dispute", sourceId: row.id });
     if (!openCase) resolutionFail("dependency_unavailable");
     await input.cases.resolveCase(tx, { caseId: openCase.caseId, resolutionKind: "settled", actor, reason: null, requestId, at });
+    await insertOutboxEvent(tx, { eventType: "resolution.dispute_closed.v1", eventVersion: 1, aggregateType: "commission_dispute", aggregateId: row.id,
+      payload: { disputeId: row.id, orderId, state: "settled" }, occurredAt: at });
   }
   function result(reference: string): Result {
     const recorded = decode(reference);
