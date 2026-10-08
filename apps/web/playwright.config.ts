@@ -23,6 +23,7 @@ export default defineConfig({
     "commission-fulfillment.playwright.ts",
     "ui-foundation.playwright.ts",
     "ui-regression.playwright.ts",
+    "resolution-ui.playwright.ts",
     INCREMENT_THREE_DISABLED_TEST,
     ...INCREMENT_THREE_ENABLED_TESTS,
   ],

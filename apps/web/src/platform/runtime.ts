@@ -61,7 +61,7 @@ import {
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation, recordCommissionFileOperation } from "@pawket/observability";
-import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
+import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
 import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
   createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort } from "@pawket/resolutions";
@@ -110,6 +110,7 @@ export type WebPlatformRuntime = {
   caseHandlers: ReturnType<typeof createCaseHttpHandlers>;
   commissions: ReturnType<typeof createCommissionOrderService>;
   commissionCatalog: ReturnType<typeof createCommissionPackageService>;
+  readCurrentCommissionPolicy(): Promise<CommissionPolicySnapshot | null>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
@@ -668,6 +669,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     caseHandlers: commandHttp.wrap(caseHandlers),
     commissions,
     commissionCatalog,
+    readCurrentCommissionPolicy: () => database.db.transaction((tx) => commissionPolicy.readCurrent(tx, new Date())),
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,

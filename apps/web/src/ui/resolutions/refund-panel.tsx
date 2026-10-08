@@ -63,16 +63,18 @@ export function RefundPanel({ order, refund, banks = {}, disabled, onRefresh }: 
   </section>;
 }
 function DestinationForm({ banks, disabled, onSubmit }: Readonly<{ banks: Readonly<Record<string, string>>; disabled: boolean; onSubmit(payload: object): void }>) {
-  const id = useId(); const [invalid, setInvalid] = useState(false);
+  const id = useId(); const [invalid, setInvalid] = useState(false); const [invalidBank, setInvalidBank] = useState(false);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (disabled) return; const form = new FormData(event.currentTarget); const bankBin = String(form.get("bank"));
     const accountNumber = String(form.get("account")).trim(); const accountHolder = String(form.get("holder")).normalize("NFC").trim();
-    if (!Object.hasOwn(banks, bankBin) || !/^[0-9]{6,19}$/u.test(accountNumber) || !accountHolder || [...accountHolder].length > 100 || /[\p{Cc}\p{Cf}]/u.test(accountHolder)) { setInvalid(true); return; }
+    if (!Object.hasOwn(banks, bankBin)) { setInvalidBank(true); setInvalid(false); return; }
+    setInvalidBank(false);
+    if (!/^[0-9]{6,19}$/u.test(accountNumber) || !accountHolder || [...accountHolder].length > 100 || /[\p{Cc}\p{Cf}]/u.test(accountHolder)) { setInvalid(true); return; }
     setInvalid(false); onSubmit({ bankBin, accountNumber, accountHolder });
   }
   return <form onSubmit={submit}><FieldSet disabled={disabled}><FieldGroup><h4>Nhập tài khoản nhận hoàn tiền</h4>
     <StatusBanner>Pawket không kiểm tra được tài khoản này. Vui lòng nhập chính xác.</StatusBanner>
-    <Field htmlFor={`${id}-bank`} label="Ngân hàng"><NativeSelect id={`${id}-bank`} name="bank">{Object.entries(banks).map(([bin, label]) => <NativeSelectOption key={bin} value={bin}>{label}</NativeSelectOption>)}</NativeSelect></Field>
+    <Field htmlFor={`${id}-bank`} label="Ngân hàng" required error={invalidBank ? "Chọn ngân hàng nhận hoàn tiền." : null}><NativeSelect id={`${id}-bank`} name="bank" defaultValue="" aria-required="true"><NativeSelectOption value="" disabled>Chọn ngân hàng</NativeSelectOption>{Object.entries(banks).map(([bin, label]) => <NativeSelectOption key={bin} value={bin}>{label}</NativeSelectOption>)}</NativeSelect></Field>
     <Field htmlFor={`${id}-account`} label="Số tài khoản" required><Input id={`${id}-account`} name="account" inputMode="numeric" autoComplete="off" pattern="[0-9]{6,19}" required /></Field>
     <Field htmlFor={`${id}-holder`} label="Tên chủ tài khoản" required><Input id={`${id}-holder`} name="holder" autoComplete="off" required /></Field>
     {invalid ? <StatusBanner tone="error">Kiểm tra lại tài khoản nhận hoàn tiền.</StatusBanner> : null}

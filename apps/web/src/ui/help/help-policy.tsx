@@ -1,7 +1,6 @@
-import { loadServerEnv } from "@pawket/config";
-import { createDatabase } from "@pawket/database";
-import { createCommissionPolicyReadPort, type CommissionPolicySnapshot } from "@pawket/orders";
+import type { CommissionPolicySnapshot } from "@pawket/orders";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getPlatformRuntime } from "@/platform/runtime";
 import { StatusBanner } from "@/ui/status-banner";
 
 export function HelpPolicy({ policy, unavailable = false }: Readonly<{ policy: CommissionPolicySnapshot | null; unavailable?: boolean }>) {
@@ -11,10 +10,8 @@ export function HelpPolicy({ policy, unavailable = false }: Readonly<{ policy: C
   </CardContent></Card>;
 }
 export async function CurrentHelpPolicy() {
-  const env = loadServerEnv(); const database = createDatabase(env.DATABASE_URL);
   let policy: CommissionPolicySnapshot | null = null; let unavailable = false;
-  try { policy = await database.db.transaction((tx) => createCommissionPolicyReadPort({ environment: env.APP_ENV }).readCurrent(tx, new Date())); }
+  try { policy = await getPlatformRuntime().readCurrentCommissionPolicy(); }
   catch { unavailable = true; }
-  finally { await database.close(); }
   return <HelpPolicy policy={policy} unavailable={unavailable} />;
 }

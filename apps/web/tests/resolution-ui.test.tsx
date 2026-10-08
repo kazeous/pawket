@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, test, vi } from "vitest";
+const { execute } = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock("../src/ui/commissions/commission-session", () => ({ useCommissionSession: () => async () => "synthetic-actor",
-  useCommissionCommand: () => ({ execute: vi.fn(), retry: vi.fn(), locked: false, pending: false, code: null }), CommandFeedback: () => null }));
+  useCommissionCommand: () => ({ execute, retry: vi.fn(), locked: false, pending: false, code: null }), CommandFeedback: () => null }));
+vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: vi.fn() }));
 import { OrderResolutionPanel } from "../src/ui/resolutions/order-resolution-panel";
 import { DisputeForm, disputeInputSchema } from "../src/ui/resolutions/dispute-panel";
 import { RefundPanel, SendForm } from "../src/ui/resolutions/refund-panel";
@@ -61,8 +64,37 @@ test("refund send fields have accessible labels matching the browser locators", 
 
 test("refund destination fields have accessible labels", () => {
   labelledFields(renderToStaticMarkup(createElement(RefundPanel, { order, refund: fixtureRefund, banks: { "970436": "Synthetic bank" }, disabled: false, onRefresh: async () => undefined })), {
-    '[name="bank"]': "Ngân hàng", '[name="account"]': "Số tài khoản bắt buộc", '[name="holder"]': "Tên chủ tài khoản bắt buộc",
+    '[name="bank"]': "Ngân hàng bắt buộc", '[name="account"]': "Số tài khoản bắt buộc", '[name="holder"]': "Tên chủ tài khoản bắt buộc",
   });
+});
+test("refund bank starts on an empty disabled placeholder even when a destination exists", () => {
+  const container = document.createElement("div"); container.innerHTML = renderToStaticMarkup(createElement(RefundPanel,
+    { order, refund: fixtureRefund, banks: { "970415": "Synthetic bank A", "970436": "Synthetic bank B" }, disabled: false, onRefresh: async () => undefined }));
+  const bank = container.querySelector<HTMLSelectElement>('[name="bank"]')!;
+  expect(bank.value === "").toBe(true);
+  expect(bank.options[0]!.value === "" && bank.options[0]!.disabled && bank.options[0]!.selected).toBe(true);
+  expect(Array.from(bank.options).some((option) => option.value !== "" && option.selected)).toBe(false);
+});
+test("refund destination rejects an unchosen bank with an associated field error and accepts a selected bank", async () => {
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  execute.mockClear(); vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  try {
+    await act(async () => root.render(createElement(RefundPanel,
+      { order, refund: fixtureRefund, banks: { "970436": "Synthetic bank" }, disabled: false, onRefresh: async () => undefined })));
+    const form = container.querySelector("form")!; const bank = form.querySelector<HTMLSelectElement>('[name="bank"]')!;
+    form.querySelector<HTMLInputElement>('[name="account"]')!.value = "000000000001";
+    form.querySelector<HTMLInputElement>('[name="holder"]')!.value = "SYNTHETIC BUYER";
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    expect(execute.mock.calls.length).toBe(0);
+    expect(bank.getAttribute("aria-invalid")).toBe("true");
+    const error = document.getElementById(bank.getAttribute("aria-describedby")!);
+    expect(error?.textContent?.trim()).toBe("Chọn ngân hàng nhận hoàn tiền.");
+    bank.value = "970436";
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    expect(execute.mock.calls.length).toBe(1);
+    expect(execute.mock.calls[0]?.[1]?.bankBin === "970436").toBe(true);
+    expect(bank.hasAttribute("aria-invalid")).toBe(false);
+  } finally { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); }
 });
 test("creator refund view renders only masked details before reveal", () => {
   const refund = { obligationId: id, source: "agreement", sourceId: id, amountVnd: 100_000, reference: "PKR000000000000", state: "awaiting_send", version: 1,
