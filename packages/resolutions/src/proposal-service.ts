@@ -38,24 +38,11 @@ export function isProposalStale(proposal: Readonly<Pick<CommissionProposal, "ord
   return facts.state !== proposal.orderStateAtCreation || (facts.lastFulfillmentMoveAt !== null && facts.lastFulfillmentMoveAt > proposal.createdAt);
 }
 
-export function createProposalService(kit: Kit, input: Input) {
-  if (input.mode !== "enabled" && input.mode !== "disabled") resolutionFail("invalid_request");
-  const enabled = () => { if (input.mode !== "enabled") resolutionFail("resolution_disabled"); };
-  async function owned(tx: PawketTransaction, orderId: string, actor: ResolutionActor): Promise<CommissionResolutionOrderFacts> {
-    const order = await input.orders.lockOrder(tx, orderId);
-    if (!order || (order.buyerUserId !== actor.userId && order.creatorUserId !== actor.userId)) resolutionFail("not_available");
-    return order;
-  }
+export function createProposalEnder(input: Pick<Input, "orders">) {
   async function proposal(tx: PawketTransaction, proposalId: string, locked = false): Promise<CommissionProposal> {
     const query = tx.select().from(commissionProposals).where(eq(commissionProposals.id, proposalId)).limit(1);
     const [row] = await (locked ? query.for("update") : query);
     if (!row) resolutionFail("not_available"); return row;
-  }
-  async function creatorOf(tx: PawketTransaction, command: Target, role: "proposer" | "other"): Promise<string> {
-    const row = await proposal(tx, command.proposalId);
-    const order = await owned(tx, row.orderId, command.actor);
-    if ((row.proposerUserId === command.actor.userId) !== (role === "proposer")) resolutionFail("not_available");
-    return order.creatorUserId;
   }
   async function recordEnd(tx: PawketTransaction, row: CommissionProposal, state: EndState | "accepted", at: Date, actor: ResolutionActor | null) {
     const [ended] = await tx.update(commissionProposals).set({ state, endedAt: at, endedByUserId: actor?.userId ?? null, version: row.version + 1 })
@@ -84,6 +71,24 @@ export function createProposalService(kit: Kit, input: Input) {
       orderVersion = restored.version;
     }
     return { proposalId: row.id, orderVersion };
+  }
+  return { proposal, recordEnd, endProposalWithoutAgreement };
+}
+
+export function createProposalService(kit: Kit, input: Input) {
+  const { proposal, recordEnd, endProposalWithoutAgreement } = createProposalEnder(input);
+  if (input.mode !== "enabled" && input.mode !== "disabled") resolutionFail("invalid_request");
+  const enabled = () => { if (input.mode !== "enabled") resolutionFail("resolution_disabled"); };
+  async function owned(tx: PawketTransaction, orderId: string, actor: ResolutionActor): Promise<CommissionResolutionOrderFacts> {
+    const order = await input.orders.lockOrder(tx, orderId);
+    if (!order || (order.buyerUserId !== actor.userId && order.creatorUserId !== actor.userId)) resolutionFail("not_available");
+    return order;
+  }
+  async function creatorOf(tx: PawketTransaction, command: Target, role: "proposer" | "other"): Promise<string> {
+    const row = await proposal(tx, command.proposalId);
+    const order = await owned(tx, row.orderId, command.actor);
+    if ((row.proposerUserId === command.actor.userId) !== (role === "proposer")) resolutionFail("not_available");
+    return order.creatorUserId;
   }
   async function deadline(tx: PawketTransaction, row: CommissionProposal, at: Date): Promise<Date> {
     const until = await effectiveResolutionDeadline(tx, row.respondBy);

@@ -278,3 +278,20 @@ groups:
         annotations:
           summary: Commission file maintenance is failing or stale; expiry, retries and purges are not running
           runbook: ops/runbooks/commission-files.md
+
+      - alert: PawketCommissionRefundOverdue
+        expr: pawket_commission_refund_overdue > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: Commission refund obligations are overdue
+          runbook: ops/runbooks/overdue-refunds.md
+      - alert: PawketCommissionResolutionScanStale
+        expr: (pawket_worker_scan_healthy{scan="commission_resolution"} == 0) or (time() - pawket_worker_last_success_timestamp_seconds{scan="commission_resolution"} >= 900)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Commission resolution maintenance is unhealthy or stale
+          runbook: ops/runbooks/commission-operations.md

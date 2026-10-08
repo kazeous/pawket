@@ -1,4 +1,4 @@
-import type { PawketTransaction } from "@pawket/database";
+import type { PawketDatabase, PawketTransaction } from "@pawket/database";
 import type { CommissionResolutionOrderFacts, PostPaymentCloseReason } from "@pawket/orders";
 import type { ResolutionActor } from "./contracts.js";
 
@@ -31,6 +31,13 @@ export type ResolutionRefundPort = Readonly<{
   listForOrder(tx: PawketTransaction, command: { orderId: string }): Promise<readonly ResolutionRefundView[]>;
 }>;
 type CaseKind = "dispute" | "refund_not_received" | "refund_overdue" | "late_payment";
+export type ResolutionRefundMaintenancePort = Readonly<{
+  readOverdueCandidates(db: PawketDatabase, command: { at: Date; limit: number; after?: RefundCandidateCursor | null }): Promise<readonly { obligationId: string; orderId: string; version: number; dueAt: Date | null }[]>;
+  readConfirmationCandidates(db: PawketDatabase, command: { at: Date; limit: number; after?: RefundCandidateCursor | null }): Promise<readonly { obligationId: string; orderId: string; version: number; confirmBy: Date | null }[]>;
+  presumeReceived(tx: PawketTransaction, command: { obligationId: string; requestId: string; at: Date }): Promise<void>;
+  purgeDestinations(db: PawketDatabase, command: { at: Date; limit: number }): Promise<number>;
+}>;
+export type RefundCandidateCursor = Readonly<{ deadline: Date; obligationId: string }>;
 type CaseCommand = Readonly<{ caseId: string; actor: ResolutionActor | null; reason: string | null; requestId: string; at: Date }>;
 export type ResolutionCasePort = Readonly<{
   readCase(tx: PawketTransaction, caseId: string): Promise<Readonly<{ caseId: string; kind: string; orderId: string;

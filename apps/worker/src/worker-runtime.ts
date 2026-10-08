@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { types as nodeTypes } from "node:util";
+import type { createResolutionMaintenance } from "@pawket/resolutions";
 
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
@@ -29,6 +30,9 @@ import {
   recordRetentionMetrics,
   recordTipOperation,
   recordCommissionOperation,
+  recordResolutionOperation,
+  setResolutionPausedMetric,
+  setCommissionRefundOverdueMetric,
   setCommissionOperationalMetrics,
   setCommissionCleanupConfiguredMetric,
   setCommissionFulfillmentConfiguredMetric,
@@ -93,6 +97,7 @@ import {
 import type { WorkerHealthState } from "./worker-health.js";
 import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-email.js";
 import { materializeTipNotification } from "./tip-notification.js";
+import { RESOLUTION_OUTBOX_EVENTS, validateResolutionOutboxEvent } from "./resolution-events.js";
 import { COMMISSION_OUTBOX_EVENTS, validateCommissionOutboxEvent } from "./commission-events.js";
 import { commissionUuid } from "@pawket/orders";
 
@@ -170,7 +175,9 @@ export type SePayWorkerService = {
   processInbox(inboxId: string): Promise<"confirmed" | "review_required" | "deferred" | "unchanged">;
   recoverDue(limit: number): Promise<number>;
 };
+export type ResolutionWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled"; createService(db: DatabaseResource["db"]): Pick<ReturnType<typeof createResolutionMaintenance>, "observeResolutionMode" | "scan" | "readRefundOverdueCount"> }>;
 export type CommissionWorkerConfiguration = {
+  resolution?: ResolutionWorkerConfiguration;
   paymentsMode?: TipPaymentsMode;
   fulfillmentMode: "disabled" | "enabled";
   batchSize: number;
@@ -428,6 +435,9 @@ export function createWorkerJobProcessor(input: {
                 outcome: "attention_required",
               });
             }
+          } else if (RESOLUTION_OUTBOX_EVENTS.has(job.data.eventType)) {
+            try { await validateResolutionOutboxEvent(input.database, job.data); recordResolutionOperation({ operation: "event", outcome: "validated" }); }
+            catch { recordResolutionOperation({ operation: "event", outcome: "failed" }); throw new Error("Resolution event validation failed"); }
           } else if (COMMISSION_OUTBOX_EVENTS.has(job.data.eventType)) {
             try { await validateCommissionOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
             catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Commission event validation failed"); }
@@ -645,6 +655,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.commissionFiles && (!Number.isInteger(options.commissionFiles.concurrency) || options.commissionFiles.concurrency < 1 || options.commissionFiles.concurrency > 2 ||
     !Number.isInteger(options.commissionFiles.batchSize) || options.commissionFiles.batchSize < 1 || options.commissionFiles.batchSize > 500 ||
     !Number.isInteger(options.commissionFiles.scanIntervalMs) || options.commissionFiles.scanIntervalMs < 10_000 || options.commissionFiles.scanIntervalMs > 600_000)) throw new Error("Invalid commission file worker configuration");
+  if (options.commissions?.resolution && (!["disabled", "enabled"].includes(options.commissions.resolution.mode) ||
+    typeof options.commissions.resolution.createService !== "function")) throw new Error("Invalid resolution worker configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -668,6 +680,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let commissionFileWorker: CommissionFileWorkerResource | undefined;
   let sepayService: SePayWorkerService | undefined;
   let commissionService: CommissionOrderMaintenanceService | undefined;
+  let resolutionService: ReturnType<ResolutionWorkerConfiguration["createService"]> | undefined;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -721,6 +734,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     database = dependencies.createDatabase(options.databaseUrl);
     sepayService = options.sepay?.createService(database.db, workerId);
     commissionService = options.commissions?.createService(database.db);
+    resolutionService = options.commissions?.resolution?.createService(database.db);
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -788,6 +802,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let commissionScanCursor: string | null = null;
   let currentCommissionFulfillmentScan: Promise<void> | undefined;
   let lastCommissionFulfillmentScanAt = 0;
+  let currentCommissionResolutionScan: Promise<void> | undefined;
+  let lastCommissionResolutionScanAt = 0;
   let commissionCompletionCursor: { reviewEndsAt: Date; id: string } | null = null;
   let currentCommissionFilesScan: Promise<void> | undefined;
   let currentScannerProbe: Promise<void> | undefined;
@@ -828,6 +844,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     options.healthState.commissionFulfillmentConfigured = options.commissions !== undefined;
     options.healthState.commissionFulfillmentMaximumAgeMs = options.commissions ? options.commissions.scanIntervalMs * 3 : null;
     options.healthState.lastCommissionFulfillmentSucceededAt = null;
+    options.healthState.commissionResolutionConfigured = options.commissions?.resolution !== undefined;
+    options.healthState.commissionResolutionMaximumAgeMs = options.commissions?.resolution ? options.commissions.scanIntervalMs * 3 : null;
+    options.healthState.lastCommissionResolutionSucceededAt = null;
     options.healthState.tipExpiryConfigured = tipExpiryEnabled;
     options.healthState.tipExpiryMaximumAgeMs = tipExpiryEnabled ? options.tipPayments!.scanIntervalMs * 3 : null;
     options.healthState.sepayRecoveryConfigured = sepayRecoveryEnabled;
@@ -847,6 +866,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   }
   if (options.commissionFiles) setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
   if (options.commissions) setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
+  if (options.commissions?.resolution) setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -1101,6 +1121,34 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanCommissionResolutionIfDue = async (scanAt: number): Promise<void> => {
+    const config = options.commissions; const resolution = config?.resolution;
+    if (!running || !config || !resolution || !resolutionService || scanAt - lastCommissionResolutionScanAt < config.scanIntervalMs) return;
+    lastCommissionResolutionScanAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: false });
+    try {
+      const observation = await resolutionService.observeResolutionMode(resolution.mode);
+      if (!["opened", "closed", "none"].includes(observation.change) || typeof observation.paused !== "boolean" ||
+        observation.paused !== (resolution.mode === "disabled")) throw new Error("Invalid resolution mode observation");
+      setResolutionPausedMetric(observation.paused);
+      if (resolution.mode === "enabled") {
+        const result = await resolutionService.scan({ limit: config.batchSize });
+        if (!result || ![result.expiredProposals, result.lapsedProposals, result.escalatedClaims, result.overdueCases, result.presumedReceived, result.purgedDestinations]
+          .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= config.batchSize) || result.expiredProposals + result.lapsedProposals > config.batchSize) throw new Error("Invalid resolution scan result");
+        setCommissionRefundOverdueMetric(await resolutionService.readRefundOverdueCount());
+      } else setCommissionRefundOverdueMetric(0);
+      recordResolutionOperation({ operation: "scan", outcome: "completed" });
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "commission_resolution", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastCommissionResolutionSucceededAt = succeededAt;
+    } catch {
+      if (options.healthState) options.healthState.lastCommissionResolutionSucceededAt = null;
+      recordResolutionOperation({ operation: "scan", outcome: "failed" });
+      logger.error({ category: "commission_resolution_failed" }, "Commission resolution failed");
+    }
+  };
+
   const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
     const config = options.commissionFiles; const queueResource = commissionFileQueue;
     if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
@@ -1262,6 +1310,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       if (!currentCommissionFulfillmentScan) {
         currentCommissionFulfillmentScan = scanCommissionFulfillmentIfDue(Date.now()).finally(() => { currentCommissionFulfillmentScan = undefined; });
       }
+      if (!currentCommissionResolutionScan) currentCommissionResolutionScan = scanCommissionResolutionIfDue(Date.now()).finally(() => { currentCommissionResolutionScan = undefined; });
       if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
       if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
@@ -1313,6 +1362,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentSePayScan;
       await currentCommissionScan;
       await currentCommissionFulfillmentScan;
+      await currentCommissionResolutionScan;
       await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());

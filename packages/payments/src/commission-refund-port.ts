@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, exists, inArray, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, asc, eq, exists, gt, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
 import { calculateStoredBusinessDayDeadline, commissionRefundObligations, commissionRefundSends, commissionRefundEvents,
   type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { decryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
@@ -9,6 +9,7 @@ type Obligation = typeof commissionRefundObligations.$inferSelect;
 type Actor = Readonly<{ userId: string; sessionId: string }>;
 type Command = Readonly<{ obligationId: string; actor: Actor | null; requestId: string; at: Date }>;
 type Scan = Readonly<{ at: Date; limit: number }>;
+type CandidateScan = Scan & Readonly<{ after?: { deadline: Date; obligationId: string } | null }>;
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value);
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
 const sources: readonly CommissionRefundSource[] = ["agreement", "ruling", "correction", "late_payment", "late_payment_provider", "suspension_cancel", "fulfillment_freeze"];
@@ -143,18 +144,22 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
         .where(and(eq(commissionRefundObligations.creatorUserId, creatorUserId), eq(commissionRefundObligations.state, "awaiting_send"))).orderBy(asc(commissionRefundObligations.dueAt), asc(commissionRefundObligations.id));
       return rows.map((row) => ({ obligationId: row.obligationId, dueAt: row.dueAt! }));
     },
-    async readOverdueCandidates(db: PawketDatabase, command: Scan) {
+    async readOverdueCandidates(db: PawketDatabase, command: CandidateScan) {
       scan(command);
+      if (command.after) { time(command.after.deadline); if (!uuid(command.after.obligationId)) refundFail("invalid_request"); }
       return db.select({ obligationId: commissionRefundObligations.id, orderId: commissionRefundObligations.orderId, creatorUserId: commissionRefundObligations.creatorUserId,
         buyerUserId: commissionRefundObligations.buyerUserId, dueAt: commissionRefundObligations.dueAt, version: commissionRefundObligations.version }).from(commissionRefundObligations)
-        .where(and(eq(commissionRefundObligations.state, "awaiting_send"), lte(commissionRefundObligations.dueAt, command.at)))
+        .where(and(eq(commissionRefundObligations.state, "awaiting_send"), lte(commissionRefundObligations.dueAt, command.at), command.after ?
+          or(gt(commissionRefundObligations.dueAt, command.after.deadline), and(eq(commissionRefundObligations.dueAt, command.after.deadline), gt(commissionRefundObligations.id, command.after.obligationId))) : undefined))
         .orderBy(asc(commissionRefundObligations.dueAt), asc(commissionRefundObligations.id)).limit(command.limit);
     },
-    async readConfirmationCandidates(db: PawketDatabase, command: Scan) {
+    async readConfirmationCandidates(db: PawketDatabase, command: CandidateScan) {
       scan(command);
+      if (command.after) { time(command.after.deadline); if (!uuid(command.after.obligationId)) refundFail("invalid_request"); }
       return db.select({ obligationId: commissionRefundObligations.id, orderId: commissionRefundObligations.orderId, creatorUserId: commissionRefundObligations.creatorUserId,
         confirmBy: commissionRefundObligations.confirmBy, version: commissionRefundObligations.version }).from(commissionRefundObligations)
-        .where(and(eq(commissionRefundObligations.state, "sent"), lte(commissionRefundObligations.confirmBy, command.at)))
+        .where(and(eq(commissionRefundObligations.state, "sent"), lte(commissionRefundObligations.confirmBy, command.at), command.after ?
+          or(gt(commissionRefundObligations.confirmBy, command.after.deadline), and(eq(commissionRefundObligations.confirmBy, command.after.deadline), gt(commissionRefundObligations.id, command.after.obligationId))) : undefined))
         .orderBy(asc(commissionRefundObligations.confirmBy), asc(commissionRefundObligations.id)).limit(command.limit);
     },
     async purgeDestinations(db: PawketDatabase, command: Scan): Promise<number> {

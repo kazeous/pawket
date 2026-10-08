@@ -72,13 +72,7 @@ function providerSourceId(eventId: string): string {
   const hex = bytes.toString("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function createLateClaimService(kit: Kit, input: Input) {
-  if (input.mode !== "enabled" && input.mode !== "disabled") resolutionFail("invalid_request");
-  const enabled = () => { if (input.mode !== "enabled") resolutionFail("resolution_disabled"); };
-  async function owned(tx: PawketTransaction, orderId: string, actor: ResolutionActor, role: "buyer" | "creator") {
-    const order = await input.orders.lockOrder(tx, orderId);
-    if (!order || (role === "buyer" ? order.buyerUserId : order.creatorUserId) !== actor.userId) resolutionFail("not_available"); return order;
-  }
+export function createLateClaimEscalator(input: Pick<Input, "orders" | "payments" | "cases" | "mode">) {
   async function closedIntent(tx: PawketTransaction, order: CommissionResolutionOrderFacts) {
     if (!isLatePaymentOrder(order)) resolutionFail("invalid_transition");
     const intent = await input.payments.closedIntent(tx, order.id); if (!intent) resolutionFail("invalid_transition"); return intent;
@@ -87,6 +81,26 @@ export function createLateClaimService(kit: Kit, input: Input) {
     await recordLateClaimState(tx, row, "escalated", null, at);
     await input.cases.openCase(tx, { kind: "late_payment", orderId: order.id, sourceType: "commission_late_payment_claim", sourceId: row.id,
       policyRevisionId: order.policyRevisionId, requestId, at });
+  }
+  async function escalateUnanswered(tx: PawketTransaction, candidate: CommissionLatePaymentClaim, at: Date, requestId: string): Promise<void> {
+    commissionTime(at); if (!commissionUuid(candidate.id) || !commissionUuid(candidate.orderId) || !commissionIdentifier(requestId)) resolutionFail("invalid_request");
+    if (input.mode !== "enabled") return;
+    const order = await input.orders.lockOrder(tx, candidate.orderId); if (!order) resolutionFail("not_available");
+    const row = await readLatePaymentClaim(tx, candidate.id, true); if (row.orderId !== order.id) resolutionFail("not_available");
+    if (row.state !== "awaiting_creator") return; if (at < row.filedAt) resolutionFail("invalid_request");
+    const until = await effectiveResolutionDeadline(tx, row.creatorRespondBy); if (!until || at < until) return;
+    await closedIntent(tx, order); await escalate(tx, row, order, at, requestId);
+  }
+  return { closedIntent, escalate, escalateUnanswered };
+}
+
+export function createLateClaimService(kit: Kit, input: Input) {
+  const { closedIntent, escalate, escalateUnanswered } = createLateClaimEscalator(input);
+  if (input.mode !== "enabled" && input.mode !== "disabled") resolutionFail("invalid_request");
+  const enabled = () => { if (input.mode !== "enabled") resolutionFail("resolution_disabled"); };
+  async function owned(tx: PawketTransaction, orderId: string, actor: ResolutionActor, role: "buyer" | "creator") {
+    const order = await input.orders.lockOrder(tx, orderId);
+    if (!order || (role === "buyer" ? order.buyerUserId : order.creatorUserId) !== actor.userId) resolutionFail("not_available"); return order;
   }
   return {
     async fileLateClaim(command: File): Promise<{ claimId: string }> {
@@ -142,15 +156,7 @@ export function createLateClaimService(kit: Kit, input: Input) {
       return { claimId: resultId(reference) };
     },
     /** Maintenance owns the transaction; refresh under the creator/order fence before checking the effective deadline. */
-    async escalateUnanswered(tx: PawketTransaction, candidate: CommissionLatePaymentClaim, at: Date, requestId: string): Promise<void> {
-      commissionTime(at); if (!commissionUuid(candidate.id) || !commissionUuid(candidate.orderId) || !commissionIdentifier(requestId)) resolutionFail("invalid_request");
-      if (input.mode !== "enabled") return;
-      const order = await input.orders.lockOrder(tx, candidate.orderId); if (!order) resolutionFail("not_available");
-      const row = await readLatePaymentClaim(tx, candidate.id, true); if (row.orderId !== order.id) resolutionFail("not_available");
-      if (row.state !== "awaiting_creator") return; if (at < row.filedAt) resolutionFail("invalid_request");
-      const until = await effectiveResolutionDeadline(tx, row.creatorRespondBy); if (!until || at < until) return;
-      await closedIntent(tx, order); await escalate(tx, row, order, at, requestId);
-    },
+    escalateUnanswered,
     /** Internal verified-provider hook. Matching reference and destination revision are the provider caller's responsibility. */
     async recordProviderLatePayment(tx: PawketTransaction, command: Provider): Promise<"obligation_created" | "already_recorded" | "not_applicable"> {
       if (!readCommissionRecord(command, ["orderId", "paymentIntentId", "amountVnd", "providerEventId", "at", "requestId"]) || !commissionUuid(command.orderId)
