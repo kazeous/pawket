@@ -2,16 +2,32 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { expect } from "vitest";
 import { createCommissionThreadPort, encryptCommissionFileName } from "@pawket/commission-files";
-import { createCommissionOrderService } from "@pawket/orders";
+import { importConfiguredBusinessCalendarVersion } from "@pawket/database";
+import { createCommissionOrderService, createCommissionResolutionOrderPort } from "@pawket/orders";
+import { createCommissionPaymentFactsPort, createCommissionRefundPort } from "@pawket/payments";
+import { createProposalService, createResolutionCommandKit, type ResolutionOrderPort, type ResolutionRefundPort,
+  type ResolutionPaymentFactsPort, type ResolutionCasePort } from "@pawket/resolutions";
+import { createTrustCasePort } from "@pawket/trust";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const DAY = 86_400_000;
+const refundCalendarVersion = "vn-proposals-test";
 type Paid = Awaited<ReturnType<ReturnType<typeof createCommissionOrderTestFixture>["paidOrder"]>>;
 type Options = Partial<Parameters<typeof createCommissionOrderService>[0]>;
 export function service(p: Paid, options: Options = {}) {
   return createCommissionOrderService({ ...p.s.input, fulfillmentMode: "enabled",
     thread: createCommissionThreadPort({ keyring: p.s.input.keyring, mode: "enabled" }), ...options });
+}
+type ProposalOptions = Partial<Parameters<typeof createProposalService>[1]>;
+type KitOptions = Partial<Parameters<typeof createResolutionCommandKit>[0]>;
+export function resolutions(p: Paid, options: ProposalOptions = {}, kitOptions: KitOptions = {}) {
+  const orders: ResolutionOrderPort = createCommissionResolutionOrderPort({ applicationRevision: "synthetic-i8", newId: randomUUID });
+  const refunds: ResolutionRefundPort = createCommissionRefundPort({ keyring: p.s.input.keyring, calendarVersion: refundCalendarVersion });
+  const payments: ResolutionPaymentFactsPort = createCommissionPaymentFactsPort();
+  const cases: ResolutionCasePort = createTrustCasePort();
+  const kit = createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity, ...kitOptions });
+  return createProposalService(kit, { orders, refunds, payments, cases, mode: "enabled", ...options });
 }
 const order = (p: Paid) => p.s.input.db.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.id, p.orderId)).then((rows) => rows[0]!);
 const submissions = (p: Paid) => p.s.input.db.select().from(schema.commissionSubmissions).where(eq(schema.commissionSubmissions.orderId, p.orderId));
@@ -44,9 +60,13 @@ export async function respond(p: Paid, submissionId: string, response: "approve"
 }
 export function createCommissionResolutionTestFixture(label: string) {
   const base = createCommissionOrderTestFixture(label);
+  async function initialize() {
+    await base.initialize();
+    await base.db.transaction((tx) => importConfiguredBusinessCalendarVersion(tx, { version: refundCalendarVersion, holidayDates: [] }));
+  }
   async function deliveredOrder(options: Parameters<typeof base.paidOrder>[0] = {}) {
     const p = await base.paidOrder(options); const instance = service(p); const final = await submit(p, "final", instance);
     return { ...p, service: instance, finalId: final.id };
   }
-  return { ...base, deliveredOrder, service, cleanFile, submit, respond };
+  return { ...base, initialize, deliveredOrder, service, cleanFile, submit, respond, resolutions };
 }

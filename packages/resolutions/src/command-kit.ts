@@ -1,5 +1,5 @@
 import { beginIdempotentCommand, completeIdempotentCommand, type PawketDatabase, type PawketTransaction } from "@pawket/database";
-import { commissionCommandFingerprint, commissionIdempotencyKey, commissionIdentifier, commissionTime, lockCommissionCreator, readCommissionRecord } from "@pawket/orders";
+import { CommissionError, commissionCommandFingerprint, commissionIdempotencyKey, commissionIdentifier, commissionTime, lockCommissionCreator, readCommissionRecord } from "@pawket/orders";
 import { createLookupHmac, decryptSensitiveField, encryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
 import { ResolutionError, resolutionFail, type ResolutionActor, type ResolutionCommand, type ResolutionOwnerCommand, type ResolutionErrorCode, RESOLUTION_ERRORS } from "./contracts.js";
 import type { ResolutionSessionPort } from "./ports.js";
@@ -19,8 +19,15 @@ export function createResolutionCommandKit(input: Input) {
   async function boundary<T>(run: () => Promise<T>): Promise<T> {
     try { return await run(); } catch (error) {
       if (error instanceof ResolutionError) throw error;
+      if (error instanceof CommissionError && error.code === "expired") resolutionFail("deadline_passed");
       if (error instanceof Error && ["CommissionError", "CommissionRefundError", "TrustCaseError"].includes(error.name) && "code" in error &&
         (RESOLUTION_ERRORS as readonly unknown[]).includes(error.code)) resolutionFail(error.code as ResolutionErrorCode);
+      // Drizzle wraps postgres-js failures in cause; map only this domain's pending constraint.
+      let cause: unknown = error;
+      for (let depth = 0; depth < 8 && cause instanceof Error; depth++) {
+        if ("code" in cause && cause.code === "23505" && "constraint_name" in cause && cause.constraint_name === "commission_proposals_pending_uidx") resolutionFail("proposal_pending");
+        cause = cause.cause;
+      }
       return resolutionFail("dependency_unavailable");
     }
   }
@@ -61,6 +68,7 @@ export function createResolutionCommandKit(input: Input) {
     }));
   }
   return {
+    now,
     mutate: (command: ResolutionCommand, scope: string, payload: unknown, creatorOf: (tx: PawketTransaction) => Promise<string>, apply: (tx: PawketTransaction) => Promise<Change>) =>
       mutate(command, scope, payload, creatorOf, apply),
     async ownerMutate(command: ResolutionOwnerCommand, scope: string, payload: unknown, creatorOf: (tx: PawketTransaction) => Promise<string>, actionClass: string, apply: (tx: PawketTransaction) => Promise<Change>) {
