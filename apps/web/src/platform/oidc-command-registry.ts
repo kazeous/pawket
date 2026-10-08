@@ -15,7 +15,8 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
   if (payload.method !== "POST") return null;
   const { path } = payload;
   const make = (actionClass: string, fresh: boolean, title: string, returnPath: string, execute: Command["execute"]): Command =>
-    ({ policy: { actionClass, fresh, ...(actionClass === "payments.commission_confirm" ? freshness.commission :
+    ({ policy: { actionClass, fresh, ...(["payments.commission_confirm", "payments.commission_refund_destination", "payments.commission_refund_reveal",
+      "payments.commission_refund_send", "orders.commission_late_claim_answer"].includes(actionClass) ? freshness.commission :
       ["payments.tip_confirm", "catalog.tip_settings"].includes(actionClass) ? freshness.tip : {}) }, title, returnPath, execute });
   let match: RegExpExecArray | null;
   if (path === "/api/v1/creator-application/receiving-account") return make("payments.receiving_account", true, "Cập nhật tài khoản nhận tiền", "/creator/apply", (r, q) => r.paymentsHandlers.proposeReceivingAccount(q));
@@ -27,6 +28,37 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
   if (path === "/api/v1/creator/commissions/packages") return make("catalog.commission_package", false, "Lưu gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.savePackage(q));
   if (path === "/api/v1/creator/commissions/packages/change") return make("catalog.commission_publish", false, "Cập nhật gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.changePackage(q));
   if (path === "/api/v1/creator/commissions/settings") return make("catalog.commission_settings", false, "Cập nhật nhận commission", "/creator/commissions", (r, q) => r.commissionHandlers.saveSettings(q));
+  if ((match = new RegExp(`^/api/v1/(creator/)?commissions/${uuid}/(proposals|disputes)$`, "u").exec(path))) {
+    const role = match[1] ? "creator" : "buyer"; const id = match[2]!; const proposal = match[3] === "proposals";
+    return make(proposal ? "orders.commission_propose" : "orders.commission_dispute_open", false, "Cập nhật commission", `${role === "creator" ? "/creator" : ""}/commissions/${id}`,
+      (r, q) => proposal ? r.resolutionHandlers.propose(q, id, role) : r.resolutionHandlers.openDispute(q, id, role));
+  }
+  if ((match = new RegExp(`^/api/v1/(creator/)?commissions/${uuid}/proposals/${uuid}/(respond|withdraw)$`, "u").exec(path))) {
+    const role = match[1] ? "creator" : "buyer"; const id = match[2]!; const proposalId = match[3]!; const respond = match[4] === "respond";
+    return make(respond ? "orders.commission_proposal_respond" : "orders.commission_proposal_withdraw", false, "Cập nhật commission", `${role === "creator" ? "/creator" : ""}/commissions/${id}`,
+      (r, q) => respond ? r.resolutionHandlers.respondProposal(q, id, proposalId, role) : r.resolutionHandlers.withdrawProposal(q, id, proposalId, role));
+  }
+  if ((match = new RegExp(`^/api/v1/(creator/)?commissions/${uuid}/disputes/${uuid}/(statements|withdraw)$`, "u").exec(path))) {
+    const role = match[1] ? "creator" : "buyer"; const id = match[2]!; const disputeId = match[3]!; const statement = match[4] === "statements";
+    return make(statement ? "orders.commission_dispute_statement" : "orders.commission_dispute_withdraw", false, "Cập nhật commission", `${role === "creator" ? "/creator" : ""}/commissions/${id}`,
+      (r, q) => statement ? r.resolutionHandlers.addStatement(q, id, disputeId, role) : r.resolutionHandlers.withdrawDispute(q, id, disputeId, role));
+  }
+  if ((match = new RegExp(`^/api/v1/(creator/)?commissions/${uuid}/refunds/${uuid}/(destination|receipt|reveal|send)$`, "u").exec(path))) {
+    const creator = Boolean(match[1]); const id = match[2]!; const obligationId = match[3]!; const operation = match[4]!;
+    if (creator !== ["reveal", "send"].includes(operation)) return null;
+    const handler = operation === "destination" ? "enterRefundDestination" : operation === "receipt" ? "confirmRefundReceipt" : operation === "reveal" ? "revealRefund" : "recordRefundSend";
+    return make(`payments.commission_refund_${operation}`, operation !== "receipt", "Cập nhật hoàn tiền commission", `${creator ? "/creator" : ""}/commissions/${id}`,
+      (r, q) => r.resolutionHandlers[handler](q, id, obligationId));
+  }
+  if ((match = new RegExp(`^/api/v1/commissions/${uuid}/(late-claim|suspension-cancel)$`, "u").exec(path))) {
+    const id = match[1]!; const claim = match[2] === "late-claim";
+    return make(claim ? "orders.commission_late_claim" : "orders.commission_suspension_cancel", false, "Cập nhật commission", `/commissions/${id}`,
+      (r, q) => claim ? r.resolutionHandlers.fileLateClaim(q, id) : r.resolutionHandlers.cancelAfterSuspension(q, id));
+  }
+  if ((match = new RegExp(`^/api/v1/creator/commissions/${uuid}/late-claim/${uuid}/answer$`, "u").exec(path))) {
+    const id = match[1]!; const claimId = match[2]!;
+    return make("orders.commission_late_claim_answer", true, "Trả lời thanh toán muộn", `/creator/commissions/${id}`, (r, q) => r.resolutionHandlers.answerLateClaim(q, id, claimId));
+  }
   if ((match = new RegExp(`^/api/v1/creator/commissions/${uuid}/submissions$`, "u").exec(path))) {
     const id = match[1]!; return make("orders.commission_submit", false, "Cập nhật commission", `/creator/commissions/${id}`, (r, q) => r.commissionHandlers.submit(q, id));
   }
