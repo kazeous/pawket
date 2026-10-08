@@ -19,6 +19,14 @@ describe("resolution dependency error mapping", () => {
   test.each(["expired", "version_conflict", "invalid_transition"] as const)("Orders %s has an explicit resolution code", async (code) => {
     await expect(run(new CommissionError(code))).rejects.toMatchObject({ code: code === "expired" ? "deadline_passed" : code });
   });
+  test("an Orders expired error from another module instance maps by name", async () => {
+    await expect(run(Object.assign(new Error("Synthetic expiry"), { name: "CommissionError", code: "expired" })))
+      .rejects.toMatchObject({ code: "deadline_passed" });
+  });
+  test("an unrelated expired error remains dependency_unavailable", async () => {
+    await expect(run(Object.assign(new Error("Synthetic expiry"), { name: "CommissionRefundError", code: "expired" })))
+      .rejects.toMatchObject({ code: "dependency_unavailable" });
+  });
   test.each([false, true])("pending proposal unique index maps proposal_pending (wrapped: %s)", async (wrapped) => {
     const cause = Object.assign(new Error("Synthetic constraint failure"), { code: "23505", constraint_name: "commission_proposals_pending_uidx" });
     await expect(run(wrapped ? new Error("Synthetic database failure", { cause }) : cause)).rejects.toMatchObject({ code: "proposal_pending" });

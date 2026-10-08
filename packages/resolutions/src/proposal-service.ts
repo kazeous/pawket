@@ -34,6 +34,10 @@ function decode(reference: string): { proposalId: string; orderVersion?: number;
 // Idempotency references accept identifiers only; persist the outcome without JSON or private content.
 const reference = (result: Result, error?: "proposal_stale") => `${result.proposalId}:${result.orderVersion}${error ? `:${error}` : ""}`;
 
+export function isProposalStale(proposal: Readonly<Pick<CommissionProposal, "orderStateAtCreation" | "createdAt">>, facts: CommissionResolutionOrderFacts): boolean {
+  return facts.state !== proposal.orderStateAtCreation || (facts.lastFulfillmentMoveAt !== null && facts.lastFulfillmentMoveAt > proposal.createdAt);
+}
+
 export function createProposalService(kit: Kit, input: Input) {
   if (input.mode !== "enabled" && input.mode !== "disabled") resolutionFail("invalid_request");
   const enabled = () => { if (input.mode !== "enabled") resolutionFail("resolution_disabled"); };
@@ -74,7 +78,7 @@ export function createProposalService(kit: Kit, input: Input) {
     if (at < row.createdAt) resolutionFail("invalid_request");
     await recordEnd(tx, row, state, at, actor);
     let orderVersion = order.version;
-    if (order.state === "delivered" && row.orderStateAtCreation === "delivered") {
+    if (order.state === "delivered" && !isProposalStale(row, order)) {
       const floorAt = new Date(at.getTime() + Math.max(row.remainingReviewMs ?? 0, RESOLUTION_POLICY.restoreFloorMs));
       const restored = await input.orders.restoreReviewTime(tx, { orderId: order.id, expectedVersion: order.version, floorAt, actor, requestId, at });
       orderVersion = restored.version;
@@ -130,8 +134,9 @@ export function createProposalService(kit: Kit, input: Input) {
           let remainingReviewMs: number | null = null;
           if (order.state === "delivered") {
             const dueAt = await input.orders.completionDueAt(tx, order.id);
-            if (!dueAt) resolutionFail("deadline_passed");
-            remainingReviewMs = Math.max(0, dueAt.getTime() - at.getTime());
+            if (!dueAt) resolutionFail("resolution_disabled");
+            if (at >= dueAt) resolutionFail("deadline_passed");
+            remainingReviewMs = dueAt.getTime() - at.getTime();
           }
           const proposalId = randomUUID();
           await tx.insert(commissionProposals).values({ id: proposalId, orderId: order.id, proposerUserId: command.actor.userId,
@@ -156,7 +161,7 @@ export function createProposalService(kit: Kit, input: Input) {
             const ended = await endProposalWithoutAgreement(tx, row, "declined", at, command.actor, command.requestId);
             return { resultReference: reference(ended), at, guardUntil };
           }
-          if (order.state !== row.orderStateAtCreation) {
+          if (isProposalStale(row, order)) {
             const ended = await endProposalWithoutAgreement(tx, row, "lapsed", at, command.actor, command.requestId);
             return { resultReference: reference(ended, "proposal_stale"), at, guardUntil };
           }

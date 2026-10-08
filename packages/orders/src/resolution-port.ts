@@ -1,5 +1,5 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
-import { commissionOrders, commissionTermsSnapshots, type PawketTransaction } from "@pawket/database";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { commissionOrders, commissionSubmissions, commissionTermsSnapshots, type PawketTransaction } from "@pawket/database";
 import { commissionFail, type CommissionActor, type CommissionCloseReason, type CommissionState, type PostPaymentCloseReason } from "./contracts.js";
 import { readCommissionCompletionDueAt } from "./fulfillment-service.js";
 import { createCommissionOrderPersistence } from "./order-persistence.js";
@@ -11,6 +11,7 @@ type Command = Readonly<{ orderId: string; expectedVersion: number; actor: Commi
 export type CommissionResolutionOrderFacts = Readonly<{
   id: string; version: number; state: CommissionState; creatorUserId: string; buyerUserId: string; amountVnd: number | null;
   acceptedAt: Date | null; confirmedAt: Date | null; dueAt: Date | null; deliveredAt: Date | null; reviewEndsAt: Date | null;
+  lastFulfillmentMoveAt: Date | null;
   completionFloorAt: Date | null; closedAt: Date | null; closeReason: CommissionCloseReason | null; policyRevisionId: string | null;
 }>;
 
@@ -41,9 +42,14 @@ export function createCommissionResolutionOrderPort(input: { applicationRevision
       const order = await lockOrderRow(tx, orderId); if (!order) return null;
       const [terms] = await tx.select({ policyRevisionId: commissionTermsSnapshots.policyRevisionId }).from(commissionTermsSnapshots)
         .where(eq(commissionTermsSnapshots.orderId, order.id)).limit(1);
+      const [latestChanges] = await tx.select({ respondedAt: commissionSubmissions.respondedAt }).from(commissionSubmissions)
+        .where(and(eq(commissionSubmissions.orderId, order.id), eq(commissionSubmissions.response, "changes_requested")))
+        .orderBy(desc(commissionSubmissions.respondedAt)).limit(1);
+      const changesAt = latestChanges?.respondedAt ?? null;
+      const lastFulfillmentMoveAt = changesAt && (!order.deliveredAt || changesAt > order.deliveredAt) ? changesAt : order.deliveredAt;
       return { id: order.id, version: order.version, state: order.state as CommissionState, creatorUserId: order.creatorUserId, buyerUserId: order.buyerUserId,
         amountVnd: order.amountVnd, acceptedAt: order.acceptedAt, confirmedAt: order.confirmedAt, dueAt: order.dueAt, deliveredAt: order.deliveredAt,
-        reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt, closedAt: order.closedAt,
+        lastFulfillmentMoveAt, reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt, closedAt: order.closedAt,
         closeReason: order.closeReason as CommissionCloseReason | null, policyRevisionId: terms?.policyRevisionId ?? null };
     },
     async closePaidOrder(tx: PawketTransaction, command: Command & Readonly<{ reason: PostPaymentCloseReason }>): Promise<{ version: number }> {

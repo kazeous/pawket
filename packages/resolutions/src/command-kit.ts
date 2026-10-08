@@ -1,5 +1,5 @@
 import { beginIdempotentCommand, completeIdempotentCommand, type PawketDatabase, type PawketTransaction } from "@pawket/database";
-import { CommissionError, commissionCommandFingerprint, commissionIdempotencyKey, commissionIdentifier, commissionTime, lockCommissionCreator, readCommissionRecord } from "@pawket/orders";
+import { commissionCommandFingerprint, commissionIdempotencyKey, commissionIdentifier, commissionTime, lockCommissionCreator, readCommissionRecord } from "@pawket/orders";
 import { createLookupHmac, decryptSensitiveField, encryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
 import { ResolutionError, resolutionFail, type ResolutionActor, type ResolutionCommand, type ResolutionOwnerCommand, type ResolutionErrorCode, RESOLUTION_ERRORS } from "./contracts.js";
 import type { ResolutionSessionPort } from "./ports.js";
@@ -19,7 +19,7 @@ export function createResolutionCommandKit(input: Input) {
   async function boundary<T>(run: () => Promise<T>): Promise<T> {
     try { return await run(); } catch (error) {
       if (error instanceof ResolutionError) throw error;
-      if (error instanceof CommissionError && error.code === "expired") resolutionFail("deadline_passed");
+      if (error instanceof Error && error.name === "CommissionError" && "code" in error && error.code === "expired") resolutionFail("deadline_passed");
       if (error instanceof Error && ["CommissionError", "CommissionRefundError", "TrustCaseError"].includes(error.name) && "code" in error &&
         (RESOLUTION_ERRORS as readonly unknown[]).includes(error.code)) resolutionFail(error.code as ResolutionErrorCode);
       // Drizzle wraps postgres-js failures in cause; map only this domain's pending constraint.

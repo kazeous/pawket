@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, test, vi } from "vitest";
 import { commissionProposals, completeIdempotentCommand, systemOutbox, type PawketTransaction } from "@pawket/database";
 import type { CommissionResolutionOrderFacts } from "@pawket/orders";
-import { createProposalService, type CommissionProposal } from "../src/index.js";
+import { createProposalService, isProposalStale, type CommissionProposal } from "../src/index.js";
 import type { createResolutionCommandKit } from "../src/command-kit.js";
 import type { ResolutionOrderPort, ResolutionRefundPort, ResolutionPaymentFactsPort, ResolutionCasePort } from "../src/ports.js";
 
@@ -12,7 +12,7 @@ const command = () => ({ actor, orderId, expectedVersion: 2, kind: "cancel_with_
   note: "Synthetic note", idempotencyKey: randomUUID(), requestId: randomUUID() });
 function setup() {
   const facts: CommissionResolutionOrderFacts = { id: orderId, version: 2, state: "in_progress", creatorUserId: "synthetic-creator",
-    buyerUserId: actor.userId, amountVnd: 500_000, acceptedAt: at, confirmedAt: at, dueAt: at, deliveredAt: null,
+    buyerUserId: actor.userId, amountVnd: 500_000, acceptedAt: at, confirmedAt: at, dueAt: at, deliveredAt: null, lastFulfillmentMoveAt: null,
     reviewEndsAt: null, completionFloorAt: null, closedAt: null, closeReason: null, policyRevisionId: null };
   const orders: ResolutionOrderPort = { lockOrder: vi.fn(async () => facts), closePaidOrder: vi.fn(), completeByResolution: vi.fn(),
     restoreReviewTime: vi.fn(), completionDueAt: vi.fn(), listLiveOrders: vi.fn() };
@@ -27,6 +27,20 @@ function setup() {
   const service = createProposalService(kit, { orders, refunds, payments, cases, mode: "enabled" });
   return { service, kit, orders, facts, refunds, payments, cases };
 }
+describe("R11 proposal staleness predicate", () => {
+  test.each([
+    { state: "in_progress", offset: null, stale: false },
+    { state: "delivered", offset: null, stale: true },
+    { state: "in_progress", offset: -1, stale: false },
+    { state: "in_progress", offset: 0, stale: false },
+    { state: "in_progress", offset: 1, stale: true },
+    { state: "delivered", offset: -1, stale: true },
+  ] as const)("state $state and fulfillment offset $offset has stale=$stale", ({ state, offset, stale }) => {
+    const p = setup();
+    expect(isProposalStale({ orderStateAtCreation: "in_progress", createdAt: at }, { ...p.facts, state,
+      lastFulfillmentMoveAt: offset === null ? null : new Date(at.getTime() + offset) })).toBe(stale);
+  });
+});
 describe("proposal command validation and replay boundaries", () => {
   test.each([NaN, Infinity, -1, 1.5, 50_000_001])("invalid integer amount %s never reaches mutate", async (amount) => {
     const p = setup(); await expect(p.service.propose({ ...command(), refundAmountVnd: amount })).rejects.toMatchObject({ code: "invalid_request" });
@@ -77,7 +91,8 @@ function scenario(options: { delivered?: boolean; proposer?: "buyer" | "creator"
   const p = setup(); const creator = { userId: p.facts.creatorUserId, sessionId: "synthetic-creator-session" };
   const buyer = actor; const delivered = options.delivered ?? false;
   const order = { ...p.facts, state: delivered ? "delivered" as const : "in_progress" as const,
-    deliveredAt: delivered ? at : null, reviewEndsAt: delivered ? new Date(at.getTime() + 7 * 86_400_000) : null };
+    deliveredAt: delivered ? at : null, lastFulfillmentMoveAt: delivered ? at : null,
+    reviewEndsAt: delivered ? new Date(at.getTime() + 7 * 86_400_000) : null };
   vi.mocked(p.orders.lockOrder).mockResolvedValue(order);
   vi.mocked(p.orders.completionDueAt).mockResolvedValue(order.reviewEndsAt);
   vi.mocked(p.orders.closePaidOrder).mockResolvedValue({ version: 3 });
@@ -176,6 +191,12 @@ describe("proposal outcomes through the transaction ports", () => {
     await p.service.endProposalWithoutAgreement(p.tx, p.row(), "lapsed", at, null, randomUUID());
     expect(p.orders.restoreReviewTime).not.toHaveBeenCalled();
   });
+  test.each(["declined", "withdrawn", "expired", "lapsed"] as const)("R11: ending a stale delivered proposal as %s never restores review time", async (state) => {
+    const p = scenario({ delivered: true }); const endedAt = new Date(at.getTime() + 2);
+    vi.mocked(p.orders.lockOrder).mockResolvedValue({ ...p.order, lastFulfillmentMoveAt: new Date(at.getTime() + 1) });
+    expect(await p.service.endProposalWithoutAgreement(p.tx, p.row(), state, endedAt, null, randomUUID())).toEqual({ proposalId, orderVersion: 2 });
+    expect(p.row()).toMatchObject({ state, endedAt }); expect(p.orders.restoreReviewTime).not.toHaveBeenCalled();
+  });
   test("a deadline at the boundary refuses acceptance before any write", async () => {
     const p = scenario(); p.setRow({ respondBy: at });
     await expect(p.service.respondToProposal(p.answer())).rejects.toMatchObject({ code: "deadline_passed" });
@@ -205,6 +226,14 @@ describe("proposal outcomes through the transaction ports", () => {
   test("the delivered proposal records the remaining review time", async () => {
     const p = scenario({ delivered: true, empty: true }); await p.service.propose(command());
     expect(p.row()).toMatchObject({ orderStateAtCreation: "delivered", remainingReviewMs: 7 * 86_400_000 });
+  });
+  test.each([
+    { offset: null, code: "resolution_disabled" }, { offset: 0, code: "deadline_passed" }, { offset: -1, code: "deadline_passed" },
+  ] as const)("R12: delivered completion deadline offset $offset refuses creation with $code", async ({ offset, code }) => {
+    const p = scenario({ delivered: true, empty: true });
+    vi.mocked(p.orders.completionDueAt).mockResolvedValue(offset === null ? null : new Date(at.getTime() + offset));
+    await expect(p.service.propose(command())).rejects.toMatchObject({ code });
+    expect(p.events).toHaveLength(0); expect(p.kit.encrypt).not.toHaveBeenCalled();
   });
   test("proposal response authorization also rejects an unrelated party on replay", async () => {
     const p = scenario(); await p.service.respondToProposal(p.answer()); const creatorOf = vi.mocked(p.kit.mutate).mock.calls[0]![3];

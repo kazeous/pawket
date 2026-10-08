@@ -131,7 +131,7 @@ describe("commission resolution order port", () => {
     const facts = await f.db.transaction((tx) => port().lockOrder(tx, p.orderId));
     expect(facts).toEqual({ id: p.orderId, version: before.version, state: "delivered", creatorUserId: p.creator.userId, buyerUserId: p.buyer.userId, amountVnd: before.amountVnd,
       acceptedAt: before.acceptedAt, confirmedAt: before.confirmedAt, dueAt: before.dueAt, deliveredAt: before.deliveredAt, reviewEndsAt: before.reviewEndsAt,
-      completionFloorAt: null, closedAt: null, closeReason: null, policyRevisionId: p.s.policyId });
+      lastFulfillmentMoveAt: before.deliveredAt, completionFloorAt: null, closedAt: null, closeReason: null, policyRevisionId: p.s.policyId });
     expect(await f.db.transaction((tx) => port().listLiveOrders(tx, p.creator.userId))).toEqual([{ orderId: p.orderId, version: before.version }]);
     await close(p); expect(await f.db.transaction((tx) => port().listLiveOrders(tx, p.creator.userId))).toEqual([]);
     expect(await f.db.transaction((tx) => port().lockOrder(tx, randomUUID()))).toBeNull();

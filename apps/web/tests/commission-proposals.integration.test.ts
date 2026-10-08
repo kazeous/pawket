@@ -6,7 +6,7 @@ import { CommissionError, createCommissionFileAccessPort, createCommissionResolu
 import { createCommissionRefundPort } from "@pawket/payments";
 import { RESOLUTION_POLICY, type ResolutionOrderPort, type ResolutionRefundPort } from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
-import { createCommissionResolutionTestFixture, resolutions, submit } from "./commission-resolution-test-support.js";
+import { createCommissionResolutionTestFixture, resolutions, respond, submit } from "./commission-resolution-test-support.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const f = createCommissionResolutionTestFixture("i8proposals");
@@ -19,6 +19,15 @@ const obligations = (p: Paid) => f.db.select().from(schema.commissionRefundOblig
 const outbox = (p: Paid) => f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.aggregateType, "commission_proposal"))
   .then((rows) => rows.filter((row) => row.payload.orderId === p.orderId));
 const orders = (): ResolutionOrderPort => createCommissionResolutionOrderPort({ applicationRevision: "synthetic-i8", newId: randomUUID });
+const settlementFacts = (p: Paid) => Promise.all([
+  order(p), obligations(p),
+  f.db.select().from(schema.commissionReservations).where(eq(schema.commissionReservations.orderId, p.orderId)),
+  f.db.select().from(schema.paymentIntents).where(eq(schema.paymentIntents.id, p.confirmationCommand.paymentIntentId)),
+  f.db.select().from(schema.paymentConfirmations).where(eq(schema.paymentConfirmations.paymentIntentId, p.confirmationCommand.paymentIntentId)),
+  f.db.select().from(schema.commissionSubmissions).where(eq(schema.commissionSubmissions.orderId, p.orderId)),
+  f.db.select().from(schema.commissionEvents).where(eq(schema.commissionEvents.orderId, p.orderId)),
+  f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.aggregateId, p.orderId)),
+]);
 async function proposalCommand(p: Paid, actor = p.buyer, kind: "cancel_with_refund" | "complete_with_refund" = "cancel_with_refund", amount = 250_000) {
   return { actor, orderId: p.orderId, expectedVersion: (await order(p)).version, kind, refundAmountVnd: amount,
     note: "Synthetic proposal note", ...commandIds() };
@@ -127,6 +136,54 @@ describe("commission cancellation proposals", () => {
     expect(await proposals(p)).toMatchObject([{ state: "lapsed", version: 2 }]);
     expect(await order(p)).toEqual(before); expect(await obligations(p)).toHaveLength(0);
     expect((await outbox(p)).filter((event) => event.eventType === "resolution.proposal_ended.v1")).toHaveLength(1);
+  });
+  test.each(["delivered", "in_progress"] as const)("R11: acceptance after a %s fulfillment round trip lapses only the proposal", async (state) => {
+    const p = await f.paidOrder(); const firstFinal = state === "delivered" ? await submit(p, "final") : null; const instance = resolutions(p);
+    const kind = state === "delivered" ? "complete_with_refund" : "cancel_with_refund";
+    const made = await instance.propose(await proposalCommand(p, p.buyer, kind));
+    p.s.creator.advance(HOUR);
+    const finalId = firstFinal?.id ?? (await submit(p, "final")).id;
+    p.s.creator.advance(HOUR); await respond(p, finalId, "request_changes"); const changesAt = p.s.creator.now();
+    if (state === "delivered") { p.s.creator.advance(HOUR); await submit(p, "final"); }
+    const before = await settlementFacts(p); const answer = response(p, made.proposalId);
+    await expect(instance.respondToProposal(answer)).rejects.toMatchObject({ code: "proposal_stale" });
+    await expect(instance.respondToProposal(answer)).rejects.toMatchObject({ code: "proposal_stale" });
+    expect(await proposals(p)).toMatchObject([{ state: "lapsed", version: 2 }]);
+    expect(await settlementFacts(p)).toEqual(before);
+    expect(await f.db.transaction((tx) => orders().lockOrder(tx, p.orderId))).toMatchObject({ state,
+      lastFulfillmentMoveAt: state === "delivered" ? p.s.creator.now() : changesAt });
+    expect((await outbox(p)).filter((event) => event.eventType === "resolution.proposal_ended.v1")).toMatchObject([
+      { payload: { proposalId: made.proposalId, orderId: p.orderId, state: "lapsed" } },
+    ]);
+  });
+  test("R11: declining a stale delivered-made proposal does not restore review time", async () => {
+    const p = await f.deliveredOrder(); const instance = resolutions(p); const made = await instance.propose(await proposalCommand(p));
+    p.s.creator.advance(HOUR); await respond(p, p.finalId, "request_changes");
+    p.s.creator.advance(HOUR); await submit(p, "final"); p.s.creator.advance(HOUR);
+    const before = await settlementFacts(p); const version = (await order(p)).version;
+    expect(await instance.respondToProposal(response(p, made.proposalId, "decline"))).toEqual({ proposalId: made.proposalId, orderVersion: version });
+    expect(await proposals(p)).toMatchObject([{ state: "declined", version: 2 }]);
+    expect(await settlementFacts(p)).toEqual(before);
+  });
+  test("R12: a null delivered completion deadline refuses proposal creation with resolution_disabled", async () => {
+    const p = await f.deliveredOrder(); const before = await settlementFacts(p); const pauseId = randomUUID();
+    const startedAt = p.s.creator.now();
+    await f.db.insert(schema.commissionFulfillmentPauses).values({ id: pauseId, startedAt });
+    try {
+      expect(await f.db.transaction((tx) => orders().completionDueAt(tx, p.orderId))).toBeNull();
+      await expect(resolutions(p).propose(await proposalCommand(p))).rejects.toMatchObject({ code: "resolution_disabled" });
+      expect(await proposals(p)).toHaveLength(0); expect(await outbox(p)).toHaveLength(0);
+      expect(await settlementFacts(p)).toEqual(before);
+    } finally {
+      await f.db.update(schema.commissionFulfillmentPauses).set({ endedAt: new Date(startedAt.getTime() + 1) }).where(eq(schema.commissionFulfillmentPauses.id, pauseId));
+    }
+  });
+  test.each([0, 1])("R12: proposal creation at completionDueAt + %i ms fails deadline_passed", async (offset) => {
+    const p = await f.deliveredOrder(); const dueAt = await f.db.transaction((tx) => orders().completionDueAt(tx, p.orderId));
+    p.s.creator.setNow(new Date(dueAt!.getTime() + offset)); const before = await settlementFacts(p);
+    await expect(resolutions(p).propose(await proposalCommand(p))).rejects.toMatchObject({ code: "deadline_passed" });
+    expect(await proposals(p)).toHaveLength(0); expect(await outbox(p)).toHaveLength(0);
+    expect(await settlementFacts(p)).toEqual(before);
   });
   test.each([0, 1])("acceptance at respond_by + %i ms fails deadline_passed", async (offset) => {
     const p = await f.paidOrder(); const instance = resolutions(p); const made = await instance.propose(await proposalCommand(p));
