@@ -287,6 +287,30 @@ describe("commission owner case commands", () => {
     const late = correction(c, rulingId, 0); await expect(c.instance.correctRuling(late)).rejects.toMatchObject({ code: "deadline_passed" });
     expect(await audit(late.requestId)).toHaveLength(0); expect(await c.instance.correctRuling(command)).toEqual(recorded);
   });
+  test("correction uses the pause extension inclusively, refuses an open pause and rejects a commit after it", async () => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c)); const before = await order(c.p);
+    const rawDeadline = new Date(c.p.s.creator.now().getTime() + resolution.RESOLUTION_POLICY.correctionWindowMs);
+    const pauseId = randomUUID(); const endedAt = new Date(rawDeadline.getTime() + DAY);
+    await f.db.insert(schema.commissionResolutionPauses).values({ id: pauseId, startedAt: new Date(rawDeadline.getTime() - 1) });
+    try {
+      c.p.s.creator.setNow(rawDeadline);
+      await expect(c.instance.correctRuling(correction(c, rulingId, 100_000))).rejects.toMatchObject({ code: "resolution_disabled" });
+    } finally { await f.db.update(schema.commissionResolutionPauses).set({ endedAt, version: 2 }).where(eq(schema.commissionResolutionPauses.id, pauseId)); }
+    const effective = (await f.db.transaction((tx) => resolution.effectiveResolutionDeadline(tx, rawDeadline)))!;
+    expect(effective).toEqual(new Date(endedAt.getTime() + resolution.RESOLUTION_POLICY.pauseGraceMs));
+    const adjust = c.ports.refunds.adjustAmount;
+    const crossing = vi.spyOn(c.ports.refunds, "adjustAmount").mockImplementation(async (tx, command) => {
+      const result = await adjust(tx, command); c.p.s.creator.advance(1); return result;
+    });
+    c.p.s.creator.setNow(effective); const crossed = correction(c, rulingId, 100_000);
+    await expect(c.instance.correctRuling(crossed)).rejects.toMatchObject({ code: "deadline_passed" });
+    expect(await audit(crossed.requestId)).toHaveLength(0); expect((await refunds(c.p))[0]!.amountVnd).toBe(200_000);
+    crossing.mockRestore(); c.p.s.creator.setNow(effective);
+    const command = correction(c, rulingId, 100_000); await c.instance.correctRuling(command); await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
+    c.p.s.creator.advance(1); const late = correction(c, rulingId, 0);
+    await expect(c.instance.correctRuling(late)).rejects.toMatchObject({ code: "deadline_passed" });
+    expect(await audit(late.requestId)).toHaveLength(0); expect(await order(c.p)).toEqual(before);
+  });
   test.each(["accept_evidence", "require_resend", "waive", "extend_deadline"] as const)("refund case %s resolves with the matching kind and one audit", async (action) => {
     const c = await refundCase(action === "extend_deadline" ? "refund_overdue" : "refund_not_received");
     const until = action === "extend_deadline" ? new Date(c.p.s.creator.now().getTime() + 30 * DAY) : undefined;

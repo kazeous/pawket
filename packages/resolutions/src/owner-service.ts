@@ -7,6 +7,7 @@ import { resolutionFail, RULING_OUTCOMES, type ResolutionOwnerCommand, type Ruli
 import type { createResolutionCommandKit } from "./command-kit.js";
 import { effectiveResolutionDeadline } from "./deadlines.js";
 import { normalizeResolutionText, RESOLUTION_POLICY } from "./policy.js";
+import { isLatePaymentOrder, lateClaimAmountValid, readLatePaymentClaim, recordLateClaimState } from "./late-claim-service.js";
 import type { ResolutionOrderPort, ResolutionRefundPort, ResolutionPaymentFactsPort, ResolutionCasePort } from "./ports.js";
 
 type Kit = ReturnType<typeof createResolutionCommandKit>;
@@ -17,6 +18,7 @@ type Rule = Target & Readonly<{ outcome: RulingOutcome; refundAmountVnd: number;
 type Correct = ResolutionOwnerCommand & Readonly<{ rulingId: string; newRefundAmountVnd: number; reason: string }>;
 type RefundAction = "accept_evidence" | "require_resend" | "waive" | "extend_deadline";
 type Refund = ResolutionOwnerCommand & Readonly<{ caseId: string; action: RefundAction; until?: Date; reason: string }>;
+type LateClaim = ResolutionOwnerCommand & Readonly<{ claimId: string; outcome: "refund_owed" | "rejected"; amountVnd?: number; reason: string }>;
 type CorrectionEffect = "increased" | "reduced" | "waived" | "recorded_only";
 const effects: readonly CorrectionEffect[] = ["increased", "reduced", "waived", "recorded_only"];
 const commandKeys = ["owner", "stepUpProofId", "idempotencyKey", "requestId"];
@@ -71,6 +73,33 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
     if (at < row.openedAt) resolutionFail("invalid_request");
   }
   return {
+    async ruleLateClaim(command: LateClaim): Promise<{ claimId: string }> {
+      enabled(); exact(command, ["claimId", "outcome", "reason"], ["amountVnd"]);
+      if (!commissionUuid(command.claimId) || !["refund_owed", "rejected"].includes(command.outcome)
+        || (command.outcome === "refund_owed" ? !lateClaimAmountValid(command.amountVnd) : Object.hasOwn(command, "amountVnd"))) resolutionFail("invalid_request");
+      const reason = normalizeResolutionText(command.reason, 1, RESOLUTION_POLICY.statementMaxCodePoints);
+      const reference = await kit.ownerMutate(command, "case_rule_claim", [command.claimId, command.outcome, command.amountVnd ?? null, reason],
+        async (tx) => (await order(tx, (await readLatePaymentClaim(tx, command.claimId)).orderId)).creatorUserId, "owner.case_rule_claim", async (tx) => {
+          const row = await readLatePaymentClaim(tx, command.claimId, true); const facts = await order(tx, row.orderId); const at = kit.now();
+          if (row.state !== "escalated" || !isLatePaymentOrder(facts)) resolutionFail("invalid_transition"); if (at < row.filedAt) resolutionFail("invalid_request");
+          const openCase = await input.cases.findOpenCase(tx, { kind: "late_payment", sourceId: row.id }); if (!openCase) resolutionFail("dependency_unavailable");
+          const caseRow = await input.cases.readCase(tx, openCase.caseId);
+          if (!caseRow || caseRow.state !== "open" || caseRow.kind !== "late_payment" || caseRow.sourceType !== "commission_late_payment_claim"
+            || caseRow.sourceId !== row.id || caseRow.orderId !== facts.id) resolutionFail("not_available");
+          let obligationId: string | null = null;
+          if (command.outcome === "refund_owed") {
+            const intent = await input.payments.closedIntent(tx, facts.id); if (!intent) resolutionFail("dependency_unavailable");
+            const obligation = await input.refunds.createObligation(tx, { orderId: facts.id, paymentIntentId: intent.paymentIntentId, creatorUserId: facts.creatorUserId,
+              buyerUserId: facts.buyerUserId, source: "late_payment", sourceId: row.id, amountVnd: command.amountVnd!, requestId: command.requestId, at }); obligationId = obligation.obligationId;
+          }
+          await recordLateClaimState(tx, row, command.outcome, command.amountVnd ?? null, at);
+          await input.cases.resolveCase(tx, { caseId: caseRow.caseId, resolutionKind: command.outcome, actor: command.owner, reason, requestId: command.requestId, at });
+          await audit(tx, command, "owner.case_rule_claim", "commission_late_payment_claim", row.id, { state: row.state, version: row.version, caseId: caseRow.caseId, orderId: facts.id },
+            { state: command.outcome, version: row.version + 1, caseId: caseRow.caseId, caseState: "resolved", orderId: facts.id, obligationId, receivedAmountVnd: command.amountVnd ?? null }, at);
+          return { resultReference: row.id, at };
+        });
+      return { claimId: resultId(reference) };
+    },
     async rule(command: Rule): Promise<{ rulingId: string }> {
       enabled(); exact(command, ["disputeId", "outcome", "refundAmountVnd", "reasoning"], ["internalNote"]);
       if (!commissionUuid(command.disputeId) || !(RULING_OUTCOMES as readonly unknown[]).includes(command.outcome) || !amountValid(command.refundAmountVnd)) resolutionFail("invalid_request");
@@ -129,8 +158,11 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
       const reference = await kit.ownerMutate(command, "case_correct", [command.rulingId, command.newRefundAmountVnd, reason],
         (tx) => rulingCreator(tx, command.rulingId), "owner.case_correct", async (tx) => {
           const row = await ruling(tx, command.rulingId); const facts = await order(tx, (await dispute(tx, row.disputeId)).orderId); const at = kit.now();
-          const guardUntil = new Date(row.ruledAt.getTime() + RESOLUTION_POLICY.correctionWindowMs + 1);
-          if (at < row.ruledAt) resolutionFail("invalid_request"); if (at >= guardUntil) resolutionFail("deadline_passed");
+          if (at < row.ruledAt) resolutionFail("invalid_request");
+          const deadline = await effectiveResolutionDeadline(tx, new Date(row.ruledAt.getTime() + RESOLUTION_POLICY.correctionWindowMs));
+          if (!deadline) resolutionFail("resolution_disabled");
+          const guardUntil = new Date(deadline.getTime() + 1);
+          if (at >= guardUntil) resolutionFail("deadline_passed");
           if (facts.amountVnd === null) resolutionFail("dependency_unavailable");
           if (command.newRefundAmountVnd > facts.amountVnd || (row.outcome === "complete" && command.newRefundAmountVnd >= facts.amountVnd)) resolutionFail("invalid_request");
           const corrections = await tx.select({ id: commissionRulingCorrections.id }).from(commissionRulingCorrections).where(eq(commissionRulingCorrections.rulingId, row.id));

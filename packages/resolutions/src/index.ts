@@ -9,3 +9,4 @@ export * from "./dispute-service.js";
 export * from "./hold-port.js";
 export * from "./resolution-view.js";
 export * from "./owner-service.js";
+export * from "./late-claim-service.js";

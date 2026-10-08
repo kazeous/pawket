@@ -282,7 +282,7 @@ describe("commission disputes and completion holds", () => {
         expect.objectContaining({ kind: "opening", text: "Synthetic opening statement" }), expect.objectContaining({ kind: "response", text: "Synthetic party statement" })]) });
       expect(view.proposals.pending).toMatchObject({ note: "Synthetic proposal" }); expect(view.refunds).toEqual([]);
       expect(view.actions).toMatchObject({ canOpenDispute: false, canPropose: false, canCancelAfterSuspension: false });
-      expect(view).not.toHaveProperty("lateClaim");
+      expect(view.lateClaim).toBeNull();
     }
     await expect(viewService(p).getOrderResolution({ actor: await p.s.buyer(), orderId: p.orderId })).rejects.toMatchObject({ code: "not_available" });
     p.s.users.delete(p.buyer.userId);
@@ -323,7 +323,7 @@ describe("commission disputes and completion holds", () => {
     await disputeService(p).withdrawDispute(withdrawal(p, opened.disputeId));
     const buyerCases = await viewService(p).listMyCases({ actor: p.buyer });
     expect(buyerCases.disputes).toHaveLength(1); expect(buyerCases.refunds).toMatchObject([{ orderId: p.orderId, obligationId: created.obligationId }]);
-    expect(await viewService(p).listMyCases({ actor: await p.s.buyer() })).toEqual({ disputes: [], refunds: [] });
+    expect(await viewService(p).listMyCases({ actor: await p.s.buyer() })).toEqual({ disputes: [], refunds: [], lateClaims: [] });
     const refundOnly = await f.paidOrder();
     const obligation = await f.db.transaction((tx) => createCommissionRefundPort({ keyring: refundOnly.s.input.keyring, calendarVersion: "vn-proposals-test" }).createObligation(tx, {
       orderId: refundOnly.orderId, paymentIntentId: refundOnly.confirmationCommand.paymentIntentId, creatorUserId: refundOnly.creator.userId, buyerUserId: refundOnly.buyer.userId,

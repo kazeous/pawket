@@ -6,6 +6,7 @@ import { ResolutionError, RESOLUTION_ERRORS, resolutionFail, type ResolutionActo
 import { effectiveResolutionDeadline } from "./deadlines.js";
 import { evaluateDisputeTrigger } from "./dispute-service.js";
 import { RESOLUTION_POLICY } from "./policy.js";
+import type { LateClaimService, LateClaimView } from "./late-claim-service.js";
 import { isProposalStale } from "./proposal-service.js";
 import type { ResolutionOrderPort, ResolutionRefundView, ResolutionSessionPort, ResolutionStandingPort } from "./ports.js";
 
@@ -17,7 +18,7 @@ type RefundView = Omit<ResolutionRefundView, "dueAt" | "confirmBy" | "endedAt" |
 type Refunds = Readonly<{ listForViewer(command: Readonly<{ actor: ResolutionActor; orderId: string }>): Promise<readonly RefundView[]> }>;
 type Orders = Pick<ResolutionOrderPort, "lockOrder" | "completionDueAt"> & Pick<CommissionOrderService, "listOrders">;
 type Input = Readonly<{ db: PawketDatabase; keyring: EncryptionKeyring; orders: Orders; refunds: Refunds; session: ResolutionSessionPort;
-  now?(): Date; standing?: ResolutionStandingPort; lateClaims?: unknown }>;
+  now?(): Date; standing?: ResolutionStandingPort; lateClaims?: Pick<LateClaimService, "readForOrder"> }>;
 
 export function createResolutionViewService(input: Input) {
   const clock = input.now ?? (() => new Date());
@@ -87,12 +88,13 @@ export function createResolutionViewService(input: Input) {
         const live = order.state === "in_progress" || order.state === "delivered";
         const due = order.state === "delivered" ? await input.orders.completionDueAt(tx, order.id) : null;
         const resolutionEnabled = await effectiveResolutionDeadline(tx, at) !== null;
+        const lateClaim = await input.lateClaims?.readForOrder(tx, order.id) ?? null;
         if (expiry <= now()) resolutionFail("not_authorized");
-        return { role, proposals: { pending, history: projected.filter((row) => row.state !== "pending") }, dispute: disputeView,
+        return { role, proposals: { pending, history: projected.filter((row) => row.state !== "pending") }, dispute: disputeView, lateClaim,
           actions: { canPropose: resolutionEnabled && live && !pending && proposals.filter((row) => row.proposerUserId === command.actor.userId).length < RESOLUTION_POLICY.maxProposalsPerParty
               && (order.state !== "delivered" || (due !== null && at < due)),
             canOpenDispute: resolutionEnabled && trigger !== null, disputeTrigger: trigger?.kind ?? null, disputeTriggerEndsAt: trigger?.endsAt?.toISOString() ?? null,
-            // R3: suspension and late-claim composition is added by Tasks 11/12.
+            // R3: suspension composition is added by Task 12.
             canCancelAfterSuspension: false } };
       });
       // Payments owns its read transaction and creator fence; do not call it while holding that fence here.
@@ -120,7 +122,7 @@ export function createResolutionViewService(input: Input) {
             before = page.nextBefore ?? undefined;
           } while (before);
         }
-        const disputes = []; const refunds = [];
+        const disputes = []; const refunds = []; const lateClaims: (LateClaimView & { orderId: string })[] = [];
         for (const orderId of ids) {
           const view = await getOrderResolution({ actor: command.actor, orderId });
           // Include earlier withdrawn disputes without private statement text.
@@ -129,9 +131,10 @@ export function createResolutionViewService(input: Input) {
           for (const row of rows) disputes.push({ id: row.id, orderId, state: row.state, reason: row.reason, trigger: row.trigger,
             openedAt: row.openedAt.toISOString(), closedAt: row.closedAt?.toISOString() ?? null });
           for (const row of view.refunds) refunds.push({ ...row, orderId });
+          if (view.lateClaim) lateClaims.push({ ...view.lateClaim, orderId });
         }
         await input.db.transaction((tx) => session(tx, command.actor));
-        return { disputes, refunds };
+        return { disputes, refunds, lateClaims };
       });
     },
   };

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { effectiveResolutionDeadline } from "../../resolutions/src/deadlines.js";
 import { createCommissionResolutionTestFixture } from "../../../apps/web/tests/commission-resolution-test-support.js";
 import { fixtureEnvelope } from "../../payments/tests/sepay-integration-fixture.js";
 
@@ -47,6 +48,44 @@ async function ruling(disputeId: string, userId: string, policyId: string) {
   return id;
 }
 describe("resolution database boundaries", () => {
+  test("SQL and TypeScript effective deadlines agree before, inside, open and chained resolution pauses", async () => {
+    const pauses = [
+      { startedAt: "2030-01-02T04:00:00Z", endedAt: "2030-01-03T04:00:00Z" },
+      { startedAt: "2030-01-06T04:00:00Z", endedAt: "2030-01-07T04:00:00Z" },
+      { startedAt: "2030-01-08T04:00:00Z", endedAt: "2030-01-10T04:00:00Z" },
+      { startedAt: "2030-01-13T04:00:00Z", endedAt: null },
+      { startedAt: "2030-01-20T04:00:00Z", endedAt: "2030-01-21T04:00:00Z" },
+    ];
+    const openId = randomUUID();
+    try {
+      // Insert out of chronological order to pin sorting in both implementations.
+      for (const pause of [...pauses].reverse().sort((a, b) => Number(a.endedAt === null) - Number(b.endedAt === null))) {
+        const id = pause.endedAt === null ? openId : randomUUID();
+        await fixture.client`insert into commission_resolution_pauses (id, started_at) values (${id}, ${pause.startedAt})`;
+        if (pause.endedAt !== null) await fixture.client`update commission_resolution_pauses set ended_at = ${pause.endedAt}, version = 2 where id = ${id}`;
+      }
+      for (const [deadline, expected] of [
+        ["2030-01-01T04:00:00Z", "2030-01-01T04:00:00Z"],
+        ["2030-01-02T04:00:00Z", "2030-01-05T04:00:00Z"],
+        ["2030-01-02T16:00:00Z", "2030-01-05T04:00:00Z"],
+        ["2030-01-03T04:00:00Z", "2030-01-03T04:00:00Z"],
+        ["2030-01-04T04:00:00Z", "2030-01-04T04:00:00Z"],
+        ["2030-01-06T04:00:00Z", "2030-01-12T04:00:00Z"],
+        ["2030-01-11T04:00:00Z", "2030-01-11T04:00:00Z"],
+        ["2030-01-12T04:00:00Z", "2030-01-12T04:00:00Z"],
+        ["2030-01-13T04:00:00Z", null],
+        ["2030-01-15T04:00:00Z", null],
+      ]) {
+        const [row] = await fixture.client<{ deadline: string | null }[]>`select commission_resolution_effective_deadline(${deadline}::timestamptz) as deadline`;
+        const actual = row!.deadline === null ? null : new Date(row!.deadline);
+        const ts = await fixture.db.transaction((tx) => effectiveResolutionDeadline(tx, new Date(deadline!)));
+        expect(actual).toEqual(expected === null ? null : new Date(expected!));
+        expect(actual).toEqual(ts);
+      }
+    } finally {
+      await fixture.client`update commission_resolution_pauses set ended_at = '2030-01-14T04:00:00Z', version = 2 where id = ${openId} and ended_at is null`;
+    }
+  });
   test("a second pending proposal on one order fails", async () => {
     const p = await fixture.paidOrder(); await proposal(p.orderId, p.buyer.userId);
     await refused(proposal(p.orderId, p.buyer.userId), "23505");
@@ -74,6 +113,24 @@ describe("resolution database boundaries", () => {
     };
     await correction("2026-11-06T04:00:00Z");
     await refused(correction("2026-11-06T04:00:00.001Z"));
+  });
+  test("the correction guard refuses an open pause, accepts its extension inclusively and rejects outside it", async () => {
+    const p = await fixture.paidOrder(); const id = await ruling(await dispute(p.orderId, p.buyer.userId), p.creator.userId, p.s.policyId);
+    const correction = (correctedAt: string) => {
+      const correctionId = randomUUID();
+      return fixture.client`insert into commission_ruling_corrections (id, ruling_id, refund_amount_vnd, reason_envelope,
+        effect, owner_user_id, actor_session_id, step_up_proof_id, request_id, corrected_at)
+        values (${correctionId}, ${id}, 500, ${envelope("commission_ruling_corrections", correctionId, "reason")}::jsonb,
+          'reduced', ${p.creator.userId}, 'synthetic-session', ${randomUUID()}, ${randomUUID()}, ${correctedAt})`;
+    };
+    const pauseId = randomUUID();
+    await fixture.client`insert into commission_resolution_pauses (id, started_at) values (${pauseId}, '2026-11-06T03:59:59.999Z')`;
+    try { await refused(correction("2026-11-06T04:00:00Z")); }
+    finally { await fixture.client`update commission_resolution_pauses set ended_at = '2026-11-07T04:00:00Z', version = 2 where id = ${pauseId}`; }
+    await refused(correction("2026-10-07T03:59:59.999Z"));
+    await correction("2026-11-08T04:00:00Z");
+    await correction("2026-11-09T04:00:00Z");
+    await refused(correction("2026-11-09T04:00:00.001Z"));
   });
   test("rulings and statements cannot be updated or deleted", async () => {
     const p = await fixture.paidOrder(); const d = await dispute(p.orderId, p.buyer.userId);
