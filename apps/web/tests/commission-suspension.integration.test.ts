@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createCommissionThreadService } from "@pawket/commission-files";
 import * as identity from "@pawket/identity";
@@ -79,13 +79,16 @@ async function pendingAndDispute(p: Paid) {
     requestedOutcome: { kind: "close", refundAmountVnd: 200_000 }, acknowledgeStaffReview: true, ...commandIds() });
   return { proposalId, disputeId, caseId };
 }
-async function superseded(ids: Awaited<ReturnType<typeof pendingAndDispute>>, p: Paid) {
+async function superseded(ids: Awaited<ReturnType<typeof pendingAndDispute>>, p: Paid, reason: string | null = null) {
   expect(await f.db.select().from(schema.commissionProposals).where(eq(schema.commissionProposals.id, ids.proposalId)))
     .toMatchObject([{ state: "superseded", version: 2, endedAt: p.s.creator.now() }]);
   expect(await f.db.select().from(schema.commissionDisputes).where(eq(schema.commissionDisputes.id, ids.disputeId)))
     .toMatchObject([{ state: "superseded", version: 2, closedAt: p.s.creator.now() }]);
   expect(await f.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, ids.caseId)))
     .toMatchObject([{ state: "resolved", resolutionKind: "superseded" }]);
+  const events = await f.db.select().from(schema.trustCaseEvents)
+    .where(and(eq(schema.trustCaseEvents.caseId, ids.caseId), eq(schema.trustCaseEvents.action, "resolved")));
+  expect(events).toHaveLength(1); expect(events[0]!.reason === reason).toBe(true);
   expect((await outbox(ids.proposalId)).filter((row) => row.eventType === "resolution.proposal_ended.v1").map((row) => row.payload))
     .toEqual([{ proposalId: ids.proposalId, orderId: p.orderId, state: "superseded" }]);
   expect((await outbox(ids.disputeId)).filter((row) => row.eventType === "resolution.dispute_closed.v1").map((row) => row.payload))
@@ -155,7 +158,7 @@ describe("commission suspension effects", () => {
         paymentIntentId: paid.confirmationCommand.paymentIntentId }]); expect(await refunds(paid)).toHaveLength(1);
       expect(await reservations(paid)).toMatchObject([{ state: "cancelled" }]);
     }
-    expect(await Promise.all([paymentFacts(p), paymentFacts(second)])).toEqual(payments); await superseded(ids, p);
+    expect(await Promise.all([paymentFacts(p), paymentFacts(second)])).toEqual(payments); await superseded(ids, p, command.reason);
     expect(await order({ ...p, orderId: pendingOrderId })).toMatchObject({ state: "awaiting_payment" }); expect((await order(unrelated)).state).toBe("in_progress");
     expect((await outbox(p.creator.userId)).filter((row) => row.eventType === "resolution.fulfillment_frozen.v1").map((row) => row.payload))
       .toEqual([{ creatorUserId: p.creator.userId, closedOrders: 2 }]);
@@ -163,7 +166,51 @@ describe("commission suspension effects", () => {
       .filter((row) => row.action === "owner.commission_fulfillment_freeze");
     expect(audits).toHaveLength(1); expect(audits[0]).toMatchObject({ actorUserId: c.owner.userId, actorSessionId: c.owner.sessionId,
       subjectId: p.creator.userId, applicationRevision: "synthetic-i8", assurance: { method: "owner_step_up" }, afterState: { closedOrders: 2 } });
-    expect(JSON.stringify(audits).includes(command.reason)).toBe(false);
+    expect(audits[0]!.afterState?.reason === command.reason).toBe(true);
+  });
+  test("freeze keeps the normalized owner reason in audit and every superseded case, excluding outbox and party projections", async () => {
+    const p = await f.deliveredOrder(); const second = await additionalPaid(p); await submit(second, "final");
+    const firstIds = await pendingAndDispute(p); const secondIds = await pendingAndDispute(second); await capability(p);
+    const c = await ownerService(p); const command = { ...freeze(p, c.owner), reason: "  Synthetic freeze cafe\u0301 reason  " };
+    const reason = "Synthetic freeze caf\u00e9 reason";
+    expect(await c.instance.freezeFulfillment(command)).toEqual({ closedOrders: 2 });
+    const audits = await f.db.select().from(schema.adminAuditEvents).where(eq(schema.adminAuditEvents.requestId, command.requestId));
+    const ownerAudits = audits.filter((row) => row.action === "owner.commission_fulfillment_freeze");
+    expect(ownerAudits).toHaveLength(1); expect(ownerAudits[0]!.afterState?.reason === reason).toBe(true);
+    const aggregateIds = [p.creator.userId];
+    for (const [paid, ids] of [[p, firstIds], [second, secondIds]] as const) {
+      await superseded(ids, paid, reason);
+      aggregateIds.push(paid.orderId, ids.proposalId, ids.disputeId, ids.caseId, (await refunds(paid))[0]!.id);
+      const views = view(paid);
+      for (const actor of [paid.buyer, paid.creator]) {
+        const projections = await Promise.all([views.getOrderResolution({ actor, orderId: paid.orderId }),
+          views.listMyCases({ actor }), service(paid).getOrder({ actor, orderId: paid.orderId })]);
+        for (const text of [command.reason, reason]) expect(JSON.stringify(projections).includes(text)).toBe(false);
+      }
+    }
+    const payloads = await f.db.select({ payload: schema.systemOutbox.payload }).from(schema.systemOutbox)
+      .where(inArray(schema.systemOutbox.aggregateId, aggregateIds));
+    for (const text of [command.reason, reason]) expect(JSON.stringify(payloads).includes(text)).toBe(false);
+  });
+  test("a fresh freeze with standing omitted fails dependency_unavailable and writes nothing", async () => {
+    const p = await f.deliveredOrder(); const ids = await pendingAndDispute(p); await capability(p); const c = await ownerService(p);
+    const { orders, refunds: refundPort, payments, cases, mode } = ports(p);
+    const instance = resolution.createOwnerResolutionService(kit(p, { consumeStepUpProof: c.consume }),
+      { orders, refunds: refundPort, payments, cases, mode, applicationRevision: "synthetic-i8" });
+    const command = freeze(p, c.owner);
+    const read = () => Promise.all([order(p), reservations(p), paymentFacts(p), outbox(p.orderId), outbox(p.creator.userId),
+      outbox(ids.proposalId), outbox(ids.disputeId), outbox(ids.caseId),
+      f.db.select().from(schema.commissionProposals).where(eq(schema.commissionProposals.id, ids.proposalId)),
+      f.db.select().from(schema.commissionDisputes).where(eq(schema.commissionDisputes.id, ids.disputeId)),
+      f.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, ids.caseId)),
+      f.db.select().from(schema.trustCaseEvents).where(eq(schema.trustCaseEvents.caseId, ids.caseId)),
+      f.db.select().from(schema.commissionEvents).where(eq(schema.commissionEvents.orderId, p.orderId))]);
+    const before = await read();
+    await expect(instance.freezeFulfillment(command)).rejects.toMatchObject({ code: "dependency_unavailable" });
+    expect(await read()).toEqual(before); expect(await refunds(p)).toHaveLength(0);
+    expect(await f.db.select().from(schema.commissionRefundEvents).where(eq(schema.commissionRefundEvents.requestId, command.requestId))).toHaveLength(0);
+    expect(await f.db.select().from(schema.adminAuditEvents).where(eq(schema.adminAuditEvents.requestId, command.requestId))).toHaveLength(0);
+    expect(await f.db.select().from(schema.systemCommandIdempotency).where(eq(schema.systemCommandIdempotency.actorUserId, c.owner.userId))).toHaveLength(0);
   });
   test("freeze on an active creator fails invalid_transition and a fresh freeze needs step-up and reason", async () => {
     const p = await f.paidOrder(); await capability(p, "active"); const c = await ownerService(p); const command = freeze(p, c.owner);

@@ -12,7 +12,8 @@ type Cancel = ResolutionCommand & Readonly<{ orderId: string; expectedVersion: n
 type Exit = Readonly<{ reason: "buyer_cancelled_after_suspension" | "fulfillment_frozen"; actor: ResolutionActor; requestId: string; at: Date }>;
 
 /** Both callers hold the creator fence, a live order and suspended standing in this transaction. */
-export async function closeSuspendedPaidOrder(tx: PawketTransaction, input: ExitPorts, facts: CommissionResolutionOrderFacts, command: Exit): Promise<string> {
+export async function closeSuspendedPaidOrder(tx: PawketTransaction, input: ExitPorts, facts: CommissionResolutionOrderFacts, command: Exit,
+  caseReason: string | null = null): Promise<string> {
   const paid = await input.payments.paidIntent(tx, facts.id);
   if (!paid || paid.amountVnd !== facts.amountVnd) resolutionFail("dependency_unavailable");
   await input.orders.closePaidOrder(tx, { orderId: facts.id, expectedVersion: facts.version, ...command });
@@ -37,7 +38,7 @@ export async function closeSuspendedPaidOrder(tx: PawketTransaction, input: Exit
     if (!ended) resolutionFail("version_conflict");
     const openCase = await input.cases.findOpenCase(tx, { kind: "dispute", sourceId: dispute.id });
     if (!openCase) resolutionFail("dependency_unavailable");
-    await input.cases.resolveCase(tx, { caseId: openCase.caseId, resolutionKind: "superseded", actor: command.actor, reason: null,
+    await input.cases.resolveCase(tx, { caseId: openCase.caseId, resolutionKind: "superseded", actor: command.actor, reason: caseReason,
       requestId: command.requestId, at: command.at });
     await insertOutboxEvent(tx, { eventType: "resolution.dispute_closed.v1", eventVersion: 1, aggregateType: "commission_dispute", aggregateId: dispute.id,
       payload: { disputeId: dispute.id, orderId: facts.id, state: "superseded" }, occurredAt: command.at });

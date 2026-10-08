@@ -88,13 +88,13 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
             const facts = await order(tx, candidate.orderId);
             if (facts.creatorUserId !== command.creatorUserId || !["in_progress", "delivered"].includes(facts.state)
               || facts.version !== candidate.version) resolutionFail("version_conflict");
-            await closeSuspendedPaidOrder(tx, input, facts, { reason: "fulfillment_frozen", actor: command.owner, requestId: command.requestId, at });
+            await closeSuspendedPaidOrder(tx, input, facts, { reason: "fulfillment_frozen", actor: command.owner, requestId: command.requestId, at }, reason);
           }
           const closedOrders = candidates.length;
           await insertOutboxEvent(tx, { eventType: "resolution.fulfillment_frozen.v1", eventVersion: 1, aggregateType: "creator", aggregateId: command.creatorUserId,
             payload: { creatorUserId: command.creatorUserId, closedOrders }, occurredAt: at });
           await audit(tx, command, "owner.commission_fulfillment_freeze", "identity_user", command.creatorUserId,
-            { standing: "suspended", liveOrders: closedOrders }, { standing: "suspended", closedOrders }, at);
+            { standing: "suspended", liveOrders: closedOrders }, { standing: "suspended", closedOrders, reason }, at);
           return { resultReference: String(closedOrders), at };
         });
       const closedOrders = Number(reference);
