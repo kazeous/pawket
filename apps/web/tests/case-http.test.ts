@@ -15,7 +15,9 @@ function setup() {
     resolveRefundCase: vi.fn(async () => ({})), ruleLateClaim: vi.fn(async () => ({})), freezeFulfillment: vi.fn(async () => ({})) };
   const input = { appBaseUrl: origin, authorizeOwner: vi.fn<Input["authorizeOwner"]>(async () => "authorized"), authenticate: vi.fn(async () => owner),
     issueOwnerStepUpProof: vi.fn(async () => ({ id: randomUUID() })), cases, owner: commands, lateClaims: {}, suspension: {},
-    refunds: { readAging: vi.fn(async () => []) }, standing: { readForOrder: vi.fn(async () => "active" as const) } } as unknown as Input;
+    refunds: { readAging: vi.fn(async () => []) }, standing: { readForOrder: vi.fn(async () => "active" as const) },
+    orderMetadata: { readForOrder: vi.fn(async () => ({ creatorUserId: "synthetic-creator", buyerUserId: "synthetic-buyer", orderState: "delivered", amountVnd: 500_000 })) },
+    resolutionMetadata: { readForCase: vi.fn(async () => ({ disputeOpenedAt: null, respondBy: null, ruling: null })) } } as unknown as Input;
   return { input, cases, commands, http: createCaseHttpHandlers(input) };
 }
 function request(path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) {
@@ -55,6 +57,12 @@ describe("owner case HTTP", () => {
     expect(response.status).toBe(200); expect((await response.json()).case.creatorStanding).toBe("active");
     expect(s.cases.readEvidence).not.toHaveBeenCalled(); expect(s.cases.fileGrant).not.toHaveBeenCalled();
     expect(response.headers.get("cache-control")).toBe("private, no-store, max-age=0"); expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+  test("detail derives owner-only order identifiers, state and amount server-side", async () => {
+    const s = setup(); const response = await s.http.detail(request(`cases/${caseId}`), caseId);
+    expect((await response.json()).case).toMatchObject({ creatorUserId: "synthetic-creator", buyerUserId: "synthetic-buyer", orderState: "delivered", amountVnd: 500_000 });
+    expect(s.input.orderMetadata.readForOrder).toHaveBeenCalledWith((await s.cases.getCase.mock.results[0]!.value).orderId);
+    expect(s.cases.readEvidence).not.toHaveBeenCalled(); expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled();
   });
   test("aging exposes only order ID, amount and age", async () => {
     const s = setup(); vi.mocked(s.input.refunds.readAging).mockResolvedValue([{ obligationId: randomUUID(), orderId: caseId, buyerUserId: "private-buyer", creatorUserId: "creator",

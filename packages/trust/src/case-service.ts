@@ -12,13 +12,17 @@ export type TrustCaseEvidencePort = Readonly<{
   fileGrant(tx: PawketTransaction, input: Readonly<{ orderId: string; fileId: string; disposition: "attachment" | "inline" }>): Promise<{ url: string }>;
 }>;
 type Case = typeof trustCases.$inferSelect;
+export type TrustCaseDeadlineRow = Readonly<{ caseId: string; kind: string; orderId: string; sourceId: string; state: string }>;
+export type TrustCaseDeadlinePort = Readonly<{
+  nextDeadlines(db: PawketDatabase, rows: readonly TrustCaseDeadlineRow[]): Promise<ReadonlyMap<string, Date | null>>;
+}>;
 type EvidenceSection = "order_summary" | "thread_page" | "resolution_records" | "refund_destination";
 type EvidenceCommand = Readonly<{ owner: TrustCaseActor; stepUpProofId: string; caseId: string; section: EvidenceSection; cursor?: number; requestId: string }>;
 type FileCommand = Readonly<{ owner: TrustCaseActor; stepUpProofId: string; caseId: string; fileId: string; disposition: "attachment" | "inline"; requestId: string }>;
 type FactoryInput = Readonly<{
   db: PawketDatabase; applicationRevision: string;
   consumeStepUpProof(tx: PawketTransaction, input: Readonly<{ proofId: string; sessionId: string; userId: string; actionClass: string; now: Date }>): Promise<boolean>;
-  evidence: TrustCaseEvidencePort; now?(): Date; idFactory?(): string;
+  evidence: TrustCaseEvidencePort; deadlines?: TrustCaseDeadlinePort; now?(): Date; idFactory?(): string;
 }>;
 function summary(row: Case) {
   return { caseId: row.id, kind: row.kind as TrustCaseKind, orderId: row.orderId, sourceType: row.sourceType, sourceId: row.sourceId,
@@ -79,7 +83,9 @@ export function createTrustCaseService(input: FactoryInput) {
         const rows = await db.select().from(trustCases).where(and(eq(trustCases.state, state), kind === undefined ? undefined : eq(trustCases.kind, kind),
           before === null ? undefined : or(lt(trustCases.openedAt, before.openedAt), and(eq(trustCases.openedAt, before.openedAt), lt(trustCases.id, before.id)))))
           .orderBy(desc(trustCases.openedAt), desc(trustCases.id)).limit(limit);
-        return rows.map(summary);
+        const summaries = rows.map(summary);
+        const deadlines = await input.deadlines?.nextDeadlines(db, summaries);
+        return summaries.map((row) => ({ ...row, nextDeadline: row.state === "open" ? deadlines?.get(row.caseId)?.toISOString() ?? null : null }));
       });
     },
     async getCase(caseId: string) {

@@ -34,6 +34,7 @@ async function setup() {
   const storage = { presignDownload: vi.fn(async () => ({ url: "https://example.invalid/download", expiresAt: new Date() })), presignUpload: vi.fn() };
   const files = createCommissionFileService({ ...p.s.creator.common, storage, mode: "enabled", fulfillmentMode: "enabled", sessions: p.s.input.identity, orders: createCommissionFileAccessPort({ catalog: p.s.catalog }) });
   const instance = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-i8", consumeStepUpProof: async (_tx, input) => input.userId === actor.userId && input.sessionId === actor.sessionId,
+    deadlines: resolutions.createResolutionCaseDeadlinePort({ refunds }),
     evidence: createCaseEvidencePort({ orders, refunds, view, files }), now: p.s.creator.now });
   const disputes = createDisputeService(createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity }), { orders: orderPort, refunds, cases, mode: "enabled" });
   const opened = await disputes.openDispute({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version, reason: "not_as_agreed", statement: "Synthetic statement",
@@ -55,6 +56,20 @@ test("the owner reads a dispute case's order summary, thread page and resolution
   expect(records.disputes[0]?.id).toBe(c.disputeId); expect(records.disputes[0]?.statements.length).toBe(2); expect(records.refunds).toEqual([]);
   const log = await accesses(c.caseId); expect(log.map((row) => row.itemType).sort()).toEqual(["order_summary", "resolution_records", "thread_page"]);
   expect(log.every((row) => row.ownerUserId === c.actor.userId && row.ownerSessionId === c.actor.sessionId)).toBe(true);
+}, 30_000);
+test("queue deadlines and owner ruling metadata use no private evidence or access-log write", async () => {
+  const c = await setup(); const detail = await c.instance.getCase(c.caseId);
+  const [dispute] = await f.db.select().from(schema.commissionDisputes).where(eq(schema.commissionDisputes.id, c.disputeId));
+  expect((await c.instance.listQueue()).find((row) => row.caseId === c.caseId)?.nextDeadline).toBe(dispute!.respondBy.toISOString());
+  const metadata = resolutions.createResolutionCaseMetadataPort();
+  expect(await metadata.readForCase(f.db, detail)).toEqual({ disputeOpenedAt: dispute!.openedAt.toISOString(), respondBy: dispute!.respondBy.toISOString(), ruling: null });
+  expect(await accesses(c.caseId)).toHaveLength(0);
+  const ruling = await c.rule(); const resolved = await c.instance.getCase(c.caseId);
+  const result = await metadata.readForCase(f.db, resolved);
+  expect(result.ruling?.id).toBe(ruling.rulingId);
+  expect(result.ruling && Object.keys(result.ruling).sort()).toEqual(["correctionEndsAt", "id", "outcome", "refundAmountVnd", "ruledAt"]);
+  expect((await c.instance.listQueue({ state: "resolved" })).find((row) => row.caseId === c.caseId)?.nextDeadline).toBeNull();
+  expect(await accesses(c.caseId)).toHaveLength(0);
 }, 30_000);
 test("after the case resolves the same call fails not_available without another log", async () => {
   const c = await setup(); await c.read("order_summary"); await c.rule();

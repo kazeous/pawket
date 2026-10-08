@@ -34,6 +34,11 @@ type Input = Readonly<{
   // Runtime binds the database; the adapter never reads private domain tables.
   refunds: Readonly<{ readAging(command: Parameters<Aging>[1]): ReturnType<Aging> }>;
   standing: Readonly<{ readForOrder(orderId: string): Promise<"active" | "suspended" | "none"> }>;
+  orderMetadata: Readonly<{ readForOrder(orderId: string): Promise<Readonly<{ creatorUserId: string; buyerUserId: string; orderState: string; amountVnd: number | null }>> }>;
+  resolutionMetadata: Readonly<{ readForCase(row: Readonly<{ caseId: string; kind: string; state: string; sourceId: string; orderId: string }>): Promise<Readonly<{
+    disputeOpenedAt: string | null; respondBy: string | null;
+    ruling: Readonly<{ id: string; outcome: string; refundAmountVnd: number; ruledAt: string; correctionEndsAt: string | null }> | null;
+  }>> }>;
 }>;
 const invalid = (): never => { throw new CommissionHttpFailure(400, "invalid_request"); };
 function noQuery(request: Request) { if (new URL(request.url).searchParams.size !== 0) invalid(); }
@@ -87,7 +92,9 @@ export function createCaseHttpHandlers(input: Input) {
     }),
     detail: (request: Request, caseId: string) => run(request, "GET", async () => {
       noQuery(request); const detail = await input.cases.getCase(id(caseId));
-      return { case: { ...detail, creatorStanding: await input.standing.readForOrder(detail.orderId) } };
+      const [order, resolution, creatorStanding] = await Promise.all([input.orderMetadata.readForOrder(detail.orderId),
+        input.resolutionMetadata.readForCase(detail), input.standing.readForOrder(detail.orderId)]);
+      return { case: { ...detail, ...order, ...resolution, creatorStanding } };
     }),
     evidence: (request: Request, caseId: string) => run(request, "POST", async (owner) => {
       noQuery(request); id(caseId); const body = await readCommissionBody(request, evidence);

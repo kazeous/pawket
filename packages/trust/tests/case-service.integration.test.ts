@@ -84,6 +84,16 @@ const resolve = (c: Awaited<ReturnType<typeof open>>) => fixture.db.transaction(
 }));
 
 describe("case-scoped owner evidence", () => {
+  test("queue deadline enrichment writes no access or audit entries and never reads evidence", async () => {
+    const c = await open(); const s = service();
+    const deadlines = { nextDeadlines: vi.fn(async () => new Map([[c.caseId, new Date("2026-10-13T04:00:00Z")]])) };
+    const instance = trust.createTrustCaseService({ db: fixture.db, applicationRevision: "synthetic-test", evidence: s.port,
+      consumeStepUpProof: s.consumeStepUpProof, deadlines });
+    expect((await instance.listQueue()).find((row) => row.caseId === c.caseId)?.nextDeadline).toBe("2026-10-13T04:00:00.000Z");
+    expect(await accesses(c.caseId)).toHaveLength(0);
+    expect(await fixture.db.select().from(schema.adminAuditEvents).where(eq(schema.adminAuditEvents.subjectId, c.caseId))).toHaveLength(0);
+    expect(s.consumeStepUpProof).not.toHaveBeenCalled(); for (const read of Object.values(s.port)) expect(read).not.toHaveBeenCalled();
+  });
   test("readCase returns unlocked metadata in open and resolved states, or null", async () => {
     const c = await open();
     const expected = { caseId: c.caseId, kind: "dispute", orderId: c.p.orderId, sourceType: "commission_dispute",

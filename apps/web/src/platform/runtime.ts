@@ -64,7 +64,8 @@ import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, 
 import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
 import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
-  createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort } from "@pawket/resolutions";
+  createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
+  createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort } from "@pawket/resolutions";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -519,6 +520,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     } });
   const ownerResolution = createOwnerResolutionService(ownerKit, { ...resolutionCommon, applicationRevision: env.APP_REVISION, standing });
   const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
+    deadlines: createResolutionCaseDeadlinePort({ refunds }),
     evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles }) });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
     issueOwnerStepUpProof: commandContext.issueOwnerProof,
@@ -527,6 +529,11 @@ export function getPlatformRuntime(): WebPlatformRuntime {
       return await resolveOwnerSessionPermission(database.db, { ...actor, now: new Date() }) ? "authorized" : "forbidden";
     },
     refunds: { readAging: (command) => refunds.readAging(database.db, command) },
+    orderMetadata: { readForOrder: (orderId) => database.db.transaction(async (tx) => {
+      const order = await resolutionOrders.lockOrder(tx, orderId); if (!order) resolutionFail("not_available");
+      return { creatorUserId: order.creatorUserId, buyerUserId: order.buyerUserId, orderState: order.state, amountVnd: order.amountVnd };
+    }) },
+    resolutionMetadata: { readForCase: (row) => createResolutionCaseMetadataPort().readForCase(database.db, row) },
     standing: { readForOrder: (orderId) => database.db.transaction(async (tx) => {
       const order = await resolutionOrders.lockOrder(tx, orderId); if (!order) resolutionFail("not_available");
       return standing.readCreatorStanding(tx, order.creatorUserId);
