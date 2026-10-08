@@ -35,7 +35,7 @@ export function SubmissionCard({ submission, order, disabled, onUpdated }: Reado
       <CardDescription><time dateTime={submission.submittedAt}>{formatTipTime(submission.submittedAt)}</time>{submission.late ? <Badge variant="outline">Giao trễ hạn</Badge> : null}</CardDescription></CardHeader>
     <CardContent className="flex min-w-0 flex-col gap-4">
       {submission.note ? <p className="whitespace-pre-wrap wrap-anywhere">{submission.note}</p> : null}
-      <AttachedFileList order={order} files={submission.files} />
+      <AttachedFileList order={order} files={submission.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer"} />
       {submission.respondedAt ? <div className="flex flex-col gap-2 text-sm"><time dateTime={submission.respondedAt}>{formatTipTime(submission.respondedAt)}</time>
         {submission.response === "approved" ? <p>Duyệt và tiếp tục</p> : null}
         {submission.responseNote ? <p className="whitespace-pre-wrap wrap-anywhere">{submission.responseNote}</p> : null}</div> : null}

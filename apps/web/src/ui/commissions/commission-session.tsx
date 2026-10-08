@@ -36,7 +36,7 @@ export function useCommissionSession() {
   const verify = useContext(SessionContext); if (!verify) throw new Error("Commission session boundary required"); return verify;
 }
 type Attempt = { path: string; key: string; body: string; done(value: unknown): void };
-export function useCommissionCommand() {
+export function useCommissionCommand(request: typeof tipRequest = tipRequest) {
   const verify = useCommissionSession(); const attempt = useRef<Attempt | null>(null); const running = useRef(false);
   const [pending, setPending] = useState(false); const [locked, setLocked] = useState(false); const [code, setCode] = useState<string | null>(null);
   async function send() {
@@ -44,7 +44,7 @@ export function useCommissionCommand() {
     running.current = true; setPending(true); setLocked(true); setCode(null);
     try {
       const actorUserId = await verify(true); const a = attempt.current;
-      const value = await tipRequest(a.path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": a.key, "x-pawket-actor": actorUserId }, body: a.body }, 131_072);
+      const value = await request(a.path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": a.key, "x-pawket-actor": actorUserId }, body: a.body }, 131_072);
       await verify(); a.done(value); attempt.current = null; setLocked(false);
     } catch (error) {
       const failure = error instanceof TipRequestError ? error.code : "dependency_unavailable"; setCode(failure);

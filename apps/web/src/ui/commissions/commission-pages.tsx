@@ -1,4 +1,5 @@
 import { DISCIPLINES } from "@pawket/catalog";
+import { VIETQR_REFUND_BANKS } from "@pawket/payments";
 import { loadServerEnv } from "@pawket/config";
 import { headers } from "next/headers";
 import Link from "next/link";
@@ -17,6 +18,7 @@ import { CommissionRequest } from "./commission-request";
 import { CommissionSession } from "./commission-session";
 import { CommissionTerms } from "./commission-terms";
 import { PackageWorkbench } from "./package-workbench";
+import { resolutionSchema, type ResolutionView } from "../resolutions/resolution-client";
 
 async function pageContext() {
   const incoming = new Headers(await headers()); const platform = getPlatformRuntime(); const env = loadServerEnv();
@@ -43,8 +45,10 @@ export async function CommissionDetailPage({ role, orderId }: Readonly<{ role: R
   let initial = null; let code = "dependency_unavailable";
   try { initial = await read(await ctx.platform.commissionHandlers.detail(ctx.request(`/api/v1${commissionPath(role)}/${encodeURIComponent(orderId)}`), orderId, role), detailSchema); } catch (error) { code = errorCode(error); }
   if (!initial && code === "not_available") notFound();
+  let resolution: ResolutionView | null = null;
+  if (initial) try { resolution = await read(await ctx.platform.resolutionHandlers.resolution(ctx.request(`/api/v1${commissionPath(role)}/${encodeURIComponent(orderId)}/resolution`), orderId, role), resolutionSchema); } catch { /* The panel offers its own retry without hiding the order. */ }
   return <AppShell context="Commission" action={{ href: commissionPath(role), label: "Danh sách commission" }}><section data-commission-surface className="min-w-0"><CommissionSession key={`${actor.userId}:${orderId}`} actorUserId={actor.userId}>
-    {initial ? <CommissionDetail initial={initial} /> : <><h1>Chi tiết commission</h1><PageFailure code={code} href={`${commissionPath(role)}/${encodeURIComponent(orderId)}`} /></>}
+    {initial ? <CommissionDetail initial={initial} initialResolution={resolution} refundBanks={VIETQR_REFUND_BANKS} /> : <><h1>Chi tiết commission</h1><PageFailure code={code} href={`${commissionPath(role)}/${encodeURIComponent(orderId)}`} /></>}
   </CommissionSession></section></AppShell>;
 }
 export async function CommissionPackagesPage() {
@@ -62,7 +66,7 @@ export async function PublicCommissionPackages({ handle }: Readonly<{ handle: st
   try { result = await read(await ctx.platform.commissionHandlers.publicPackages(ctx.request(`/api/v1/public/creators/${encodeURIComponent(handle)}/commissions`), handle), publicPackagesSchema); }
   catch { return <Alert><AlertTitle>Chưa tải được gói commission</AlertTitle><AlertDescription>Vui lòng quay lại sau để xem các gói nhận việc.</AlertDescription></Alert>; }
   if (!result.packages.length) return null;
-  return <section data-commission-surface className="flex min-w-0 flex-col gap-4" aria-label="Gói commission"><h2>Commission</h2><div className="grid min-w-0 gap-4 md:grid-cols-2">{result.packages.map((p) => <Card key={p.id}><CardHeader><CardTitle role="heading" aria-level={3} className="wrap-anywhere"><a href={`/creators/${handle}/commissions/${p.id}`} className="underline underline-offset-4">{p.title}</a></CardTitle><CardDescription>{routeLabels[p.route]}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><p>{p.terms ? formatVnd(p.terms.amountVnd) : "Giá theo brief"}</p><p className="text-sm text-muted-foreground">{!p.accepting ? "Tạm dừng nhận yêu cầu" : p.capacityAvailable ? "Đang nhận yêu cầu" : p.route === "fixed_immediate" ? "Đã hết suất" : "Nhận yêu cầu · chưa giữ suất"}</p></CardContent></Card>)}</div></section>;
+  return <section data-commission-surface className="flex min-w-0 flex-col gap-4" aria-label="Gói commission"><h2>Commission</h2><div className="grid min-w-0 gap-4 md:grid-cols-2">{result.packages.map((p) => <Card key={p.id}><CardHeader><CardTitle role="heading" aria-level={3} className="wrap-anywhere"><a href={`/creators/${handle}/commissions/${p.id}`} className="underline underline-offset-4">{p.title}</a></CardTitle><CardDescription>{routeLabels[p.route]}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><p>{p.terms ? formatVnd(p.terms.amountVnd) : "Giá theo brief"}</p><p className="text-sm text-muted-foreground">{!p.accepting ? "Tạm ngưng nhận đơn" : p.capacityAvailable ? "Đang nhận yêu cầu" : p.route === "fixed_immediate" ? "Đã hết suất" : "Nhận yêu cầu · chưa giữ suất"}</p></CardContent></Card>)}</div></section>;
 }
 export async function PublicCommissionPackagePage({ handle, packageId }: Readonly<{ handle: string; packageId: string }>) {
   const ctx = await pageContext(); let result;
@@ -73,6 +77,7 @@ export async function PublicCommissionPackagePage({ handle, packageId }: Readonl
   return <AppShell context={`@${handle}`} action={{ href: `/creators/${handle}`, label: "Trang nghệ sĩ" }}><article data-commission-surface className="flex min-w-0 flex-col gap-6"><header className="flex min-w-0 flex-col gap-3"><p className="eyebrow">{routeLabels[offering.route]}</p><h1 className="wrap-anywhere">{offering.title}</h1><p className="lede whitespace-pre-wrap wrap-anywhere">{offering.description}</p></header>
     <Card><CardHeader><CardTitle role="heading" aria-level={2}>Nội dung và điều khoản</CardTitle><CardDescription>Đọc kỹ nội dung trước khi gửi brief.</CardDescription></CardHeader><CardContent><CommissionTerms terms={offering.terms} policy={offering.policy?.document} /></CardContent></Card>
     {offering.showcaseId ? <a href={`/creators/${handle}#showcase-${offering.showcaseId}`} className="underline">Xem tác phẩm tham khảo</a> : null}
+    {!offering.accepting ? <Alert><AlertTitle>Tạm ngưng nhận đơn</AlertTitle><AlertDescription>Gói này hiện chưa nhận yêu cầu mới.</AlertDescription></Alert> : null}
     {actor ? <CommissionSession key={`${actor.userId}:${offering.revisionId}`} actorUserId={actor.userId}><CommissionRequest offering={offering} /></CommissionSession> : <Alert><AlertTitle>Đăng nhập để đặt commission</AlertTitle><AlertDescription><p>Dùng tài khoản đã xác minh email để gửi brief và theo dõi đơn riêng tư.</p><a href="/sign-in" className={buttonVariants({ variant: "outline" })}>Đăng nhập</a></AlertDescription></Alert>}
     <Link prefetch={false} href="/commissions" className="text-sm underline">Xem commission của bạn</Link>
   </article></AppShell>;

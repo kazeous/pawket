@@ -12,6 +12,8 @@ import { Field, FieldDescription, FieldGroup, FieldLabel, FieldSet } from "@/com
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
+import { StatusBanner } from "@/ui/status-banner";
+import { formatTipTime } from "@/ui/tips/tip-client";
 import { Acceptance, CommissionTerms, TermsFields, termsFromForm } from "./commission-terms";
 import { commissionRead, draftSchema, parseCommission, routeLabels, workspaceSchema, type PackageDraft, type WorkspaceView } from "./commission-client";
 import { CommandFeedback, useCommissionCommand, useCommissionSession } from "./commission-session";
@@ -41,6 +43,7 @@ export function PackageWorkbench({ initial, disciplines }: Readonly<{ initial: W
     });
   }
   return <div className="flex min-w-0 flex-col gap-6">
+    {w.intakePause?.paused ? <StatusBanner tone="warning" title="Bạn đang tạm ngưng nhận đơn mới vì có khoản hoàn tiền quá hạn."><ul>{w.intakePause.overdue.map((row) => <li key={row.obligationId}>Hạn chuyển: {formatTipTime(row.dueAt)} · <Link prefetch={false} href={`/help/cases#refund-${row.obligationId}`} className="underline">Xem khoản hoàn tiền</Link></li>)}</ul><p>Ghi nhận chuyển các khoản quá hạn để tiếp tục nhận đơn mới; Pawket cũng có thể gia hạn hoặc miễn khoản hoàn tiền sau khi xem xét.</p></StatusBanner> : null}
     {view.controls.intakeMode === "disabled" || view.controls.paymentsMode === "disabled" ? <Alert><AlertTitle>Commission đang có giới hạn hoạt động</AlertTitle><AlertDescription>{view.controls.intakeMode === "disabled" ? "Hệ thống đang tạm đóng nhận yêu cầu mới. " : ""}{view.controls.paymentsMode === "disabled" ? "Thanh toán đang tạm dừng. " : ""}Bạn vẫn có thể chuẩn bị bản nháp và đọc lịch sử.</AlertDescription></Alert> : null}
     <CommandFeedback command={command} />{notice ? <p role="status">{notice}</p> : null}
     {refreshError ? <Alert><AlertTitle>Đã gửi thao tác nhưng chưa tải được trạng thái mới</AlertTitle><AlertDescription>Kiểm tra lại trước khi sửa tiếp.<Button variant="outline" onClick={() => void reload()}>Tải lại cài đặt</Button></AlertDescription></Alert> : null}

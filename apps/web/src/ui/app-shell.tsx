@@ -30,6 +30,7 @@ export function AppShell({
       </main>
       <footer className="site-footer">
         <p>Pawket · công cụ cho nhà sáng tạo · 2026</p>
+        <Link href="/help">Trợ giúp</Link>
       </footer>
     </div>
   );
