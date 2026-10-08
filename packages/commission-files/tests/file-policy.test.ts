@@ -16,7 +16,9 @@ describe("commission file policy", () => {
       maxMessageFiles: 10, orderQuotaBytes: 1_073_741_824, completedRetentionMs: 180 * 86_400_000 });
   });
   test("allows artwork and archives only in submissions", () => {
-    expect(COMMISSION_FILE_CONTEXTS).toEqual(["brief", "thread", "submission"]);
+    expect(COMMISSION_FILE_CONTEXTS).toEqual(["brief", "thread", "submission", "resolution_evidence"]);
+    expect(commissionFileMaxBytes("resolution_evidence")).toBe(26_214_400);
+    expect(COMMISSION_FILE_CONTEXT_TYPES.resolution_evidence).toEqual(["jpeg", "png", "webp", "pdf"]);
     expect(COMMISSION_FILE_CONTEXT_TYPES.brief).toEqual(["jpeg", "png", "webp", "gif", "pdf"]);
     expect(COMMISSION_FILE_CONTEXT_TYPES.thread).toEqual(COMMISSION_FILE_CONTEXT_TYPES.brief);
     expect(COMMISSION_FILE_TYPES).toEqual(["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"]);

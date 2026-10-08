@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { createCommissionEvidenceAttachmentPort } from "@pawket/commission-files";
 import { createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
 import { createCommissionPaymentFactsPort, createCommissionRefundPort, createCommissionRefundService } from "@pawket/payments";
 import * as resolution from "@pawket/resolutions";
@@ -20,7 +21,8 @@ const outbox = (claimId: string) => f.db.select().from(schema.systemOutbox).wher
 const orderPort = () => createCommissionResolutionOrderPort({ applicationRevision: "synthetic-i8", newId: randomUUID });
 function ports(p: Context) {
   return { orders: orderPort(), refunds: createCommissionRefundPort({ keyring: p.s.input.keyring, calendarVersion }),
-    payments: createCommissionPaymentFactsPort(), cases: createTrustCasePort(), mode: "enabled" as const };
+    payments: createCommissionPaymentFactsPort(), cases: createTrustCasePort(), mode: "enabled" as const,
+    files: createCommissionEvidenceAttachmentPort({ keyring: p.s.input.keyring, mode: "enabled" }) };
 }
 function kit(p: Context, options: Partial<Parameters<typeof resolution.createResolutionCommandKit>[0]> = {}) {
   return resolution.createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity, ...options });
@@ -203,8 +205,9 @@ describe("commission late-payment claims", () => {
     for (const actor of [p.creator, outsider]) await expect(instance.fileLateClaim({ ...command, actor })).rejects.toMatchObject({ code: "not_available" });
     await expect(instance.fileLateClaim({ ...command, actor: { ...p.buyer, sessionId: randomUUID() } })).rejects.toMatchObject({ code: "not_authorized" });
     await expect(service(p, { mode: "disabled" }).fileLateClaim(command)).rejects.toMatchObject({ code: "resolution_disabled" });
-    for (const change of [{ amountVnd: 0 }, { amountVnd: 50_000_001 }, { transferAt: new Date(p.s.creator.now().getTime() + 1) }, { bankReference: "bad ref" }, { fileIds: [] }, { fileIds: [randomUUID()] }])
+    for (const change of [{ amountVnd: 0 }, { amountVnd: 50_000_001 }, { transferAt: new Date(p.s.creator.now().getTime() + 1) }, { bankReference: "bad ref" }, { fileIds: [randomUUID()] }])
       await expect(instance.fileLateClaim({ ...command, ...change })).rejects.toMatchObject({ code: "invalid_request" });
+    for (const fileIds of [[], [randomUUID()]]) await expect(service(p, { files: undefined }).fileLateClaim({ ...command, fileIds })).rejects.toMatchObject({ code: "invalid_request" });
     const { claimId } = await instance.fileLateClaim(command);
     for (const actor of [p.buyer, outsider]) await expect(instance.answerLateClaim({ ...answer(p, claimId), actor })).rejects.toMatchObject({ code: "not_available" });
     await expect(instance.answerLateClaim({ ...answer(p, claimId), receivedAmountVnd: 0 })).rejects.toMatchObject({ code: "invalid_request" });

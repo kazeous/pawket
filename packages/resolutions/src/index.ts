@@ -10,5 +10,6 @@ export * from "./hold-port.js";
 export * from "./resolution-view.js";
 export * from "./owner-service.js";
 export * from "./late-claim-service.js";
+export * from "./evidence-upload-port.js";
 export * from "./maintenance.js";
 export { createSuspensionService, type SuspensionService } from "./suspension-service.js";

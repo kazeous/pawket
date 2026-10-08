@@ -17,3 +17,7 @@ export type CommissionFileOrderAccessPort = Readonly<{
 /** Implemented by Trust in I8. I7 has no holds. */
 export type CommissionFileEvidenceHoldPort = Readonly<{ hasEvidenceHold(db: PawketDatabase | PawketTransaction, orderId: string): Promise<boolean> }>;
 export const noCommissionFileEvidenceHolds: CommissionFileEvidenceHoldPort = Object.freeze({ hasEvidenceHold: async () => false });
+/** Implemented by Resolutions; eligibility is checked under the creator fence in the upload transaction. */
+export type CommissionEvidenceUploadPort = Readonly<{
+  canUpload(tx: PawketTransaction, command: Readonly<{ orderId: string; actorUserId: string }>): Promise<boolean>;
+}>;

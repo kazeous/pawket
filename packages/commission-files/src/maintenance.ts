@@ -135,7 +135,7 @@ export async function runCommissionFileMaintenance(input: Readonly<{
   const purgeNextAfter: CommissionFilePurgeCursor | null = purgeCandidates.length === input.batchSize
     ? { createdAt: purgeCandidates[purgeCandidates.length - 1]!.createdAt, id: purgeCandidates[purgeCandidates.length - 1]!.id } : null;
 
-  // Closed-unpaid references and completed-order files have distinct retention periods.
+  // Closed-unpaid references and paid terminal orders have distinct retention periods.
   // Files attached to orders without an eligible terminal outcome stay `attached`, so
   // a plain unbounded scan would let that backlog fill every batch once it exceeds batchSize and
   // never reach closed-unpaid files attached afterwards. Keyset pagination on (attachedAt, id) walks
@@ -160,7 +160,9 @@ export async function runCommissionFileMaintenance(input: Readonly<{
       && order.closedAt.getTime() + COMMISSION_FILE_POLICY.closedUnpaidRetentionMs <= at.getTime();
     const completedDue = order.state === "completed" && order.completedAt !== null
       && order.completedAt.getTime() + COMMISSION_FILE_POLICY.completedRetentionMs <= at.getTime();
-    if (!closedUnpaidDue && !completedDue) continue;
+    const closedPaidDue = order.state === "closed" && order.confirmedAt !== null && order.closedAt !== null
+      && order.closedAt.getTime() + COMMISSION_FILE_POLICY.completedRetentionMs <= at.getTime();
+    if (!closedUnpaidDue && !completedDue && !closedPaidDue) continue;
     if (await input.holds.hasEvidenceHold(input.db, file.orderId!)) continue;
     retentionDue += 1;
     if (input.retentionMode !== "enforce") continue;

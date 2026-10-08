@@ -7,11 +7,12 @@ export const COMMISSION_FILE_POLICY = Object.freeze({
   uploadGrantMs: 15 * 60_000, downloadGrantSeconds: 300, scanDeadlineMs: 24 * HOUR_MS, signatureMaxAgeMs: 24 * HOUR_MS,
   unsentTtlMs: 24 * HOUR_MS, closedUnpaidRetentionMs: 30 * 24 * HOUR_MS, inlinePreviewMaxBytes: 25 * MIB,
   completedRetentionMs: 180 * 24 * HOUR_MS,
+  evidenceFileMaxBytes: 25 * MIB, maxEvidenceFiles: 3,
   scanLeaseMs: 10 * 60_000, retryBaseMs: 60_000, retryMaxMs: 30 * 60_000, filenameMaxBytes: 255,
 });
 export const COMMISSION_FILE_TYPES = ["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"] as const;
 export type CommissionFileType = typeof COMMISSION_FILE_TYPES[number];
-export const COMMISSION_FILE_CONTEXTS = ["brief", "thread", "submission"] as const;
+export const COMMISSION_FILE_CONTEXTS = ["brief", "thread", "submission", "resolution_evidence"] as const;
 export type CommissionFileContext = typeof COMMISSION_FILE_CONTEXTS[number];
 export const COMMISSION_FILE_CONTENT_TYPES: Readonly<Record<CommissionFileType, string>> = Object.freeze({
   jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf",
@@ -21,9 +22,11 @@ export const COMMISSION_FILE_CONTEXT_TYPES: Readonly<Record<CommissionFileContex
   brief: Object.freeze(["jpeg", "png", "webp", "gif", "pdf"] as const),
   thread: Object.freeze(["jpeg", "png", "webp", "gif", "pdf"] as const),
   submission: Object.freeze([...COMMISSION_FILE_TYPES]),
+  resolution_evidence: Object.freeze(["jpeg", "png", "webp", "pdf"] as const),
 });
 export function commissionFileMaxBytes(context: CommissionFileContext): number {
-  return context === "submission" ? COMMISSION_FILE_POLICY.submissionFileMaxBytes : COMMISSION_FILE_POLICY.briefFileMaxBytes;
+  return context === "submission" ? COMMISSION_FILE_POLICY.submissionFileMaxBytes : context === "resolution_evidence"
+    ? COMMISSION_FILE_POLICY.evidenceFileMaxBytes : COMMISSION_FILE_POLICY.briefFileMaxBytes;
 }
 const PREVIEW_TYPES: readonly CommissionFileType[] = ["jpeg", "png", "webp", "gif"];
 

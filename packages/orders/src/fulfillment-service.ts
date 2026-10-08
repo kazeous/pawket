@@ -161,7 +161,7 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
       return kit.boundary(() => input.db.transaction(async (tx) => {
         const candidate = await kit.owned(tx, command.orderId, command.actor); await lockCommissionCreator(tx, candidate.creatorUserId);
         const proofExpiry = await kit.session(tx, command.actor); const order = await kit.owned(tx, command.orderId, command.actor);
-        if (!["in_progress", "delivered", "completed"].includes(order.state)) commissionFail("invalid_transition");
+        if (!["in_progress", "delivered", "completed"].includes(order.state) && !(order.state === "closed" && order.confirmedAt !== null)) commissionFail("invalid_transition");
         const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
         const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
         const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)

@@ -11,7 +11,7 @@ import {
   COMMISSION_FILE_CONTENT_TYPES, COMMISSION_FILE_POLICY, CommissionFileError, commissionFileContentDisposition, commissionFileFail, commissionFileObjectKey,
   commissionFileMaxBytes, commissionFileUuid, isInlinePreviewAllowed, normalizeCommissionFileName, type CommissionFileType,
 } from "./file-policy.js";
-import type { CommissionFileActor, CommissionFileOrderAccessPort, CommissionFileSessionPort } from "./ports.js";
+import type { CommissionEvidenceUploadPort, CommissionFileActor, CommissionFileOrderAccessPort, CommissionFileSessionPort } from "./ports.js";
 import { CommissionFileStorageError, type CommissionFileStoragePort } from "./storage-port.js";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
@@ -25,6 +25,7 @@ type Input = Readonly<{
   db: PawketDatabase; storage: Pick<CommissionFileStoragePort, "presignUpload" | "presignDownload">; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   mode: "disabled" | "enabled"; fulfillmentMode: "disabled" | "enabled"; sessions: CommissionFileSessionPort;
   orders: Pick<CommissionFileOrderAccessPort, "briefPackage" | "orderAccess" | "lockFulfillmentOrder">;
+  evidenceUploads?: CommissionEvidenceUploadPort;
   now?: () => Date; idFactory?: () => string;
 }>;
 
@@ -64,10 +65,10 @@ export function createCommissionFileService(input: Input) {
 
   return {
     async createUpload(command: Readonly<{ actor: CommissionFileActor; fileName: unknown; declaredBytes: unknown; idempotencyKey: string; requestId: string }> &
-      (Readonly<{ context: "brief"; packageId: string }> | Readonly<{ context: "thread" | "submission"; orderId: string }>)) {
+      (Readonly<{ context: "brief"; packageId: string }> | Readonly<{ context: "thread" | "submission" | "resolution_evidence"; orderId: string }>)) {
       actorValid(command.actor);
       if (!(command.context === "brief" ? commissionFileUuid(command.packageId) :
-        (command.context === "thread" || command.context === "submission") && commissionFileUuid(command.orderId)) ||
+        (command.context === "thread" || command.context === "submission" || command.context === "resolution_evidence") && commissionFileUuid(command.orderId)) ||
         typeof command.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(command.idempotencyKey) ||
         typeof command.requestId !== "string" || !IDENTIFIER.test(command.requestId) || !Number.isSafeInteger(command.declaredBytes) || (command.declaredBytes as number) < 1) commissionFileFail("invalid_request");
       const declaredBytes = command.declaredBytes as number;
@@ -83,6 +84,11 @@ export function createCommissionFileService(input: Input) {
             ? [command.packageId, name, declaredBytes] : [command.context, command.orderId, name, declaredBytes]) }),
           now: startedAt, expiresAt: new Date(startedAt.getTime() + COMMISSION_FILE_POLICY.uploadGrantMs) });
         if (started.kind === "replay") {
+          if (command.context === "resolution_evidence") {
+            const order = await input.orders.lockFulfillmentOrder(tx, { orderId: command.orderId, actorUserId: command.actor.userId });
+            if (!order) commissionFileFail("not_available");
+            if (!await input.evidenceUploads?.canUpload(tx, { orderId: command.orderId, actorUserId: command.actor.userId })) commissionFileFail("invalid_state");
+          }
           const row = await owned(tx, started.resultReference, command.actor);
           const remaining = Math.floor((row.uploadExpiresAt.getTime() - now().getTime()) / 1000);
           if (row.state !== "awaiting_upload" || remaining < 1) commissionFileFail("upload_expired");
@@ -94,7 +100,9 @@ export function createCommissionFileService(input: Input) {
         if (command.context !== "brief") {
           const order = await input.orders.lockFulfillmentOrder(tx, { orderId: command.orderId, actorUserId: command.actor.userId });
           if (!order) commissionFileFail("not_available");
-          if (command.context === "thread" ? !["in_progress", "delivered"].includes(order.state) : order.role !== "creator" || order.state !== "in_progress") commissionFileFail("invalid_state");
+          if (command.context === "resolution_evidence") {
+            if (!await input.evidenceUploads?.canUpload(tx, { orderId: command.orderId, actorUserId: command.actor.userId })) commissionFileFail("invalid_state");
+          } else if (command.context === "thread" ? !["in_progress", "delivered"].includes(order.state) : order.role !== "creator" || order.state !== "in_progress") commissionFileFail("invalid_state");
         }
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commission-files:owner:${command.actor.userId}`}, 0))`);
         if (command.context === "brief" && !await input.orders.briefPackage(tx, { packageId: command.packageId, actorUserId: command.actor.userId })) commissionFileFail("not_available");
@@ -171,7 +179,8 @@ export function createCommissionFileService(input: Input) {
           .where(and(eq(commissionFileAttachments.fileId, command.fileId), eq(commissionFileAttachments.orderId, command.orderId), inArray(commissionFiles.state, ["attached"]))).limit(1);
         if (!row || row.file.cleanPurgedAt || !row.file.cleanVersionId || !row.file.detectedType) commissionFileFail("not_available");
         // Brief references: the creator loses access once the request closes before payment (spec §12).
-        if (access.role === "creator" && access.state === "closed") commissionFileFail("not_available");
+        if (access.role === "creator" && access.state === "closed" && access.confirmedAt === null) commissionFileFail("not_available");
+        if (access.role === "buyer" && access.state === "closed" && access.confirmedAt !== null && row.file.ownerUserId !== command.actor.userId) commissionFileFail("not_available");
         const type = row.file.detectedType as CommissionFileType;
         if (command.disposition === "inline" && !isInlinePreviewAllowed(type, row.file.declaredBytes)) commissionFileFail("preview_not_allowed");
         const grant = await input.storage.presignDownload({ key: row.file.objectKey, versionId: row.file.cleanVersionId, contentType: COMMISSION_FILE_CONTENT_TYPES[type],

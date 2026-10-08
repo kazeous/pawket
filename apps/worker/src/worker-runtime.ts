@@ -1143,7 +1143,6 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       setWorkerLastSuccessMetric({ scan: "commission_resolution", timestampSeconds: succeededAt / 1_000 });
       if (options.healthState) options.healthState.lastCommissionResolutionSucceededAt = succeededAt;
     } catch {
-      if (options.healthState) options.healthState.lastCommissionResolutionSucceededAt = null;
       recordResolutionOperation({ operation: "scan", outcome: "failed" });
       logger.error({ category: "commission_resolution_failed" }, "Commission resolution failed");
     }

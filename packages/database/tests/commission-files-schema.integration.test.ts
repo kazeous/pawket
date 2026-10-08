@@ -36,9 +36,10 @@ const filename = (fileId: string) => envelope("commission_files", fileId, "filen
 const sha = `sha256:${"a".repeat(64)}`;
 const legacyIds: string[] = [];
 
-async function expectSqlState(operation: PromiseLike<unknown>, code: string) {
+async function expectSqlState(operation: PromiseLike<unknown>, code: string, constraint?: string) {
   try { await operation; } catch (error) {
     expect((error as { cause?: unknown }).cause ?? error).toMatchObject({ code });
+    if (constraint) expect((error as { cause?: unknown }).cause ?? error).toMatchObject({ constraint_name: constraint });
     return;
   }
   throw new Error(`Expected SQLSTATE ${code}`);
@@ -114,6 +115,35 @@ const uploaded = { state: "scanning", uploadedAt: at, scanDeadlineAt: new Date(a
 const clean = { state: "clean", sha256: sha, detectedType: "png", cleanVersionId: "v1", cleanAt: later, quarantineVersionId: "q1" } as const;
 
 describe("commission file schema", () => {
+  async function evidence(o: Awaited<ReturnType<typeof orderFixture>>, declaredBytes = 16, ownerUserId = o.buyerUserId) {
+    const id = randomUUID();
+    await db.insert(commissionFiles).values({ id, ownerUserId, context: "resolution_evidence", uploadOrderId: o.orderId,
+      declaredBytes, filenameEnvelope: filename(id), objectKey: `commission/${id}`, uploadExpiresAt: new Date(at.getTime() + 900_000),
+      requestId: "evidence-fixture", createdAt: at, updatedAt: at });
+    return id;
+  }
+  test("a resolution_evidence file over 25 MiB fails", async () => {
+    const o = await orderFixture(); await evidence(o, 26_214_400);
+    await expectSqlState(evidence(o, 26_214_401), "23514", "commission_files_size_check");
+  });
+  test("a buyer-owned evidence file cannot attach to refund_send", async () => {
+    const o = await orderFixture(); const id = await evidence(o); await step(id, uploaded); await step(id, clean);
+    await expectSqlState(db.transaction(async (tx) => {
+      await tx.update(commissionFiles).set({ state: "attached", orderId: o.orderId, attachedAt: later, version: 4, updatedAt: later }).where(eq(commissionFiles.id, id));
+      await tx.insert(commissionFileAttachments).values({ fileId: id, orderId: o.orderId, targetKind: "refund_send", targetId: randomUUID(), position: 0, attachedAt: later });
+    }), "23514");
+  });
+  test("a fourth evidence attachment fails", async () => {
+    const o = await orderFixture(); const id = await evidence(o); await step(id, uploaded); await step(id, clean);
+    await expectSqlState(db.transaction(async (tx) => {
+      await tx.update(commissionFiles).set({ state: "attached", orderId: o.orderId, attachedAt: later, version: 4, updatedAt: later }).where(eq(commissionFiles.id, id));
+      await tx.insert(commissionFileAttachments).values({ fileId: id, orderId: o.orderId, targetKind: "late_claim", targetId: randomUUID(), position: 3, attachedAt: later });
+    }), "23514", "commission_file_attachment_target_check");
+  });
+  test.each(["gif", "psd", "clip", "zip"])("resolution evidence refuses detected type %s", async (detectedType) => {
+    const o = await orderFixture(); const id = await evidence(o); await step(id, uploaded);
+    await expectSqlState(step(id, { ...clean, detectedType }), "23514", "commission_files_type_check");
+  });
   test("backfills ended legacy names and reopens ambiguous uploaded cleanup", async () => {
     for (const id of legacyIds) {
       const [row] = await db.select().from(commissionFiles).where(eq(commissionFiles.id, id));

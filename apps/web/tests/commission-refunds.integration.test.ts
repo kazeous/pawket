@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { importConfiguredBusinessCalendarVersion } from "@pawket/database";
+import { createCommissionEvidenceAttachmentPort } from "@pawket/commission-files";
 import { lockCommissionCreator } from "@pawket/orders";
 import { createCommissionRefundPort, createCommissionRefundService, COMMISSION_REFUND_POLICY } from "@pawket/payments";
 import { createTrustCasePort } from "@pawket/trust";
@@ -34,7 +35,8 @@ async function setup() {
       mfaVerifiedAt: auth.verified ? time : null, sessionExpiresAt: new Date(time.getTime() + 60_000) };
   }) };
   const input: ServiceInput = { ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion, mode: "enabled",
-    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, assurance, cases, lockCreator: lockCommissionCreator };
+    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, assurance, cases, lockCreator: lockCommissionCreator,
+    files: createCommissionEvidenceAttachmentPort({ keyring: p.s.input.keyring, mode: "enabled" }) };
   const service = createCommissionRefundService(input);
   return { p, obligationId: created.obligationId, auth, input, service, cases };
 }
@@ -196,7 +198,8 @@ describe("commission refund party commands", () => {
   });
   test("fileIds is refused while the optional files port is absent, including an empty array", async () => {
     const c = await setup(); await enter(c);
-    for (const fileIds of [[], [randomUUID()]]) await expect(c.service.recordSend({ ...await sendCommand(c), fileIds })).rejects.toMatchObject({ code: "invalid_request" });
+    const service = createCommissionRefundService({ ...c.input, files: undefined });
+    for (const fileIds of [[], [randomUUID()]]) await expect(service.recordSend({ ...await sendCommand(c), fileIds })).rejects.toMatchObject({ code: "invalid_request" });
     expect(await sends(c)).toHaveLength(0);
   });
   test("evidence is attached to the inserted send in the same transaction and an invalid attachment rolls back", async () => {

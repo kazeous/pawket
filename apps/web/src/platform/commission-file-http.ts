@@ -16,7 +16,7 @@ const uuid = z.uuid();
 const uploadFields = { fileName: z.string().min(1).max(4096), declaredBytes: z.number().int() };
 const createUpload = z.discriminatedUnion("context", [
   z.strictObject({ context: z.literal("brief"), packageId: uuid, ...uploadFields }),
-  z.strictObject({ context: z.enum(["thread", "submission"]), orderId: uuid, ...uploadFields }),
+  z.strictObject({ context: z.enum(["thread", "submission", "resolution_evidence"]), orderId: uuid, ...uploadFields }),
 ]);
 const empty = z.strictObject({});
 function statusFor(code: string): number {

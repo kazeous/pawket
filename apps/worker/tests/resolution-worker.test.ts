@@ -49,7 +49,14 @@ test.each([{}, { ...result, overdueCases: -1 }, { ...result, presumedReceived: 3
   const r = await runtime("enabled");
   try { r.service.scan.mockResolvedValueOnce(invalid); await vi.advanceTimersByTimeAsync(5_000);
     expect(await metricsRegistry.metrics()).toContain('pawket_worker_scan_healthy{scan="commission_resolution"} 0');
-    expect(r.state.lastCommissionResolutionSucceededAt).toBeNull();
+    const lastSuccess = r.state.lastCommissionResolutionSucceededAt;
+    expect(lastSuccess).toBe(Date.now() - 5_000);
+    expect(workerReadiness({ state: r.state, revision })).toMatchObject({ commissionResolutionScan: "up" });
+    r.service.scan.mockResolvedValue(invalid);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(r.state.lastCommissionResolutionSucceededAt).toBe(lastSuccess);
+    expect(workerReadiness({ state: r.state, revision })).toMatchObject({ commissionResolutionScan: "up" });
+    await vi.advanceTimersByTimeAsync(1);
     expect(workerReadiness({ state: r.state, revision })).toMatchObject({ status: "not_ready", commissionResolutionScan: "down" });
   } finally { await r.handle.stop(); }
 });
