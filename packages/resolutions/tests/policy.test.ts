@@ -16,4 +16,5 @@ describe("resolution text policy", () => {
     expect(() => normalizeResolutionText(`synthetic${character}`, 1, 4_000)).toThrow("invalid_request");
   });
   test("uses the approved pause grace", () => { expect(RESOLUTION_POLICY.pauseGraceMs).toBe(172_800_000); });
+  test("uses the approved 30-day refund extension cap", () => { expect(RESOLUTION_POLICY.maxRefundExtensionMs).toBe(2_592_000_000); });
 });

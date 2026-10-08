@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNotNull, isNull, lte } from "drizzle-orm";
 import { calculateStoredBusinessDayDeadline, commissionRefundObligations, commissionRefundSends, commissionRefundEvents,
   type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { decryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
@@ -178,6 +178,8 @@ export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; 
         bankBin: commissionRefundObligations.destinationBankBin, bankName: commissionRefundObligations.destinationBankName, suffix: commissionRefundObligations.destinationSuffix,
         dueAt: commissionRefundObligations.dueAt, confirmBy: commissionRefundObligations.confirmBy, endedAt: commissionRefundObligations.endedAt,
         destinationPurgedAt: commissionRefundObligations.destinationPurgedAt, currentSendId: commissionRefundObligations.currentSendId,
+        hasRecordedSend: exists(tx.select({ id: commissionRefundSends.id }).from(commissionRefundSends)
+          .where(eq(commissionRefundSends.obligationId, commissionRefundObligations.id))).mapWith(Boolean),
         version: commissionRefundObligations.version, createdAt: commissionRefundObligations.createdAt }).from(commissionRefundObligations)
         .where(eq(commissionRefundObligations.orderId, command.orderId)).orderBy(asc(commissionRefundObligations.createdAt), asc(commissionRefundObligations.id));
     },

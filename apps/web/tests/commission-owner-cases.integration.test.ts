@@ -3,7 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { calculateStoredBusinessDayDeadline } from "@pawket/database";
 import { createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
-import { createCommissionPaymentFactsPort, createCommissionRefundPort, createCommissionRefundService } from "@pawket/payments";
+import { COMMISSION_REFUND_POLICY, createCommissionPaymentFactsPort, createCommissionRefundPort, createCommissionRefundService } from "@pawket/payments";
 import * as resolution from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
 import { createCommissionResolutionTestFixture, resolutions, service } from "./commission-resolution-test-support.js";
@@ -57,6 +57,14 @@ async function audited(c: Context, command: { requestId: string }, action: strin
   expect(rows[0]).toMatchObject({ actorUserId: c.owner.userId, actorSessionId: c.owner.sessionId, subjectType, subjectId, action,
     outcome: "succeeded", assurance: { method: "owner_step_up" }, applicationRevision: "synthetic-i8", occurredAt: c.p.s.creator.now() });
   expect(rows[0]!.beforeState).not.toBeNull(); expect(rows[0]!.afterState).not.toBeNull();
+  if (action === "owner.case_rule") {
+    expect(rows[0]!.beforeState).toMatchObject({ orderId: c.p.orderId });
+    expect(rows[0]!.afterState).toMatchObject({ orderId: c.p.orderId });
+  } else if (["accept_evidence", "require_resend", "waive", "extend_deadline"].some((kind) => action === `owner.case_${kind}`)) {
+    const obligationId = (await caseRow(subjectId)).sourceId;
+    expect(rows[0]!.beforeState).toMatchObject({ obligationId });
+    expect(rows[0]!.afterState).toMatchObject({ obligationId });
+  }
   expect(c.consume).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ ...c.owner, actionClass: action }));
   for (const text of ["Synthetic public reasoning", "Synthetic private owner note", "Synthetic correction reason", "Synthetic owner question", "Synthetic deadline reason", "Synthetic refund reason"])
     expect(JSON.stringify(rows).includes(text)).toBe(false);
@@ -68,12 +76,12 @@ async function caseRow(caseId: string) {
   return (await f.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, caseId)))[0]!;
 }
 async function destination(c: Context, obligationId: string) {
-  const [row] = await refunds(c.p); expect(row!.id).toBe(obligationId);
+  const row = (await refunds(c.p)).find((entry) => entry.id === obligationId); expect(row).toBeDefined();
   await partyRefunds(c.p).enterDestination({ actor: c.p.buyer, obligationId, expectedVersion: row!.version,
     bankBin: "970422", accountNumber: "000000123456", accountHolder: "SYNTHETIC BUYER", ...commandIds() });
 }
 async function send(c: Context, obligationId: string) {
-  const [row] = await refunds(c.p);
+  const row = (await refunds(c.p)).find((entry) => entry.id === obligationId); expect(row).toBeDefined();
   await partyRefunds(c.p).recordSend({ actor: c.p.creator, obligationId, expectedVersion: row!.version,
     transferDate: c.p.s.creator.now().toISOString().slice(0, 10), bankReference: "SYNTHETIC_REF", ...commandIds() });
 }
@@ -200,6 +208,78 @@ describe("commission owner case commands", () => {
     expect(outbox.map((row) => row.payload)).toEqual([{ correctionId: result.correctionId, rulingId, effect: expected }]);
     await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
   });
+  test.each([
+    { target: 150_000, effect: "reduced", adjustableAmount: 50_000 },
+    { target: 100_000, effect: "waived", adjustableAmount: 0 },
+    { target: 50_000, effect: "recorded_only", adjustableAmount: 0 },
+  ] as const)("correction to $target subtracts a newer sent supplement before reducing the older unsent obligation", async ({ target, effect, adjustableAmount }) => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c)); const originalId = (await refunds(c.p))[0]!.id;
+    c.p.s.creator.advance(1); const increased = await c.instance.correctRuling(correction(c, rulingId, 300_000));
+    const supplementId = (await refunds(c.p)).find((row) => row.sourceId === increased.correctionId)!.id;
+    await destination(c, supplementId); await send(c, supplementId); c.p.s.creator.advance(1);
+    const beforeOrder = await order(c.p); const command = correction(c, rulingId, target); const result = await c.instance.correctRuling(command);
+    const rows = await refunds(c.p); expect(rows).toHaveLength(2);
+    expect(rows.map(({ id, amountVnd, state }) => ({ id, amountVnd, state }))).toEqual(expect.arrayContaining([
+      { id: originalId, amountVnd: adjustableAmount || 200_000, state: adjustableAmount ? "awaiting_destination" : "waived" },
+      { id: supplementId, amountVnd: 100_000, state: "sent" },
+    ]));
+    expect(rows.filter((row) => row.state !== "waived").reduce((total, row) => total + row.amountVnd, 0)).toBe(Math.max(target, 100_000));
+    expect(result.effect).toBe(effect); expect(await c.instance.correctRuling(command)).toEqual(result);
+    expect(await order(c.p)).toEqual(beforeOrder); await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
+  });
+  test.each([
+    { target: 250_000, effect: "reduced", adjustableAmount: 50_000 },
+    { target: 200_000, effect: "waived", adjustableAmount: 0 },
+    { target: 150_000, effect: "recorded_only", adjustableAmount: 0 },
+  ] as const)("correction to $target preserves the older sent obligation and reduces the newer unsent supplement", async ({ target, effect, adjustableAmount }) => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c)); const originalId = (await refunds(c.p))[0]!.id;
+    await destination(c, originalId); await send(c, originalId); c.p.s.creator.advance(1);
+    const increased = await c.instance.correctRuling(correction(c, rulingId, 300_000));
+    const supplementId = (await refunds(c.p)).find((row) => row.sourceId === increased.correctionId)!.id;
+    await destination(c, supplementId); c.p.s.creator.advance(1);
+    const command = correction(c, rulingId, target); const result = await c.instance.correctRuling(command);
+    const rows = await refunds(c.p); expect(rows).toHaveLength(2);
+    expect(rows.map(({ id, amountVnd, state }) => ({ id, amountVnd, state }))).toEqual(expect.arrayContaining([
+      { id: originalId, amountVnd: 200_000, state: "sent" },
+      { id: supplementId, amountVnd: adjustableAmount || 100_000, state: adjustableAmount ? "awaiting_send" : "waived" },
+    ]));
+    expect(rows.filter((row) => row.state !== "waived").reduce((total, row) => total + row.amountVnd, 0)).toBe(Math.max(target, 200_000));
+    expect(result.effect).toBe(effect); expect(await c.instance.correctRuling(command)).toEqual(result);
+    await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
+  });
+  test.each(["require_resend", "waive"] as const)("correction treats a supplement after %s as fixed while any send is recorded", async (action) => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c)); const originalId = (await refunds(c.p))[0]!.id;
+    c.p.s.creator.advance(1); const increased = await c.instance.correctRuling(correction(c, rulingId, 300_000));
+    const supplementId = (await refunds(c.p)).find((row) => row.sourceId === increased.correctionId)!.id;
+    await destination(c, supplementId); await send(c, supplementId);
+    const sent = (await refunds(c.p)).find((row) => row.id === supplementId)!;
+    await partyRefunds(c.p).confirmReceipt({ actor: c.p.buyer, obligationId: supplementId, expectedVersion: sent.version, received: false, ...commandIds() });
+    const refundCase = await f.db.transaction((tx) => c.ports.cases.findOpenCase(tx, { kind: "refund_not_received", sourceId: supplementId }));
+    await c.instance.resolveRefundCase({ ...base(c), caseId: refundCase!.caseId, action, reason: "Synthetic refund reason" });
+    const before = (await refunds(c.p)).find((row) => row.id === supplementId)!;
+    expect({ state: before.state, currentSendId: before.currentSendId })
+      .toEqual({ state: action === "require_resend" ? "awaiting_send" : "waived", currentSendId: action === "require_resend" ? null : sent.currentSendId });
+    const listed = await f.db.transaction((tx) => c.ports.refunds.listForOrder(tx, { orderId: c.p.orderId }));
+    expect(listed.find((row) => row.obligationId === originalId)!.hasRecordedSend).toBe(false);
+    expect(listed.find((row) => row.obligationId === supplementId)!.hasRecordedSend).toBe(true);
+    c.p.s.creator.advance(1); const command = correction(c, rulingId, 150_000); const result = await c.instance.correctRuling(command);
+    const rows = await refunds(c.p);
+    expect(rows.find((row) => row.id === originalId)!.amountVnd).toBe(50_000);
+    const after = rows.find((row) => row.id === supplementId)!;
+    expect({ amountVnd: after.amountVnd, state: after.state, currentSendId: after.currentSendId, version: after.version })
+      .toEqual({ amountVnd: 100_000, state: before.state, currentSendId: before.currentSendId, version: before.version });
+    expect(result.effect).toBe("reduced"); expect(await c.instance.correctRuling(command)).toEqual(result);
+    expect(await f.db.select({ id: schema.commissionRefundSends.id }).from(schema.commissionRefundSends).where(eq(schema.commissionRefundSends.obligationId, supplementId))).toHaveLength(1);
+    await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
+  });
+  test("an unchanged refund target is reduced, reserving recorded_only for targets below fixed money", async () => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c));
+    const before = (await refunds(c.p)).map(({ id, amountVnd, state, version }) => ({ id, amountVnd, state, version }));
+    const command = correction(c, rulingId, 200_000); const result = await c.instance.correctRuling(command);
+    expect(result.effect).toBe("reduced"); expect(await c.instance.correctRuling(command)).toEqual(result);
+    expect((await refunds(c.p)).map(({ id, amountVnd, state, version }) => ({ id, amountVnd, state, version }))).toEqual(before);
+    await audited(c, command, "owner.case_correct", "commission_ruling", rulingId);
+  });
   test("correction is allowed at 30 days, rejected afterwards and replay still succeeds", async () => {
     const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c)); const ruledAt = c.p.s.creator.now();
     c.p.s.creator.setNow(new Date(ruledAt.getTime() + 30 * DAY)); const command = correction(c, rulingId, 100_000);
@@ -225,6 +305,7 @@ describe("commission owner case commands", () => {
     await audited(c, command, `owner.case_${action}`, "trust_case", c.refundCaseId);
   });
   test("refund deadline beyond 30 days fails and leaves the case and obligation untouched", async () => {
+    expect(resolution.RESOLUTION_POLICY.maxRefundExtensionMs).toBe(COMMISSION_REFUND_POLICY.maxExtensionMs);
     const c = await refundCase("refund_overdue"); const before = await refunds(c.p);
     const command = { ...base(c), caseId: c.refundCaseId, action: "extend_deadline" as const,
       until: new Date(c.p.s.creator.now().getTime() + 30 * DAY + 1), reason: "Synthetic refund reason" };

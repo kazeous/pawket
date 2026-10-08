@@ -116,8 +116,8 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
             payload: { disputeId: row.id, orderId: facts.id, state: "ruled" }, occurredAt: at });
           await insertOutboxEvent(tx, { eventType: "resolution.ruling_recorded.v1", eventVersion: 1, aggregateType: "commission_ruling", aggregateId: rulingId,
             payload: { rulingId, disputeId: row.id, orderId: facts.id, outcome: command.outcome }, occurredAt: at });
-          await audit(tx, command, "owner.case_rule", "commission_dispute", row.id, { state: row.state, orderState: facts.state, orderVersion: facts.version },
-            { state: "ruled", orderState: command.outcome === "complete" ? "completed" : "closed", orderVersion: changed.version, rulingId, refundAmountVnd: command.refundAmountVnd }, at);
+          await audit(tx, command, "owner.case_rule", "commission_dispute", row.id, { state: row.state, orderId: facts.id, orderState: facts.state, orderVersion: facts.version },
+            { state: "ruled", orderId: facts.id, orderState: command.outcome === "complete" ? "completed" : "closed", orderVersion: changed.version, rulingId, refundAmountVnd: command.refundAmountVnd }, at);
           return { resultReference: rulingId, at };
         });
       return { rulingId: resultId(reference) };
@@ -135,24 +135,29 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
           if (command.newRefundAmountVnd > facts.amountVnd || (row.outcome === "complete" && command.newRefundAmountVnd >= facts.amountVnd)) resolutionFail("invalid_request");
           const corrections = await tx.select({ id: commissionRulingCorrections.id }).from(commissionRulingCorrections).where(eq(commissionRulingCorrections.rulingId, row.id));
           const correctionIds = new Set(corrections.map((entry) => entry.id));
-          const obligations = (await input.refunds.listForOrder(tx, { orderId: facts.id })).filter((entry) => entry.state !== "waived"
+          const obligations = (await input.refunds.listForOrder(tx, { orderId: facts.id })).filter((entry) => (entry.state !== "waived" || entry.hasRecordedSend)
             && ((entry.source === "ruling" && entry.sourceId === row.id) || (entry.source === "correction" && correctionIds.has(entry.sourceId))));
           // Include recorded sends in the total: a correction never creates a second debt for money already sent.
           const currentAmount = obligations.reduce((total, entry) => total + entry.amountVnd, 0); const correctionId = randomUUID();
-          let effect: CorrectionEffect = "recorded_only";
+          // Unchanged totals use reduced; recorded_only is reserved for a target below fixed money.
+          let effect: CorrectionEffect = "reduced";
           if (command.newRefundAmountVnd > currentAmount) {
             await createRefund(tx, facts, "correction", correctionId, command.newRefundAmountVnd - currentAmount, command.requestId, at); effect = "increased";
           } else if (command.newRefundAmountVnd < currentAmount) {
-            let remaining = currentAmount - command.newRefundAmountVnd; let recordedOnly = false; let adjusted = false;
-            // Payments protects each obligation's send history while reductions are allocated.
-            for (const entry of [...obligations].reverse()) {
+            const adjustable = obligations.filter((entry) => ["awaiting_destination", "awaiting_send"].includes(entry.state) && !entry.hasRecordedSend);
+            const adjustableTotal = adjustable.reduce((total, entry) => total + entry.amountVnd, 0); const fixedTotal = currentAmount - adjustableTotal;
+            const adjustableTarget = Math.max(0, command.newRefundAmountVnd - fixedTotal); let remaining = adjustableTotal - adjustableTarget;
+            for (const entry of [...adjustable].reverse()) {
               if (remaining === 0) break;
               const reduction = Math.min(remaining, entry.amountVnd);
               const result = await input.refunds.adjustAmount(tx, { obligationId: entry.obligationId, newAmountVnd: entry.amountVnd - reduction,
                 actor: command.owner, requestId: command.requestId, at });
-              recordedOnly ||= result === "recorded_only"; adjusted ||= result !== "recorded_only"; remaining -= reduction;
+              // The creator fence keeps sends stable; never count a protected amount as reduced.
+              if (result === "recorded_only") resolutionFail("version_conflict"); remaining -= reduction;
             }
-            effect = recordedOnly ? "recorded_only" : adjusted ? command.newRefundAmountVnd === 0 ? "waived" : "reduced" : "recorded_only";
+            // Reduction effects: below fixedTotal, recorded_only wins even when all adjustable obligations are waived.
+            // At fixedTotal all adjustable obligations are waived; above it the effect is reduced.
+            effect = command.newRefundAmountVnd < fixedTotal ? "recorded_only" : adjustableTarget === 0 ? "waived" : "reduced";
           }
           await tx.insert(commissionRulingCorrections).values({ id: correctionId, rulingId: row.id, refundAmountVnd: command.newRefundAmountVnd,
             reasonEnvelope: kit.encrypt("commission_ruling_corrections", correctionId, "reason", reason), effect, ownerUserId: command.owner.userId,
@@ -219,14 +224,14 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
           else if (command.action === "require_resend") { await input.refunds.requireResend(tx, change); resolutionKind = "resend_required"; }
           else if (command.action === "waive") { await input.refunds.waive(tx, change); resolutionKind = "waived"; }
           else {
-            if (!command.until || command.until <= at || command.until.getTime() > at.getTime() + 2_592_000_000) resolutionFail("invalid_request");
+            if (!command.until || command.until <= at || command.until.getTime() > at.getTime() + RESOLUTION_POLICY.maxRefundExtensionMs) resolutionFail("invalid_request");
             await input.refunds.extendDeadline(tx, { ...change, until: command.until }); resolutionKind = "extended";
           }
           await input.cases.resolveCase(tx, { caseId: row.caseId, resolutionKind, actor: command.owner, reason, requestId: command.requestId, at });
           const [after] = (await input.refunds.listForOrder(tx, { orderId: row.orderId })).filter((entry) => entry.obligationId === obligation.obligationId);
           if (!after) resolutionFail("dependency_unavailable");
-          await audit(tx, command, actionClass, "trust_case", row.caseId, { state: row.state, obligationState: obligation.state, dueAt: obligation.dueAt?.toISOString() ?? null },
-            { state: "resolved", resolutionKind, obligationState: after.state, dueAt: after.dueAt?.toISOString() ?? null }, at);
+          await audit(tx, command, actionClass, "trust_case", row.caseId, { state: row.state, obligationId: obligation.obligationId, obligationState: obligation.state, dueAt: obligation.dueAt?.toISOString() ?? null },
+            { state: "resolved", resolutionKind, obligationId: obligation.obligationId, obligationState: after.state, dueAt: after.dueAt?.toISOString() ?? null }, at);
           return { resultReference: row.caseId, at, ...(command.until ? { guardUntil: command.until } : {}) };
         });
       return { caseId: resultId(reference) };

@@ -16,7 +16,7 @@ type RefundCommand = Readonly<{ obligationId: string; actor: ResolutionActor | n
 export type ResolutionRefundView = Readonly<{
   obligationId: string; source: string; sourceId: string; amountVnd: number; reference: string; state: string;
   bankBin: string | null; bankName: string | null; suffix: string | null; dueAt: Date | null; confirmBy: Date | null;
-  endedAt: Date | null; destinationPurgedAt: Date | null; currentSendId: string | null; version: number; createdAt: Date;
+  endedAt: Date | null; destinationPurgedAt: Date | null; currentSendId: string | null; hasRecordedSend: boolean; version: number; createdAt: Date;
 }>;
 /** Payments implements these ports structurally; Resolutions never reads Payments' tables. */
 export type ResolutionRefundPort = Readonly<{

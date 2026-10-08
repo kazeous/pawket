@@ -7,6 +7,7 @@ export const RESOLUTION_POLICY = Object.freeze({
   maxStatementsPerParty: 10, statementMaxCodePoints: 4_000, noteMaxCodePoints: 2_000,
   restoreFloorMs: 172_800_000, correctionWindowMs: 2_592_000_000, claimWindowMs: 2_592_000_000,
   claimResponseMs: 432_000_000, pauseGraceMs: 172_800_000, maxClaimAmountVnd: 50_000_000,
+  maxRefundExtensionMs: 2_592_000_000, // Matches COMMISSION_REFUND_POLICY.maxExtensionMs (P6).
 });
 export function normalizeResolutionText(value: unknown, minimum: number, maximum: number): string {
   if (typeof value !== "string" || !Number.isSafeInteger(minimum) || !Number.isSafeInteger(maximum) || minimum < 0 || maximum < minimum) resolutionFail("invalid_request");
