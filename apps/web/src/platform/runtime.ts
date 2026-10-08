@@ -64,7 +64,7 @@ import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, 
 import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator } from "@pawket/orders";
 import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
-  createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort } from "@pawket/resolutions";
+  createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort } from "@pawket/resolutions";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -72,12 +72,15 @@ import {
   createTrustHttpHandlers,
   createCommissionTrustPort,
   createTrustCasePort,
+  createTrustCaseService,
 } from "@pawket/trust";
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
 import { createCommissionHttpHandlers } from "./commission-http.js";
 import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createResolutionHttpHandlers } from "./resolution-http.js";
+import { createCaseHttpHandlers } from "./case-http.js";
+import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
@@ -104,6 +107,7 @@ export type WebPlatformRuntime = {
   commissionHandlers: ReturnType<typeof createCommissionHttpHandlers>;
   commissionFileHandlers: ReturnType<typeof createCommissionFileHttpHandlers>;
   resolutionHandlers: ReturnType<typeof createResolutionHttpHandlers>;
+  caseHandlers: ReturnType<typeof createCaseHttpHandlers>;
   commissions: ReturnType<typeof createCommissionOrderService>;
   commissionCatalog: ReturnType<typeof createCommissionPackageService>;
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
@@ -505,6 +509,27 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissionFiles = createCommissionFileService({ db: database.db, storage: commissionFileStorage, keyring, lookupHmacKey, mode: env.COMMISSION_FILES_MODE,
     evidenceUploads: createCommissionEvidenceUploadPort({ orders: resolutionOrders, refunds, payments: resolutionPayments, mode: env.COMMISSION_RESOLUTION_MODE }),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
+  const ownerKit = createResolutionCommandKit({ db: database.db, keyring, lookupHmacKey, session: commissionIdentity,
+    consumeStepUpProof: commandContext.consumeOwnerProof,
+    async authorizeCommand(tx, actor) {
+      // Replays do not consume a new proof, but still require an active owner session.
+      if (!await resolveOwnerSessionPermission(tx, { ...actor, now: new Date() })) resolutionFail("not_authorized");
+      await commandContext.authorize(tx, actor);
+    } });
+  const ownerResolution = createOwnerResolutionService(ownerKit, { ...resolutionCommon, applicationRevision: env.APP_REVISION, standing });
+  const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
+    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles }) });
+  const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
+    issueOwnerStepUpProof: commandContext.issueOwnerProof,
+    async authorizeOwner(headers) {
+      const actor = await authenticate(headers); if (!actor) return "unauthenticated";
+      return await resolveOwnerSessionPermission(database.db, { ...actor, now: new Date() }) ? "authorized" : "forbidden";
+    },
+    refunds: { readAging: (command) => refunds.readAging(database.db, command) },
+    standing: { readForOrder: (orderId) => database.db.transaction(async (tx) => {
+      const order = await resolutionOrders.lockOrder(tx, orderId); if (!order) resolutionFail("not_available");
+      return standing.readCreatorStanding(tx, order.creatorUserId);
+    }) } });
   const commissionFileHandlers = createCommissionFileHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, files: commissionFiles,
     onOperation: recordCommissionFileOperation,
     async throttle({ actorUserId, networkKeyHash, operation }) {
@@ -640,6 +665,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     commissionHandlers: commandHttp.wrap(commissionHandlers),
     commissionFileHandlers,
     resolutionHandlers: commandHttp.wrap(resolutionHandlers),
+    caseHandlers: commandHttp.wrap(caseHandlers),
     commissions,
     commissionCatalog,
     mediaCommandHandlers,

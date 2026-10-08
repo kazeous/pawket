@@ -85,6 +85,19 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     return make(`payments.sepay_${operation}`, operation === "confirm", "Xử lý giao dịch SePay", "/creator/tips/sepay", (r, q) => r.sepayHandlers[operation](q, id));
   }
   if (path === "/api/v1/admin/tip-policy") return make("owner.tip_policy_update", true, "Cập nhật chính sách tip", "/admin/tip-policy", (r, q) => r.tipPolicyHandlers.save(q));
+  if ((match = new RegExp(`^/api/v1/admin/cases/${uuid}/evidence$`, "u").exec(path))) {
+    const id = match[1]!; return make("owner.case_evidence", true, "Xem bằng chứng của vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.evidence(q, id));
+  }
+  if ((match = new RegExp(`^/api/v1/admin/cases/${uuid}/files/${uuid}$`, "u").exec(path))) {
+    const id = match[1]!; const fileId = match[2]!; return make("owner.case_file", true, "Xem tệp của vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.file(q, id, fileId));
+  }
+  if ((match = new RegExp(`^/api/v1/admin/cases/${uuid}/actions$`, "u").exec(path))) {
+    const id = match[1]!; const decision = action(payload, ["rule", "correct", "question", "extend", "accept_evidence", "require_resend", "waive", "extend_deadline", "rule_claim"]);
+    return decision ? make(`owner.case_${decision}`, true, "Xử lý vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.action(q, id)) : null;
+  }
+  if ((match = /^\/api\/v1\/admin\/creators\/([A-Za-z0-9][A-Za-z0-9._:-]{0,199})\/freeze$/u.exec(path))) {
+    const id = match[1]!; return make("owner.commission_fulfillment_freeze", true, "Dừng thực hiện commission", "/admin/cases", (r, q) => r.caseHandlers.freeze(q, id));
+  }
   if ((match = new RegExp(`^/api/v1/admin/creator-applications/${uuid}/(detail|claim|decision|deposit/challenge)$`, "u").exec(path))) {
     const id = match[1]!; const operation = match[2]!; const back = "/admin/creator-applications";
     if (operation === "deposit/challenge") return make("owner.verification_deposit_challenge", true, "Tạo yêu cầu xác minh tài khoản", back, (r, q) => r.paymentsHandlers.issueChallenge(q, id));

@@ -1,5 +1,5 @@
 import { asc, desc, eq } from "drizzle-orm";
-import { commissionDisputes, commissionDisputeStatements, commissionProposals, commissionRulings, type PawketDatabase, type PawketTransaction } from "@pawket/database";
+import { commissionDisputes, commissionDisputeStatements, commissionProposals, commissionRulings, commissionRulingCorrections, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { commissionIdentifier, commissionTime, commissionUuid, readCommissionRecord, type CommissionOrderService } from "@pawket/orders";
 import { decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
 import { ResolutionError, RESOLUTION_ERRORS, resolutionFail, type ResolutionActor, type ResolutionErrorCode } from "./contracts.js";
@@ -109,6 +109,27 @@ export function createResolutionViewService(input: Input) {
     });
   }
   return {
+    /** Internal evidence projection: Trust must authorize an open case and log this transaction. */
+    async readForCase(tx: PawketTransaction, orderId: string) {
+      if (!commissionUuid(orderId)) resolutionFail("invalid_request");
+      const proposals = await tx.select().from(commissionProposals).where(eq(commissionProposals.orderId, orderId)).orderBy(asc(commissionProposals.createdAt), asc(commissionProposals.id));
+      const disputes = await tx.select().from(commissionDisputes).where(eq(commissionDisputes.orderId, orderId)).orderBy(asc(commissionDisputes.openedAt), asc(commissionDisputes.id));
+      const projected = [];
+      for (const row of disputes) {
+        const statements = await tx.select().from(commissionDisputeStatements).where(eq(commissionDisputeStatements.disputeId, row.id)).orderBy(asc(commissionDisputeStatements.createdAt), asc(commissionDisputeStatements.id));
+        const [ruling] = await tx.select().from(commissionRulings).where(eq(commissionRulings.disputeId, row.id)).limit(1);
+        const corrections = ruling ? await tx.select().from(commissionRulingCorrections).where(eq(commissionRulingCorrections.rulingId, ruling.id)).orderBy(asc(commissionRulingCorrections.correctedAt), asc(commissionRulingCorrections.id)) : [];
+        projected.push({ id: row.id, state: row.state, reason: row.reason, trigger: row.trigger, requestedOutcome: row.requestedOutcome, requestedRefundVnd: row.requestedRefundVnd,
+          respondBy: (await effectiveResolutionDeadline(tx, row.respondBy))?.toISOString() ?? null, openedAt: row.openedAt.toISOString(), closedAt: row.closedAt?.toISOString() ?? null,
+          statements: statements.map((entry) => ({ id: entry.id, authorRole: entry.authorRole, kind: entry.kind, text: decrypt("commission_dispute_statements", entry.id, "text", entry.textEnvelope), createdAt: entry.createdAt.toISOString() })),
+          ruling: ruling ? { id: ruling.id, outcome: ruling.outcome, refundAmountVnd: ruling.refundAmountVnd, policyRevisionId: ruling.policyRevisionId,
+            reasoning: decrypt("commission_rulings", ruling.id, "reasoning", ruling.reasoningEnvelope), internalNote: ruling.internalNoteEnvelope === null ? null : decrypt("commission_rulings", ruling.id, "internal_note", ruling.internalNoteEnvelope), ruledAt: ruling.ruledAt.toISOString(),
+            corrections: corrections.map((entry) => ({ id: entry.id, refundAmountVnd: entry.refundAmountVnd, effect: entry.effect, reason: decrypt("commission_ruling_corrections", entry.id, "reason", entry.reasonEnvelope), correctedAt: entry.correctedAt.toISOString() })) } : null });
+      }
+      return { proposals: await Promise.all(proposals.map(async (row) => ({ id: row.id, proposerRole: row.proposerRole, kind: row.kind, refundAmountVnd: row.refundAmountVnd,
+        note: decrypt("commission_proposals", row.id, "note", row.noteEnvelope), state: row.state, respondBy: (await effectiveResolutionDeadline(tx, row.respondBy))?.toISOString() ?? null,
+        createdAt: row.createdAt.toISOString(), endedAt: row.endedAt?.toISOString() ?? null }))), disputes: projected, lateClaim: await input.lateClaims?.readForOrder(tx, orderId) ?? null };
+    },
     getOrderResolution,
     async listMyCases(command: Readonly<{ actor: ResolutionActor }>) {
       if (!readCommissionRecord(command, ["actor"])) resolutionFail("invalid_request"); actorValid(command.actor);

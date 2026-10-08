@@ -162,36 +162,46 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
         const candidate = await kit.owned(tx, command.orderId, command.actor); await lockCommissionCreator(tx, candidate.creatorUserId);
         const proofExpiry = await kit.session(tx, command.actor); const order = await kit.owned(tx, command.orderId, command.actor);
         if (!["in_progress", "delivered", "completed"].includes(order.state) && !(order.state === "closed" && order.confirmedAt !== null)) commissionFail("invalid_transition");
-        const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
-        const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
-        const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)
-          .where(and(eq(commissionSubmissions.orderId, order.id), inArray(commissionSubmissions.id, submissionIds))) : [];
-        const byId = new Map(submissions.map((submission) => [submission.id, submission]));
-        const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId) });
-        const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })) });
-        const due = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
-        const at = kit.now(); if (proofExpiry <= at) commissionFail("not_authorized");
-        const items = page.map((entry): CommissionMessageItem | CommissionSubmissionItem => {
-          const attached = files.get(entry.kind + ":" + entry.entryId) ?? [];
-          if (entry.kind === "message") {
-            const message = messages.get(entry.entryId); if (!message) commissionFail("dependency_unavailable");
-            return { sequence: entry.sequence, kind: "message", id: entry.entryId, author: message.authorUserId === order.buyerUserId ? "buyer" : "creator",
-              text: message.text, files: attached, createdAt: message.createdAt.toISOString() };
-          }
-          const submission = byId.get(entry.entryId); if (!submission) commissionFail("dependency_unavailable");
-          const note = submission.noteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.noteEnvelope,
-            binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "note" } });
-          const responseNote = submission.responseNoteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.responseNoteEnvelope,
-            binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "response_note" } });
-          return { sequence: entry.sequence, kind: "submission", id: submission.id, submissionKind: submission.kind as SubmissionKind, note, files: attached,
-            submittedAt: submission.submittedAt.toISOString(), late: submission.kind === "final" && !!order.dueAt && submission.submittedAt > order.dueAt,
-            response: submission.response as SubmissionResponse | null, responseNote, respondedAt: submission.respondedAt?.toISOString() ?? null,
-            actionable: input.fulfillmentMode === "enabled" && command.actor.userId === order.buyerUserId && submission.response === null &&
-              (submission.kind === "draft" ? order.state === "in_progress" : order.state === "delivered" && due !== null && at < due) };
-        });
-        return { items, nextBeforeSequence: entries.length > limit ? items.at(-1)!.sequence : null,
-          writable: input.fulfillmentMode === "enabled" && (order.state === "in_progress" || order.state === "delivered") };
+        const projection = await readCommissionThread(tx, input, order, { ...command, limit, now: kit.now });
+        if (proofExpiry <= kit.now()) commissionFail("not_authorized");
+        return projection;
       }));
     },
   };
+}
+
+/** Shared read-only projection; case callers supply no party actor or writable controls. */
+export async function readCommissionThread(tx: PawketTransaction, input: Pick<Input, "keyring" | "thread" | "fulfillmentMode">, order: Order,
+  command: Readonly<{ beforeSequence?: number; limit: number; actor?: CommissionActor; now(): Date }>): Promise<CommissionThreadView> {
+  const thread = input.thread; if (!thread) commissionFail("fulfillment_disabled");
+  const limit = command.limit;
+  const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
+  const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
+  const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)
+    .where(and(eq(commissionSubmissions.orderId, order.id), inArray(commissionSubmissions.id, submissionIds))) : [];
+  const byId = new Map(submissions.map((submission) => [submission.id, submission]));
+  const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId) });
+  const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })) });
+  const due = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
+  const at = command.now();
+  const items = page.map((entry): CommissionMessageItem | CommissionSubmissionItem => {
+    const attached = files.get(entry.kind + ":" + entry.entryId) ?? [];
+    if (entry.kind === "message") {
+      const message = messages.get(entry.entryId); if (!message) commissionFail("dependency_unavailable");
+      return { sequence: entry.sequence, kind: "message", id: entry.entryId, author: message.authorUserId === order.buyerUserId ? "buyer" : "creator",
+        text: message.text, files: attached, createdAt: message.createdAt.toISOString() };
+    }
+    const submission = byId.get(entry.entryId); if (!submission) commissionFail("dependency_unavailable");
+    const note = submission.noteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.noteEnvelope,
+      binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "note" } });
+    const responseNote = submission.responseNoteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.responseNoteEnvelope,
+      binding: { recordType: "commission_submissions", recordId: submission.id, fieldName: "response_note" } });
+    return { sequence: entry.sequence, kind: "submission", id: submission.id, submissionKind: submission.kind as SubmissionKind, note, files: attached,
+      submittedAt: submission.submittedAt.toISOString(), late: submission.kind === "final" && !!order.dueAt && submission.submittedAt > order.dueAt,
+      response: submission.response as SubmissionResponse | null, responseNote, respondedAt: submission.respondedAt?.toISOString() ?? null,
+      actionable: input.fulfillmentMode === "enabled" && command.actor?.userId === order.buyerUserId && submission.response === null &&
+        (submission.kind === "draft" ? order.state === "in_progress" : order.state === "delivered" && due !== null && at < due) };
+  });
+  return { items, nextBeforeSequence: entries.length > limit ? items.at(-1)!.sequence : null,
+    writable: command.actor !== undefined && input.fulfillmentMode === "enabled" && (order.state === "in_progress" || order.state === "delivered") };
 }

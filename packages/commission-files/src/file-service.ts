@@ -166,6 +166,23 @@ export function createCommissionFileService(input: Input) {
       return boundary(() => input.db.transaction(async (tx) => { await session(tx, command.actor); return view(input.keyring, await owned(tx, command.fileId, command.actor)); }));
     },
 
+    /** Internal evidence port: only Trust's open-case access transaction may call this bypass. */
+    async caseDownloadGrant(tx: PawketTransaction, command: Readonly<{ orderId: string; fileId: string; disposition: "attachment" | "inline" }>): Promise<{ url: string }> {
+      if (!commissionFileUuid(command.orderId) || !commissionFileUuid(command.fileId) || (command.disposition !== "attachment" && command.disposition !== "inline")) commissionFileFail("not_available");
+      if (input.mode !== "enabled") commissionFileFail("files_disabled");
+      const [row] = await tx.select({ file: commissionFiles }).from(commissionFileAttachments)
+        .innerJoin(commissionFiles, eq(commissionFiles.id, commissionFileAttachments.fileId))
+        .where(and(eq(commissionFileAttachments.orderId, command.orderId), eq(commissionFileAttachments.fileId, command.fileId), eq(commissionFiles.state, "attached"))).limit(1).for("share");
+      if (!row || row.file.cleanPurgedAt || !row.file.cleanVersionId || !row.file.detectedType) commissionFileFail("not_available");
+      const type = row.file.detectedType as CommissionFileType;
+      if (command.disposition === "inline" && !isInlinePreviewAllowed(type, row.file.declaredBytes)) commissionFileFail("preview_not_allowed");
+      const versionId = row.file.cleanVersionId;
+      return boundary(async () => {
+        const grant = await input.storage.presignDownload({ key: row.file.objectKey, versionId, contentType: COMMISSION_FILE_CONTENT_TYPES[type],
+          contentDisposition: commissionFileContentDisposition(decryptCommissionFileName(input.keyring, row.file), command.disposition), expiresInSeconds: COMMISSION_FILE_POLICY.downloadGrantSeconds });
+        return { url: grant.url };
+      });
+    },
     async downloadGrant(command: Readonly<{ actor: CommissionFileActor; orderId: string; fileId: string; disposition: "attachment" | "inline" }>): Promise<Readonly<{ url: string }>> {
       actorValid(command.actor);
       if (!commissionFileUuid(command.orderId) || !commissionFileUuid(command.fileId) || (command.disposition !== "attachment" && command.disposition !== "inline")) commissionFileFail("not_available");
