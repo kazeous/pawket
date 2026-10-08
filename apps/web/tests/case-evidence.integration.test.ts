@@ -15,7 +15,7 @@ import { createCaseHttpHandlers } from "../src/platform/case-http.js";
 import { getPlatformRuntime } from "../src/platform/runtime.js";
 import { caseDetailSchema } from "../src/ui/cases/case-client.js";
 import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-support.js";
-import { createCommissionResolutionTestFixture, service, submit } from "./commission-resolution-test-support.js";
+import { createCommissionResolutionTestFixture, service, submit, resolutionRefundDeadlines } from "./commission-resolution-test-support.js";
 import { commandIds, fixtureKey, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const f = createCommissionResolutionTestFixture("i8caseevidence"); beforeAll(f.initialize, 60_000); afterAll(f.dispose, 30_000);
@@ -29,7 +29,7 @@ async function setup() {
   const kit = createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity, consumeStepUpProof: async (_tx, input) => input.userId === actor.userId && input.sessionId === actor.sessionId,
     authorizeCommand: async (_tx, input) => { if (input.userId !== actor.userId) throw new Error("Synthetic forbidden owner"); } });
   const parties = createCommissionRefundService({ ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion: "vn-proposals-test", mode: "enabled",
-    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases,
+    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases, ...resolutionRefundDeadlines,
     assurance: { getTipSessionAssurance: async (_tx, input, at) => p.s.users.get(input.userId) === input.sessionId
       ? { primaryAuthenticatedAt: at, mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 60_000) } : null } });
   const view = createResolutionViewService({ db: f.db, keyring: p.s.input.keyring, orders: { ...orderPort, listOrders: orders.listOrders }, refunds: parties, session: p.s.input.identity, now: p.s.creator.now });
@@ -69,7 +69,7 @@ test("queue deadlines and owner ruling metadata use no private evidence or acces
   const ruling = await c.rule(); const resolved = await c.instance.getCase(c.caseId);
   const result = await metadata.readForCase(f.db, resolved);
   expect(result.ruling?.id).toBe(ruling.rulingId);
-  expect(result.ruling && Object.keys(result.ruling).sort()).toEqual(["correctionEndsAt", "id", "outcome", "refundAmountVnd", "ruledAt"]);
+  expect(result.ruling && Object.keys(result.ruling).sort()).toEqual(["correctedAt", "correctionEndsAt", "currentRefundAmountVnd", "id", "outcome", "refundAmountVnd", "ruledAt"]);
   expect((await c.instance.listQueue({ state: "resolved" })).find((row) => row.caseId === c.caseId)?.nextDeadline).toBeNull();
   expect(await accesses(c.caseId)).toHaveLength(0);
 }, 30_000);

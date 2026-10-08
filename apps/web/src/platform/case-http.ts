@@ -37,7 +37,7 @@ type Input = Readonly<{
   orderMetadata: Readonly<{ readForOrder(orderId: string): Promise<Readonly<{ creatorUserId: string; buyerUserId: string; orderState: string; amountVnd: number | null }>> }>;
   resolutionMetadata: Readonly<{ readForCase(row: Readonly<{ caseId: string; kind: string; state: string; sourceId: string; orderId: string }>): Promise<Readonly<{
     disputeOpenedAt: string | null; respondBy: string | null;
-    ruling: Readonly<{ id: string; outcome: string; refundAmountVnd: number; ruledAt: string; correctionEndsAt: string | null }> | null;
+    ruling: Readonly<{ id: string; outcome: string; refundAmountVnd: number; currentRefundAmountVnd: number; correctedAt: string | null; ruledAt: string; correctionEndsAt: string | null }> | null;
   }>> }>;
 }>;
 const invalid = (): never => { throw new CommissionHttpFailure(400, "invalid_request"); };
@@ -112,11 +112,13 @@ export function createCaseHttpHandlers(input: Input) {
       if (["rule", "correct", "question", "extend"].includes(action) && detail.kind !== "dispute"
         || action === "rule_claim" && detail.kind !== "late_payment"
         || ["accept_evidence", "require_resend", "waive", "extend_deadline"].includes(action) && !["refund_not_received", "refund_overdue"].includes(detail.kind)) throw new CommissionHttpFailure(404, "not_available");
+      const ruling = body.action === "correct" ? (await input.resolutionMetadata.readForCase(detail)).ruling : null;
+      if (body.action === "correct" && (!ruling || ruling.id !== body.rulingId)) throw new CommissionHttpFailure(404, "not_available");
       const base = { owner, idempotencyKey, stepUpProofId: await proof(owner, `owner.case_${action}`), requestId: randomUUID() };
       // Target IDs for dispute/claim commands come from the case, never the client.
       if (body.action === "rule") return input.owner.rule({ ...base, disputeId: detail.sourceId, outcome: body.outcome, refundAmountVnd: body.refundAmountVnd, reasoning: body.reasoning,
         ...(body.internalNote === undefined ? {} : { internalNote: body.internalNote }) });
-      if (body.action === "correct") return input.owner.correctRuling({ ...base, rulingId: body.rulingId, newRefundAmountVnd: body.newRefundAmountVnd, reason: body.reason });
+      if (body.action === "correct") return input.owner.correctRuling({ ...base, rulingId: ruling!.id, newRefundAmountVnd: body.newRefundAmountVnd, reason: body.reason });
       if (body.action === "question") return input.owner.postQuestion({ ...base, disputeId: detail.sourceId, text: body.text });
       if (body.action === "extend") return input.owner.extendDispute({ ...base, disputeId: detail.sourceId, until: body.until, reason: body.reason });
       if (body.action === "rule_claim") return input.owner.ruleLateClaim({ ...base, claimId: detail.sourceId, outcome: body.outcome, reason: body.reason,

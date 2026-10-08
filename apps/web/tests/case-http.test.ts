@@ -47,6 +47,16 @@ describe("owner case HTTP", () => {
     const s = setup(); expect((await s.http.action(request(`cases/${caseId}/actions`, "POST", { action: "unknown" }), caseId)).status).toBe(400);
     expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled();
   });
+  test.each(["different", "missing"])("a correction with a %s case ruling returns 404 without issuing a proof or executing", async (kind) => {
+    const s = setup(); const detail = await s.cases.getCase(); detail.state = "resolved"; s.cases.getCase.mockResolvedValue(detail);
+    vi.mocked(s.input.resolutionMetadata.readForCase).mockResolvedValue({ disputeOpenedAt: null, respondBy: null,
+      ruling: kind === "missing" ? null : { id: randomUUID(), outcome: "close", refundAmountVnd: 100_000, currentRefundAmountVnd: 100_000, correctedAt: null, ruledAt: "2026-10-08T00:00:00.000Z", correctionEndsAt: null } });
+    const response = await s.http.action(request(`cases/${caseId}/actions`, "POST", { action: "correct", rulingId: fileId, newRefundAmountVnd: 0, reason: "Synthetic reason" }), caseId);
+    expect(response.status).toBe(404); expect(await response.json()).toEqual({ code: "not_available" });
+    expect(s.input.resolutionMetadata.readForCase).toHaveBeenCalledWith(detail);
+    expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled();
+    for (const fn of Object.values(s.commands)) expect(fn).not.toHaveBeenCalled();
+  });
   test("evidence without step-up returns 403 owner_step_up_required", async () => {
     const s = setup(); s.cases.readEvidence.mockRejectedValue(new TrustCaseError("owner_step_up_required"));
     const response = await s.http.evidence(request(`cases/${caseId}/evidence`, "POST", { section: "order_summary" }), caseId);
@@ -91,6 +101,8 @@ describe("owner case HTTP", () => {
     { action: "rule_claim", method: "ruleLateClaim", kind: "late_payment", fields: { outcome: "rejected", reason: "Synthetic reason" } },
   ] as const)("dispatches $action with an action-bound server proof", async ({ action, method, kind, fields }) => {
     const s = setup(); const detail = await s.cases.getCase(); detail.kind = kind; s.cases.getCase.mockResolvedValue(detail);
+    if (action === "correct") vi.mocked(s.input.resolutionMetadata.readForCase).mockResolvedValue({ disputeOpenedAt: null, respondBy: null,
+      ruling: { id: fileId, outcome: "close", refundAmountVnd: 100_000, currentRefundAmountVnd: 100_000, correctedAt: null, ruledAt: "2026-10-08T00:00:00.000Z", correctionEndsAt: null } });
     const response = await s.http.action(request(`cases/${caseId}/actions`, "POST", { action, ...fields }), caseId);
     expect(response.status).toBe(200); expect(s.input.issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ ...owner, actionClass: `owner.case_${action}` }));
     expect(s.commands[method]).toHaveBeenCalledWith(expect.objectContaining({ owner, stepUpProofId: expect.any(String), idempotencyKey: "synthetic-command" }));

@@ -84,8 +84,9 @@ export function CaseDetail({ caseId, actorUserId, initial }: Readonly<{ caseId: 
     {detail.kind === "dispute" && detail.state === "open" ? <section className="work-surface stack">{detail.amountVnd !== null ? <RulingForm key={`${detail.version}-${detail.orderState}`} orderState={detail.orderState} amountVnd={detail.amountVnd} disabled={disabled} onSubmit={action} /> : null}<DisputeActions detail={detail} disabled={disabled} onSubmit={action} clock={clock} /></section> : null}
     {detail.kind.startsWith("refund_") && detail.state === "open" ? <section className="work-surface"><RefundCaseActions kind={detail.kind as "refund_not_received" | "refund_overdue"} disabled={disabled} onSubmit={action} /></section> : null}
     {detail.kind === "late_payment" && detail.state === "open" ? <section className="work-surface"><LateClaimActions disabled={disabled} onSubmit={action} /></section> : null}
-    {detail.ruling ? <section className="work-surface stack"><h2>Kết luận đã ghi nhận</h2><p>{detail.ruling.outcome === "complete" ? "Hoàn tất đơn" : "Đóng đơn"} · hoàn {formatVnd(detail.ruling.refundAmountVnd)} · {formatTipTime(detail.ruling.ruledAt)}</p>
-      {detail.ruling.correctionEndsAt && clock <= Date.parse(detail.ruling.correctionEndsAt) ? <CorrectionForm detail={detail} disabled={disabled} onSubmit={action} /> : <p>Đính chính tiền hiện không khả dụng hoặc đã hết thời hạn 30 ngày.</p>}</section> : null}
+    {detail.ruling ? <section className="work-surface stack"><h2>Kết luận đã ghi nhận</h2><p>{detail.ruling.outcome === "complete" ? "Hoàn tất đơn" : "Đóng đơn"} · hoàn {formatVnd(detail.ruling.currentRefundAmountVnd)} · {formatTipTime(detail.ruling.ruledAt)}</p>
+      {detail.ruling.correctedAt ? <p>Số tiền hoàn ban đầu: {formatVnd(detail.ruling.refundAmountVnd)} · Đính chính lúc <time dateTime={detail.ruling.correctedAt}>{formatTipTime(detail.ruling.correctedAt)}</time></p> : null}
+      {detail.ruling.correctionEndsAt && clock <= Date.parse(detail.ruling.correctionEndsAt) ? <CorrectionForm key={`${detail.ruling.id}:${detail.ruling.correctedAt}`} detail={detail} disabled={disabled} onSubmit={action} /> : <p>Đính chính tiền hiện không khả dụng hoặc đã hết thời hạn 30 ngày.</p>}</section> : null}
     {detail.creatorStanding === "suspended" ? <section className="work-surface"><FreezeForm disabled={disabled} onSubmit={(reason) => execute(`/api/v1/admin/creators/${encodeURIComponent(detail.creatorUserId)}/freeze`, { reason })} /></section> : null}
   </div>;
 }
@@ -110,7 +111,7 @@ function CorrectionForm({ detail, disabled, onSubmit }: Readonly<{ detail: CaseD
   return <ReasonForm title="Đính chính số tiền hoàn" disabled={disabled} onSubmit={(reason, data) => {
     const value = Number(data.get("amount")); if (!Number.isSafeInteger(value) || value < 0 || value > max) return false;
     onSubmit({ action: "correct", rulingId: ruling.id, newRefundAmountVnd: value, reason });
-  }}><p>Chỉ đổi số tiền; trạng thái kết thúc đơn và quyền tải tệp được giữ nguyên. Pawket không thu hồi khoản đã chuyển.</p><Field htmlFor={id} label="Tổng số tiền hoàn mới (VND)" required><Input id={id} name="amount" type="number" required step={1} min={0} max={max} defaultValue={ruling.refundAmountVnd} disabled={disabled} /></Field></ReasonForm>;
+  }}><p>Chỉ đổi số tiền; trạng thái kết thúc đơn và quyền tải tệp được giữ nguyên. Pawket không thu hồi khoản đã chuyển.</p><Field htmlFor={id} label="Tổng số tiền hoàn mới (VND)" required><Input id={id} name="amount" type="number" required step={1} min={0} max={max} defaultValue={ruling.currentRefundAmountVnd} disabled={disabled} /></Field></ReasonForm>;
 }
 function LateClaimActions({ disabled, onSubmit }: Readonly<{ disabled: boolean; onSubmit(action: CaseAction): void }>) {
   const id = useId(); const [outcome, setOutcome] = useState<"refund_owed" | "rejected">("rejected");

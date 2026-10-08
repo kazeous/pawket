@@ -6,7 +6,7 @@ import { createCommissionPaymentFactsPort, createCommissionRefundPort, createCom
 import { createCommissionIntakeFencePort, createLateClaimService, createResolutionCommandKit, createResolutionMaintenance, effectiveResolutionDeadline } from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
 import { createWorkerCommissionConfiguration } from "../../worker/src/commission-config.js";
-import { createCommissionResolutionTestFixture, resolutions, submit } from "./commission-resolution-test-support.js";
+import { createCommissionResolutionTestFixture, resolutions, submit, resolutionRefundDeadlines } from "./commission-resolution-test-support.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const f = createCommissionResolutionTestFixture("i8maintenance");
@@ -31,7 +31,7 @@ async function refund(from?: Date) {
     paymentIntentId: p.confirmationCommand.paymentIntentId, creatorUserId: p.creator.userId, buyerUserId: p.buyer.userId,
     source: "agreement", sourceId: randomUUID(), amountVnd: 100_000, requestId: randomUUID(), at }));
   const service = createCommissionRefundService({ ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion: "vn-proposals-test",
-    mode: "enabled", recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: ports(p).cases,
+    mode: "enabled", recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: ports(p).cases, ...resolutionRefundDeadlines,
     assurance: { getTipSessionAssurance: async (_tx, _actor, time) => ({ primaryAuthenticatedAt: time, mfaEnrolled: false,
       mfaVerifiedAt: null, sessionExpiresAt: new Date(time.getTime() + 60_000) }) } });
   await service.enterDestination({ actor: p.buyer, obligationId, expectedVersion: 1, bankBin: "970422",

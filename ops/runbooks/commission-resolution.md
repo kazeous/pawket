@@ -2,7 +2,8 @@
 
 This runbook covers cancellation proposals, disputes, commission refunds,
 late-payment claims and suspension/freeze effects. Money stays with the parties:
-the creator transfers refunds through their bank. Pawket records obligations and
+Commission refunds are always sent by the creator through their bank, never by
+the owner or Pawket. Pawket records obligations and
 evidence; neither a close nor a send record proves money was recovered.
 
 Use with [Commission operations](commission-operations.md) and
@@ -28,19 +29,25 @@ by this release. SePay retains its provider-evidence gate.
 Enable consistently across web and worker, in this order:
 
 1. `COMMISSION_FILES_MODE=enabled`, after the storage/scanner gates.
-2. `COMMISSION_FULFILLMENT_MODE=enabled`, after the fulfilment gates.
-3. `COMMISSION_RESOLUTION_MODE=enabled`, with a resolved, approved
+2. Switch fulfilment and resolution on together:
+   `COMMISSION_FULFILLMENT_MODE=enabled` and `COMMISSION_RESOLUTION_MODE=enabled`,
+   after the fulfilment gates and with a resolved, approved
    `VN_BUSINESS_CALENDAR_VERSION` and holiday data. Verify that the worker has
    durably observed resume and that the resolution scan is healthy.
-4. Enable `COMMISSION_PAYMENTS_MODE=manual_only` (or separately authorized
+3. Enable `COMMISSION_PAYMENTS_MODE=manual_only` (or separately authorized
    `sepay_optional`) only after resolution is enabled. Enable intake only when
    the remaining launch gates are closed and the owner authorizes it.
+
+Fulfilment and resolution must be switched on and off together. Once paid orders
+exist, never run `COMMISSION_FULFILLMENT_MODE=enabled` with
+`COMMISSION_RESOLUTION_MODE=disabled`: delivered orders would auto-complete
+while buyers cannot open disputes.
 
 Configuration rejects active commission payments without both fulfilment and
 resolution, resolution without fulfilment, and fulfilment without files. To
 pause resolution, disable intake and commission payments first, drain affected
-instances, then disable resolution consistently. Disable fulfilment/files only
-if the incident requires it and in reverse dependency order. Keep a compatible
+instances, then disable fulfilment and resolution together consistently across
+web and worker. Disable files afterwards only if the incident requires it. Keep a compatible
 worker running; changing environment values does not stop old instances.
 
 ## Pause observation and time
@@ -63,7 +70,7 @@ Confirm a durable closed pause, `pawket_commission_resolution_paused=0`, fresh
 scan success and working party controls before accepting recovery. Never insert,
 backdate, close or delete either resolution or fulfilment pause rows by SQL.
 Destination purge is a privacy-retention action: it waits while resolution is
-paused, then uses terminal time plus 30 days, without adding pause grace (R19).
+paused, then uses terminal time plus 30 days, without adding pause grace.
 
 Read-only aggregate pause diagnosis:
 
@@ -89,13 +96,6 @@ flight and shutdown draining. Worker readiness tolerates three scan intervals
 since the last success; one failure does not erase that last success. Alert
 timing and readiness timing differ. Bounded cursors may need to wrap before a
 waiting row is revisited. No scan success is proof that the money arrived.
-
-The overdue alert currently links to `overdue-refunds.md`, the separate legacy
-application-refund runbook. For **commission** obligations follow this runbook
-via Commission operations; the legacy instruction that the owner sends money
-does not apply to seller-owned commission refunds. The stale-scan alert links
-to Commission operations, which links here. Repointing the alert is a follow-up
-for the controller; this task does not change alert rules.
 
 ## Reading a stuck case
 
@@ -147,11 +147,11 @@ cancel obligations. A buyer unable to enter a destination has no send deadline.
 
 After a paid close, the buyer retains their own uploads, brief references and
 thread text, loses access to creator thread/submission files, and can still read
-creator refund-send evidence (R22). The creator retains authorized files and
+creator refund-send evidence. The creator retains authorized files and
 refund actions. Existing downloaded copies cannot be recalled. Paid-close and
 resolution-evidence retention is 180 days after terminal close, with open-case
 holds and at least 30 days after the last hold ends; unpaid brief references
-retain their 30-day rule (R23). Retention enforcement stays `report_only` until
+retain their 30-day rule. Retention enforcement stays `report_only` until
 the owner approves it. Full refund destinations purge 30 days after a terminal
 obligation; the bank label and last four digits remain.
 
@@ -160,7 +160,7 @@ obligation; the bank label and last four digits remain.
 Once any resolved order or refund obligation exists, rollback is forward-only.
 Every replacement web/worker must understand the exit states, cases, obligations,
 holds and migrations 0045–0051. An older worker must never process them even
-with commerce disabled. Pause new intake/payments, then resolution consistently
+with commerce disabled. Pause new intake/payments, then fulfilment and resolution together
 when required; keep a compatible worker observing the pause. Preserve schema,
 events, reservations, obligations, evidence and pause history. Fix forward;
 never down-migrate, delete records, rewrite a close as completion, force a

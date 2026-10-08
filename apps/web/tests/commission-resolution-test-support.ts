@@ -5,7 +5,7 @@ import { createCommissionThreadPort, encryptCommissionFileName } from "@pawket/c
 import { importConfiguredBusinessCalendarVersion } from "@pawket/database";
 import { createCommissionOrderService, createCommissionResolutionOrderPort } from "@pawket/orders";
 import { createCommissionPaymentFactsPort, createCommissionRefundPort } from "@pawket/payments";
-import { createProposalService, createResolutionCommandKit, createResolutionHoldPort, type ResolutionOrderPort, type ResolutionRefundPort,
+import { createProposalService, createResolutionCommandKit, createResolutionHoldPort, effectiveResolutionDeadline, type ResolutionOrderPort, type ResolutionRefundPort,
   type ResolutionPaymentFactsPort, type ResolutionCasePort } from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
 import { createCommissionOrderTestFixture } from "./commission-order-test-support.js";
@@ -13,6 +13,7 @@ import { commandIds, schema } from "../../../packages/payments/tests/sepay-integ
 
 const DAY = 86_400_000;
 const refundCalendarVersion = "vn-proposals-test";
+export const resolutionRefundDeadlines = { effectiveDeadline: effectiveResolutionDeadline };
 type Paid = Awaited<ReturnType<ReturnType<typeof createCommissionOrderTestFixture>["paidOrder"]>>;
 type Options = Partial<Parameters<typeof createCommissionOrderService>[0]>;
 export function service(p: Paid, options: Options = {}) {

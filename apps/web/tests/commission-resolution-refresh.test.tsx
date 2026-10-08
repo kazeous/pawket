@@ -47,6 +47,13 @@ function singlePanel() {
   const ids = Array.from(container.querySelectorAll("[id]"), (node) => node.id);
   expect(new Set(ids).size).toBe(ids.length);
 }
+test.each([true, false])("closed-order copy describes the paid=%s path", async (paid) => {
+  const detail: OrderView = { controls, order: { ...fixtureOrder, state: "closed", closeReason: paid ? "cancelled_by_agreement" : "buyer_withdrawn", confirmedAt: paid ? at : null } };
+  const view = empty("buyer"); await mount(detail, view, () => ({ detail, view }));
+  const copy = paid ? "Đơn đã đóng sau khi thanh toán. Xem phần hoàn tiền bên dưới nếu có khoản cần hoàn."
+    : "Đơn đã đóng trước khi thanh toán. Nếu bạn đã chuyển khoản sau khi đơn đóng, hãy gửi yêu cầu đối chiếu bên dưới.";
+  expect(container.textContent?.includes(copy)).toBe(true);
+});
 
 test.each(["accept", "decline"] as const)("proposal %s refresh removes the pending region and retains one resolution panel", async (response) => {
   let detail: OrderView = { controls, order: { ...fixtureOrder, role: "creator" } };

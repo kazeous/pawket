@@ -16,6 +16,7 @@ import { HelpPolicy } from "../src/ui/help/help-policy";
 import { DisputePanel } from "../src/ui/resolutions/dispute-panel";
 import { AttachedFileList } from "../src/ui/commissions/reference-files";
 import { resolutionSchema, type ResolutionView, type RefundView } from "../src/ui/resolutions/resolution-client";
+import { formatVnd } from "../src/ui/tips/tip-client";
 import type { OrderView } from "../src/ui/commissions/commission-client";
 import { fixtureRefund, resolutionFormLabels } from "./resolution-fixture-data";
 
@@ -140,6 +141,17 @@ test("an open dispute still permits statements after its response deadline and s
     statements: [{ authorRole: "buyer", kind: "opening", text: "Synthetic", createdAt: "2020-01-01T00:00:00.000Z" }, { authorRole: "owner", kind: "question", text: "Synthetic question", createdAt: "2020-01-01T00:00:00.000Z" }] } as NonNullable<ResolutionView["resolution"]["dispute"]>;
   const markup = renderToStaticMarkup(createElement(DisputePanel, { dispute, role: "creator", disabled: false, onStatement: vi.fn(), onWithdraw: vi.fn() }));
   expect(markup).toContain("Câu hỏi của Pawket"); expect(markup).not.toContain("<fieldset disabled"); expect(markup).not.toContain("Rút khiếu nại");
+});
+test("party ruling displays the latest corrected refund and its date alongside the original ruling", () => {
+  const correctedAt = "2026-10-09T00:00:00.000Z";
+  const view = resolutionSchema.parse({ ...initial, resolution: { ...initial.resolution, dispute: { id, state: "ruled", reason: "not_delivered", trigger: "overdue",
+    respondBy: null, statements: [], ruling: { outcome: "close", refundAmountVnd: 200_000, currentRefundAmountVnd: 100_000, correctedAt, reasoning: "Synthetic reasoning", ruledAt: "2026-10-08T00:00:00.000Z" } } } });
+  const node = document.createElement("div"); node.innerHTML = renderToStaticMarkup(createElement(DisputePanel,
+    { dispute: view.resolution.dispute!, role: "buyer", disabled: false, onStatement: vi.fn(), onWithdraw: vi.fn() }));
+  const fields = Array.from(node.querySelectorAll("dl > div"));
+  expect(fields.find((field) => field.querySelector("dt")?.textContent === "Số tiền hoàn")?.querySelector("dd")?.textContent).toBe(formatVnd(100_000));
+  expect(node.textContent?.includes(formatVnd(200_000))).toBe(true);
+  expect(node.querySelector<HTMLTimeElement>(`time[datetime="${correctedAt}"]`)).not.toBeNull();
 });
 test("paid-close creator files show no preview or download controls for the buyer", () => {
   const markup = renderToStaticMarkup(createElement(AttachedFileList, { order, withdrawn: true, files: [{ fileId: id, name: null, sizeBytes: 16,

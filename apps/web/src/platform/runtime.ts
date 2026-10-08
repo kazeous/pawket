@@ -65,7 +65,7 @@ import { createCommissionOrderService, createCommissionPolicyReadPort, createCom
 import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
   createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
-  createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort } from "@pawket/resolutions";
+  createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort, effectiveResolutionDeadline } from "@pawket/resolutions";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
   createReportService,
@@ -487,7 +487,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commissionRefunds = createCommissionRefundService({ db: database.db, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
     mode: env.COMMISSION_RESOLUTION_MODE, lockCreator: lockCommissionCreator, calendarVersion: env.VN_BUSINESS_CALENDAR_VERSION,
     recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000,
-    assurance: commissionIdentity, cases, files: resolutionFiles });
+    assurance: commissionIdentity, cases, files: resolutionFiles, effectiveDeadline: effectiveResolutionDeadline });
   const resolutionView = createResolutionViewService({ db: database.db, keyring, orders: { ...resolutionOrders, listOrders: commissions.listOrders },
     refunds: commissionRefunds, session: commissionIdentity, standing, lateClaims });
   const commissionThrottle: Parameters<typeof createCommissionHttpHandlers>[0]["throttle"] = async ({ actorUserId, networkKeyHash, operation, orderId }) => {

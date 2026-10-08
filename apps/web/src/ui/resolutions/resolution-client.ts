@@ -19,7 +19,7 @@ export const resolutionSchema = z.object({ controls: z.object({ mode: z.enum(["d
   proposals: z.object({ pending: proposal.nullable(), history: z.array(proposal) }),
   dispute: z.object({ id: uuid, state: z.enum(["open", "withdrawn", "settled", "ruled", "superseded"]), reason: z.enum(Object.keys(reasonLabels) as [keyof typeof reasonLabels, ...Array<keyof typeof reasonLabels>]),
     trigger: z.string(), respondBy: time.nullable(), statements: z.array(z.object({ authorRole: z.enum(["buyer", "creator", "owner"]), kind: z.enum(["opening", "response", "statement", "question"]), text: z.string(), createdAt: time })),
-    ruling: z.object({ outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, reasoning: z.string(), ruledAt: time }).nullable() }).nullable(),
+    ruling: z.object({ outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, currentRefundAmountVnd: amount, correctedAt: time.nullable(), reasoning: z.string(), ruledAt: time }).nullable() }).nullable(),
   refunds: z.array(refundSchema), lateClaim: lateClaim.nullable(), actions: z.object({ canPropose: z.boolean(), canOpenDispute: z.boolean(),
     disputeTrigger: z.enum(["final_delivery", "overdue", "proposal_declined"]).nullable(), disputeTriggerEndsAt: time.nullable(), canCancelAfterSuspension: z.boolean() }) }) });
 export const myCasesSchema = z.object({ cases: z.object({ disputes: z.array(z.object({ id: uuid, orderId: uuid, state: z.string(), reason: z.string(), trigger: z.string(), openedAt: time, closedAt: time.nullable() })),

@@ -7,6 +7,8 @@ const { request } = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("../src/ui/cases/case-client", async (original) => ({ ...await original<object>(), caseRequest: request }));
 import { CaseQueue } from "../src/ui/cases/case-queue";
 import { CaseDetail } from "../src/ui/cases/case-detail";
+import { caseDetailSchema, formatVnd } from "../src/ui/cases/case-client";
+import { EvidenceView } from "../src/ui/cases/evidence-tabs";
 import { RulingForm, rulingBounds } from "../src/ui/cases/ruling-form";
 import { RefundCaseActions } from "../src/ui/cases/refund-case-actions";
 import type { CaseDetailView } from "../src/ui/cases/case-client";
@@ -73,6 +75,35 @@ test("evidence is fetched only after an explicit opening; closing and reopening 
 test("resolved detail has no evidence open controls and lists access entries", () => {
   const node = markup(createElement(CaseDetail, { initial: { ...detail, state: "resolved" }, caseId: id, actorUserId: "synthetic-owner" }));
   expect(node.textContent).not.toContain("Xem bằng chứng"); expect(node.textContent).toContain("Nhật ký truy cập");
+});
+test("the owner sees the corrected ruling amount and date, and the correction form defaults and refreshes from it", async () => {
+  const correctedAt = new Date().toISOString(); const correctionEndsAt = new Date(Date.now() + 86_400_000).toISOString();
+  const corrected = caseDetailSchema.parse({ case: { ...detail, state: "resolved", ruling: { id, outcome: "close", refundAmountVnd: 200_000,
+    currentRefundAmountVnd: 100_000, correctedAt, ruledAt: at, correctionEndsAt } } }).case;
+  await mounted(createElement(CaseDetail, { initial: corrected, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {
+    const summary = Array.from(node.querySelectorAll("section")).find((section) => section.querySelector("h2")?.textContent === "Kết luận đã ghi nhận")!;
+    expect(summary.textContent).toContain(formatVnd(100_000)); expect(summary.textContent).toContain(formatVnd(200_000));
+    expect(summary.querySelector<HTMLTimeElement>(`time[datetime="${correctedAt}"]`)).not.toBeNull();
+    expect(summary.querySelector<HTMLInputElement>('[name="amount"]')!.value).toBe("100000");
+    request.mockResolvedValue({ case: { ...corrected, ruling: { ...corrected.ruling!, currentRefundAmountVnd: 50_000, correctedAt: new Date(Date.parse(correctedAt) + 1).toISOString() } } });
+    await act(async () => Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Tải lại vụ việc")!.click());
+    expect(node.querySelector<HTMLInputElement>('[name="amount"]')!.value).toBe("50000");
+  });
+});
+test.each(["other", "final", "received", "constructor", "toString"])("evidence preserves free text equal to %s while translating enum fields", (value) => {
+  const node = markup(createElement(EvidenceView, { value: { items: [{ kind: "message", text: value }, { kind: "submission", submissionKind: "final", note: value, responseNote: value }],
+    statements: [{ authorRole: "buyer", kind: "opening", text: value }], reasoning: value, internalNote: value,
+    corrections: [{ reason: value, effect: "reduced" }], disputes: [{ reason: "other", state: "ruled" }], refunds: [{ state: "received" }] } }));
+  const fields = Array.from(node.querySelectorAll("dl > div"));
+  const textFields = fields.filter((field) => ["Nội dung", "Lời nhắn", "Phản hồi", "Kết luận gửi hai bên", "Ghi chú nội bộ (chỉ owner thấy)"].includes(field.querySelector("dt")?.textContent ?? ""));
+  expect(textFields.length).toBe(6); expect(textFields.every((field) => field.querySelector("dd")?.textContent === value)).toBe(true);
+  expect(fields.some((field) => field.querySelector("dt")?.textContent === "Lý do" && field.querySelector("dd")?.textContent === value)).toBe(true);
+  for (const label of ["Tin nhắn", "Bản cuối", "Người mua", "Trình bày ban đầu", "Giảm số tiền hoàn", "Lý do khác", "Đã kết luận", "Đã nhận"]) expect(node.textContent?.includes(label)).toBe(true);
+});
+test("evidence ignores inherited label keys and leaves unknown enum values literal", () => {
+  const node = markup(createElement(EvidenceView, { value: JSON.parse('{"constructor":"Synthetic hidden","toString":"Synthetic hidden","state":"constructor","kind":"toString"}') }));
+  expect(Array.from(node.querySelectorAll("dt"), (field) => field.textContent)).toEqual(["Trạng thái", "Loại"]);
+  expect(Array.from(node.querySelectorAll("dd"), (field) => field.textContent)).toEqual(["constructor", "toString"]);
 });
 test("access log tab lists item, time and owner session", async () => {
   await mounted(createElement(CaseDetail, { initial: detail, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {

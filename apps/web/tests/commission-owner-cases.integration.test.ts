@@ -6,7 +6,7 @@ import { createCommissionResolutionOrderPort, lockCommissionCreator } from "@paw
 import { COMMISSION_REFUND_POLICY, createCommissionPaymentFactsPort, createCommissionRefundPort, createCommissionRefundService } from "@pawket/payments";
 import * as resolution from "@pawket/resolutions";
 import { createTrustCasePort } from "@pawket/trust";
-import { createCommissionResolutionTestFixture, resolutions, service } from "./commission-resolution-test-support.js";
+import { createCommissionResolutionTestFixture, resolutions, service, resolutionRefundDeadlines } from "./commission-resolution-test-support.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const f = createCommissionResolutionTestFixture("i8owner");
@@ -25,7 +25,7 @@ function kit(p: Paid, consumeStepUpProof?: Parameters<typeof resolution.createRe
 }
 function partyRefunds(p: Paid) {
   return createCommissionRefundService({ ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion, mode: "enabled",
-    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: createTrustCasePort(),
+    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, lockCreator: lockCommissionCreator, cases: createTrustCasePort(), ...resolutionRefundDeadlines,
     assurance: { getTipSessionAssurance: async (_tx, actor, at) => p.s.users.get(actor.userId) === actor.sessionId
       ? { primaryAuthenticatedAt: at, mfaEnrolled: false, mfaVerifiedAt: null, sessionExpiresAt: new Date(at.getTime() + 60_000) } : null } });
 }
@@ -101,6 +101,34 @@ async function refundCase(kind: "refund_not_received" | "refund_overdue") {
 }
 
 describe("commission owner case commands", () => {
+  test("a waiving correction resolves the overdue case atomically and replays without another resolution", async () => {
+    const c = await refundCase("refund_overdue");
+    const [ruled] = await f.db.select().from(schema.commissionRulings).where(eq(schema.commissionRulings.disputeId, c.disputeId));
+    const command = correction(c, ruled!.id, 0);
+    const resolveCase = vi.fn<typeof c.ports.cases.resolveCase>(async (tx, input) => {
+      const [obligation] = await tx.select().from(schema.commissionRefundObligations).where(eq(schema.commissionRefundObligations.id, c.obligationId));
+      expect(obligation!.state).toBe("waived"); await c.ports.cases.resolveCase(tx, input); throw new Error("Synthetic case failure");
+    });
+    const broken = resolution.createOwnerResolutionService(kit(c.p, c.consume), { ...c.ports, cases: { ...c.ports.cases, resolveCase } });
+    await expect(broken.correctRuling(command)).rejects.toMatchObject({ code: "dependency_unavailable" });
+    expect((await refunds(c.p))[0]!.state).toBe("awaiting_send"); expect((await caseRow(c.refundCaseId)).state).toBe("open");
+    expect(await audit(command.requestId)).toHaveLength(0);
+    const result = await c.instance.correctRuling(command); expect(result.effect).toBe("waived");
+    expect(await c.instance.correctRuling(command)).toEqual(result);
+    expect(await caseRow(c.refundCaseId)).toMatchObject({ state: "resolved", resolutionKind: "waived", version: 2 });
+    expect((await refunds(c.p))[0]!.state).toBe("waived"); await audited(c, command, "owner.case_correct", "commission_ruling", ruled!.id);
+  });
+  test("owner and party ruling projections preserve the original and show the latest corrected amount and date", async () => {
+    const c = await setup(); const { rulingId } = await c.instance.rule(ruling(c));
+    const metadata = resolution.createResolutionCaseMetadataPort(); const row = await caseRow(c.caseId); const detail = { ...row, caseId: row.id };
+    expect((await metadata.readForCase(f.db, detail)).ruling).toMatchObject({ refundAmountVnd: 200_000, currentRefundAmountVnd: 200_000, correctedAt: null });
+    c.p.s.creator.advance(1); await c.instance.correctRuling(correction(c, rulingId, 300_000));
+    c.p.s.creator.advance(1); await c.instance.correctRuling(correction(c, rulingId, 100_000));
+    const expected = { refundAmountVnd: 200_000, currentRefundAmountVnd: 100_000, correctedAt: c.p.s.creator.now().toISOString() };
+    expect((await metadata.readForCase(f.db, detail)).ruling).toMatchObject(expected);
+    for (const actor of [c.p.buyer, c.p.creator]) expect((await view(c.p).getOrderResolution({ actor, orderId: c.p.orderId })).dispute?.ruling).toMatchObject(expected);
+    expect(await f.db.select().from(schema.trustCaseAccessLog).where(eq(schema.trustCaseAccessLog.caseId, c.caseId))).toHaveLength(0);
+  });
   test("complete with 200,000 completes the slot, supersedes a proposal and rules the case atomically; replay writes nothing", async () => {
     const c = await setup(); const proposals = resolutions(c.p);
     const made = await proposals.propose({ actor: c.p.creator, orderId: c.p.orderId, expectedVersion: (await order(c.p)).version,

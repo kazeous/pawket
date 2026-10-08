@@ -1,5 +1,5 @@
-import { eq } from "drizzle-orm";
-import { commissionDisputes, commissionRulings, type PawketDatabase, type PawketTransaction } from "@pawket/database";
+import { desc, eq } from "drizzle-orm";
+import { commissionDisputes, commissionRulings, commissionRulingCorrections, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import type { ResolutionRefundView } from "./ports.js";
 import { effectiveResolutionDeadline } from "./deadlines.js";
 import { RESOLUTION_POLICY } from "./policy.js";
@@ -42,8 +42,11 @@ export function createResolutionCaseMetadataPort() {
         if (!dispute) return empty;
         const [ruling] = await tx.select({ id: commissionRulings.id, outcome: commissionRulings.outcome, refundAmountVnd: commissionRulings.refundAmountVnd, ruledAt: commissionRulings.ruledAt })
           .from(commissionRulings).where(eq(commissionRulings.disputeId, row.sourceId)).limit(1);
+        const [correction] = ruling ? await tx.select({ refundAmountVnd: commissionRulingCorrections.refundAmountVnd, correctedAt: commissionRulingCorrections.correctedAt })
+          .from(commissionRulingCorrections).where(eq(commissionRulingCorrections.rulingId, ruling.id))
+          .orderBy(desc(commissionRulingCorrections.correctedAt), desc(commissionRulingCorrections.id)).limit(1) : [];
         return { disputeOpenedAt: dispute.openedAt.toISOString(), respondBy: dispute.respondBy.toISOString(),
-          ruling: ruling ? { ...ruling, ruledAt: ruling.ruledAt.toISOString(),
+          ruling: ruling ? { ...ruling, currentRefundAmountVnd: correction?.refundAmountVnd ?? ruling.refundAmountVnd, correctedAt: correction?.correctedAt.toISOString() ?? null, ruledAt: ruling.ruledAt.toISOString(),
             correctionEndsAt: (await effectiveResolutionDeadline(tx, new Date(ruling.ruledAt.getTime() + RESOLUTION_POLICY.correctionWindowMs)))?.toISOString() ?? null } : null };
       });
     },

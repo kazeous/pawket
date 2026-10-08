@@ -12,7 +12,7 @@ export const queueSchema = z.object({ cases: z.array(summary.extend({ nextDeadli
 export const caseDetailSchema = z.object({ case: summary.extend({ creatorStanding: z.enum(["active", "suspended", "none"]), creatorUserId: z.string().min(1), buyerUserId: z.string().min(1),
   orderState: z.enum(["requested", "quoted", "awaiting_payment", "in_progress", "delivered", "completed", "closed"]), amountVnd: amount.nullable(),
   disputeOpenedAt: time.nullable(), respondBy: time.nullable(), nextDeadline: time.nullable().optional(),
-  ruling: z.object({ id: uuid, outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, ruledAt: time, correctionEndsAt: time.nullable() }).nullable(),
+  ruling: z.object({ id: uuid, outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, currentRefundAmountVnd: amount, correctedAt: time.nullable(), ruledAt: time, correctionEndsAt: time.nullable() }).nullable(),
   events: z.array(z.object({ id: uuid, action: z.string(), reason: z.string().nullable(), beforeState: z.string().nullable(), afterState: z.string(), occurredAt: time, resultingVersion: z.number().int().positive() })),
   accessLog: z.array(z.object({ id: uuid, itemType: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination", "file"]), itemId: uuid,
     ownerUserId: z.string(), ownerSessionId: z.string(), accessedAt: time })).max(100) }) });

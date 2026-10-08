@@ -34,6 +34,7 @@ test("runtime uses the real resolution holds, intake fence, refund creator lock 
   expect(fence).toHaveBeenCalledOnce(); expect(packages.mock.calls[0]?.[0].intakeFence).toBe(fence.mock.results[0]?.value);
   expect(fence.mock.calls[0]?.[0]).toEqual({ mode: "enabled", refunds: refundPort.mock.results[0]?.value });
   expect(refund).toHaveBeenCalledOnce(); expect(refund.mock.calls[0]?.[0].lockCreator).toBe(orders.lockCommissionCreator);
+  expect(refund.mock.calls[0]?.[0].effectiveDeadline).toBe(resolutions.effectiveResolutionDeadline);
   expect(refund.mock.calls[0]?.[0]).toMatchObject({ mode: "enabled", calendarVersion: env.VN_BUSINESS_CALENDAR_VERSION, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaAuthMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000 });
   expect(refund.mock.calls[0]?.[0].files).toBe(attachment.mock.results[0]?.value); expect(lateClaim.mock.calls[0]?.[1].files).toBe(attachment.mock.results[0]?.value);
   expect(fileService.mock.calls[0]?.[0].evidenceUploads).toBe(upload.mock.results[0]?.value);

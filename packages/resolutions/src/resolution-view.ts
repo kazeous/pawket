@@ -77,11 +77,15 @@ export function createResolutionViewService(input: Input) {
           const statements = await tx.select().from(commissionDisputeStatements).where(eq(commissionDisputeStatements.disputeId, dispute.id))
             .orderBy(asc(commissionDisputeStatements.createdAt), asc(commissionDisputeStatements.id));
           const [ruling] = await tx.select().from(commissionRulings).where(eq(commissionRulings.disputeId, dispute.id)).limit(1);
+          const [correction] = ruling ? await tx.select({ refundAmountVnd: commissionRulingCorrections.refundAmountVnd, correctedAt: commissionRulingCorrections.correctedAt })
+            .from(commissionRulingCorrections).where(eq(commissionRulingCorrections.rulingId, ruling.id))
+            .orderBy(desc(commissionRulingCorrections.correctedAt), desc(commissionRulingCorrections.id)).limit(1) : [];
           disputeView = { id: dispute.id, state: dispute.state, reason: dispute.reason, trigger: dispute.trigger,
             respondBy: (await effectiveResolutionDeadline(tx, dispute.respondBy))?.toISOString() ?? null,
             statements: statements.map((row) => ({ authorRole: row.authorRole, kind: row.kind,
               text: decrypt("commission_dispute_statements", row.id, "text", row.textEnvelope), createdAt: row.createdAt.toISOString() })),
             ruling: ruling ? { outcome: ruling.outcome, refundAmountVnd: ruling.refundAmountVnd,
+              currentRefundAmountVnd: correction?.refundAmountVnd ?? ruling.refundAmountVnd, correctedAt: correction?.correctedAt.toISOString() ?? null,
               reasoning: decrypt("commission_rulings", ruling.id, "reasoning", ruling.reasoningEnvelope), ruledAt: ruling.ruledAt.toISOString() } : null };
         }
         const at = now(); const trigger = dispute?.state === "open" ? null : await evaluateDisputeTrigger(tx, input.orders, order, command.actor, at);

@@ -74,7 +74,9 @@ for (const [index, entry] of ["fixed_immediate", "fixed_approval", "custom_quote
     await page.getByRole("button", { name: "Xác nhận đã nhận tiền commission", exact: true }).click();
     await expect(page.getByText("Đã xác nhận thanh toán · đang thực hiện", { exact: true })).toBeVisible();
     await expect(page.getByText("Nguồn xác nhận: nghệ sĩ tự đối chiếu và xác nhận đã nhận tiền.", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: /hoàn tất|hoàn tiền/iu })).toHaveCount(0);
+    const resolutionPanel = page.locator("[data-resolution-panel]");
+    await expect(page.getByRole("button", { name: /hoàn tất|hoàn tiền/iu }).and(page.locator(":not([data-resolution-panel] *)"))).toHaveCount(0);
+    await expect(resolutionPanel.getByRole("button", { name: "Đề nghị hủy hoặc hoàn tiền", exact: true })).toBeVisible();
     const settled = await (await page.request.get(`/api/v1/creator/commissions/${orderId}`)).json();
     expect(settled.order.state).toBe("in_progress"); expect(settled.order.dueAt).toBeTruthy(); expect(settled.order.payment.instruction).toBeNull();
   });

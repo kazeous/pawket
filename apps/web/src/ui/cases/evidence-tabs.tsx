@@ -17,7 +17,7 @@ const labels: Record<string, string> = { brief: "Yêu cầu sáng tác", text: "
   respondBy: "Hạn phản hồi", dueAt: "Hạn chuyển", confirmBy: "Hạn xác nhận", ruledAt: "Thời điểm kết luận", correctedAt: "Thời điểm đính chính", transferAt: "Thời điểm chuyển", filedAt: "Thời điểm khai báo",
   payment: "Thanh toán", confirmedAt: "Thời điểm xác nhận", settlementLane: "Kênh xác nhận", confirmationSource: "Nguồn xác nhận", sends: "Lần chuyển hoàn tiền", transferDate: "Ngày chuyển", recordedAt: "Thời điểm ghi nhận",
   policy: "Chính sách đã chốt", document: "Nội dung chính sách", quote: "Báo giá", fulfillment: "Thực hiện đơn", deliveredAt: "Thời điểm bàn giao cuối", completedAt: "Thời điểm hoàn tất", completionKind: "Cách hoàn tất",
-  closeReason: "Lý do đóng đơn", reviewEndsAt: "Hạn kiểm tra", completionFloorAt: "Hạn kiểm tra được khôi phục", completionDueAt: "Hạn hoàn tất", revisionsUsed: "Số lần đã chỉnh sửa", lateDelivery: "Bàn giao trễ" };
+  closeReason: "Lý do đóng đơn", reviewEndsAt: "Hạn kiểm tra", completionFloorAt: "Hạn kiểm tra được khôi phục", completionDueAt: "Hạn hoàn tất", revisionsUsed: "Số lần đã chỉnh sửa", lateDelivery: "Bàn giao trễ", section: "Mục bằng chứng" };
 const values: Record<string, string> = { buyer: "Người mua", creator: "Nghệ sĩ", owner: "Owner", open: "Đang mở", resolved: "Đã giải quyết", complete: "Hoàn tất", close: "Đóng đơn", completed: "Đã hoàn tất", closed: "Đã đóng",
   in_progress: "Đang thực hiện", delivered: "Đã bàn giao", message: "Tin nhắn", submission: "Bàn giao", opening: "Trình bày ban đầu", response: "Phản hồi", statement: "Trình bày bổ sung", question: "Câu hỏi của Pawket",
   draft: "Bản nháp", final: "Bản cuối", approved: "Đã duyệt", changes_requested: "Yêu cầu chỉnh sửa", superseded: "Đã được thay thế", pending: "Đang chờ", accepted: "Đã đồng ý", declined: "Đã từ chối", withdrawn: "Đã rút", expired: "Đã hết hạn", lapsed: "Không còn phù hợp", settled: "Đã thỏa thuận", ruled: "Đã kết luận",
@@ -27,13 +27,21 @@ const values: Record<string, string> = { buyer: "Người mua", creator: "Nghệ
   awaiting_transfer: "Chờ chuyển khoản", confirmed: "Đã xác nhận", manual_attested: "Xác nhận thủ công", provider_bound: "Đối soát qua nhà cung cấp", creator_manual: "Nghệ sĩ xác nhận", sepay_automatic: "SePay tự đối soát", creator_reviewed_sepay: "Nghệ sĩ kiểm tra giao dịch SePay",
   requested: "Đã yêu cầu", quoted: "Đã báo giá", awaiting_payment: "Chờ thanh toán", agreement: "Theo thỏa thuận", ruling: "Theo kết luận", cancelled_by_agreement: "Hủy theo thỏa thuận", cancelled_by_ruling: "Hủy theo kết luận", buyer_cancelled_after_suspension: "Người mua hủy sau khi nghệ sĩ bị tạm dừng", fulfillment_frozen: "Owner đóng băng thực hiện", increased: "Tăng số tiền hoàn", reduced: "Giảm số tiền hoàn", recorded_only: "Chỉ ghi nhận đính chính" };
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+const enumFields = new Set(["state", "kind", "author", "authorRole", "proposerRole", "outcome", "requestedOutcome", "section", "response", "submissionKind", "trigger", "effect", "completionKind", "closeReason", "settlementLane", "confirmationSource"]);
 export function EvidenceView({ value, onFile }: Readonly<{ value: unknown; onFile?(fileId: string): void }>) {
+  return <EvidenceValue value={value} onFile={onFile} />;
+}
+function EvidenceValue({ value, onFile, field, context }: Readonly<{ value: unknown; onFile?(fileId: string): void; field?: string; context?: string }>) {
   if (value === null || value === undefined) return <span>Không có</span>;
-  if (Array.isArray(value)) return value.length ? <ul className="stack">{value.map((item, index) => <li key={index}><EvidenceView value={item} onFile={onFile} /></li>)}</ul> : <span>Không có</span>;
-  if (!record(value)) return <span className="whitespace-pre-wrap break-words">{typeof value === "boolean" ? value ? "Có" : "Không" : values[String(value)] ?? String(value)}</span>;
+  if (Array.isArray(value)) return value.length ? <ul className="stack">{value.map((item, index) => <li key={index}><EvidenceValue value={item} onFile={onFile} field={field} context={context} /></li>)}</ul> : <span>Không có</span>;
+  if (!record(value)) {
+    const text = String(value); const enumValue = field !== undefined && (enumFields.has(field) || field === "reason" && context === "disputes");
+    const translated = enumValue && Object.hasOwn(values, text) ? values[text] : enumValue && field === "section" && Object.hasOwn(evidenceLabels, text) ? evidenceLabels[text as EvidenceSection] : text;
+    return <span className="whitespace-pre-wrap break-words">{typeof value === "boolean" ? value ? "Có" : "Không" : translated}</span>;
+  }
   if (typeof value.fileId === "string") return <div className="button-row"><span>{typeof value.name === "string" ? value.name : "Tệp đính kèm"}</span>
     {onFile && value.availability === "available" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.fileId) ? <Button variant="outline" onClick={() => onFile(value.fileId as string)}>Tải tệp</Button> : <span>{value.availability === "available" ? "Quay lại vụ việc để tải tệp." : "Tệp không còn khả dụng."}</span>}</div>;
-  return <dl className="summary-list">{Object.entries(value).filter(([key]) => key in labels).map(([key, item]) => <div key={key}><dt>{labels[key]}</dt><dd><EvidenceView value={item} onFile={onFile} /></dd></div>)}</dl>;
+  return <dl className="summary-list">{Object.entries(value).filter(([key]) => Object.hasOwn(labels, key)).map(([key, item]) => <div key={key}><dt>{labels[key]}</dt><dd><EvidenceValue value={item} onFile={onFile} field={key} context={field ?? context} /></dd></div>)}</dl>;
 }
 export function EvidenceTabs({ kind, disabled, onRead, onFile }: Readonly<{ kind: CaseKind; disabled: boolean; onRead(section: EvidenceSection, cursor?: number): Promise<unknown>; onFile(fileId: string): void }>) {
   const [section, setSection] = useState<EvidenceSection>("order_summary"); const [evidence, setEvidence] = useState<unknown>(null); const [opened, setOpened] = useState(false);

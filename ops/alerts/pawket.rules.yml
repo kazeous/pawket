@@ -286,7 +286,7 @@ groups:
           severity: info
         annotations:
           summary: Commission refund obligations are overdue
-          runbook: ops/runbooks/overdue-refunds.md
+          runbook: ops/runbooks/commission-resolution.md
       - alert: PawketCommissionResolutionScanStale
         expr: (pawket_worker_scan_healthy{scan="commission_resolution"} == 0) or (time() - pawket_worker_last_success_timestamp_seconds{scan="commission_resolution"} >= 900)
         for: 15m

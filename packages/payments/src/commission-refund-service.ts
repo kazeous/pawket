@@ -31,6 +31,7 @@ type Input = Readonly<{
   db: PawketDatabase; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; applicationRevision: string; calendarVersion: string;
   mode: "disabled" | "enabled"; recentAuthMs: number; mfaAuthMs: number;
   lockCreator(tx: PawketTransaction, creatorUserId: string): Promise<void>;
+  effectiveDeadline?(tx: PawketTransaction, deadline: Date): Promise<Date | null>;
   assurance: { getTipSessionAssurance(tx: PawketTransaction, actor: Actor, at: Date): Promise<Assurance | null> };
   cases?: Cases; files?: CommissionRefundFilesPort; now?: () => Date; idFactory?: () => string;
 }>;
@@ -83,7 +84,8 @@ function evidenceIds(value: unknown): readonly string[] {
 export function createCommissionRefundService(input: Input) {
   if (!identifier(input.applicationRevision) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.calendarVersion) || input.lookupHmacKey.length < 32
     || !["disabled", "enabled"].includes(input.mode) || !Number.isSafeInteger(input.recentAuthMs) || input.recentAuthMs < 60_000 || input.recentAuthMs > 3_600_000
-    || !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 3_600_000 || typeof input.lockCreator !== "function") refundFail("invalid_request");
+    || !Number.isSafeInteger(input.mfaAuthMs) || input.mfaAuthMs < 30_000 || input.mfaAuthMs > 3_600_000 || typeof input.lockCreator !== "function"
+    || (input.effectiveDeadline !== undefined && typeof input.effectiveDeadline !== "function")) refundFail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date());
   const port = createCommissionRefundPort(input);
   const enabled = () => { if (input.mode !== "enabled") refundFail("resolution_disabled"); };
@@ -137,7 +139,7 @@ export function createCommissionRefundService(input: Input) {
     await event(tx, row, command, action, at, updated.state); return { version: updated.version };
   }
   async function mutate(command: Command, scope: string, payload: unknown, role: Party, fresh: boolean,
-    apply: (tx: PawketTransaction, row: Obligation, at: Date) => Promise<{ version: number }>, guardUntil?: (row: Obligation) => Date | null) {
+    apply: (tx: PawketTransaction, row: Obligation, at: Date) => Promise<{ version: number }>, guardUntil?: (tx: PawketTransaction, row: Obligation) => Promise<Date>) {
     commandValid(command);
     // Prehash bounded multibyte notes before the shared HMAC primitive's 8 KiB limit.
     const fingerprint = digest("commission-refund-command", createHash("sha256").update(JSON.stringify([scope, command.actor.userId, payload])).digest("hex"));
@@ -156,10 +158,16 @@ export function createCommissionRefundService(input: Input) {
       if (row.version !== command.expectedVersion) refundFail("version_conflict");
       const at = now(); const changed = await apply(tx, row, at); const completedAt = await recheck(tx, command.actor, startedAt, proof, fresh);
       if (completedAt < at) refundFail("not_available");
-      const deadline = guardUntil?.(row); if (deadline && completedAt >= deadline) refundFail("invalid_transition");
+      const deadline = await guardUntil?.(tx, row); if (deadline && completedAt >= deadline) refundFail("invalid_transition");
       if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `${row.id}:${changed.version}`, completedAt })) refundFail("idempotency_conflict");
       return changed;
     }));
+  }
+  async function receiptDeadline(tx: PawketTransaction, row: Obligation): Promise<Date> {
+    if (!row.confirmBy) refundFail("invalid_transition");
+    const deadline = input.effectiveDeadline ? await input.effectiveDeadline(tx, row.confirmBy) : row.confirmBy;
+    if (deadline === null) refundFail("resolution_disabled");
+    return deadline;
   }
   return {
     async enterDestination(command: Command & Readonly<{ bankBin: string; accountNumber: string; accountHolder: string }>): Promise<{ version: number }> {
@@ -174,12 +182,15 @@ export function createCommissionRefundService(input: Input) {
         const [send] = await tx.select({ id: commissionRefundSends.id }).from(commissionRefundSends).where(eq(commissionRefundSends.obligationId, row.id)).limit(1);
         if (!["awaiting_destination", "awaiting_send"].includes(row.state) || send) refundFail("invalid_transition");
         const dueAt = await calculateStoredBusinessDayDeadline(tx, { from: at, businessDays: COMMISSION_REFUND_POLICY.sendBusinessDays, calendarVersion: input.calendarVersion });
-        return change(tx, row, command, "destination_entered", at, { state: "awaiting_send", destinationBankBin: destination.bankBin,
+        const result = await change(tx, row, command, "destination_entered", at, { state: "awaiting_send", destinationBankBin: destination.bankBin,
           destinationBankName: destination.bankName, destinationSuffix: destination.accountNumber.slice(-4), destinationEnteredAt: at, dueAt, calendarVersion: input.calendarVersion,
           destinationAccountEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: destination.accountNumber,
             binding: { recordType: "commission_refund_obligation", recordId: row.id, fieldName: "account_number" } }),
           destinationHolderEnvelope: encryptSensitiveField({ keyring: input.keyring, plaintext: destination.accountHolderLabel,
             binding: { recordType: "commission_refund_obligation", recordId: row.id, fieldName: "holder_name" } }) });
+        const overdue = await input.cases?.findOpenCase(tx, { kind: "refund_overdue", sourceId: row.id });
+        if (overdue) await input.cases!.resolveCase(tx, { caseId: overdue.caseId, resolutionKind: "extended", actor: command.actor, reason: null, requestId: command.requestId, at });
+        return result;
       });
     },
     async revealDestination(command: Readonly<{ actor: Actor; obligationId: string; requestId: string }>) {
@@ -239,14 +250,15 @@ export function createCommissionRefundService(input: Input) {
       enabled(); record(command, [...commandKeys, "received"]); commandValid(command);
       if (typeof command.received !== "boolean") refundFail("invalid_request");
       return mutate(command, "confirm-receipt", [command.obligationId, command.expectedVersion, command.received], "buyer", false, async (tx, row, at) => {
-        if (row.state !== "sent" || !row.confirmBy || at >= row.confirmBy) refundFail("invalid_transition");
+        if (row.state !== "sent") refundFail("invalid_transition");
+        if (at >= await receiptDeadline(tx, row)) refundFail("invalid_transition");
         if (!command.received && !input.cases) refundFail("dependency_unavailable");
         const result = await change(tx, row, command, command.received ? "receipt_confirmed" : "receipt_denied", at,
           { state: command.received ? "received" : "not_received", endedAt: command.received ? at : null });
         if (!command.received) await input.cases!.openCase(tx, { kind: "refund_not_received", orderId: row.orderId, sourceType: "commission_refund_obligation",
           sourceId: row.id, policyRevisionId: null, requestId: command.requestId, at });
         return result;
-      }, (row) => row.confirmBy);
+      }, receiptDeadline);
     },
     async listForViewer(command: Readonly<{ actor: Actor; orderId: string }>) {
       record(command, ["actor", "orderId"]); actorValid(command.actor); if (!uuid(command.orderId)) refundFail("invalid_request");

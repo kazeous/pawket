@@ -6,9 +6,10 @@ import { createCommissionEvidenceAttachmentPort } from "@pawket/commission-files
 import { lockCommissionCreator } from "@pawket/orders";
 import { createCommissionRefundPort, createCommissionRefundService, COMMISSION_REFUND_POLICY } from "@pawket/payments";
 import { createTrustCasePort } from "@pawket/trust";
+import { effectiveResolutionDeadline } from "@pawket/resolutions";
 import { vietQrCrc16 } from "../../../packages/payments/src/vietqr.js";
 import { commandIds, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
-import { createCommissionResolutionTestFixture } from "./commission-resolution-test-support.js";
+import { createCommissionResolutionTestFixture, resolutionRefundDeadlines } from "./commission-resolution-test-support.js";
 
 const f = createCommissionResolutionTestFixture("i8refunds");
 const calendarVersion = "vn-refund-party-test"; const currentCalendarVersion = "vn-refund-party-current";
@@ -35,7 +36,7 @@ async function setup() {
       mfaVerifiedAt: auth.verified ? time : null, sessionExpiresAt: new Date(time.getTime() + 60_000) };
   }) };
   const input: ServiceInput = { ...p.s.creator.common, applicationRevision: "synthetic-i8", calendarVersion, mode: "enabled",
-    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, assurance, cases, lockCreator: lockCommissionCreator,
+    recentAuthMs: 3_600_000, mfaAuthMs: 300_000, assurance, cases, lockCreator: lockCommissionCreator, ...resolutionRefundDeadlines,
     files: createCommissionEvidenceAttachmentPort({ keyring: p.s.input.keyring, mode: "enabled" }) };
   const service = createCommissionRefundService(input);
   return { p, obligationId: created.obligationId, auth, input, service, cases };
@@ -106,6 +107,26 @@ describe("commission refund party commands", () => {
     expect((await row(c)).calendarVersion).toBe(currentCalendarVersion);
     expect((await row(c)).dueAt?.toISOString()).toBe("2026-10-26T16:59:59.999Z");
   });
+  test("correcting a destination resolves its overdue case as extended in the same transaction", async () => {
+    const c = await setup(); await enter(c);
+    c.p.s.creator.setNow(new Date((await row(c)).dueAt!.getTime() + 1));
+    const overdue = await f.db.transaction((tx) => c.cases.openCase(tx, { kind: "refund_overdue", orderId: c.p.orderId,
+      sourceType: "commission_refund_obligation", sourceId: c.obligationId, policyRevisionId: null, requestId: randomUUID(), at: c.p.s.creator.now() }));
+    const correcting = { ...await destinationCommand(c), accountNumber: correctedAccount };
+    const resolveCase = vi.fn<Fixture["cases"]["resolveCase"]>(async (tx, command) => {
+      const [current] = await tx.select().from(schema.commissionRefundObligations).where(eq(schema.commissionRefundObligations.id, c.obligationId));
+      expect(current!.dueAt! > c.p.s.creator.now()).toBe(true); expect(current!.version).toBe(3);
+      await c.cases.resolveCase(tx, command); throw new Error("Synthetic case failure");
+    });
+    const broken = createCommissionRefundService({ ...c.input, cases: { ...c.cases, resolveCase } });
+    await expect(broken.enterDestination(correcting)).rejects.toMatchObject({ code: "dependency_unavailable" });
+    expect((await row(c)).version).toBe(2);
+    expect((await f.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, overdue.caseId)))[0]!.state).toBe("open");
+    await c.service.enterDestination(correcting); await c.service.enterDestination(correcting);
+    expect((await row(c)).version).toBe(3);
+    expect((await f.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, overdue.caseId)))[0])
+      .toMatchObject({ state: "resolved", resolutionKind: "extended", version: 2 });
+  });
   test("correction after a send is refused with invalid_transition, including after a required resend", async () => {
     const c = await setup(); await enter(c); await send(c);
     await expect(c.service.enterDestination({ ...await destinationCommand(c), accountNumber: correctedAccount })).rejects.toMatchObject({ code: "invalid_transition" });
@@ -150,6 +171,40 @@ describe("commission refund party commands", () => {
     await expect(c.service.confirmReceipt({ ...await command(c, c.p.creator), received: true })).rejects.toMatchObject({ code: "not_available" });
     c.p.s.creator.setNow(new Date(at.getTime() + COMMISSION_REFUND_POLICY.confirmWindowMs));
     await expect(c.service.confirmReceipt({ ...await command(c), received: true })).rejects.toMatchObject({ code: "invalid_transition" });
+  });
+  test.each([true, false])("receipt received=%s follows the pause-moved deadline at command and commit time", async (received) => {
+    const c = await setup(); await enter(c); await send(c);
+    const rawDeadline = (await row(c)).confirmBy!; const pauseId = randomUUID();
+    const resumedAt = new Date(rawDeadline.getTime() + 86_400_000);
+    await f.db.insert(schema.commissionResolutionPauses).values({ id: pauseId, startedAt: new Date(rawDeadline.getTime() - 1) });
+    try {
+      c.p.s.creator.setNow(rawDeadline);
+      await expect(c.service.confirmReceipt({ ...await command(c), received })).rejects.toMatchObject({ code: "resolution_disabled" });
+    } finally { await f.db.update(schema.commissionResolutionPauses).set({ endedAt: resumedAt, version: 2 }).where(eq(schema.commissionResolutionPauses.id, pauseId)); }
+    const deadline = new Date(resumedAt.getTime() + 172_800_000);
+    for (const time of [deadline, new Date(deadline.getTime() + 1)]) {
+      c.p.s.creator.setNow(time);
+      await expect(c.service.confirmReceipt({ ...await command(c), received })).rejects.toMatchObject({ code: "invalid_transition" });
+      expect((await row(c)).state).toBe("sent");
+    }
+    c.p.s.creator.setNow(new Date(deadline.getTime() - 1));
+    const crossing = createCommissionRefundService({ ...c.input, effectiveDeadline: async (tx, raw) => {
+      const effective = await effectiveResolutionDeadline(tx, raw); c.p.s.creator.setNow(deadline); return effective;
+    } });
+    await expect(crossing.confirmReceipt({ ...await command(c), received })).rejects.toMatchObject({ code: "invalid_transition" });
+    expect((await row(c)).state).toBe("sent");
+    expect(await f.db.transaction((tx) => c.cases.findOpenCase(tx, { kind: "refund_not_received", sourceId: c.obligationId }))).toBeNull();
+    c.p.s.creator.setNow(new Date(deadline.getTime() - 1));
+    const confirming = { ...await command(c), received }; const result = await c.service.confirmReceipt(confirming);
+    expect((await row(c)).state).toBe(received ? "received" : "not_received");
+    c.p.s.creator.setNow(new Date(deadline.getTime() + 1));
+    expect(await c.service.confirmReceipt(confirming)).toEqual(result);
+  });
+  test("receipt keeps the raw deadline when no effective deadline port is configured", async () => {
+    const c = await setup(); await enter(c); await send(c);
+    const service = createCommissionRefundService({ ...c.input, effectiveDeadline: undefined });
+    c.p.s.creator.setNow((await row(c)).confirmBy!);
+    await expect(service.confirmReceipt({ ...await command(c), received: true })).rejects.toMatchObject({ code: "invalid_transition" });
   });
   test("listForViewer never contains the account number and includes stored deadlines and send text", async () => {
     const c = await setup(); await enter(c); await send(c);

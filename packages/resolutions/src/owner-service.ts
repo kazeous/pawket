@@ -214,6 +214,11 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
                 actor: command.owner, requestId: command.requestId, at });
               // The creator fence keeps sends stable; never count a protected amount as reduced.
               if (result === "recorded_only") resolutionFail("version_conflict"); remaining -= reduction;
+              if (result === "waived") {
+                const overdue = await input.cases.findOpenCase(tx, { kind: "refund_overdue", sourceId: entry.obligationId });
+                if (overdue) await input.cases.resolveCase(tx, { caseId: overdue.caseId, resolutionKind: "waived", actor: command.owner,
+                  reason: null, requestId: command.requestId, at });
+              }
             }
             // Reduction effects: below fixedTotal, recorded_only wins even when all adjustable obligations are waived.
             // At fixedTotal all adjustable obligations are waived; above it the effect is reduced.
