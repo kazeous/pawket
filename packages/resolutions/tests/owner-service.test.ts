@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, test, vi } from "vitest";
+import type { PawketTransaction } from "@pawket/database";
 import { createOwnerResolutionService, type ResolutionOwnerCommand } from "../src/index.js";
 import type { createResolutionCommandKit } from "../src/command-kit.js";
 import type { ResolutionOrderPort, ResolutionRefundPort, ResolutionPaymentFactsPort, ResolutionCasePort } from "../src/ports.js";
@@ -21,6 +22,19 @@ function setup() {
 }
 const rule = () => ({ ...base(), disputeId, outcome: "complete" as const, refundAmountVnd: 200_000, reasoning: "Synthetic reasoning" });
 describe("owner resolution command boundaries", () => {
+  test.each(["creator", "command"] as const)("refund case with null order is refused in the %s callback", async (phase) => {
+    const p = setup();
+    vi.mocked(p.input.cases.readCase).mockResolvedValue({ caseId, kind: "refund_overdue", sourceType: "commission_refund_obligation",
+      orderId: null, sourceId: randomUUID(), state: "open", resolutionKind: null, version: 1, policyRevisionId: null });
+    vi.mocked(p.kit.ownerMutate).mockImplementation(async (_command, _scope, _payload, creator, _actionClass, run) => {
+      const tx = {} as PawketTransaction;
+      if (phase === "creator") await creator(tx); else await run(tx);
+      return recordedId;
+    });
+    await expect(p.service.resolveRefundCase({ ...base(), caseId, action: "waive", reason: "Synthetic reason" })).rejects.toMatchObject({ code: "not_available" });
+    expect(p.input.orders.lockOrder).not.toHaveBeenCalled(); expect(p.input.refunds.listForOrder).not.toHaveBeenCalled();
+    expect(p.input.cases.resolveCase).not.toHaveBeenCalled();
+  });
   test.each([NaN, Infinity, -1, 0.5, 50_000_001])("invalid amount %s never reaches ownerMutate", async (amount) => {
     const p = setup();
     await expect(p.service.rule({ ...rule(), refundAmountVnd: amount })).rejects.toMatchObject({ code: "invalid_request" });

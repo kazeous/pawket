@@ -28,3 +28,19 @@ test("non-dispute owner metadata contains no ruling or private content", async (
   expect(await createResolutionCaseMetadataPort().readForCase(db, { ...row, kind: "late_payment" })).toEqual({ disputeOpenedAt: null, respondBy: null, ruling: null });
   expect(reads()).toBe(0);
 });
+test.each(["report", "appeal"])("%s with no order has no Stage A deadline or metadata", async (kind) => {
+  const { db, reads } = database(); const refunds = { listForOrder: vi.fn() }; const nullable = { ...row, kind, orderId: null };
+  expect((await createResolutionCaseDeadlinePort({ refunds }).nextDeadlines(db, [nullable])).get("case")).toBeNull();
+  expect(await createResolutionCaseMetadataPort().readForCase(db, nullable)).toEqual({ disputeOpenedAt: null, respondBy: null, ruling: null });
+  expect(refunds.listForOrder).not.toHaveBeenCalled(); expect(reads()).toBe(0);
+});
+test.each(["dispute", "refund_not_received", "refund_overdue", "late_payment"])("Stage A %s deadline refuses null order metadata", async (kind) => {
+  const { db, reads } = database(); const refunds = { listForOrder: vi.fn() };
+  await expect(createResolutionCaseDeadlinePort({ refunds }).nextDeadlines(db, [{ ...row, kind, orderId: null }])).rejects.toMatchObject({ code: "not_available" });
+  expect(refunds.listForOrder).not.toHaveBeenCalled(); expect(reads()).toBe(0);
+});
+test("dispute owner metadata refuses a null order", async () => {
+  const { db, reads } = database();
+  await expect(createResolutionCaseMetadataPort().readForCase(db, { ...row, orderId: null })).rejects.toMatchObject({ code: "not_available" });
+  expect(reads()).toBe(0);
+});

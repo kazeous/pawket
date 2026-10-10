@@ -92,8 +92,9 @@ export function createCaseHttpHandlers(input: Input) {
     }),
     detail: (request: Request, caseId: string) => run(request, "GET", async () => {
       noQuery(request); const detail = await input.cases.getCase(id(caseId));
+      if (detail.orderId === null) throw new TrustCaseError("not_available");
       const [order, resolution, creatorStanding] = await Promise.all([input.orderMetadata.readForOrder(detail.orderId),
-        input.resolutionMetadata.readForCase(detail), input.standing.readForOrder(detail.orderId)]);
+        input.resolutionMetadata.readForCase({ ...detail, orderId: detail.orderId }), input.standing.readForOrder(detail.orderId)]);
       return { case: { ...detail, ...order, ...resolution, creatorStanding } };
     }),
     evidence: (request: Request, caseId: string) => run(request, "POST", async (owner) => {
@@ -109,10 +110,11 @@ export function createCaseHttpHandlers(input: Input) {
     action: (request: Request, caseId: string) => run(request, "POST", async (owner) => {
       noQuery(request); id(caseId); const idempotencyKey = key(request); const body = await readCommissionBody(request, actionBody);
       const detail = await input.cases.getCase(caseId); const { action } = body;
+      if (detail.orderId === null) throw new TrustCaseError("not_available");
       if (["rule", "correct", "question", "extend"].includes(action) && detail.kind !== "dispute"
         || action === "rule_claim" && detail.kind !== "late_payment"
         || ["accept_evidence", "require_resend", "waive", "extend_deadline"].includes(action) && !["refund_not_received", "refund_overdue"].includes(detail.kind)) throw new CommissionHttpFailure(404, "not_available");
-      const ruling = body.action === "correct" ? (await input.resolutionMetadata.readForCase(detail)).ruling : null;
+      const ruling = body.action === "correct" ? (await input.resolutionMetadata.readForCase({ ...detail, orderId: detail.orderId })).ruling : null;
       if (body.action === "correct" && (!ruling || ruling.id !== body.rulingId)) throw new CommissionHttpFailure(404, "not_available");
       const base = { owner, idempotencyKey, stepUpProofId: await proof(owner, `owner.case_${action}`), requestId: randomUUID() };
       // Target IDs for dispute/claim commands come from the case, never the client.

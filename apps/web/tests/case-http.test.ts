@@ -9,7 +9,7 @@ const origin = "https://pawket.example.invalid"; const caseId = randomUUID(); co
 const owner = { userId: "synthetic-owner", sessionId: "synthetic-session" };
 type Input = Parameters<typeof createCaseHttpHandlers>[0];
 function setup() {
-  const cases = { listQueue: vi.fn(async () => []), getCase: vi.fn(async () => ({ caseId, orderId: randomUUID(), sourceId: randomUUID(), kind: "dispute", sourceType: "commission_dispute", state: "open", events: [], accessLog: [] })),
+  const cases = { listQueue: vi.fn(async () => []), getCase: vi.fn(async () => ({ caseId, orderId: randomUUID() as string | null, sourceId: randomUUID(), kind: "dispute", sourceType: "commission_dispute", state: "open", events: [], accessLog: [] })),
     readEvidence: vi.fn(async () => ({})), fileGrant: vi.fn(async () => ({ url: "https://example.invalid/download" })) };
   const commands = { rule: vi.fn(async () => ({})), correctRuling: vi.fn(async () => ({})), postQuestion: vi.fn(async () => ({})), extendDispute: vi.fn(async () => ({})),
     resolveRefundCase: vi.fn(async () => ({})), ruleLateClaim: vi.fn(async () => ({})), freezeFulfillment: vi.fn(async () => ({})) };
@@ -33,6 +33,15 @@ const routes = (s: ReturnType<typeof setup>) => [
   () => s.http.agingRefunds(request("refunds/aging")),
 ];
 describe("owner case HTTP", () => {
+  test.each(["detail", "action"] as const)("%s refuses null order metadata before reading order ports or issuing a proof", async (route) => {
+    const s = setup(); const detail = await s.cases.getCase(); detail.orderId = null; s.cases.getCase.mockResolvedValue(detail);
+    const response = route === "detail" ? await s.http.detail(request(`cases/${caseId}`), caseId)
+      : await s.http.action(request(`cases/${caseId}/actions`, "POST", { action: "question", text: "Synthetic question" }), caseId);
+    expect(response.status).toBe(404); expect(await response.json()).toEqual({ code: "not_available" });
+    expect(s.input.orderMetadata.readForOrder).not.toHaveBeenCalled(); expect(s.input.resolutionMetadata.readForCase).not.toHaveBeenCalled();
+    expect(s.input.standing.readForOrder).not.toHaveBeenCalled(); expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled();
+    for (const fn of Object.values(s.commands)) expect(fn).not.toHaveBeenCalled();
+  });
   test("a non-owner gets 403 on every case route, including a forged proof, and nothing executes", async () => {
     const s = setup(); vi.mocked(s.input.authorizeOwner).mockResolvedValue("forbidden");
     for (const run of routes(s)) expect((await run()).status).toBe(403);

@@ -5,7 +5,10 @@ import { readExactOwnDataRecord, validUuid } from "./report-policy.js";
 
 export type TrustCaseKind = typeof TRUST_CASE_KINDS[number];
 export type TrustCaseActor = Readonly<{ userId: string; sessionId: string }>;
-export type TrustCaseSourceType = "commission_dispute" | "commission_refund_obligation" | "commission_late_payment_claim";
+export type TrustCaseSourceType = "commission_dispute" | "commission_refund_obligation" | "commission_late_payment_claim"
+  | "commission_package" | "commission_brief" | "commission_message" | "commission_file" | "trust_appeal";
+type OpenEventAction = "question_posted" | "deadline_extended" | "report_added" | "content_hidden" | "content_restored" | "penalty_applied";
+const openEventActions: readonly OpenEventAction[] = ["question_posted", "deadline_extended", "report_added", "content_hidden", "content_restored", "penalty_applied"];
 type Case = typeof trustCases.$inferSelect;
 type Command = Readonly<{ caseId: string; actor: TrustCaseActor | null; reason: string | null; requestId: string; at: Date }>;
 export class TrustCaseError extends Error {
@@ -38,10 +41,13 @@ const resolutions: Readonly<Record<TrustCaseKind, readonly string[]>> = {
   refund_not_received: ["receipt_accepted", "resend_required", "waived"],
   refund_overdue: ["send_recorded", "extended", "waived"],
   late_payment: ["refund_owed", "rejected"],
+  report: ["dismissed", "actioned"],
+  appeal: ["upheld", "reduced", "reversed"],
 };
-function sourceType(kind: TrustCaseKind): TrustCaseSourceType {
-  return kind === "dispute" ? "commission_dispute" : kind === "late_payment" ? "commission_late_payment_claim" : "commission_refund_obligation";
-}
+const sources: Readonly<Record<TrustCaseKind, readonly TrustCaseSourceType[]>> = {
+  dispute: ["commission_dispute"], refund_not_received: ["commission_refund_obligation"], refund_overdue: ["commission_refund_obligation"],
+  late_payment: ["commission_late_payment_claim"], report: ["commission_package", "commission_brief", "commission_message", "commission_file"], appeal: ["trust_appeal"],
+};
 
 /** Callers own authorization and the surrounding domain transaction. */
 export function createTrustCasePort(input: { newId?(): string } = {}) {
@@ -60,7 +66,7 @@ export function createTrustCasePort(input: { newId?(): string } = {}) {
     if (command.at.getTime() < row.openedAt.getTime()) caseFail("invalid_request");
     return row;
   }
-  async function record(tx: PawketTransaction, row: Case, command: Command, action: "resolved" | "question_posted" | "deadline_extended", resolutionKind: string | null) {
+  async function record(tx: PawketTransaction, row: Case, command: Command, action: "resolved" | OpenEventAction, resolutionKind: string | null) {
     const [updated] = await tx.update(trustCases).set({ version: row.version + 1,
       ...(action === "resolved" ? { state: "resolved", resolutionKind, resolvedAt: command.at } : {}),
     }).where(and(eq(trustCases.id, row.id), eq(trustCases.version, row.version), eq(trustCases.state, "open"))).returning();
@@ -76,21 +82,30 @@ export function createTrustCasePort(input: { newId?(): string } = {}) {
       if (!validUuid(caseId)) caseFail("invalid_request");
       const [row] = await tx.select({ caseId: trustCases.id, kind: trustCases.kind, orderId: trustCases.orderId,
         sourceType: trustCases.sourceType, sourceId: trustCases.sourceId, state: trustCases.state,
-        resolutionKind: trustCases.resolutionKind, version: trustCases.version, policyRevisionId: trustCases.policyRevisionId })
+        resolutionKind: trustCases.resolutionKind, version: trustCases.version, policyRevisionId: trustCases.policyRevisionId,
+        communityPolicyRevisionId: trustCases.communityPolicyRevisionId, enforcementPolicyRevisionId: trustCases.enforcementPolicyRevisionId })
         .from(trustCases).where(eq(trustCases.id, caseId)).limit(1);
       return row ?? null;
     },
-    async openCase(tx: PawketTransaction, command: Readonly<{ kind: TrustCaseKind; orderId: string; sourceType: TrustCaseSourceType; sourceId: string; policyRevisionId: string | null; requestId: string; at: Date }>): Promise<{ caseId: string; created: boolean }> {
-      if (!caseKind(command.kind) || command.sourceType !== sourceType(command.kind) || !validUuid(command.orderId) || !validUuid(command.sourceId)
-        || (command.policyRevisionId !== null && !validUuid(command.policyRevisionId)) || !caseIdentifier(command.requestId)) caseFail("invalid_request");
+    async openCase(tx: PawketTransaction, command: Readonly<{ kind: TrustCaseKind; orderId: string | null; sourceType: TrustCaseSourceType; sourceId: string;
+      policyRevisionId: string | null; communityPolicyRevisionId?: string | null; enforcementPolicyRevisionId?: string | null; requestId: string; at: Date }>): Promise<{ caseId: string; created: boolean }> {
+      const communityPolicyRevisionId = command.communityPolicyRevisionId ?? null;
+      const enforcementPolicyRevisionId = command.enforcementPolicyRevisionId ?? null;
+      if (!caseKind(command.kind) || !sources[command.kind].includes(command.sourceType) || !validUuid(command.sourceId)
+        || (command.orderId !== null && !validUuid(command.orderId))
+        || (command.sourceType === "commission_package" ? command.orderId !== null : command.kind !== "appeal" && command.orderId === null)
+        || (command.policyRevisionId !== null && !validUuid(command.policyRevisionId))
+        || (communityPolicyRevisionId !== null && !validUuid(communityPolicyRevisionId))
+        || (enforcementPolicyRevisionId !== null && !validUuid(enforcementPolicyRevisionId)) || !caseIdentifier(command.requestId)) caseFail("invalid_request");
       const at = caseTime(command.at);
       const [row] = await tx.insert(trustCases).values({ id: id(), kind: command.kind, orderId: command.orderId, sourceType: command.sourceType,
-        sourceId: command.sourceId, policyRevisionId: command.policyRevisionId, openedAt: at })
+        sourceId: command.sourceId, policyRevisionId: command.policyRevisionId, communityPolicyRevisionId, enforcementPolicyRevisionId, openedAt: at })
         .onConflictDoNothing({ target: [trustCases.kind, trustCases.sourceId], where: sql`${trustCases.state} = 'open'` }).returning();
       if (!row) {
         const [existing] = await tx.select().from(trustCases).where(and(eq(trustCases.kind, command.kind), eq(trustCases.sourceId, command.sourceId), eq(trustCases.state, "open"))).limit(1).for("update");
         if (!existing) caseFail("version_conflict");
-        if (existing.orderId !== command.orderId || existing.sourceType !== command.sourceType || existing.policyRevisionId !== command.policyRevisionId) caseFail("invalid_request");
+        if (existing.orderId !== command.orderId || existing.sourceType !== command.sourceType || existing.policyRevisionId !== command.policyRevisionId
+          || existing.communityPolicyRevisionId !== communityPolicyRevisionId || existing.enforcementPolicyRevisionId !== enforcementPolicyRevisionId) caseFail("invalid_request");
         return { caseId: existing.id, created: false };
       }
       await tx.insert(trustCaseEvents).values({ id: id(), caseId: row.id, action: "opened", requestId: command.requestId,
@@ -104,8 +119,8 @@ export function createTrustCasePort(input: { newId?(): string } = {}) {
       if (!caseKind(row.kind) || !resolutions[row.kind].includes(command.resolutionKind)) caseFail("invalid_request");
       await record(tx, row, command, "resolved", command.resolutionKind);
     },
-    async recordCaseEvent(tx: PawketTransaction, command: Command & Readonly<{ action: "question_posted" | "deadline_extended" }>): Promise<void> {
-      if (command.action !== "question_posted" && command.action !== "deadline_extended") caseFail("invalid_request");
+    async recordCaseEvent(tx: PawketTransaction, command: Command & Readonly<{ action: OpenEventAction }>): Promise<void> {
+      if (!openEventActions.includes(command.action)) caseFail("invalid_request");
       const row = await lockCase(tx, command); await record(tx, row, command, command.action, null);
     },
   };

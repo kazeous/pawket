@@ -23,7 +23,7 @@ async function event(tx: TransactionSql, caseId: string, version: number, action
     values (${randomUUID()}, ${caseId}, ${action}, ${randomUUID()}, ${version - 1}, ${version}, ${version === 1 ? null : "open"},
       ${action === "resolved" ? "resolved" : "open"}, ${resolutionKind}, ${version === 1 ? at.toISOString() : later.toISOString()})`;
 }
-async function insertCase(tx: TransactionSql, orderId: string, options: { id?: string; sourceId?: string; kind?: string; sourceType?: string } = {}) {
+async function insertCase(tx: TransactionSql, orderId: string | null, options: { id?: string; sourceId?: string; kind?: string; sourceType?: string } = {}) {
   const id = options.id ?? randomUUID(); const sourceId = options.sourceId ?? randomUUID();
   await tx`insert into trust_cases (id, kind, order_id, source_type, source_id, opened_at)
     values (${id}, ${options.kind ?? "dispute"}, ${orderId}, ${options.sourceType ?? "commission_dispute"}, ${sourceId}, ${at.toISOString()})`;
@@ -43,6 +43,87 @@ async function resolve(caseId: string) {
 }
 
 describe("trust case database boundaries", () => {
+  test("report case on a package has no order", async () => {
+    const options = { kind: "report", sourceType: "commission_package" };
+    const c = await fixture.client.begin((tx) => insertCase(tx, null, options));
+    expect(await fixture.client`select order_id from trust_cases where id = ${c.id}`).toEqual([{ order_id: null }]);
+    const p = await fixture.paidOrder();
+    await expectSqlState(fixture.client.begin((tx) => insertCase(tx, p.orderId, options)));
+  });
+  test("dispute case still requires an order", async () => {
+    await expectSqlState(fixture.client.begin((tx) => insertCase(tx, null)));
+  });
+  test.each(["commission_brief", "commission_message", "commission_file"])("report source %s requires an order", async (sourceType) => {
+    await expectSqlState(fixture.client.begin((tx) => insertCase(tx, null, { kind: "report", sourceType })));
+    const p = await fixture.paidOrder();
+    await fixture.client.begin((tx) => insertCase(tx, p.orderId, { kind: "report", sourceType }));
+  });
+  test.each(["report_added", "content_hidden", "content_restored", "penalty_applied"])("%s keeps the case open and advances the version", async (action) => {
+    const c = await fixture.client.begin((tx) => insertCase(tx, null, { kind: "report", sourceType: "commission_package" }));
+    await fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, action);
+    });
+    expect(await fixture.client`select state, version from trust_cases where id = ${c.id}`).toEqual([{ state: "open", version: 2 }]);
+    await expectSqlState(fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set version = 3 where id = ${c.id}`;
+      await event(tx, c.id, 3, "unknown");
+    }));
+  });
+  test.each(["upheld", "reduced", "reversed"])("appeal resolves only as upheld, reduced or reversed (%s)", async (resolutionKind) => {
+    const c = await fixture.client.begin((tx) => insertCase(tx, null, { kind: "appeal", sourceType: "trust_appeal" }));
+    for (const invalid of ["ruled", "dismissed", "actioned", "rejected"]) {
+      await expectSqlState(fixture.client.begin(async (tx) => {
+        await tx`update trust_cases set state = 'resolved', resolution_kind = ${invalid}, resolved_at = ${later.toISOString()}, version = 2 where id = ${c.id}`;
+        await event(tx, c.id, 2, "resolved", invalid);
+      }));
+    }
+    await fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set state = 'resolved', resolution_kind = ${resolutionKind}, resolved_at = ${later.toISOString()}, version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, "resolved", resolutionKind);
+    });
+  });
+  test.each(["dismissed", "actioned"])("report resolves as %s", async (resolutionKind) => {
+    const c = await fixture.client.begin((tx) => insertCase(tx, null, { kind: "report", sourceType: "commission_package" }));
+    await fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set state = 'resolved', resolution_kind = ${resolutionKind}, resolved_at = ${later.toISOString()}, version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, "resolved", resolutionKind);
+    });
+  });
+  test("policy revision columns cannot change after insert", async () => {
+    const communityId = randomUUID(); const enforcementId = randomUUID();
+    for (const [id, kind] of [[communityId, "community_rules"], [enforcementId, "enforcement_appeals"]] as const) {
+      await fixture.client`insert into trust_policy_revisions (id, kind, revision_number, document, approval_kind, checksum, source, effective_at, created_at)
+        values (${id}, ${kind}, 100, 'Synthetic policy', 'synthetic', ${`sha256:${"a".repeat(64)}`}, 'synthetic-test', ${at.toISOString()}, ${at.toISOString()})`;
+    }
+    const c = await fixture.client.begin(async (tx) => {
+      const id = randomUUID();
+      await tx`insert into trust_cases (id, kind, source_type, source_id, community_policy_revision_id, enforcement_policy_revision_id, opened_at)
+        values (${id}, 'report', 'commission_package', ${randomUUID()}, ${communityId}, ${enforcementId}, ${at.toISOString()})`;
+      await event(tx, id, 1); return { id };
+    });
+    await expectSqlState(fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set community_policy_revision_id = null, version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, "report_added");
+    }));
+    await expectSqlState(fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set enforcement_policy_revision_id = null, version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, "report_added");
+    }));
+    const empty = await fixture.client.begin((tx) => insertCase(tx, null, { kind: "report", sourceType: "commission_package" }));
+    await expectSqlState(fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set community_policy_revision_id = ${communityId}, version = 2 where id = ${empty.id}`;
+      await event(tx, empty.id, 2, "report_added");
+    }));
+    await expectSqlState(fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set enforcement_policy_revision_id = ${enforcementId}, version = 2 where id = ${empty.id}`;
+      await event(tx, empty.id, 2, "report_added");
+    }));
+    await fixture.client.begin(async (tx) => {
+      await tx`update trust_cases set version = 2 where id = ${c.id}`;
+      await event(tx, c.id, 2, "report_added");
+    });
+  });
   test("a case kind must match its source type", async () => {
     const p = await fixture.paidOrder();
     await expectSqlState(fixture.client.begin((tx) => insertCase(tx, p.orderId, { kind: "dispute", sourceType: "commission_refund_obligation" })));

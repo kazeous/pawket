@@ -40,7 +40,7 @@ export type ResolutionRefundMaintenancePort = Readonly<{
 export type RefundCandidateCursor = Readonly<{ deadline: Date; obligationId: string }>;
 type CaseCommand = Readonly<{ caseId: string; actor: ResolutionActor | null; reason: string | null; requestId: string; at: Date }>;
 export type ResolutionCasePort = Readonly<{
-  readCase(tx: PawketTransaction, caseId: string): Promise<Readonly<{ caseId: string; kind: string; orderId: string;
+  readCase(tx: PawketTransaction, caseId: string): Promise<Readonly<{ caseId: string; kind: string; orderId: string | null;
     sourceType: string; sourceId: string; state: string; resolutionKind: string | null; version: number; policyRevisionId: string | null }> | null>;
   openCase(tx: PawketTransaction, command: Readonly<{ kind: CaseKind; orderId: string;
     sourceType: "commission_dispute" | "commission_refund_obligation" | "commission_late_payment_claim";

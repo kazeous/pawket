@@ -63,8 +63,8 @@ function evidence() {
     fileGrant: vi.fn<TrustCaseEvidencePort["fileGrant"]>(async () => ({ url: "synthetic-grant" })),
   };
 }
-function service(options: { accepted?: boolean; throws?: boolean } = {}) {
-  const port = evidence();
+function service(options: { accepted?: boolean; throws?: boolean; evidence?: Pick<TrustCaseEvidencePort, "reportContext" | "packageRevision" | "brief" | "appealSource"> } = {}) {
+  const port = { ...evidence(), ...options.evidence };
   const consumeStepUpProof = vi.fn(async () => { if (options.throws) throw new Error("Synthetic proof failure"); return options.accepted ?? true; });
   const instance = trust.createTrustCaseService({ db: fixture.db, applicationRevision: "synthetic-i8", consumeStepUpProof, evidence: port, now: () => at });
   return { instance, port, consumeStepUpProof };
@@ -76,7 +76,7 @@ async function open(kind: "dispute" | "refund_not_received" | "refund_overdue" |
   const result = await fixture.db.transaction((tx) => port.openCase(tx, command));
   return { ...result, p, port, command };
 }
-const read = (caseId: string, section: "order_summary" | "thread_page" | "resolution_records" | "refund_destination" = "order_summary") =>
+const read = (caseId: string, section: Parameters<trust.TrustCaseService["readEvidence"]>[0]["section"] = "order_summary") =>
   ({ owner, stepUpProofId: randomUUID(), caseId, section, requestId: randomUUID() });
 const accesses = (caseId: string) => fixture.db.select().from(schema.trustCaseAccessLog).where(eq(schema.trustCaseAccessLog.caseId, caseId));
 const resolve = (c: Awaited<ReturnType<typeof open>>) => fixture.db.transaction((tx) => c.port.resolveCase(tx, {
@@ -84,6 +84,79 @@ const resolve = (c: Awaited<ReturnType<typeof open>>) => fixture.db.transaction(
 }));
 
 describe("case-scoped owner evidence", () => {
+  async function openNew(kind: "report" | "appeal", sourceType: trust.TrustCaseSourceType, orderId: string | null = null) {
+    const port = trust.createTrustCasePort();
+    const command = { kind, sourceType, orderId, sourceId: randomUUID(), policyRevisionId: null, requestId: randomUUID(), at };
+    return { ...await fixture.db.transaction((tx) => port.openCase(tx, command)), command, port };
+  }
+  test("listQueue filters kind report and appeal", async () => {
+    const report = await openNew("report", "commission_package"); const appeal = await openNew("appeal", "trust_appeal");
+    const s = service();
+    const reports = await s.instance.listQueue({ kind: "report" }); const appeals = await s.instance.listQueue({ kind: "appeal" });
+    expect(reports.some((row) => row.caseId === report.caseId)).toBe(true); expect(reports.every((row) => row.kind === "report")).toBe(true);
+    expect(appeals.some((row) => row.caseId === appeal.caseId)).toBe(true); expect(appeals.every((row) => row.kind === "appeal")).toBe(true);
+  });
+  test("getCase returns orderId null for package report cases", async () => {
+    const c = await openNew("report", "commission_package");
+    expect(await service().instance.getCase(c.caseId)).toMatchObject({ kind: "report", orderId: null, communityPolicyRevisionId: null, enforcementPolicyRevisionId: null });
+    expect(await fixture.db.transaction((tx) => c.port.openCase(tx, c.command))).toEqual({ caseId: c.caseId, created: false });
+  });
+  test("openCase persists optional policy snapshots and rejects changed snapshots on replay", async () => {
+    const communityPolicyRevisionId = randomUUID(); const enforcementPolicyRevisionId = randomUUID();
+    await fixture.db.insert(schema.trustPolicyRevisions).values([
+      { id: communityPolicyRevisionId, kind: "community_rules" as const }, { id: enforcementPolicyRevisionId, kind: "enforcement_appeals" as const },
+    ].map((revision) => ({ ...revision, revisionNumber: 100, document: "Synthetic policy", approvalKind: "synthetic" as const,
+      checksum: `sha256:${"a".repeat(64)}`, source: "synthetic-test", effectiveAt: at, createdAt: at })));
+    const port = trust.createTrustCasePort();
+    const command = { kind: "report" as const, sourceType: "commission_package" as const, orderId: null, sourceId: randomUUID(), policyRevisionId: null,
+      communityPolicyRevisionId, enforcementPolicyRevisionId, requestId: randomUUID(), at };
+    const c = await fixture.db.transaction((tx) => port.openCase(tx, command));
+    expect(await service().instance.getCase(c.caseId)).toMatchObject({ communityPolicyRevisionId, enforcementPolicyRevisionId });
+    expect(await fixture.db.transaction((tx) => port.readCase(tx, c.caseId))).toMatchObject({ communityPolicyRevisionId, enforcementPolicyRevisionId });
+    expect(await fixture.db.transaction((tx) => port.openCase(tx, command))).toEqual({ caseId: c.caseId, created: false });
+    for (const column of ["communityPolicyRevisionId", "enforcementPolicyRevisionId"] as const) {
+      await expect(fixture.db.transaction((tx) => port.openCase(tx, { ...command, [column]: null }))).rejects.toMatchObject({ code: "invalid_request" });
+    }
+  });
+  test("appeal case can retain its original order", async () => {
+    const orderId = (await order()).orderId; const c = await openNew("appeal", "trust_appeal", orderId);
+    expect(await service().instance.getCase(c.caseId)).toMatchObject({ kind: "appeal", orderId });
+  });
+  test("readEvidence refuses report_context on a dispute case with not_available", async () => {
+    const c = await open(); const reportContext = vi.fn(async () => ({})); const s = service({ evidence: { reportContext } });
+    await expect(s.instance.readEvidence(read(c.caseId, "report_context"))).rejects.toMatchObject({ code: "not_available" });
+    expect(reportContext).not.toHaveBeenCalled(); expect(s.consumeStepUpProof).not.toHaveBeenCalled(); expect(await accesses(c.caseId)).toHaveLength(0);
+  });
+  test.each([
+    { kind: "report", source: "commission_package", section: "report_context", member: "reportContext", item: "case" },
+    { kind: "report", source: "commission_package", section: "package_revision", member: "packageRevision", item: "case" },
+    { kind: "report", source: "commission_brief", section: "brief", member: "brief", item: "order" },
+    { kind: "appeal", source: "trust_appeal", section: "appeal_source", member: "appealSource", item: "case" },
+  ] as const)("readEvidence of section $section writes its access-log item", async ({ kind, source, section, member, item }) => {
+    const orderId = item === "order" ? (await order()).orderId : null;
+    const c = await openNew(kind, source, orderId); const reader = vi.fn(async () => ({ synthetic: section }));
+    const s = service({ evidence: { [member]: reader } }); const command = read(c.caseId, section);
+    expect(await s.instance.readEvidence(command)).toEqual({ synthetic: section });
+    expect(reader).toHaveBeenCalledWith(expect.anything(), item === "order" ? orderId : c.caseId);
+    expect(await accesses(c.caseId)).toEqual([expect.objectContaining({ itemType: section, itemId: item === "order" ? orderId : c.caseId, requestId: command.requestId })]);
+    expect(await fixture.db.select().from(schema.adminAuditEvents).where(eq(schema.adminAuditEvents.subjectId, c.caseId)))
+      .toEqual([expect.objectContaining({ action: "owner.case_evidence", afterState: { caseId: c.caseId, itemType: section, itemId: item === "order" ? orderId : c.caseId } })]);
+  });
+  test.each(["report_added", "content_hidden", "content_restored", "penalty_applied"] as const)("recordCaseEvent accepts %s", async (action) => {
+    const c = await openNew("report", "commission_package");
+    await fixture.db.transaction((tx) => c.port.recordCaseEvent(tx, { caseId: c.caseId, action, actor: owner, reason: null, requestId: randomUUID(), at }));
+    expect(await service().instance.getCase(c.caseId)).toMatchObject({ state: "open", version: 2, events: [{ action: "opened" }, { action }] });
+  });
+  test.each([
+    ["report", "commission_package", "dismissed"], ["report", "commission_package", "actioned"],
+    ["appeal", "trust_appeal", "upheld"], ["appeal", "trust_appeal", "reduced"], ["appeal", "trust_appeal", "reversed"],
+  ] as const)("%s resolves as %s / %s", async (kind, source, resolutionKind) => {
+    const c = await openNew(kind, source);
+    await expect(fixture.db.transaction((tx) => c.port.resolveCase(tx, { caseId: c.caseId, resolutionKind: "ruled", actor: owner, reason: null, requestId: randomUUID(), at })))
+      .rejects.toMatchObject({ code: "invalid_request" });
+    await fixture.db.transaction((tx) => c.port.resolveCase(tx, { caseId: c.caseId, resolutionKind, actor: owner, reason: null, requestId: randomUUID(), at }));
+    expect(await service().instance.getCase(c.caseId)).toMatchObject({ state: "resolved", resolutionKind, version: 2 });
+  });
   test("queue deadline enrichment writes no access or audit entries and never reads evidence", async () => {
     const c = await open(); const s = service();
     const deadlines = { nextDeadlines: vi.fn(async () => new Map([[c.caseId, new Date("2026-10-13T04:00:00Z")]])) };
@@ -97,7 +170,8 @@ describe("case-scoped owner evidence", () => {
   test("readCase returns unlocked metadata in open and resolved states, or null", async () => {
     const c = await open();
     const expected = { caseId: c.caseId, kind: "dispute", orderId: c.p.orderId, sourceType: "commission_dispute",
-      sourceId: c.command.sourceId, state: "open", resolutionKind: null, version: 1, policyRevisionId: c.p.policyId };
+      sourceId: c.command.sourceId, state: "open", resolutionKind: null, version: 1, policyRevisionId: c.p.policyId,
+      communityPolicyRevisionId: null, enforcementPolicyRevisionId: null };
     expect(await fixture.db.transaction((tx) => c.port.readCase(tx, c.caseId))).toEqual(expected);
     // Holding the case row must not block this metadata-only read.
     await fixture.db.transaction(async (tx) => {

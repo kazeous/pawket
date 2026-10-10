@@ -3,8 +3,9 @@ import { commissionDisputes, commissionRulings, commissionRulingCorrections, typ
 import type { ResolutionRefundView } from "./ports.js";
 import { effectiveResolutionDeadline } from "./deadlines.js";
 import { RESOLUTION_POLICY } from "./policy.js";
+import { resolutionFail } from "./contracts.js";
 
-type CaseRow = Readonly<{ caseId: string; kind: string; state: string; sourceId: string; orderId: string }>;
+type CaseRow = Readonly<{ caseId: string; kind: string; state: string; sourceId: string; orderId: string | null }>;
 // Structural port: Trust receives timestamps only; no evidence read or access log.
 export function createResolutionCaseDeadlinePort(input: Readonly<{ refunds: Readonly<{
   listForOrder(tx: PawketTransaction, command: { orderId: string }): Promise<readonly Pick<ResolutionRefundView, "obligationId" | "dueAt">[]>;
@@ -16,11 +17,13 @@ export function createResolutionCaseDeadlinePort(input: Readonly<{ refunds: Read
         const refundsByOrder = new Map<string, Awaited<ReturnType<typeof input.refunds.listForOrder>>>();
         for (const row of rows) {
           let deadline: Date | null = null;
+          if (["dispute", "refund_not_received", "refund_overdue", "late_payment"].includes(row.kind) && row.orderId === null) resolutionFail("not_available");
           if (row.state === "open" && row.kind === "dispute") {
             const [dispute] = await tx.select({ state: commissionDisputes.state, respondBy: commissionDisputes.respondBy })
               .from(commissionDisputes).where(eq(commissionDisputes.id, row.sourceId)).limit(1);
             if (dispute?.state === "open") deadline = dispute.respondBy;
           } else if (row.state === "open" && row.kind === "refund_overdue") {
+            if (row.orderId === null) resolutionFail("not_available");
             if (!refundsByOrder.has(row.orderId)) refundsByOrder.set(row.orderId, await input.refunds.listForOrder(tx, { orderId: row.orderId }));
             deadline = refundsByOrder.get(row.orderId)?.find((refund) => refund.obligationId === row.sourceId)?.dueAt ?? null;
           }
@@ -36,6 +39,7 @@ export function createResolutionCaseMetadataPort() {
     async readForCase(db: PawketDatabase, row: CaseRow) {
       const empty = { disputeOpenedAt: null, respondBy: null, ruling: null };
       if (row.kind !== "dispute") return empty;
+      if (row.orderId === null) resolutionFail("not_available");
       return db.transaction(async (tx: PawketTransaction) => {
         const [dispute] = await tx.select({ openedAt: commissionDisputes.openedAt, respondBy: commissionDisputes.respondBy })
           .from(commissionDisputes).where(eq(commissionDisputes.id, row.sourceId)).limit(1);
