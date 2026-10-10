@@ -19,6 +19,7 @@ export default defineConfig({
     schemaPath("public-media.ts"),
     schemaPath("public-trust.ts"),
     schemaPath("trust-cases.ts"),
+    schemaPath("trust-enforcement.ts"),
     schemaPath("payments.ts"),
     schemaPath("tips.ts"),
     schemaPath("sepay.ts"),

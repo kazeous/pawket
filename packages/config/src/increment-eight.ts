@@ -4,10 +4,12 @@ import type { CommissionFulfillmentMode } from "@pawket/config/increment-seven";
 
 export const incrementEightEnvShape = {
   COMMISSION_RESOLUTION_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
+  TRUST_ENFORCEMENT_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
 };
 type Parsed = z.infer<z.ZodObject<typeof incrementEightEnvShape>>;
 export type IncrementEightServerEnv = Parsed;
 export type CommissionResolutionMode = Parsed["COMMISSION_RESOLUTION_MODE"];
+export type TrustEnforcementMode = Parsed["TRUST_ENFORCEMENT_MODE"];
 export class IncrementEightConfigError extends Error {
   constructor(readonly failures: ReadonlyArray<{ field: string; reason: string }>) {
     super(failures.map(({ field, reason }) => `${field} ${reason}`).join("; "));
@@ -25,5 +27,5 @@ export function resolveIncrementEightEnv(parsed: Parsed & {
     failures.push({ field: "COMMISSION_PAYMENTS_MODE", reason: "requires COMMISSION_FULFILLMENT_MODE=enabled and COMMISSION_RESOLUTION_MODE=enabled" });
   }
   if (failures.length) throw new IncrementEightConfigError(failures);
-  return { COMMISSION_RESOLUTION_MODE: parsed.COMMISSION_RESOLUTION_MODE };
+  return { COMMISSION_RESOLUTION_MODE: parsed.COMMISSION_RESOLUTION_MODE, TRUST_ENFORCEMENT_MODE: parsed.TRUST_ENFORCEMENT_MODE };
 }

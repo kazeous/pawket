@@ -1,7 +1,7 @@
 import { z } from "zod";
 export { OIDC_SIGN_UP_FLOW_SLUG, oidcSignUpUrl, parseOidcEnv, parseOidcSessionEnv } from "./oidc.js";
 export type { CommissionFilesMode, CommissionFileRetentionMode } from "@pawket/config/increment-seven";
-export type { CommissionResolutionMode } from "@pawket/config/increment-eight";
+export type { CommissionResolutionMode, TrustEnforcementMode } from "@pawket/config/increment-eight";
 
 import {
   incrementTwoEnvShape,
