@@ -84,6 +84,45 @@ test("escalated claim events remain valid after an owner ends the claim", async 
   const rows = await f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.aggregateId, claimId));
   for (const row of rows) await expect(validateResolutionOutboxEvent(f.db, job(row))).resolves.toBeUndefined();
 });
+test.each([
+  { kind: "report", sourceType: "commission_package" },
+  { kind: "appeal", sourceType: "trust_appeal" },
+] as const)("case_opened accepts a null order for an orderless $kind case", async ({ kind, sourceType }) => {
+  const command = { kind, sourceType, orderId: null, sourceId: randomUUID(), policyRevisionId: null,
+    requestId: randomUUID(), at: new Date("2026-10-10T04:00:00Z") };
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, command));
+  const [row] = await f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.aggregateId, caseId));
+  expect(row!.payload).toEqual({ caseId, orderId: null, sourceId: command.sourceId, policyRevisionId: null, correlationId: command.requestId });
+  await expect(validateResolutionOutboxEvent(f.db, job(row!))).resolves.toBeUndefined();
+  const acknowledge = vi.fn(async () => true);
+  const processor = createWorkerJobProcessor({ database: f.db, acknowledge, logger: { info: vi.fn(), error: vi.fn() } });
+  await processor({ id: row!.id, name: OUTBOX_JOB, data: job(row!) } as never);
+  expect(acknowledge).toHaveBeenCalledExactlyOnceWith(f.db, { eventId: row!.id });
+});
+
+test("case_opened rejects a null payload order when its case has an order", async () => {
+  const p = await f.paidOrder();
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "appeal", sourceType: "trust_appeal",
+    orderId: p.orderId, sourceId: randomUUID(), policyRevisionId: null, requestId: randomUUID(), at: p.s.creator.now() }));
+  const [row] = await f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.aggregateId, caseId));
+  await expect(validateResolutionOutboxEvent(f.db, job(row!))).resolves.toBeUndefined();
+  const payload = { ...row!.payload, orderId: null };
+  const outboxEventId = await f.db.transaction((tx) => insertOutboxEvent(tx, { eventType: row!.eventType, eventVersion: 1,
+    aggregateType: row!.aggregateType, aggregateId: caseId, payload, occurredAt: row!.occurredAt }));
+  await expect(validateResolutionOutboxEvent(f.db, { ...job(row!), outboxEventId, payload })).rejects.toThrow("Invalid resolution worker source");
+});
+
+test("every other resolution event rejects a null orderId", async () => {
+  const rows = (await journeys()).filter((row) => row.eventType !== "trust.case_opened.v1");
+  expect(new Set(rows.map((row) => row.eventType))).toEqual(new Set([...RESOLUTION_OUTBOX_EVENTS].filter((type) => type !== "trust.case_opened.v1")));
+  for (const row of rows) {
+    const payload = { ...row.payload, orderId: null };
+    const outboxEventId = await f.db.transaction((tx) => insertOutboxEvent(tx, { eventType: row.eventType, eventVersion: 1,
+      aggregateType: row.aggregateType, aggregateId: row.aggregateId, payload, occurredAt: row.occurredAt }));
+    await expect(validateResolutionOutboxEvent(f.db, { ...job(row), outboxEventId, payload })).rejects.toThrow("Invalid resolution worker source");
+  }
+});
+
 test("every resolution and refund outbox payload uses the complete fixed id, state, kind and count allow-list", async () => {
   const rows = await journeys();
   const allowed = new Set(["proposalId", "orderId", "kind", "state", "disputeId", "statementId", "authorRole", "rulingId", "outcome",
