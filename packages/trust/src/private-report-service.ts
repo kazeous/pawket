@@ -90,6 +90,9 @@ export function createPrivateReportService(input: Input) {
       const hashes = { targetHash: hashOpaqueToken(`${c.target.kind}:${targetIdentity(c.target)}`, "trust-private-report-target"),
         revisionHash: hashOpaqueToken(c.target.kind === "commission_package" ? c.target.revisionId : targetIdentity(c.target), "trust-private-report-revision") };
       return boundary(async () => {
+        if (requester.kind === "guest" && !verifyReportChallengeToken(
+          requester.challenge.token, requester.challenge.solution, now(), challengeKey, CONTEXT,
+        )) trustFail("invalid_request");
         const result = await input.db.transaction(async (tx) => {
           const startedAt = now(); let recordId: string | null = null;
           if (requester.kind === "authenticated") {

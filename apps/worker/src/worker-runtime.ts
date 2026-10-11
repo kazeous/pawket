@@ -124,6 +124,7 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "identity.password_changed.v1",
   "identity.primary_email_changed.v1",
   "identity.user_access_changed.v1",
+  "identity.account_access_changed.v1",
   "creator.application.submitted.v1",
   "creator.application.withdrawn.v1",
   "creator.application_changes_requested.v1",
@@ -132,6 +133,8 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "creator.application_reopened.v1",
   "creator.capability_suspended.v1",
   "creator.capability_reinstated.v1",
+  "creator.capability_removed.v1",
+  "creator.capability_restored.v1",
   "creator.page_initialized.v1",
   "creator.handle_claimed.v1",
   "creator.handle_renamed.v1",
@@ -145,6 +148,7 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "media.public_asset_failed.v1",
   "trust.public_content_reported.v1",
   "trust.public_report_triaged.v1",
+  "trust.report_received.v1",
   "commission.file_scanned.v1",
 ]);
 

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import * as schema from "@pawket/database";
 import { createBriefReportTargetPort } from "@pawket/orders";
 import { createThreadReportTargetPort } from "@pawket/commission-files";
@@ -8,7 +8,7 @@ import { createLookupHmac, decryptSensitiveField, encryptSensitiveField } from "
 import { createPrivateReportService } from "../src/private-report-service.js";
 import { createTrustRestrictionPort } from "../src/penalty-port.js";
 import { createTrustCasePort } from "../src/case-port.js";
-import { issueReportChallenge } from "../src/report-service.js";
+import { issueReportChallenge, issueReportChallengeToken } from "../src/report-service.js";
 import type { TrustReportTarget, TrustReportTargetPort } from "../src/report-target-port.js";
 import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "./report-fixture.js";
 
@@ -96,6 +96,36 @@ describe("private reports", () => {
     const [row] = await fixture.db.select().from(schema.trustCases).where(eq(schema.trustCases.id, a.caseId));
     expect(row).toMatchObject({ communityPolicyRevisionId: revisions[0], enforcementPolicyRevisionId: revisions[1], orderId: null });
   });
+  test.each(["invalid token", "invalid signature", "invalid proof"] as const)(
+    "guest submit with %s is refused before opening a transaction or resolving targets",
+    async (failure) => {
+      const resolve = vi.fn<TrustReportTargetPort["resolve"]>(async () => null);
+      const s = service({ targets: { resolve } });
+      const challenge = issueReportChallengeToken(reportAt, randomUUID().replaceAll("-", ""),
+        failure === "invalid signature" ? new Uint8Array(32).fill(75) : fixtureLookupKey, "trust-private-report-challenge");
+      const token = failure === "invalid token" ? "invalid" : challenge.token;
+      let solution = 0;
+      while (true) {
+        const hash = createHash("sha256").update(`${token}.${solution}`).digest();
+        if (hash[0] !== 0 || hash[1] !== 0 || hash[2]! >= 64) break;
+        solution++;
+      }
+      if (failure === "invalid signature") solution = solve(token);
+      const transaction = vi.spyOn(fixture.db, "transaction");
+      try {
+        await expect(s.submit({
+          requester: { kind: "guest", networkKeyHmac: `hmac-sha256:v1:${"a".repeat(43)}`, challenge: { token, solution } },
+          target: { kind: "commission_package", packageId: randomUUID(), revisionId: randomUUID() },
+          reason: "other", detail: null, idempotencyKey: "guest", requestId: randomUUID(),
+        })).rejects.toMatchObject({ code: "invalid_request" });
+        expect(resolve).not.toHaveBeenCalled();
+        expect(transaction).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+      }
+    },
+    60_000,
+  );
   test("guest package challenge binds network, revision and context, is single use, and enforces 24h duplicate", async () => {
     const p = await fixture.paidOrder(); const networkKeyHmac = `hmac-sha256:v1:${"a".repeat(43)}`;
     const packageTarget: TrustReportTargetPort = { resolve: async (_tx, t) => t.kind === "commission_package" && t.revisionId === p.packageRevisionId

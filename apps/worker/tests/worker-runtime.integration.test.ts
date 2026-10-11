@@ -56,7 +56,7 @@ const pausedCommissionMaintenance = {
   completeDue: async () => ({ scanned: 0, completed: 0, held: 0, waiting: 0, nextAfter: null }),
 };
 
-const incrementThreeTerminalEvents = [
+const terminalDomainEvents = [
   "creator.page_initialized.v1",
   "creator.handle_claimed.v1",
   "creator.handle_renamed.v1",
@@ -70,6 +70,10 @@ const incrementThreeTerminalEvents = [
   "media.public_asset_failed.v1",
   "trust.public_content_reported.v1",
   "trust.public_report_triaged.v1",
+  "trust.report_received.v1",
+  "identity.account_access_changed.v1",
+  "creator.capability_removed.v1",
+  "creator.capability_restored.v1",
 ] as const;
 
 if (!databaseUrl) {
@@ -319,11 +323,11 @@ describe("public media runtime handoff", () => {
   );
 });
 
-describe("Increment 3 terminal outbox events", () => {
-  test.each(incrementThreeTerminalEvents)(
+describe("Terminal domain outbox events", () => {
+  test.each(terminalDomainEvents)(
     "acknowledges %s exactly once without dispatching email or media work",
     async (eventType) => {
-      // Break caught: a terminal catalog/media/trust event remains pending or accidentally fans out.
+      // Break caught: a terminal domain event remains pending or accidentally fans out.
       const acknowledge = vi.fn(async () => true);
       const mediaQueue = { add: vi.fn() };
       const deliver = vi.fn();
