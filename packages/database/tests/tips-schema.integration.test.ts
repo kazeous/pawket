@@ -372,11 +372,19 @@ describe("Increment 4 additive payment/tip schema", () => {
       const upgradeDb = drizzle(upgrade, { schema });
       await migrate(upgradeDb, { migrationsFolder: temporary, migrationsSchema: upgradeJournal });
       const beforeId = await user(upgradeDb);
-      const beforeColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
+      const beforeColumns = await upgrade<{ table_name: string; column_name: string; data_type: string; is_nullable: string }[]>`select table_name,column_name,data_type,is_nullable from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
       await migrate(upgradeDb, { migrationsFolder, migrationsSchema: upgradeJournal });
       const originalTables = new Set(beforeColumns.map((row) => row.table_name));
-      const afterColumns = await upgrade<{ table_name: string; column_name: string; data_type: string }[]>`select table_name,column_name,data_type from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
-      expect(afterColumns.filter((row) => originalTables.has(row.table_name))).toEqual(beforeColumns);
+      const afterColumns = await upgrade<{ table_name: string; column_name: string; data_type: string; is_nullable: string }[]>`select table_name,column_name,data_type,is_nullable from information_schema.columns where table_schema = ${upgradeSchema} order by table_name,ordinal_position`;
+      // Migration 0054_increment_8_penalties.sql adds this nullable, expand-only column.
+      const allowedAdditions = [{ table: "identity_creator_capability_events", column: "penalty_id" }];
+      expect(afterColumns.filter((row) => originalTables.has(row.table_name)
+        && !allowedAdditions.some(({ table, column }) => row.table_name === table && row.column_name === column))
+        .map(({ table_name, column_name, data_type }) => ({ table_name, column_name, data_type })))
+        .toEqual(beforeColumns.map(({ table_name, column_name, data_type }) => ({ table_name, column_name, data_type })));
+      for (const { table, column } of allowedAdditions) {
+        expect(afterColumns.find((row) => row.table_name === table && row.column_name === column)).toMatchObject({ is_nullable: "YES" });
+      }
       const afterId = await user(upgradeDb);
       const users = await upgradeDb.select({ id: identityUsers.id }).from(identityUsers);
       expect(users.map((row) => row.id).sort()).toEqual([beforeId, afterId].sort());
