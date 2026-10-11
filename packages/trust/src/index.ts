@@ -37,3 +37,4 @@ export { TRUST_ENFORCEMENT_POLICY, TRUST_RESTRICTIONS, TRUST_PENALTY_KINDS, TRUS
   type TrustPenaltyKind, type TrustPenaltyTarget, type TrustPenaltyReason, type TrustPolicyKind, type TrustEnforcementErrorCode } from "./enforcement-policy.js";
 export { effectiveEnforcementDeadline, recordEnforcementModeTransition } from "./enforcement-deadlines.js";
 export { createTrustPolicyService, type TrustPolicyService, type TrustPolicySnapshot, type TrustPolicyPublishCommand } from "./trust-policy-service.js";
+export { createTrustRestrictionPort, activePenalties, type TrustRestrictionPort } from "./penalty-port.js";

@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import * as schema from "../src/schema.js";
 import { effectiveEnforcementDeadline, recordEnforcementModeTransition } from "../../trust/src/enforcement-deadlines.js";
+import { insertTestPenalty, penaltyAt, seedPenaltySubject } from "./trust-penalty-fixture.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for trust enforcement schema tests");
@@ -37,6 +38,61 @@ async function revision(kind: string, number: number, document = "Synthetic poli
 }
 
 describe("trust enforcement database boundaries", () => {
+  test("a second active suspension of the same target is rejected", async () => {
+    const subject = await seedPenaltySubject(client);
+    const first = await insertTestPenalty(client, subject);
+    await refused(insertTestPenalty(client, subject), "23505");
+    await client`update trust_penalties set state = 'expired', ended_at = '2026-10-11T00:00Z', version = version + 1 where id = ${first}`;
+    await insertTestPenalty(client, subject);
+  });
+  test("warning cannot carry ends_at and each kind has its own shape", async () => {
+    const subject = await seedPenaltySubject(client);
+    await refused(insertTestPenalty(client, subject, { kind: "warning", endsAt: new Date("2026-10-11T00:00Z") }));
+    await refused(insertTestPenalty(client, subject, { kind: "warning", restriction: "reporting" }));
+    await refused(insertTestPenalty(client, subject, { kind: "restriction", target: "account" }));
+    await refused(insertTestPenalty(client, subject, { kind: "suspension", restriction: "reporting" }));
+    await refused(insertTestPenalty(client, subject, { kind: "removal", endsAt: new Date("2026-10-11T00:00Z") }));
+    await refused(insertTestPenalty(client, subject, { endsAt: penaltyAt }));
+  });
+  test("ending a penalty twice is rejected and identity columns are immutable", async () => {
+    const subject = await seedPenaltySubject(client); const id = await insertTestPenalty(client, subject);
+    await refused(client`update trust_penalties set reason_category = 'privacy', version = version + 1 where id = ${id}`);
+    await refused(client`delete from trust_penalties where id = ${id}`);
+    await client`update trust_penalties set state = 'lifted', ended_at = '2026-10-10T01:00Z', end_reason = 'owner_lifted', version = version + 1 where id = ${id}`;
+    await refused(client`update trust_penalties set state = 'reversed', ended_at = '2026-10-10T02:00Z', version = version + 1 where id = ${id}`);
+    await refused(client`update trust_penalties set state = 'active', ended_at = null, version = version + 1 where id = ${id}`);
+  });
+  test("a warning can be acknowledged only once", async () => {
+    const subject = await seedPenaltySubject(client); const id = await insertTestPenalty(client, subject, { kind: "warning" });
+    await client`update trust_penalties set acknowledged_at = '2026-10-10T01:00Z', version = version + 1 where id = ${id}`;
+    await refused(client`update trust_penalties set acknowledged_at = '2026-10-10T02:00Z', version = version + 1 where id = ${id}`);
+    const suspension = await insertTestPenalty(client, subject);
+    await refused(client`update trust_penalties set acknowledged_at = '2026-10-10T01:00Z', version = version + 1 where id = ${suspension}`);
+  });
+  test("penalty events are append-only", async () => {
+    const subject = await seedPenaltySubject(client); const penaltyId = await insertTestPenalty(client, subject); const id = randomUUID();
+    await client`insert into trust_penalty_events (id, penalty_id, action, actor_user_id, actor_session_id, request_id, expected_version, resulting_version, occurred_at)
+      values (${id}, ${penaltyId}, 'applied', ${subject.ownerUserId}, 'owner-session', 'test', 0, 1, ${penaltyAt.toISOString()})`;
+    await refused(client`update trust_penalty_events set action = 'expired' where id = ${id}`);
+    await refused(client`delete from trust_penalty_events where id = ${id}`);
+  });
+  test("capability may become removed and back to active", async () => {
+    const subject = await seedPenaltySubject(client);
+    await client`update identity_creator_capabilities set state = 'removed', suspended_at = ${penaltyAt.toISOString()}, version = version + 1 where id = ${subject.capabilityId}`;
+    await client`update identity_creator_capabilities set state = 'active', suspended_at = null, version = version + 1 where id = ${subject.capabilityId}`;
+    await refused(client`update identity_creator_capabilities set state = 'removed', suspended_at = null where id = ${subject.capabilityId}`);
+  });
+  test("actorless capability event only for penalty_expired", async () => {
+    const subject = await seedPenaltySubject(client); const penaltyId = await insertTestPenalty(client, subject);
+    async function event(action: string, reason: string, actorUserId: string | null = null, actorSessionId: string | null = null, proofId: string | null = null) {
+      return client`insert into identity_creator_capability_events (id, capability_id, action, state, version, actor_user_id, actor_session_id, step_up_proof_id, reason_code, penalty_id, request_id, created_at)
+        values (${randomUUID()}, ${subject.capabilityId}, ${action}, 'active', 2, ${actorUserId}, ${actorSessionId}, ${proofId}, ${reason}, ${penaltyId}, 'test', ${penaltyAt.toISOString()})`;
+    }
+    await event("reinstated", "penalty_expired"); await event("restored", "penalty_expired");
+    await refused(event("suspended", "penalty_expired")); await refused(event("removed", "penalty_expired"));
+    await refused(event("reinstated", "other")); await refused(event("restored", "penalty_expired", subject.ownerUserId));
+    await event("removed", "other", subject.ownerUserId, "owner-session", subject.actor.stepUpProofId);
+  });
   test("effective deadline moves to resume plus 48 hours", async () => {
     await recordEnforcementModeTransition(db, { mode: "disabled", at: new Date("2026-11-01T00:00Z") });
     await recordEnforcementModeTransition(db, { mode: "enabled", at: new Date("2026-11-03T00:00Z") });

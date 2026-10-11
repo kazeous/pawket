@@ -80,6 +80,9 @@ function isCompleteSmtpConfig(
 
 function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
   switch (purpose) {
+    case "enforcement_notice":
+      // The enforcement delivery task supplies the purpose-bound template.
+      throw new Error("Invalid security email message");
     case "email_verification":
     case "password_reset":
     case "email_change":
@@ -206,6 +209,8 @@ function tipStatusContent(appBaseUrl: string, message: SecurityEmailMessage): Se
 
 function renderContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
   switch (message.purpose) {
+    case "enforcement_notice":
+      throw new Error("Invalid security email message");
     case "security_notice":
       return noticeContent(message.templateData.event);
     case "application_outcome":

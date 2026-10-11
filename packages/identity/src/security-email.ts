@@ -3,6 +3,7 @@ export type SecurityEmailPurpose =
   | "password_reset"
   | "email_change"
   | "security_notice"
+  | "enforcement_notice"
   | "application_outcome"
   | "creator_status"
   | "refund_status"

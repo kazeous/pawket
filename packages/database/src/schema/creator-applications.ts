@@ -3,6 +3,9 @@ import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uu
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires this extensionless TypeScript schema import.
 // @ts-ignore Drizzle Kit 0.31 resolves this TypeScript schema only without the emitted .js suffix.
 import { identityUsers } from "./identity-core";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { trustPenalties } from "./trust-enforcement";
 
 type Envelope = { version: 1; algorithm: "A256GCM"; keyId: string; nonce: string; ciphertext: string; authenticationTag: string };
 
@@ -84,9 +87,18 @@ export const identityCreatorCapabilities = pgTable("identity_creator_capabilitie
   approvedApplicationId: uuid("approved_application_id").notNull().references(() => creatorApplications.id, { onDelete: "restrict", onUpdate: "restrict" }),
   approvedRevisionId: uuid("approved_revision_id").notNull().references(() => creatorApplicationRevisions.id, { onDelete: "restrict", onUpdate: "restrict" }),
   suspendedAt: timestamp("suspended_at", { withTimezone: true, mode: "date" }), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(), updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
-}, (t) => [uniqueIndex("identity_creator_capabilities_user_uidx").on(t.userId), check("identity_creator_capabilities_state_check", sql`${t.state} in ('active','suspended')`), check("identity_creator_capabilities_version_check", sql`${t.version} > 0`), check("identity_creator_capabilities_suspension_check", sql`(${t.state} = 'suspended' and ${t.suspendedAt} is not null) or (${t.state} = 'active' and ${t.suspendedAt} is null)`)]);
+}, (t) => [uniqueIndex("identity_creator_capabilities_user_uidx").on(t.userId), check("identity_creator_capabilities_state_check", sql`${t.state} in ('active','suspended','removed')`), check("identity_creator_capabilities_version_check", sql`${t.version} > 0`), check("identity_creator_capabilities_suspension_check", sql`(${t.state} in ('suspended','removed') and ${t.suspendedAt} is not null) or (${t.state} = 'active' and ${t.suspendedAt} is null)`)]);
 
 export const identityCreatorCapabilityEvents = pgTable("identity_creator_capability_events", {
   id: uuid("id").primaryKey(), capabilityId: uuid("capability_id").notNull().references(() => identityCreatorCapabilities.id, { onDelete: "restrict", onUpdate: "restrict" }),
-  action: text("action").notNull(), state: text("state").notNull(), version: integer("version").notNull(), actorUserId: text("actor_user_id").notNull().references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }), actorSessionId: text("actor_session_id").notNull(), stepUpProofId: uuid("step_up_proof_id").notNull(), reasonCode: text("reason_code").notNull(), requestId: text("request_id").notNull(), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
-}, (t) => [index("identity_creator_capability_events_capability_idx").on(t.capabilityId, t.createdAt), check("identity_creator_capability_events_action_check", sql`${t.action} in ('granted','suspended','reinstated')`), check("identity_creator_capability_events_state_check", sql`${t.state} in ('active','suspended')`), check("identity_creator_capability_events_version_check", sql`${t.version} > 0`)]);
+  action: text("action").notNull(), state: text("state").notNull(), version: integer("version").notNull(), actorUserId: text("actor_user_id").references(() => identityUsers.id, { onDelete: "restrict", onUpdate: "restrict" }), actorSessionId: text("actor_session_id"), stepUpProofId: uuid("step_up_proof_id"), reasonCode: text("reason_code").notNull(), requestId: text("request_id").notNull(), createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  penaltyId: uuid("penalty_id").references(() => trustPenalties.id, { onDelete: "restrict", onUpdate: "restrict" }),
+}, (t) => [
+  index("identity_creator_capability_events_capability_idx").on(t.capabilityId, t.createdAt),
+  check("identity_creator_capability_events_action_check", sql`${t.action} in ('granted','suspended','reinstated','removed','restored')`),
+  check("identity_creator_capability_events_state_check", sql`${t.state} in ('active','suspended','removed')`),
+  check("identity_creator_capability_events_version_check", sql`${t.version} > 0`),
+  check("identity_creator_capability_events_actor_check", sql`(${t.actorUserId} is not null and ${t.actorSessionId} is not null and ${t.stepUpProofId} is not null)
+    or (${t.actorUserId} is null and ${t.actorSessionId} is null and ${t.stepUpProofId} is null
+      and ${t.action} in ('reinstated','restored') and ${t.reasonCode} = 'penalty_expired')`),
+]);

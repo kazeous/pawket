@@ -1,5 +1,5 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
-export { trustEnforcementPauses, trustPolicyRevisions, trustPolicyCurrent } from "./schema.js";
+export { trustEnforcementPauses, trustPolicyRevisions, trustPolicyCurrent, trustPenalties, trustPenaltyEvents } from "./schema.js";
 export { TRUST_CASE_KINDS, trustCases, trustCaseEvents, trustCaseAccessLog } from "./schema.js";
 export { commissionRefundObligations, commissionRefundSends, commissionRefundEvents } from "./schema.js";
 export { commissionProposals, commissionDisputes, commissionDisputeStatements, commissionRulings, commissionRulingCorrections, commissionLatePaymentClaims, commissionResolutionPauses } from "./schema.js";

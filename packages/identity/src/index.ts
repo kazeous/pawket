@@ -28,3 +28,5 @@ export * from "./oidc-cleanup.js";
 export * from "./oidc-owner-link.js";
 export * from "./step-up-error.js";
 export * from "./oidc-cutover.js";
+export { createIdentityEnforcementPort, recordCreatorCapabilityChange, type IdentityEnforcementPort, type EnforcementActor,
+  type CreatorCapabilityState, type AccountAccessStatus } from "./enforcement-port.js";

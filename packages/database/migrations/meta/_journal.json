@@ -379,6 +379,13 @@
       "when": 1791612248927,
       "tag": "0053_increment_8_trust_case_kinds",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1791735637892,
+      "tag": "0054_increment_8_penalties",
+      "breakpoints": true
     }
   ]
 }
