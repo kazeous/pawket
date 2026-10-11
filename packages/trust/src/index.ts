@@ -40,6 +40,7 @@ export { TRUST_ENFORCEMENT_POLICY, TRUST_RESTRICTIONS, TRUST_PENALTY_KINDS, TRUS
   TRUST_POLICY_KINDS, TrustEnforcementError, trustFail, normalizeTrustText, type TrustEnforcementMode, type TrustRestriction,
   type TrustPenaltyKind, type TrustPenaltyTarget, type TrustPenaltyReason, type TrustPolicyKind, type TrustEnforcementErrorCode } from "./enforcement-policy.js";
 export { effectiveEnforcementDeadline, recordEnforcementModeTransition } from "./enforcement-deadlines.js";
+export { createEnforcementMaintenance } from "./enforcement-maintenance.js";
 export { createTrustPolicyService, type TrustPolicyService, type TrustPolicySnapshot, type TrustPolicyPublishCommand } from "./trust-policy-service.js";
 export { createTrustRestrictionPort, activePenalties, type TrustRestrictionPort } from "./penalty-port.js";
 export { createContentHideReadPort, type ContentHideReadPort, type ContentHideKind } from "./content-hide-port.js";

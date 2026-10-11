@@ -166,13 +166,18 @@ export function createPenaltyService(input: Input) {
     const [ending] = await tx.select({ target: trustPenalties.target }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1);
     if (subject.accessStatus !== status && (accountPenalties.length > 0 || ending?.target === "account")) await input.identity.setAccountAccess(tx, { ...c, userId: subjectUserId, status });
   }
-  async function end(tx: PawketTransaction, c: EndPenaltyCommand): Promise<void> {
+  async function end(tx: PawketTransaction, c: EndPenaltyCommand, options: { skipLocked?: boolean } = {}): Promise<boolean> {
     if (!validUuid(c.penaltyId) || !["expired", "lifted", "reversed", "reduced"].includes(c.state) || !caseIdentifier(c.requestId)) trustFail("invalid_request"); const at = time(c.at);
+    // Only actorless maintenance may skip a contended or already-ended penalty.
+    if (options.skipLocked && (c.state !== "expired" || c.actor !== null)) trustFail("invalid_request");
     if (c.actor !== null) { actor({ userId: c.actor.userId, sessionId: c.actor.sessionId }); if (!validUuid(c.actor.stepUpProofId)) trustFail("invalid_request"); }
     const reason = c.reason === null ? null : normalizeTrustText(c.reason, 1, c.state === "reversed" || c.state === "reduced" ? TRUST_ENFORCEMENT_POLICY.decisionReasoningMax : TRUST_ENFORCEMENT_POLICY.actionReasonMax, { multiline: c.state === "reversed" || c.state === "reduced" });
-    const [candidate] = await tx.select({ userId: trustPenalties.subjectUserId }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1); if (!candidate) trustFail("not_available");
+    const [candidate] = await tx.select({ userId: trustPenalties.subjectUserId }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1);
+    if (!candidate) { if (options.skipLocked) return false; trustFail("not_available"); }
     await lockSubject(tx, candidate.userId);
-    const [row] = await tx.select().from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1).for("update"); if (!row) trustFail("not_available");
+    const [row] = await tx.select().from(trustPenalties).where(and(eq(trustPenalties.id, c.penaltyId),
+      options.skipLocked ? and(eq(trustPenalties.state, "active"), lte(trustPenalties.endsAt, at)) : undefined)).limit(1).for("update", options.skipLocked ? { skipLocked: true } : {});
+    if (!row) { if (options.skipLocked) return false; trustFail("not_available"); }
     if (row.state !== "active") trustFail("invalid_transition"); if (at < row.startsAt || row.version >= 2_147_483_647) trustFail("invalid_request");
     if (c.state === "expired" && (row.endsAt === null || row.endsAt > at)) trustFail("invalid_transition");
     const [ended] = await tx.update(trustPenalties).set({ state: c.state, endedAt: at, endReason: c.state, version: row.version + 1 }).where(and(eq(trustPenalties.id, row.id), eq(trustPenalties.version, row.version))).returning();
@@ -181,6 +186,7 @@ export function createPenaltyService(input: Input) {
     await recomputeStanding(tx, row.subjectUserId, { ...c, at });
     await insertOutboxEvent(tx, { eventType: "trust.penalty_ended.v1", eventVersion: 1, aggregateType: "trust_penalty", aggregateId: row.id,
       payload: { penaltyId: row.id, subjectUserId: row.subjectUserId, state: c.state }, occurredAt: at });
+    return true;
   }
   async function applyInternal(tx: PawketTransaction, c: ReturnType<typeof normalizeApply>, at: Date, replacesPenaltyId: string | null = null): Promise<{ penaltyId: string }> {
     const subject = await lockSubject(tx, c.subjectUserId); if (subject.isOwner) trustFail("not_authorized");

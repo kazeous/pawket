@@ -66,6 +66,16 @@ test("restore releases once, restores visibility, records an event and replays w
   await expect(f.db.update(schema.trustContentHides).set({ releasedAt: new Date(reportAt.getTime() + 1) }).where(eq(schema.trustContentHides.id, hideId))).rejects.toThrow();
   await expect(f.db.delete(schema.trustContentHides).where(eq(schema.trustContentHides.id, hideId))).rejects.toThrow();
 });
+test("maximum four-byte reasons hide, restore and close with idempotent replays", async () => {
+  const c = await setup(); const reason = "\u{1f600}".repeat(2_000);
+  const hide = { ...await c.command(), reason }; const result = await c.service.hide(hide);
+  expect(await c.service.hide({ ...hide, stepUpProofId: randomUUID(), requestId: randomUUID() })).toEqual(result);
+  const restore = { ...await c.command("owner.trust_restore"), hideId: result.hideId, reason };
+  await c.service.restore(restore); await c.service.restore({ ...restore, stepUpProofId: randomUUID(), requestId: randomUUID() });
+  const close = { ...await c.command("owner.trust_report_close"), resolution: "actioned" as const, reason };
+  await c.service.closeReportCase(close); await c.service.closeReportCase({ ...close, stepUpProofId: randomUUID(), requestId: randomUUID() });
+  expect(c.consume).toHaveBeenCalledTimes(3);
+});
 test("brief cannot be hidden; actioned requires an action and dismissed requires no recorded action", async () => {
   const brief = await setup("commission_brief"); await expect(brief.service.hide(await brief.command())).rejects.toMatchObject({ code: "invalid_request" });
   await expect(brief.service.closeReportCase({ ...await brief.command("owner.trust_report_close"), resolution: "actioned" })).rejects.toMatchObject({ code: "invalid_transition" });

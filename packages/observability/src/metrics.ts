@@ -472,7 +472,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "commission_resolution", "oidc_cleanup", "commission_files"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "commission_resolution", "trust_enforcement", "oidc_cleanup", "commission_files"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",

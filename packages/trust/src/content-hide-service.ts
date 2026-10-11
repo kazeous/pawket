@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, insertOutboxEvent, trustCases, trustReports, trustContentHides, trustPenalties,
   type PawketDatabase, type PawketTransaction } from "@pawket/database";
@@ -39,9 +39,10 @@ export function createContentHideService(input: Input) {
     try {
       return await input.db.transaction(async (tx) => {
         const startedAt = now();
+        const digest = createHash("sha256").update(JSON.stringify([action, c.caseId, c.expectedCaseVersion, c.reason, c.hideId ?? null, c.resolution ?? null])).digest("hex");
         const started = await beginIdempotentCommand(tx, { actorUserId: c.owner.userId, commandScope: `trust.content_${action}`,
           keyHash: hash("trust-content-command-key", c.idempotencyKey),
-          requestFingerprint: hash("trust-content-command", JSON.stringify([action, c.caseId, c.expectedCaseVersion, c.reason, c.hideId ?? null, c.resolution ?? null])),
+          requestFingerprint: hash("trust-content-command", digest),
           now: startedAt, expiresAt: new Date(startedAt.getTime() + 86_400_000) });
         if (started.kind === "replay") return started.resultReference;
         if (started.kind !== "acquired") trustFail("idempotency_conflict");

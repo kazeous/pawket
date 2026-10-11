@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { types as nodeTypes } from "node:util";
 import type { createResolutionMaintenance } from "@pawket/resolutions";
+import type { createEnforcementMaintenance } from "@pawket/trust";
 
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
@@ -104,6 +105,7 @@ import { commissionUuid } from "@pawket/orders";
 const POLL_INTERVAL_MS = 1_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 const REFUND_SCAN_INTERVAL_MS = 60_000;
+const TRUST_ENFORCEMENT_SCAN_INTERVAL_MS = 60_000;
 const SAFE_PAYMENTS_EVENTS = new Set([
   "payments.verification_deposit_challenge_issued.v1",
   "payments.verification_deposit_received.v1",
@@ -187,6 +189,8 @@ export type SePayWorkerService = {
   recoverDue(limit: number): Promise<number>;
 };
 export type ResolutionWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled"; createService(db: DatabaseResource["db"]): Pick<ReturnType<typeof createResolutionMaintenance>, "observeResolutionMode" | "scan" | "readRefundOverdueCount"> }>;
+export type TrustEnforcementWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled";
+  createService(db: DatabaseResource["db"], onPenaltyFailure: (penaltyId: string) => void): Pick<ReturnType<typeof createEnforcementMaintenance>, "runOnce"> }>;
 export type CommissionWorkerConfiguration = {
   resolution?: ResolutionWorkerConfiguration;
   paymentsMode?: TipPaymentsMode;
@@ -248,6 +252,7 @@ export type StartWorkerOptions = {
   tipPayments?: { mode: TipPaymentsMode; batchSize: number; scanIntervalMs: number; tips: TipExpiryPort };
   sepay?: SePayWorkerConfiguration;
   commissions?: CommissionWorkerConfiguration;
+  trustEnforcement?: TrustEnforcementWorkerConfiguration;
   concurrency: number;
   batchSize: number;
   leaseMs: number;
@@ -693,6 +698,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let sepayService: SePayWorkerService | undefined;
   let commissionService: CommissionOrderMaintenanceService | undefined;
   let resolutionService: ReturnType<ResolutionWorkerConfiguration["createService"]> | undefined;
+  let trustEnforcementService: ReturnType<TrustEnforcementWorkerConfiguration["createService"]> | undefined;
+  let trustEnforcementFailedCount = 0;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -747,6 +754,10 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     sepayService = options.sepay?.createService(database.db, workerId);
     commissionService = options.commissions?.createService(database.db);
     resolutionService = options.commissions?.resolution?.createService(database.db);
+    trustEnforcementService = options.trustEnforcement?.createService(database.db, (penaltyId) => {
+      trustEnforcementFailedCount += 1;
+      logger.error({ category: "trust_enforcement_penalty_failed", penaltyId }, "Trust penalty expiry failed");
+    });
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -816,6 +827,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let lastCommissionFulfillmentScanAt = 0;
   let currentCommissionResolutionScan: Promise<void> | undefined;
   let lastCommissionResolutionScanAt = 0;
+  let currentTrustEnforcementScan: Promise<void> | undefined;
+  let lastTrustEnforcementScanAt = 0;
   let commissionCompletionCursor: { reviewEndsAt: Date; id: string } | null = null;
   let currentCommissionFilesScan: Promise<void> | undefined;
   let currentScannerProbe: Promise<void> | undefined;
@@ -859,6 +872,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     options.healthState.commissionResolutionConfigured = options.commissions?.resolution !== undefined;
     options.healthState.commissionResolutionMaximumAgeMs = options.commissions?.resolution ? options.commissions.scanIntervalMs * 3 : null;
     options.healthState.lastCommissionResolutionSucceededAt = null;
+    options.healthState.trustEnforcementConfigured = Boolean(options.databaseUrl);
+    options.healthState.trustEnforcementMaximumAgeMs = options.databaseUrl ? 180_000 : null;
+    options.healthState.lastTrustEnforcementSucceededAt = null;
     options.healthState.tipExpiryConfigured = tipExpiryEnabled;
     options.healthState.tipExpiryMaximumAgeMs = tipExpiryEnabled ? options.tipPayments!.scanIntervalMs * 3 : null;
     options.healthState.sepayRecoveryConfigured = sepayRecoveryEnabled;
@@ -879,6 +895,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.commissionFiles) setWorkerScanHealthMetric({ scan: "commission_files", healthy: false });
   if (options.commissions) setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
   if (options.commissions?.resolution) setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: false });
+  if (options.databaseUrl) setWorkerScanHealthMetric({ scan: "trust_enforcement", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -1160,6 +1177,26 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  const scanTrustEnforcementIfDue = async (scanAt: number): Promise<void> => {
+    if (!running || !trustEnforcementService || scanAt - lastTrustEnforcementScanAt < TRUST_ENFORCEMENT_SCAN_INTERVAL_MS) return;
+    lastTrustEnforcementScanAt = scanAt;
+    trustEnforcementFailedCount = 0;
+    setWorkerScanHealthMetric({ scan: "trust_enforcement", healthy: false });
+    try {
+      // runOnce observes the mode before maintenance. P6 keeps expiry and cleanup running while disabled.
+      const result = await trustEnforcementService.runOnce();
+      if (!result || ![result.expired, result.purgedSessions, result.purgedRequests].every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 500)) throw new Error("Invalid trust enforcement scan result");
+      logger.info({ category: "trust_enforcement_completed", ...result, failedCount: trustEnforcementFailedCount }, "Trust enforcement scan completed");
+      if (trustEnforcementFailedCount > 0) return;
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "trust_enforcement", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "trust_enforcement", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastTrustEnforcementSucceededAt = succeededAt;
+    } catch {
+      logger.error({ category: "trust_enforcement_failed" }, "Trust enforcement scan failed");
+    }
+  };
+
   const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
     const config = options.commissionFiles; const queueResource = commissionFileQueue;
     if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
@@ -1322,6 +1359,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         currentCommissionFulfillmentScan = scanCommissionFulfillmentIfDue(Date.now()).finally(() => { currentCommissionFulfillmentScan = undefined; });
       }
       if (!currentCommissionResolutionScan) currentCommissionResolutionScan = scanCommissionResolutionIfDue(Date.now()).finally(() => { currentCommissionResolutionScan = undefined; });
+      if (!currentTrustEnforcementScan) currentTrustEnforcementScan = scanTrustEnforcementIfDue(Date.now()).finally(() => { currentTrustEnforcementScan = undefined; });
       if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
       if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
@@ -1374,6 +1412,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentCommissionScan;
       await currentCommissionFulfillmentScan;
       await currentCommissionResolutionScan;
+      await currentTrustEnforcementScan;
       await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());
