@@ -8,6 +8,7 @@ import {
   creatorApplicationDecisions,
   creatorApplicationRevisions,
   creatorApplications,
+  creatorPages,
   identityCreatorCapabilities,
   identityCreatorCapabilityEvents,
   identitySessions,
@@ -68,6 +69,7 @@ type ServiceInput = {
   commandFingerprintKey: Uint8Array;
   consumeStepUpProof: (tx: PawketTransaction, input: StepUpInput) => Promise<boolean>;
   catalogCapabilityTransition: CatalogCapabilityTransitionPort;
+  enforcementMode?: "disabled" | "enabled";
   authorizeCommand?: (tx: PawketTransaction, actor: { userId: string; sessionId: string }) => Promise<void>;
   idFactory?: () => string;
   now?: () => Date;
@@ -279,8 +281,17 @@ export function createCreatorReviewService(input: ServiceInput) {
           return { state: match[1]! };
         }
         policy(started.kind === "acquired", "idempotency_conflict");
+        // Match enforcement writers: creator fence before capability, publication and user locks.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${command.userId}`}, 0))`);
+        if (input.enforcementMode === "enabled" && command.action === "suspend") throw new CreatorReviewError("use_penalty");
         const [capability] = await tx.select().from(identityCreatorCapabilities).where(eq(identityCreatorCapabilities.userId, command.userId)).limit(1).for("update");
         policy(capability, "creator_capability_missing");
+        await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
+        if (input.enforcementMode === "enabled" && command.action === "reinstate") {
+          const [latest] = await tx.select({ penaltyId: identityCreatorCapabilityEvents.penaltyId }).from(identityCreatorCapabilityEvents)
+            .where(eq(identityCreatorCapabilityEvents.capabilityId, capability.id)).orderBy(desc(identityCreatorCapabilityEvents.version)).limit(1);
+          if (latest?.penaltyId !== null && latest?.penaltyId !== undefined) throw new CreatorReviewError("use_penalty");
+        }
         const expectedState = command.action === "suspend" ? "active" : "suspended";
         policy(capability.state === expectedState, "invalid_capability_state");
         await requireStepUp(input, tx, { proofId: command.stepUpProofId, sessionId: command.ownerSessionId, userId: command.ownerUserId, actionClass: `owner.creator_capability_${command.action}`, now: at });

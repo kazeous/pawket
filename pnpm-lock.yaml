@@ -493,9 +493,18 @@ importers:
       '@pawket/commission-files':
         specifier: workspace:*
         version: link:../commission-files
+      '@pawket/identity':
+        specifier: workspace:*
+        version: link:../identity
       '@pawket/orders':
         specifier: workspace:*
         version: link:../orders
+      '@pawket/payments':
+        specifier: workspace:*
+        version: link:../payments
+      '@pawket/resolutions':
+        specifier: workspace:*
+        version: link:../resolutions
       postgres:
         specifier: 3.4.9
         version: 3.4.9

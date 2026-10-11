@@ -29,6 +29,7 @@ import type {
   ModerationTargetSnapshot,
   ReportTarget,
 } from "./trust-ports.js";
+import type { TrustRestrictionPort } from "./penalty-port.js";
 
 export type ReportChallenge = Readonly<{
   token: string;
@@ -353,6 +354,7 @@ type ReportServiceFactoryInput = Readonly<{
   lookupHmacKey: Uint8Array;
   clock?: () => Date;
   nonce?: () => string;
+  restrictions?: TrustRestrictionPort;
 }>;
 
 function snapshotOwnMethod(value: unknown, name: string): { receiver: object; method: (...arguments_: never[]) => unknown } | null {
@@ -396,23 +398,27 @@ function snapshotCallable(value: unknown): ((...arguments_: never[]) => unknown)
 
 function snapshotFactory(input: unknown) {
   try {
-    const record = readExactOwnDataRecord(input, [
+    const baseShapes = [
       ["db", "catalogModeration", "lookupHmacKey"],
       ["db", "catalogModeration", "lookupHmacKey", "clock"],
       ["db", "catalogModeration", "lookupHmacKey", "nonce"],
       ["db", "catalogModeration", "lookupHmacKey", "clock", "nonce"],
-    ]);
+    ];
+    const record = readExactOwnDataRecord(input, [...baseShapes, ...baseShapes.map((keys) => [...keys, "restrictions"])]);
     if (!record) fail();
     const transaction = snapshotInheritedMethod(record.db, "transaction");
     const resolveVisible = snapshotOwnMethod(record.catalogModeration, "resolveVisibleReportTarget");
     const readRevision = snapshotOwnMethod(record.catalogModeration, "readRevisionTarget");
     const clock = record.clock === undefined ? (() => new Date()) : snapshotCallable(record.clock);
     const nonce = record.nonce === undefined ? (() => randomBytes(24).toString("base64url")) : snapshotCallable(record.nonce);
+    const restrictionCheck = record.restrictions === undefined ? null : snapshotOwnMethod(record.restrictions, "assertAllowed");
+    if (record.restrictions !== undefined && !restrictionCheck) fail();
     if (!transaction || !resolveVisible || !readRevision || !clock || !nonce) fail();
     return {
       key: snapshotKey(record.lookupHmacKey as Uint8Array),
       clock: clock as () => Date,
       nonce: nonce as () => string,
+      assertAllowed: (tx: PawketTransaction, userId: string, at: Date) => restrictionCheck === null ? Promise.resolve() : Reflect.apply(restrictionCheck.method, restrictionCheck.receiver, [tx, { userId, restriction: "reporting", at }]) as Promise<void>,
       runTransaction: <T>(callback: (tx: PawketTransaction) => Promise<T>) => Reflect.apply(
         transaction.method,
         transaction.receiver,
@@ -430,7 +436,7 @@ function snapshotFactory(input: unknown) {
 }
 
 export function createReportService(input: ReportServiceFactoryInput) {
-  const { key, clock, nonce, runTransaction, resolveVisible } = snapshotFactory(input);
+  const { key, clock, nonce, runTransaction, resolveVisible, assertAllowed } = snapshotFactory(input);
 
   return {
     async issueChallenge(command: Readonly<{ networkKeyHmac: string }>): Promise<ReportChallenge> {
@@ -451,6 +457,7 @@ export function createReportService(input: ReportServiceFactoryInput) {
           let rawSnapshot: unknown;
           try { rawSnapshot = await resolveVisible(tx, normalized.target); } catch { rawSnapshot = null; }
           const snapshot = exactModerationSnapshot(rawSnapshot, normalized.target);
+          if (normalized.requester.kind === "authenticated") await assertAllowed(tx, normalized.requester.actorUserId, safeNow(clock));
           await lockAbuseKeys(tx, normalized.requester, hashes.targetHash, hashes.revisionHash);
           if (normalized.requester.kind === "guest") {
             if (!normalized.challenge || !verifyReportChallengeToken(normalized.challenge.token, normalized.challenge.solution, now, key)) {
@@ -513,6 +520,7 @@ export function createReportService(input: ReportServiceFactoryInput) {
             occurredAt: now,
           });
           acceptedReportReference = reportReference;
+          if (normalized.requester.kind === "authenticated") await assertAllowed(tx, normalized.requester.actorUserId, safeNow(clock));
           return TRANSACTION_ACCEPTED;
         });
       } catch {

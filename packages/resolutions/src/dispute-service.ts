@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { commissionDisputes, commissionDisputeStatements, commissionProposals, insertOutboxEvent, type PawketTransaction } from "@pawket/database";
-import { commissionUuid, readCommissionRecord, type CommissionResolutionOrderFacts } from "@pawket/orders";
+import { commissionUuid, readCommissionRecord, type CommissionResolutionOrderFacts, type CommissionRestrictionPort } from "@pawket/orders";
 import { DISPUTE_REASONS, RULING_OUTCOMES, resolutionFail, type DisputeReason, type ResolutionActor, type ResolutionCommand, type RulingOutcome } from "./contracts.js";
 import type { createResolutionCommandKit } from "./command-kit.js";
 import { effectiveResolutionDeadline } from "./deadlines.js";
@@ -10,7 +10,7 @@ import type { ResolutionCasePort, ResolutionOrderPort, ResolutionRefundPort } fr
 
 type Dispute = typeof commissionDisputes.$inferSelect;
 type Kit = ReturnType<typeof createResolutionCommandKit>;
-type Input = Readonly<{ orders: ResolutionOrderPort; refunds: ResolutionRefundPort; cases: ResolutionCasePort; mode: "disabled" | "enabled" }>;
+type Input = Readonly<{ orders: ResolutionOrderPort; refunds: ResolutionRefundPort; cases: ResolutionCasePort; mode: "disabled" | "enabled"; restrictions?: CommissionRestrictionPort }>;
 type Open = ResolutionCommand & Readonly<{ orderId: string; expectedVersion: number; reason: DisputeReason; statement: string;
   requestedOutcome: Readonly<{ kind: RulingOutcome; refundAmountVnd: number }>; acknowledgeStaffReview: true }>;
 type Target = ResolutionCommand & Readonly<{ disputeId: string }>;
@@ -102,6 +102,13 @@ export function createDisputeService(kit: Kit, input: Input) {
       return openingResult(await kit.mutate(command, "open_dispute", [command.orderId, command.expectedVersion, command.reason, text, outcome.kind, outcome.refundAmountVnd, true],
         async (tx) => (await owned(tx, command.orderId, command.actor)).creatorUserId, async (tx) => {
           const order = await owned(tx, command.orderId, command.actor); const at = kit.now();
+          if (order.buyerUserId === command.actor.userId) {
+            try { await input.restrictions?.assertAllowed(tx, { userId: command.actor.userId, restriction: "dispute_opening", at }); }
+            catch (error) {
+              if (error instanceof Error && error.name === "TrustEnforcementError" && "code" in error && error.code === "restricted") resolutionFail("not_available");
+              throw error;
+            }
+          }
           // Terminal state takes priority over a stale version in the completion race.
           if (order.state !== "in_progress" && order.state !== "delivered") resolutionFail("invalid_transition");
           if (order.version !== command.expectedVersion) resolutionFail("version_conflict");
@@ -133,6 +140,14 @@ export function createDisputeService(kit: Kit, input: Input) {
           // The proposal window includes its final millisecond; the completion window does not.
           const triggerGuardUntil = trigger.endsAt ? new Date(trigger.endsAt.getTime() + (trigger.kind === "proposal_declined" ? 1 : 0)) : undefined;
           const guardUntil = due && (!triggerGuardUntil || due < triggerGuardUntil) ? due : triggerGuardUntil;
+          // The first SHARE lock may have waited for enforcement. Re-read with a fresh commit-time clock.
+          if (order.buyerUserId === command.actor.userId) {
+            try { await input.restrictions?.assertAllowed(tx, { userId: command.actor.userId, restriction: "dispute_opening", at: kit.now() }); }
+            catch (error) {
+              if (error instanceof Error && error.name === "TrustEnforcementError" && "code" in error && error.code === "restricted") resolutionFail("not_available");
+              throw error;
+            }
+          }
           return { resultReference: `${disputeId}:${opened.caseId}`, at, guardUntil };
         }));
     },

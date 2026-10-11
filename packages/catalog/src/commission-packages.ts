@@ -9,7 +9,7 @@ import {
   COMMISSION_POLICY, CommissionError, commissionFail, commissionIdentifier, commissionIdempotencyKey, commissionInteger,
   commissionCommandFingerprint,
   commissionText, commissionTime, commissionUuid, lockCommissionCreator, noCommissionIntakeFence, normalizeCommissionTerms, readCommissionRecord,
-  requireCommissionPolicy, type CommissionActor, type CommissionPackageDraft, type CommissionPolicyReadPort,
+  requireCommissionPolicy, type CommissionActor, type CommissionPackageDraft, type CommissionPolicyReadPort, type CommissionRestrictionPort,
 } from "@pawket/orders";
 import { DISCIPLINES } from "./catalog-policy.js";
 import type { CommissionIntakeFencePort, CommissionPackageHoldPort } from "./catalog-ports.js";
@@ -26,6 +26,7 @@ type Input = Readonly<{
   policy: CommissionPolicyReadPort;
   intakeFence?: CommissionIntakeFencePort;
   contentHides?: CommissionPackageHoldPort;
+  restrictions?: CommissionRestrictionPort;
   authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   receivingAccount: { getCurrentTipReceivingAccount(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<{ accountVersionId: string } | null> };
@@ -218,6 +219,12 @@ export function createCommissionPackageService(input: Input) {
       const [settings] = await tx.select().from(creatorCommissionSettings).where(eq(creatorCommissionSettings.creatorUserId, row.creatorUserId)).limit(1);
       const creator = await visible(tx, row.pageId, row.creatorUserId, revision.showcaseId);
       if (!settings?.enabled || !creator) commissionFail("not_available");
+      // Take the user SHARE lock after the creator fence and publication/capability locks.
+      try { await input.restrictions?.assertAllowed(tx, { userId: row.creatorUserId, restriction: "commission_intake", at: now() }); }
+      catch (error) {
+        if (error instanceof Error && error.name === "TrustEnforcementError" && "code" in error && error.code === "restricted") commissionFail("not_available");
+        throw error;
+      }
       const receiving = command.requirePayment === false ? null : await input.receivingAccount.getCurrentTipReceivingAccount(tx, row.creatorUserId, command.at);
       if (command.requirePayment !== false && (!receiving || !commissionUuid(receiving.accountVersionId))) commissionFail("not_available");
       return { package: row, revision, creator, accountVersionId: receiving?.accountVersionId ?? null, capacityLimit: settings.capacityLimit, policy: policy! };

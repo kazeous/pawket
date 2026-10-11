@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { createCommissionPackageService } from "@pawket/catalog";
-import { commissionPolicyChecksum, createCommissionOrderService, createCommissionPolicyReadPort, type CommissionIntakeFencePort, type CommissionRoute } from "@pawket/orders";
+import { commissionPolicyChecksum, createCommissionOrderService, createCommissionPolicyReadPort, type CommissionIntakeFencePort, type CommissionRoute, type CommissionRestrictionPort } from "@pawket/orders";
 import { createCommissionPaymentIntentPort, createCreatorCommissionPaymentService, createTipReceivingAccountEligibilityPort } from "@pawket/payments";
 import { commandIds, createSePayIntegrationFixture, fixtureHash, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 
 const at = new Date("2026-09-26T04:00:00Z");
-type SetupOptions = { revisionAllowance?: number; reviewWindowDays?: number; intakeFence?: CommissionIntakeFencePort };
+type SetupOptions = { revisionAllowance?: number; reviewWindowDays?: number; intakeFence?: CommissionIntakeFencePort; restrictions?: CommissionRestrictionPort };
 export function createCommissionOrderTestFixture(label: string) {
   const parsed = new URL(process.env.TEST_DATABASE_URL ?? "invalid:");
   if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || !/test|ci/iu.test(parsed.pathname)) throw new Error("Commission workflow tests require a dedicated local test database");
@@ -37,6 +37,7 @@ export function createCommissionOrderTestFixture(label: string) {
       ? { sessionExpiresAt: new Date(time.getTime() + 60_000) } : null,
     lockSettlementParticipants: async (_tx: unknown, command: { buyerUserId: string; creatorUserId: string }) => gates.eligible && users.has(command.buyerUserId) && command.creatorUserId === creator.actor.userId };
     const catalog = createCommissionPackageService({ ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", publishingMode: "general_audience", policy, intakeFence: options.intakeFence,
+      restrictions: options.restrictions,
       identity: { lockCreator: async (tx, actor, time) => actor.userId === creator.actor.userId ? identity.getTipSessionAssurance(tx, actor, time) : null },
       receivingAccount: createTipReceivingAccountEligibilityPort({ ...creator.common, paymentsMode: "manual_only" }),
       visibility: { resolveVisibleReportTarget: async (_tx, target) => gates.visible ? { target, pageId, creatorUserId: creator.actor.userId, canonicalHandle: handle,
@@ -51,6 +52,7 @@ export function createCommissionOrderTestFixture(label: string) {
     const payments = createCommissionPaymentIntentPort({ ...creator.common, paymentsMode: "manual_only" });
     const input: Parameters<typeof createCommissionOrderService>[0] = { ...creator.common, applicationRevision: "synthetic-i6", intakeMode: "enabled", paymentsMode: "manual_only", identity, catalog, payments, policy,
       fulfillmentMode: "disabled",
+      restrictions: options.restrictions,
       trust: { lockCommissionPage: async () => true } };
     const service = createCommissionOrderService(input);
     const request = (actor = buyerActor) => ({ actor, packageId, revisionId: pkg!.publishedRevisionId!, policyRevisionId: policyId, acceptTerms: route !== "custom_quote",

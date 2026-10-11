@@ -6,6 +6,9 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsup", "typecheck": "tsc --noEmit" },
   "devDependencies": {
+    "@pawket/identity": "workspace:*",
+    "@pawket/payments": "workspace:*",
+    "@pawket/resolutions": "workspace:*",
     "postgres": "3.4.9",
     "@pawket/orders": "workspace:*",
     "@pawket/commission-files": "workspace:*"

@@ -3,6 +3,10 @@ import type { CommissionActor } from "./contracts.js";
 import type { CommissionPolicySnapshot } from "./policy-repository.js";
 
 export type CommissionSessionProof = Readonly<{ sessionExpiresAt: Date }>;
+/** Trust implements this structural port; the SHARE lock is retained until command commit. */
+export type CommissionRestrictionPort = Readonly<{
+  assertAllowed(tx: PawketTransaction, command: { userId: string; restriction: "commission_intake" | "commission_buying" | "dispute_opening" | "reporting"; at: Date }): Promise<void>;
+}>;
 export type CommissionIdentityPort = Readonly<{
   getTipSessionAssurance(tx: PawketTransaction, actor: CommissionActor, at: Date): Promise<CommissionSessionProof | null>;
   lockSettlementParticipants(tx: PawketTransaction, command: { creatorUserId: string; buyerUserId: string; at: Date }): Promise<boolean>;

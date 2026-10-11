@@ -29,6 +29,7 @@ import {
   createIdentityTipAssurancePort,
   createIdentityCommissionAssurancePort,
   createCreatorStandingPort,
+  createIdentityEnforcementPort,
   createIdentitySePayAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
@@ -65,7 +66,7 @@ import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, 
 import { createCommissionOrderService, createBriefReportTargetPort, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
 import { createThreadReportTargetPort, createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
-  createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
+  createOwnerResolutionService, createRemovalFreezePort, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
   createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort, effectiveResolutionDeadline } from "@pawket/resolutions";
 import { createTipAccessPort, createTipHttpHandlers, createTipService, createTipLifecyclePort, createCreatorTipHttpHandlers, createCreatorTipSettingsHttpHandlers } from "@pawket/tips";
 import {
@@ -75,7 +76,7 @@ import {
   createCommissionTrustPort,
   createTrustCasePort,
   createTrustCaseService,
-  createContentHideReadPort, createContentHideService,
+  createContentHideReadPort, createContentHideService, createPenaltyService,
   createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
 
@@ -277,9 +278,12 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     visibility: visibilityReadPort,
     publishingMode: env.CREATOR_PUBLISHING_MODE,
   });
+  const restrictions = createTrustRestrictionPort({ mode: env.TRUST_ENFORCEMENT_MODE });
+  const trustPolicies = createTrustPolicyService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof });
   const reportService = createReportService({
     db: database.db,
     catalogModeration: publicCatalog,
+    restrictions,
     lookupHmacKey,
   });
   const triageService = createTriageService({
@@ -296,6 +300,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     consumeStepUpProof,
     authorizeCommand,
     catalogCapabilityTransition: createCatalogCapabilityTransitionPort(catalogService),
+    enforcementMode: env.TRUST_ENFORCEMENT_MODE,
   });
   const receivingAccounts = createReceivingAccountService({
     db: database.db,
@@ -466,7 +471,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const intakeFence = createCommissionIntakeFencePort({ mode: env.COMMISSION_RESOLUTION_MODE, refunds });
   const contentHides = createContentHideReadPort();
   const commissionCatalog = createCommissionPackageService({ ...commissionCommon, identity: commissionIdentity, policy: commissionPolicy,
-    intakeFence, contentHides,
+    intakeFence, contentHides, restrictions,
     visibility: publicCatalog, publishingMode: env.CREATOR_PUBLISHING_MODE,
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.COMMISSION_PAYMENTS_MODE }) });
   const commissionFileStorage = env.COMMISSION_FILES_S3_ENDPOINT && env.COMMISSION_FILES_S3_REGION && env.COMMISSION_FILES_S3_ACCESS_KEY_ID && env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY &&
@@ -476,7 +481,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
         forcePathStyle: env.COMMISSION_FILES_S3_FORCE_PATH_STYLE })
     : unavailableCommissionFileStorage();
   const commissions = createCommissionOrderService({ ...commissionCommon, identity: commissionIdentity, trust: createCommissionTrustPort(),
-    holds: createResolutionHoldPort(),
+    holds: createResolutionHoldPort(), restrictions,
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
     files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }), thread: createCommissionThreadPort({ keyring, mode: env.COMMISSION_FILES_MODE, contentHides }) });
@@ -488,7 +493,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const resolutionKit = createResolutionCommandKit({ db: database.db, keyring, lookupHmacKey, session: commissionIdentity, authorizeCommand });
   const resolutionCommon = { orders: resolutionOrders, refunds, payments: resolutionPayments, cases, mode: env.COMMISSION_RESOLUTION_MODE };
   const proposals = createProposalService(resolutionKit, resolutionCommon);
-  const disputes = createDisputeService(resolutionKit, resolutionCommon);
+  const disputes = createDisputeService(resolutionKit, { ...resolutionCommon, restrictions });
   const lateClaims = createLateClaimService(resolutionKit, { ...resolutionCommon, files: resolutionFiles });
   const suspension = createSuspensionService(resolutionKit, { ...resolutionCommon, standing });
   const commissionRefunds = createCommissionRefundService({ db: database.db, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
@@ -531,6 +536,12 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     deadlines: createResolutionCaseDeadlinePort({ refunds }),
     evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides }) });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
+    penalties: createPenaltyService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
+      consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator }, policies: trustPolicies,
+      identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: (tx, command) => {
+        if (command.actorUserId === null || command.actorSessionId === null) resolutionFail("dependency_unavailable");
+        return catalogService.clearPublishedHeadForSuspension(tx, { ...command, actorUserId: command.actorUserId, actorSessionId: command.actorSessionId });
+      } }), freeze: createRemovalFreezePort(resolutionCommon) }),
     contentHides: createContentHideService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
       consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator } }),
     issueOwnerStepUpProof: commandContext.issueOwnerProof,
@@ -643,11 +654,10 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const packageReportTargets = createPackageReportTargetPort({ intakeMode: env.COMMISSION_INTAKE_MODE,
     publishingMode: env.CREATOR_PUBLISHING_MODE, visibility: publicCatalog });
   const briefReportTargets = createBriefReportTargetPort(); const threadReportTargets = createThreadReportTargetPort();
-  const trustPolicies = createTrustPolicyService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof });
   const privateReports = createPrivateReportService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, challengeKey: lookupHmacKey,
     targets: { resolve: (tx, target, reporter) => target.kind === "commission_package" ? packageReportTargets.resolve(tx, target, reporter)
       : target.kind === "commission_brief" ? briefReportTargets.resolve(tx, target, reporter) : threadReportTargets.resolve(tx, target, reporter) },
-    restrictions: createTrustRestrictionPort({ mode: env.TRUST_ENFORCEMENT_MODE }), policies: trustPolicies, authorizeCommand });
+    restrictions, policies: trustPolicies, authorizeCommand });
   const trustEnforcementHandlers = createTrustEnforcementHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, reports: privateReports });
   const trustHandlers = createTrustHttpHandlers({
     appBaseUrl: env.APP_BASE_URL,

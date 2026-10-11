@@ -4,7 +4,7 @@ import { CommissionFileError } from "@pawket/commission-files";
 import { CommissionError, commissionIdentifier, commissionIdempotencyKey, type CommissionActor } from "@pawket/orders";
 import { CommissionRefundError, type CommissionRefundPort } from "@pawket/payments";
 import { ResolutionError, RULING_OUTCOMES, type OwnerResolutionService, type LateClaimService, type SuspensionService } from "@pawket/resolutions";
-import { TrustCaseError, TrustEnforcementError, type ContentHideService, type TrustCaseKind, type TrustCaseService } from "@pawket/trust";
+import { TrustCaseError, TrustEnforcementError, TRUST_PENALTY_KINDS, TRUST_PENALTY_REASONS, TRUST_PENALTY_TARGETS, TRUST_RESTRICTIONS, type PenaltyService, type ContentHideService, type TrustCaseKind, type TrustCaseService } from "@pawket/trust";
 import { CommissionHttpFailure, commissionJson, readCommissionBody } from "./commission-http.js";
 
 const uuid = z.uuid(); const amount = z.number().int().min(0).max(50_000_000); const text = z.string().max(20_000);
@@ -13,6 +13,8 @@ const evidence = z.strictObject({ section: z.enum(["order_summary", "thread_page
   .refine((value) => value.cursor === undefined || value.section === "thread_page");
 const file = z.strictObject({ disposition: z.enum(["attachment", "inline"]) });
 const actionBody = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("penalty"), subjectUserId: z.string().max(200), kind: z.enum(TRUST_PENALTY_KINDS), restriction: z.enum(TRUST_RESTRICTIONS).optional(), target: z.enum(TRUST_PENALTY_TARGETS).optional(),
+    endsAt: z.iso.datetime({ offset: true }).nullable().optional(), reasonCategory: z.enum(TRUST_PENALTY_REASONS), explanation: text, internalNote: text.optional(), freezeFulfilment: z.boolean().optional() }),
   z.strictObject({ action: z.literal("hide"), reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
   z.strictObject({ action: z.literal("restore"), hideId: uuid, reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
   z.strictObject({ action: z.literal("close_report"), resolution: z.enum(["dismissed", "actioned"]), reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
@@ -35,6 +37,7 @@ type Input = Readonly<{
   issueOwnerStepUpProof(command: CommissionActor & { actionClass: string; now: Date }): Promise<{ id: string }>;
   cases: TrustCaseService; owner: OwnerResolutionService; lateClaims: LateClaimService; suspension: SuspensionService;
   contentHides?: ContentHideService;
+  penalties?: PenaltyService;
   // Runtime binds the database; the adapter never reads private domain tables.
   refunds: Readonly<{ readAging(command: Parameters<Aging>[1]): ReturnType<Aging> }>;
   standing: Readonly<{ readForOrder(orderId: string): Promise<"active" | "suspended" | "none"> }>;
@@ -117,6 +120,12 @@ export function createCaseHttpHandlers(input: Input) {
     action: (request: Request, caseId: string) => run(request, "POST", async (owner) => {
       noQuery(request); id(caseId); const idempotencyKey = key(request); const body = await readCommissionBody(request, actionBody);
       const detail = await input.cases.getCase(caseId); const { action } = body;
+      if (body.action === "penalty") {
+        if (!input.penalties) throw new TrustCaseError("not_available");
+        return input.penalties.apply({ subjectUserId: body.subjectUserId, kind: body.kind, reasonCategory: body.reasonCategory, explanation: body.explanation,
+          restriction: body.restriction, target: body.target, endsAt: body.endsAt, internalNote: body.internalNote, freezeFulfilment: body.freezeFulfilment,
+          source: { caseId }, owner, idempotencyKey, stepUpProofId: await proof(owner, "owner.trust_penalty_apply"), requestId: randomUUID() });
+      }
       if (body.action === "hide" || body.action === "restore" || body.action === "close_report") {
         if (detail.kind !== "report" || !input.contentHides) throw new TrustCaseError("not_available");
         const actionClass = body.action === "close_report" ? "owner.trust_report_close" : `owner.trust_${body.action}`;
@@ -141,6 +150,18 @@ export function createCaseHttpHandlers(input: Input) {
       if (body.action === "rule_claim") return input.owner.ruleLateClaim({ ...base, claimId: detail.sourceId, outcome: body.outcome, reason: body.reason,
         ...(body.amountVnd === undefined ? {} : { amountVnd: body.amountVnd }) });
       return input.owner.resolveRefundCase({ ...base, caseId, ...body });
+    }),
+    penalties: (request: Request) => run(request, "GET", async () => {
+      if (!input.penalties) throw new TrustCaseError("not_available");
+      const values = query(request, ["subjectUserId", "kind", "limit"]);
+      if (values.subjectUserId !== undefined && !commissionIdentifier(values.subjectUserId) || values.kind !== undefined && !(TRUST_PENALTY_KINDS as readonly string[]).includes(values.kind)) invalid();
+      return { penalties: await input.penalties.listActive({ ...(values.subjectUserId === undefined ? {} : { subjectUserId: values.subjectUserId }),
+        ...(values.kind === undefined ? {} : { kind: values.kind as typeof TRUST_PENALTY_KINDS[number] }), ...(values.limit === undefined ? {} : { limit: limit(values.limit) }) }) };
+    }),
+    liftPenalty: (request: Request, penaltyId: string) => run(request, "POST", async (owner) => {
+      noQuery(request); id(penaltyId); if (!input.penalties) throw new TrustCaseError("not_available");
+      const idempotencyKey = key(request); const body = await readCommissionBody(request, z.strictObject({ reason: text }));
+      await input.penalties.lift({ ...body, penaltyId, owner, idempotencyKey, stepUpProofId: await proof(owner, "owner.trust_penalty_lift"), requestId: randomUUID() }); return {};
     }),
     freeze: (request: Request, creatorUserId: string) => run(request, "POST", async (owner) => {
       noQuery(request); if (!commissionIdentifier(creatorUserId)) invalid(); const idempotencyKey = key(request); const body = await readCommissionBody(request, freezeBody);

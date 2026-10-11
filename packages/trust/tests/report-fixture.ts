@@ -28,22 +28,24 @@ export const reportAt = new Date(fixtureAt.getTime() + 3_000);
 async function party(fixture: ReturnType<typeof createCommissionFileFixture>) {
   return { userId: await fixture.person(), sessionId: `s-${randomUUID()}` };
 }
-async function paidOrder(fixture: ReturnType<typeof createCommissionFileFixture>) {
+async function paidOrder(fixture: ReturnType<typeof createCommissionFileFixture>, existingCreator?: { userId: string; sessionId: string }) {
   // Same normal-trigger graph as commission-threads-schema.integration.test.ts, with real payment rows.
-  const creator = await party(fixture); const buyer = await party(fixture); const creatorUserId = creator.userId; const buyerUserId = buyer.userId;
-  const accountVersionId = randomUUID(); const packageId = randomUUID(); const packageRevisionId = randomUUID(); const pageId = randomUUID();
+  const creator = existingCreator ?? await party(fixture); const buyer = await party(fixture); const creatorUserId = creator.userId; const buyerUserId = buyer.userId;
+  const [existingPage] = await fixture.db.select().from(schema.creatorPages).where(eq(schema.creatorPages.userId, creatorUserId));
+  const [existingAccount] = existingCreator ? await fixture.db.select().from(schema.paymentsReceivingAccountOnboarding).where(eq(schema.paymentsReceivingAccountOnboarding.applicantUserId, creatorUserId)) : [];
+  const accountVersionId = existingAccount?.id ?? randomUUID(); const packageId = randomUUID(); const packageRevisionId = randomUUID(); const pageId = existingPage?.id ?? randomUUID();
   const orderId = randomUUID(); const intentId = randomUUID(); const at = fixtureAt; const confirmedAt = new Date(at.getTime() + 1_000);
   const expiresAt = new Date(at.getTime() + 86_400_000);
   const envelope = <R extends string, F extends string>(recordType: R, recordId: string, fieldName: F) =>
     encryptSensitiveField({ keyring: fixtureKeyring, plaintext: "Synthetic fixture", binding: { recordType, recordId, fieldName } });
   const hash = () => createLookupHmac({ key: fixtureLookupKey, context: "synthetic-file-service", value: randomUUID() });
   const referenceHash = hash();
-  await fixture.db.insert(schema.paymentsReceivingAccountOnboarding).values({ id: accountVersionId, onboardingId: randomUUID(), applicantUserId: creatorUserId, version: 1,
+  if (!existingAccount) await fixture.db.insert(schema.paymentsReceivingAccountOnboarding).values({ id: accountVersionId, onboardingId: randomUUID(), applicantUserId: creatorUserId, version: 1,
     bankBin: "970436", bankName: "Synthetic bank", maskedSuffix: "\u2022\u2022\u2022\u2022 0000", accountFingerprint: hash(),
     accountNumberEnvelope: envelope("payments_receiving_account", accountVersionId, "account_number"), accountHolderLabelEnvelope: envelope("payments_receiving_account", accountVersionId, "account_holder_label"),
     proofState: "verified", proofVerifiedAt: at, createdAt: at, updatedAt: at });
-  await fixture.db.insert(schema.creatorPages).values({ id: pageId, userId: creatorUserId, initializedFromRevisionId: randomUUID(), createdAt: at, updatedAt: at });
-  await fixture.db.insert(schema.creatorCommissionSettings).values({ creatorUserId, enabled: true, capacityLimit: 1, createdAt: at, updatedAt: at });
+  if (!existingPage) await fixture.db.insert(schema.creatorPages).values({ id: pageId, userId: creatorUserId, initializedFromRevisionId: randomUUID(), createdAt: at, updatedAt: at });
+  await fixture.db.insert(schema.creatorCommissionSettings).values({ creatorUserId, enabled: true, capacityLimit: 1, createdAt: at, updatedAt: at }).onConflictDoNothing();
   const terms = { amountVnd: 50_000, turnaroundDays: 7, revisionAllowance: 2, reviewWindowDays: 7,
     scope: "Portrait", deliverables: "Artwork", usageRights: "Personal", artistTerms: "Synthetic terms", policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID };
   const draft = { title: "Portrait", description: "Synthetic package", discipline: "illustration", route: "fixed_immediate" as const, briefInstructions: "Describe", terms, showcaseId: null };
@@ -83,7 +85,7 @@ async function paidOrder(fixture: ReturnType<typeof createCommissionFileFixture>
 
 export function createReportFixture(label: string) {
   const fixture = createCommissionFileFixture(`report_${label}`);
-  return { ...fixture, paidOrder: () => paidOrder(fixture),
+  return { ...fixture, paidOrder: (creator?: { userId: string; sessionId: string }) => paidOrder(fixture, creator),
     async message(orderId: string, authorUserId: string) {
       const id = randomUUID();
       await fixture.db.transaction(async (tx) => {

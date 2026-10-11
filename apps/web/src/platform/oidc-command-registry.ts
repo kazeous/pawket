@@ -93,12 +93,15 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     const id = match[1]!; const fileId = match[2]!; return make("owner.case_file", true, "Xem tệp của vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.file(q, id, fileId));
   }
   if ((match = new RegExp(`^/api/v1/admin/cases/${uuid}/actions$`, "u").exec(path))) {
-    const id = match[1]!; const decision = action(payload, ["rule", "correct", "question", "extend", "accept_evidence", "require_resend", "waive", "extend_deadline", "rule_claim", "hide", "restore", "close_report"]);
-    const actionClass = decision === "hide" || decision === "restore" ? `owner.trust_${decision}` : decision === "close_report" ? "owner.trust_report_close" : `owner.case_${decision}`;
+    const id = match[1]!; const decision = action(payload, ["rule", "correct", "question", "extend", "accept_evidence", "require_resend", "waive", "extend_deadline", "rule_claim", "hide", "restore", "close_report", "penalty"]);
+    const actionClass = decision === "penalty" ? "owner.trust_penalty_apply" : decision === "hide" || decision === "restore" ? `owner.trust_${decision}` : decision === "close_report" ? "owner.trust_report_close" : `owner.case_${decision}`;
     return decision ? make(actionClass, true, "Xử lý vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.action(q, id)) : null;
   }
   if ((match = /^\/api\/v1\/admin\/creators\/([A-Za-z0-9][A-Za-z0-9._:-]{0,199})\/freeze$/u.exec(path))) {
     const id = match[1]!; return make("owner.commission_fulfillment_freeze", true, "Dừng thực hiện commission", "/admin/cases", (r, q) => r.caseHandlers.freeze(q, id));
+  }
+  if ((match = new RegExp(`^/api/v1/admin/penalties/${uuid}/lift$`, "u").exec(path))) {
+    const id = match[1]!; return make("owner.trust_penalty_lift", true, "Gỡ hình phạt", "/admin/penalties", (r, q) => r.caseHandlers.liftPenalty(q, id));
   }
   if ((match = new RegExp(`^/api/v1/admin/creator-applications/${uuid}/(detail|claim|decision|deposit/challenge)$`, "u").exec(path))) {
     const id = match[1]!; const operation = match[2]!; const back = "/admin/creator-applications";

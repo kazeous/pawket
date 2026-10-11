@@ -17,7 +17,7 @@ export type PrivateReportCommand = Readonly<{
   target: TrustReportTarget; reason: PublicReportReason; detail: string | null; idempotencyKey: string; requestId: string;
 }>;
 type Input = Readonly<{ db: PawketDatabase; mode: TrustEnforcementMode; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
-  challengeKey: Uint8Array; targets: TrustReportTargetPort; restrictions: TrustRestrictionPort; policies: Pick<TrustPolicyService, "readCurrentIds">;
+  challengeKey: Uint8Array; targets: TrustReportTargetPort; restrictions?: TrustRestrictionPort; policies: Pick<TrustPolicyService, "readCurrentIds">;
   authorizeCommand?(tx: PawketTransaction, actor: { userId: string; sessionId: string }): Promise<void>;
   now?(): Date; idFactory?(): string }>;
 const CONTEXT = "trust-private-report-challenge";
@@ -122,7 +122,7 @@ export function createPrivateReportService(input: Input) {
           if (counts.requester >= limit) return reject("rate_limited");
           if (rawTarget === null) return reject("not_available");
           const resolved = exactResolved(rawTarget, c.target, requester.kind === "authenticated" ? requester.actor.userId : null);
-          if (requester.kind === "authenticated") await input.restrictions.assertAllowed(tx, { userId: requester.actor.userId, restriction: "reporting", at });
+          if (requester.kind === "authenticated") await input.restrictions?.assertAllowed(tx, { userId: requester.actor.userId, restriction: "reporting", at });
           if (requester.kind === "authenticated") {
             const [duplicate] = await tx.select({ id: trustReports.id }).from(trustReports).where(and(eq(trustReports.targetKind, resolved.kind), eq(trustReports.targetId, resolved.targetId), eq(trustReports.reporterUserId, requester.actor.userId))).limit(1);
             if (duplicate) return reject("duplicate");
@@ -153,7 +153,7 @@ export function createPrivateReportService(input: Input) {
           if (requester.kind === "authenticated") {
             await input.authorizeCommand?.(tx, requester.actor);
             const commitAt = now(); if (commitAt < completedAt) trustFail("dependency_unavailable");
-            await input.restrictions.assertAllowed(tx, { userId: requester.actor.userId, restriction: "reporting", at: commitAt });
+            await input.restrictions?.assertAllowed(tx, { userId: requester.actor.userId, restriction: "reporting", at: commitAt });
           }
           return { value: accepted({ reportReference, caseId }) };
         });

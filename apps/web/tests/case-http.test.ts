@@ -33,6 +33,28 @@ const routes = (s: ReturnType<typeof setup>) => [
   () => s.http.agingRefunds(request("refunds/aging")),
 ];
 describe("owner case HTTP", () => {
+  test.each(["dispute", "report", "late_payment", "refund_overdue", "refund_not_received", "appeal"])("penalty dispatch accepts %s cases and binds source/proof server-side", async (kind) => {
+    const s = setup(); s.cases.getCase.mockResolvedValue({ ...await s.cases.getCase(), kind, orderId: null });
+    const apply = vi.fn(async () => ({ penaltyId: fileId }));
+    const http = createCaseHttpHandlers({ ...s.input, penalties: { apply } as unknown as NonNullable<Input["penalties"]> });
+    expect((await http.action(request(`cases/${caseId}/actions`, "POST", { action: "penalty", subjectUserId: "subject", kind: "warning", reasonCategory: "other", explanation: "Private explanation" }), caseId)).status).toBe(200);
+    expect(apply).toHaveBeenCalledWith(expect.objectContaining({ owner, source: { caseId }, subjectUserId: "subject", kind: "warning" }));
+    expect(s.input.issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass: "owner.trust_penalty_apply" }));
+  });
+  test("penalty list and lift require owner authorization, reject forged proofs, and register the exact fresh action", async () => {
+    const s = setup(); const lift = vi.fn(async () => undefined); const listActive = vi.fn(async () => []);
+    const http = createCaseHttpHandlers({ ...s.input, penalties: { lift, listActive } as unknown as NonNullable<Input["penalties"]> });
+    expect((await http.penalties(request("penalties?limit=20"))).status).toBe(200); expect(listActive).toHaveBeenCalledWith({ limit: 20 });
+    expect((await http.liftPenalty(request(`penalties/${fileId}/lift`, "POST", { reason: "Lift" }), fileId)).status).toBe(200);
+    expect(lift).toHaveBeenCalledWith(expect.objectContaining({ owner, penaltyId: fileId, reason: "Lift" }));
+    expect(s.input.issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass: "owner.trust_penalty_lift" }));
+    expect((await http.liftPenalty(request(`penalties/${fileId}/lift`, "POST", { reason: "Lift", stepUpProofId: "forged" }), fileId)).status).toBe(400);
+    vi.mocked(s.input.authorizeOwner).mockResolvedValue("forbidden"); expect((await http.penalties(request("penalties"))).status).toBe(403);
+    expect((await http.liftPenalty(request(`penalties/${fileId}/lift`, "POST", { reason: "Lift" }), fileId)).status).toBe(403);
+    const payload = { method: "POST" as const, body: "{}", idempotencyKey: null, ifMatch: null, returnPath: "/" };
+    expect(oidcCommand({ ...payload, path: `/api/v1/admin/penalties/${fileId}/lift` })?.policy).toEqual({ actionClass: "owner.trust_penalty_lift", fresh: true });
+    expect(oidcCommand({ ...payload, body: JSON.stringify({ action: "penalty" }), path: `/api/v1/admin/cases/${caseId}/actions` })?.policy).toEqual({ actionClass: "owner.trust_penalty_apply", fresh: true });
+  });
   test.each([
     ["hide", "owner.trust_hide", { reason: "Private reason" }, "hide"],
     ["restore", "owner.trust_restore", { hideId: fileId, reason: "Private reason" }, "restore"],
