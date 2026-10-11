@@ -42,3 +42,5 @@ export { TRUST_ENFORCEMENT_POLICY, TRUST_RESTRICTIONS, TRUST_PENALTY_KINDS, TRUS
 export { effectiveEnforcementDeadline, recordEnforcementModeTransition } from "./enforcement-deadlines.js";
 export { createTrustPolicyService, type TrustPolicyService, type TrustPolicySnapshot, type TrustPolicyPublishCommand } from "./trust-policy-service.js";
 export { createTrustRestrictionPort, activePenalties, type TrustRestrictionPort } from "./penalty-port.js";
+export { createContentHideReadPort, type ContentHideReadPort, type ContentHideKind } from "./content-hide-port.js";
+export { createContentHideService, type ContentHideService, type OwnerCase } from "./content-hide-service.js";

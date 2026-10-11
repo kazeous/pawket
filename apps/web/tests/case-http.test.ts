@@ -33,6 +33,26 @@ const routes = (s: ReturnType<typeof setup>) => [
   () => s.http.agingRefunds(request("refunds/aging")),
 ];
 describe("owner case HTTP", () => {
+  test.each([
+    ["hide", "owner.trust_hide", { reason: "Private reason" }, "hide"],
+    ["restore", "owner.trust_restore", { hideId: fileId, reason: "Private reason" }, "restore"],
+    ["close_report", "owner.trust_report_close", { resolution: "dismissed", reason: "Private reason" }, "closeReportCase"],
+  ] as const)("orderless report %s is dispatched with its own fresh action and expected version", async (action, actionClass, fields, method) => {
+    const s = setup(); const detail = { ...await s.cases.getCase(), kind: "report", sourceType: "commission_package", orderId: null, version: 2 };
+    s.cases.getCase.mockResolvedValue(detail);
+    const contentHides = { hide: vi.fn(async () => ({ hideId: fileId })), restore: vi.fn(async () => undefined), closeReportCase: vi.fn(async () => undefined) };
+    const http = createCaseHttpHandlers({ ...s.input, contentHides });
+    expect((await http.detail(request(`cases/${caseId}`), caseId)).status).toBe(200);
+    expect(s.input.orderMetadata.readForOrder).not.toHaveBeenCalled();
+    const response = await http.action(request(`cases/${caseId}/actions`, "POST", { action, expectedCaseVersion: 2, ...fields }), caseId);
+    expect(response.status).toBe(200); expect(contentHides[method]).toHaveBeenCalledWith(expect.objectContaining({ owner, caseId, expectedCaseVersion: 2, ...fields }));
+    expect(s.input.issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass }));
+    expect(oidcCommand({ method: "POST", path: `/api/v1/admin/cases/${caseId}/actions`, body: JSON.stringify({ action }), idempotencyKey: null, ifMatch: null, returnPath: "/" })?.policy).toEqual({ actionClass, fresh: true });
+  });
+  test.each(["report_context", "package_revision", "brief"])("HTTP accepts report evidence section %s", async (section) => {
+    const s = setup(); expect((await s.http.evidence(request(`cases/${caseId}/evidence`, "POST", { section }), caseId)).status).toBe(200);
+    expect(s.cases.readEvidence).toHaveBeenCalledWith(expect.objectContaining({ section }));
+  });
   test.each(["detail", "action"] as const)("%s refuses null order metadata before reading order ports or issuing a proof", async (route) => {
     const s = setup(); const detail = await s.cases.getCase(); detail.orderId = null; s.cases.getCase.mockResolvedValue(detail);
     const response = route === "detail" ? await s.http.detail(request(`cases/${caseId}`), caseId)

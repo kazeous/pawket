@@ -30,6 +30,7 @@ type SubmissionKind = "draft" | "final";
 type SubmissionResponse = "approved" | "changes_requested" | "superseded";
 export type CommissionMessageItem = Readonly<{
   sequence: number; kind: "message"; id: string; author: "buyer" | "creator"; text: string | null;
+  hidden: boolean;
   files: readonly CommissionAttachedFileView[]; createdAt: string;
 }>;
 export type CommissionSubmissionItem = Readonly<{
@@ -172,16 +173,20 @@ export function createCommissionFulfillmentService(kit: Kit, input: Input) {
 
 /** Shared read-only projection; case callers supply no party actor or writable controls. */
 export async function readCommissionThread(tx: PawketTransaction, input: Pick<Input, "keyring" | "thread" | "fulfillmentMode">, order: Order,
-  command: Readonly<{ beforeSequence?: number; limit: number; actor?: CommissionActor; now(): Date }>): Promise<CommissionThreadView> {
+  command: Readonly<{ beforeSequence?: number; limit: number; actor?: CommissionActor; includeHidden?: boolean;
+    reportTarget?: { kind: "commission_message" | "commission_file"; id: string }; now(): Date }>): Promise<CommissionThreadView> {
   const thread = input.thread; if (!thread) commissionFail("fulfillment_disabled");
   const limit = command.limit;
-  const entries = await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit }); const page = entries.slice(0, limit);
+  const entries = command.reportTarget
+    ? await thread.listReportContextEntries?.(tx, { orderId: order.id, target: command.reportTarget, context: 20 }) ?? commissionFail("not_available")
+    : await thread.listEntries(tx, { orderId: order.id, beforeSequence: command.beforeSequence, limit });
+  const page = command.reportTarget ? entries : entries.slice(0, limit);
   const submissionIds = page.filter((entry) => entry.kind === "submission").map((entry) => entry.entryId);
   const submissions = submissionIds.length ? await tx.select().from(commissionSubmissions)
     .where(and(eq(commissionSubmissions.orderId, order.id), inArray(commissionSubmissions.id, submissionIds))) : [];
   const byId = new Map(submissions.map((submission) => [submission.id, submission]));
-  const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId) });
-  const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })) });
+  const messages = await thread.describeMessages(tx, { orderId: order.id, messageIds: page.filter((entry) => entry.kind === "message").map((entry) => entry.entryId), includeHidden: command.includeHidden });
+  const files = await thread.describeAttachedFiles(tx, { orderId: order.id, targets: page.map((entry) => ({ kind: entry.kind, id: entry.entryId })), includeHidden: command.includeHidden });
   const due = order.reviewEndsAt ? await readCommissionCompletionDueAt(tx, { reviewEndsAt: order.reviewEndsAt, completionFloorAt: order.completionFloorAt }) : null;
   const at = command.now();
   const items = page.map((entry): CommissionMessageItem | CommissionSubmissionItem => {
@@ -189,7 +194,7 @@ export async function readCommissionThread(tx: PawketTransaction, input: Pick<In
     if (entry.kind === "message") {
       const message = messages.get(entry.entryId); if (!message) commissionFail("dependency_unavailable");
       return { sequence: entry.sequence, kind: "message", id: entry.entryId, author: message.authorUserId === order.buyerUserId ? "buyer" : "creator",
-        text: message.text, files: attached, createdAt: message.createdAt.toISOString() };
+        text: message.text, hidden: message.hidden, files: attached, createdAt: message.createdAt.toISOString() };
     }
     const submission = byId.get(entry.entryId); if (!submission) commissionFail("dependency_unavailable");
     const note = submission.noteEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring, envelope: submission.noteEnvelope,
@@ -202,6 +207,6 @@ export async function readCommissionThread(tx: PawketTransaction, input: Pick<In
       actionable: input.fulfillmentMode === "enabled" && command.actor?.userId === order.buyerUserId && submission.response === null &&
         (submission.kind === "draft" ? order.state === "in_progress" : order.state === "delivered" && due !== null && at < due) };
   });
-  return { items, nextBeforeSequence: entries.length > limit ? items.at(-1)!.sequence : null,
+  return { items, nextBeforeSequence: !command.reportTarget && entries.length > limit ? items.at(-1)!.sequence : null,
     writable: command.actor !== undefined && input.fulfillmentMode === "enabled" && (order.state === "in_progress" || order.state === "delivered") };
 }

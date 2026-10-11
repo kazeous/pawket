@@ -58,6 +58,26 @@ type PenaltyReason = "spam_or_scam" | "harassment_or_hate" | "prohibited_or_age_
   | "privacy" | "impersonation" | "refund_non_compliance" | "dispute_or_report_abuse" | "other";
 const reference = { onDelete: "restrict", onUpdate: "restrict" } as const;
 
+export const trustContentHides = pgTable("trust_content_hides", {
+  id: uuid("id").primaryKey(), caseId: uuid("case_id").notNull().references(() => trustCases.id, reference),
+  targetKind: text("target_kind").$type<"commission_message" | "commission_file" | "commission_package">().notNull(), targetId: uuid("target_id").notNull(),
+  orderId: uuid("order_id").references(() => commissionOrders.id, reference),
+  contentOwnerUserId: text("content_owner_user_id").notNull().references(() => identityUsers.id, reference),
+  hiddenAt: time("hidden_at").notNull(), hiddenByUserId: text("hidden_by_user_id").notNull().references(() => identityUsers.id, reference),
+  hiddenBySessionId: text("hidden_by_session_id").notNull(), reasonEnvelope: jsonb("reason_envelope").$type<Envelope>().notNull(), requestId: text("request_id").notNull(),
+  releasedAt: time("released_at"), releasedByUserId: text("released_by_user_id").references(() => identityUsers.id, reference),
+  releaseKind: text("release_kind").$type<"owner_restore" | "appeal_reversed">(), releaseRequestId: text("release_request_id"),
+}, (t) => [
+  uniqueIndex("trust_content_hides_active_uidx").on(t.targetKind, t.targetId).where(sql`${t.releasedAt} is null`),
+  index("trust_content_hides_case_idx").on(t.caseId, t.hiddenAt, t.id),
+  check("trust_content_hides_kind_check", sql`${t.targetKind} in ('commission_message','commission_file','commission_package')`),
+  check("trust_content_hides_order_check", sql`(${t.targetKind} = 'commission_package') = (${t.orderId} is null)`),
+  check("trust_content_hides_reason_check", commissionEnvelopeCheck(t.reasonEnvelope)),
+  check("trust_content_hides_release_check", sql`(${t.releasedAt} is null and ${t.releasedByUserId} is null and ${t.releaseKind} is null and ${t.releaseRequestId} is null)
+    or (${t.releasedAt} is not null and ${t.releasedAt} >= ${t.hiddenAt} and ${t.releaseRequestId} is not null
+      and ((${t.releaseKind} = 'owner_restore' and ${t.releasedByUserId} is not null) or (${t.releaseKind} = 'appeal_reversed' and ${t.releasedByUserId} is null)))`),
+]);
+
 type ReportTargetKind = "commission_package" | "commission_brief" | "commission_message" | "commission_file";
 type ReportReason = "impersonation" | "prohibited_or_age_restricted_content" | "harassment_or_hate" | "violence_or_self_harm"
   | "privacy" | "intellectual_property" | "spam_or_scam" | "other";

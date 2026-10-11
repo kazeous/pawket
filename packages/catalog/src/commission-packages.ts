@@ -12,7 +12,7 @@ import {
   requireCommissionPolicy, type CommissionActor, type CommissionPackageDraft, type CommissionPolicyReadPort,
 } from "@pawket/orders";
 import { DISCIPLINES } from "./catalog-policy.js";
-import type { CommissionIntakeFencePort } from "./catalog-ports.js";
+import type { CommissionIntakeFencePort, CommissionPackageHoldPort } from "./catalog-ports.js";
 import type { createPublicCatalogQuery } from "./public-catalog-query.js";
 
 type Package = typeof commissionPackages.$inferSelect;
@@ -25,6 +25,7 @@ type Input = Readonly<{
   identity: { lockCreator(tx: PawketTransaction, actor: CommissionActor, at: Date): Promise<{ sessionExpiresAt: Date } | null> };
   policy: CommissionPolicyReadPort;
   intakeFence?: CommissionIntakeFencePort;
+  contentHides?: CommissionPackageHoldPort;
   authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   visibility: Pick<ReturnType<typeof createPublicCatalogQuery>, "resolveVisibleReportTarget">;
   receivingAccount: { getCurrentTipReceivingAccount(tx: PawketTransaction, creatorUserId: string, at: Date): Promise<{ accountVersionId: string } | null> };
@@ -102,6 +103,16 @@ export function createCommissionPackageService(input: Input) {
     return used?.count ?? 0;
   }
   return {
+    /** Private, immutable public revision evidence; Trust owns authorization and access logging. */
+    async readRevisionForCase(tx: PawketTransaction, revisionId: string) {
+      if (!commissionUuid(revisionId)) commissionFail("invalid_request");
+      const [revision] = await tx.select().from(commissionPackageRevisions).where(eq(commissionPackageRevisions.id, revisionId)).limit(1);
+      if (!revision) commissionFail("not_available");
+      return { id: revision.id, packageId: revision.packageId, revisionNumber: revision.revisionNumber, title: revision.title,
+        description: revision.description, discipline: revision.discipline, route: revision.route, briefInstructions: revision.briefInstructions,
+        terms: revision.terms, showcaseId: revision.showcaseId, policyRevisionId: revision.policyRevisionId, publishedAt: revision.publishedAt.toISOString(),
+        hidden: Boolean(await input.contentHides?.activeHide(tx, "commission_package", revision.packageId)) };
+    },
     async findPackageIdentity(tx: PawketTransaction, packageId: string) {
       if (!commissionUuid(packageId)) return null;
       const [row] = await tx.select({ creatorUserId: commissionPackages.creatorUserId, route: commissionPackageRevisions.route }).from(commissionPackages)
@@ -175,6 +186,7 @@ export function createCommissionPackageService(input: Input) {
         await lockCommissionCreator(tx, actor.userId); await authorize(tx, actor);
         const [settings] = await tx.select().from(creatorCommissionSettings).where(eq(creatorCommissionSettings.creatorUserId, actor.userId)).limit(1);
         const packages = await tx.select().from(commissionPackages).where(and(eq(commissionPackages.creatorUserId, actor.userId), ne(commissionPackages.state, "archived"))).orderBy(desc(commissionPackages.createdAt), desc(commissionPackages.id)).limit(12);
+        const hiddenIds = await input.contentHides?.hiddenIds(tx, "commission_package", packages.map((row) => row.id)) ?? new Set<string>();
         const [page] = await tx.select({ id: creatorPages.id, publishedRevisionId: creatorPages.publishedRevisionId }).from(creatorPages).where(eq(creatorPages.userId, actor.userId)).limit(1);
         const showcases = page?.publishedRevisionId ? await tx.select({ id: creatorPublicationShowcases.sourceShowcaseId, title: creatorPublicationShowcases.title })
           .from(creatorPublicationShowcases).where(eq(creatorPublicationShowcases.revisionId, page.publishedRevisionId)).orderBy(asc(creatorPublicationShowcases.position)).limit(12) : [];
@@ -183,7 +195,7 @@ export function createCommissionPackageService(input: Input) {
         const policy = await input.policy.readCurrent(tx, now());
         const intakePause = await intakeFence.describe(tx, actor.userId, now());
         return { pageId: page?.id ?? null, showcases: availableShowcases, policy: policy ? { revisionId: policy.revisionId, document: policy.document, acceptsOrders: policy.acceptsOrders } : null,
-          settings: { version: settings?.version ?? 0, enabled: settings?.enabled ?? false, capacityLimit: settings?.capacityLimit ?? 3, used: await usage(tx, actor.userId) }, packages, intakePause };
+          settings: { version: settings?.version ?? 0, enabled: settings?.enabled ?? false, capacityLimit: settings?.capacityLimit ?? 3, used: await usage(tx, actor.userId) }, packages: packages.map((row) => ({ ...row, hidden: hiddenIds.has(row.id) })), intakePause };
       });
     },
     /** Orders calls after its participant assurance; old fixed requests can retain a prior revision. */
@@ -194,6 +206,7 @@ export function createCommissionPackageService(input: Input) {
       const [candidate] = await tx.select().from(commissionPackages).where(eq(commissionPackages.id, command.packageId)).limit(1);
       if (!candidate) commissionFail("not_available");
       await lockCommissionCreator(tx, candidate.creatorUserId);
+      if (await input.contentHides?.activeHide(tx, "commission_package", candidate.id)) commissionFail("not_available");
       if (await intakeFence.isIntakePaused(tx, candidate.creatorUserId, command.at)) commissionFail("intake_paused");
       const policy = await input.policy.readCurrent(tx, command.at);
       const row = await owned(tx, candidate.creatorUserId, candidate.id);
@@ -227,7 +240,9 @@ export function createCommissionPackageService(input: Input) {
         const intakePaused = await intakeFence.isIntakePaused(tx, page.userId, now());
         const receiving = input.paymentsMode === "disabled" ? null : await input.receivingAccount.getCurrentTipReceivingAccount(tx, page.userId, now());
         const result = [];
+        const hiddenIds = await input.contentHides?.hiddenIds(tx, "commission_package", packages.map((row) => row.package.id)) ?? new Set<string>();
         for (const entry of packages) {
+          if (hiddenIds.has(entry.package.id)) continue;
           const linked = entry.revision.showcaseId ? await visible(tx, page.id, page.userId, entry.revision.showcaseId) : null;
           const revision: Revision = entry.revision;
           result.push({ id: entry.package.id, revisionId: revision.id, title: revision.title, description: revision.description, discipline: revision.discipline,

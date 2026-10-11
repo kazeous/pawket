@@ -302,13 +302,15 @@ export function createCommissionOrderService(input: Input) {
       return { ...await projectOrder(tx, order), role: "owner" as const };
     },
     /** Internal evidence port; never an HTTP participant bypass. No creator lock behind the case share lock. */
-    async readThreadForCase(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number }>) {
+    async readThreadForCase(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number;
+      reportTarget?: { kind: "commission_message" | "commission_file"; id: string } }>) {
       if (!commissionUuid(command.orderId)) commissionFail("invalid_request");
       commissionInteger(command.limit, 1, 50);
       if (command.beforeSequence !== undefined) commissionInteger(command.beforeSequence, 1, 2_147_483_647);
+      if (command.reportTarget && (!["commission_message", "commission_file"].includes(command.reportTarget.kind) || !commissionUuid(command.reportTarget.id))) commissionFail("invalid_request");
       const [order] = await tx.select().from(commissionOrders).where(eq(commissionOrders.id, command.orderId)).limit(1);
       if (!order) commissionFail("not_available");
-      return readCommissionThread(tx, input, order, { ...command, now });
+      return readCommissionThread(tx, input, order, { ...command, includeHidden: true, now });
     },
     async getOrder(command: { actor: CommissionActor; orderId: string }) {
       actorValid(command.actor); if (!commissionUuid(command.orderId)) commissionFail("not_authorized");

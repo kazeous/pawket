@@ -11,7 +11,7 @@ import {
   COMMISSION_FILE_CONTENT_TYPES, COMMISSION_FILE_POLICY, CommissionFileError, commissionFileContentDisposition, commissionFileFail, commissionFileObjectKey,
   commissionFileMaxBytes, commissionFileUuid, isInlinePreviewAllowed, normalizeCommissionFileName, type CommissionFileType,
 } from "./file-policy.js";
-import type { CommissionEvidenceUploadPort, CommissionFileActor, CommissionFileOrderAccessPort, CommissionFileSessionPort } from "./ports.js";
+import type { CommissionContentHidePort, CommissionEvidenceUploadPort, CommissionFileActor, CommissionFileOrderAccessPort, CommissionFileSessionPort } from "./ports.js";
 import { CommissionFileStorageError, type CommissionFileStoragePort } from "./storage-port.js";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
@@ -24,6 +24,7 @@ export type CommissionFileView = Readonly<{
 type Input = Readonly<{
   db: PawketDatabase; storage: Pick<CommissionFileStoragePort, "presignUpload" | "presignDownload">; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array;
   mode: "disabled" | "enabled"; fulfillmentMode: "disabled" | "enabled"; sessions: CommissionFileSessionPort;
+  contentHides?: CommissionContentHidePort;
   orders: Pick<CommissionFileOrderAccessPort, "briefPackage" | "orderAccess" | "lockFulfillmentOrder">;
   evidenceUploads?: CommissionEvidenceUploadPort;
   now?: () => Date; idFactory?: () => string;
@@ -191,6 +192,7 @@ export function createCommissionFileService(input: Input) {
         const sessionExpiresAt = await session(tx, command.actor);
         const access = await input.orders.orderAccess(tx, { orderId: command.orderId, actorUserId: command.actor.userId });
         if (!access) commissionFileFail("not_available");
+        if (await input.contentHides?.activeHide(tx, "commission_file", command.fileId)) commissionFileFail("not_available");
         const [row] = await tx.select({ file: commissionFiles }).from(commissionFileAttachments)
           .innerJoin(commissionFiles, eq(commissionFiles.id, commissionFileAttachments.fileId))
           .where(and(eq(commissionFileAttachments.fileId, command.fileId), eq(commissionFileAttachments.orderId, command.orderId), inArray(commissionFiles.state, ["attached"]))).limit(1);

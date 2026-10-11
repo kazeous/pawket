@@ -1,5 +1,11 @@
 import type { PawketDatabase, PawketTransaction } from "@pawket/database";
 
+/** Implemented structurally by Trust; Files does not import Trust. */
+export type CommissionContentHidePort = Readonly<{
+  hiddenIds(tx: PawketTransaction, kind: "commission_message" | "commission_file" | "commission_package", ids: readonly string[]): Promise<ReadonlySet<string>>;
+  activeHide(tx: PawketTransaction, kind: "commission_message" | "commission_file" | "commission_package", id: string): Promise<{ hideId: string; hiddenAt: Date } | null>;
+}>;
+
 export type CommissionFileActor = Readonly<{ userId: string; sessionId: string }>;
 export type CommissionFileSessionPort = Readonly<{
   getTipSessionAssurance(tx: PawketTransaction, actor: CommissionFileActor, at: Date): Promise<Readonly<{ sessionExpiresAt: Date }> | null>;

@@ -149,6 +149,9 @@ const SAFE_DOMAIN_EVENTS = new Set([
   "trust.public_content_reported.v1",
   "trust.public_report_triaged.v1",
   "trust.report_received.v1",
+  "trust.content_hidden.v1",
+  "trust.content_restored.v1",
+  "trust.report_case_closed.v1",
   "commission.file_scanned.v1",
 ]);
 

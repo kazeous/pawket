@@ -1,6 +1,12 @@
 import type { PawketDatabase, PawketTransaction } from "@pawket/database";
 export type { CommissionIntakeFencePort } from "@pawket/orders";
 
+/** Implemented structurally by Trust; Catalog does not import Trust. */
+export type CommissionPackageHoldPort = Readonly<{
+  hiddenIds(tx: PawketTransaction, kind: "commission_message" | "commission_file" | "commission_package", ids: readonly string[]): Promise<ReadonlySet<string>>;
+  activeHide(tx: PawketTransaction, kind: "commission_message" | "commission_file" | "commission_package", id: string): Promise<{ hideId: string; hiddenAt: Date } | null>;
+}>;
+
 export type CreatorSeed = Readonly<{
   userId: string;
   capabilityState: "active" | "suspended";

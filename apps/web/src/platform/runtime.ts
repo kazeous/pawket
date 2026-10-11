@@ -75,6 +75,7 @@ import {
   createCommissionTrustPort,
   createTrustCasePort,
   createTrustCaseService,
+  createContentHideReadPort, createContentHideService,
   createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
 
@@ -463,8 +464,9 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const standing = createCreatorStandingPort();
   const resolutionFiles = createCommissionEvidenceAttachmentPort({ keyring, mode: env.COMMISSION_RESOLUTION_MODE });
   const intakeFence = createCommissionIntakeFencePort({ mode: env.COMMISSION_RESOLUTION_MODE, refunds });
+  const contentHides = createContentHideReadPort();
   const commissionCatalog = createCommissionPackageService({ ...commissionCommon, identity: commissionIdentity, policy: commissionPolicy,
-    intakeFence,
+    intakeFence, contentHides,
     visibility: publicCatalog, publishingMode: env.CREATOR_PUBLISHING_MODE,
     receivingAccount: createTipReceivingAccountEligibilityPort({ keyring, lookupHmacKey, paymentsMode: env.COMMISSION_PAYMENTS_MODE }) });
   const commissionFileStorage = env.COMMISSION_FILES_S3_ENDPOINT && env.COMMISSION_FILES_S3_REGION && env.COMMISSION_FILES_S3_ACCESS_KEY_ID && env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY &&
@@ -477,7 +479,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     holds: createResolutionHoldPort(),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE,
     policy: commissionPolicy, catalog: commissionCatalog, payments: createCommissionPaymentIntentPort(commissionCommon),
-    files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }), thread: createCommissionThreadPort({ keyring, mode: env.COMMISSION_FILES_MODE }) });
+    files: createCommissionFileAttachmentPort({ keyring, mode: env.COMMISSION_FILES_MODE }), thread: createCommissionThreadPort({ keyring, mode: env.COMMISSION_FILES_MODE, contentHides }) });
   const commissionThread = createCommissionThreadService({ db: database.db, keyring, lookupHmacKey, filesMode: env.COMMISSION_FILES_MODE,
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
   const commissionManual = createCreatorCommissionPaymentService({ ...commissionCommon, recentAuthMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000,
@@ -514,6 +516,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     throttle: commissionThrottle,
   });
   const commissionFiles = createCommissionFileService({ db: database.db, storage: commissionFileStorage, keyring, lookupHmacKey, mode: env.COMMISSION_FILES_MODE,
+    contentHides,
     evidenceUploads: createCommissionEvidenceUploadPort({ orders: resolutionOrders, refunds, payments: resolutionPayments, mode: env.COMMISSION_RESOLUTION_MODE }),
     fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, sessions: commissionIdentity, orders: createCommissionFileAccessPort({ catalog: commissionCatalog }) });
   const ownerKit = createResolutionCommandKit({ db: database.db, keyring, lookupHmacKey, session: commissionIdentity,
@@ -526,8 +529,10 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const ownerResolution = createOwnerResolutionService(ownerKit, { ...resolutionCommon, applicationRevision: env.APP_REVISION, standing });
   const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
     deadlines: createResolutionCaseDeadlinePort({ refunds }),
-    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles }) });
+    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides }) });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
+    contentHides: createContentHideService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
+      consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator } }),
     issueOwnerStepUpProof: commandContext.issueOwnerProof,
     async authorizeOwner(headers) {
       const actor = await authenticate(headers); if (!actor) return "unauthenticated";

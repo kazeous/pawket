@@ -140,7 +140,7 @@ describe("commission thread messages", () => {
     const third = await messages.sendMessage(command(p));
     expect([first.sequence, second.sequence, third.sequence]).toEqual([1, 2, 3]);
     const described = await fixture.db.transaction((tx) => port().describeMessages(tx, { orderId: p.orderId, messageIds: [first.messageId, second.messageId, third.messageId] }));
-    expect(described.get(second.messageId)).toEqual({ authorUserId: p.creator.userId, text: "<3 a < b", createdAt: clock });
+    expect(described.get(second.messageId)).toEqual({ authorUserId: p.creator.userId, text: "<3 a < b", createdAt: clock, hidden: false });
     const [row] = await fixture.db.select().from(commissionMessages).where(eq(commissionMessages.id, second.messageId));
     expect(decryptSensitiveField({ keyring: fixtureKeyring, envelope: row!.textEnvelope!, binding: { recordType: "commission_messages", recordId: second.messageId, fieldName: "text" } })).toBe("<3 a < b");
     expect(JSON.stringify(row!.textEnvelope).includes("<3 a < b")).toBe(false);

@@ -4,15 +4,18 @@ import { CommissionFileError } from "@pawket/commission-files";
 import { CommissionError, commissionIdentifier, commissionIdempotencyKey, type CommissionActor } from "@pawket/orders";
 import { CommissionRefundError, type CommissionRefundPort } from "@pawket/payments";
 import { ResolutionError, RULING_OUTCOMES, type OwnerResolutionService, type LateClaimService, type SuspensionService } from "@pawket/resolutions";
-import { TrustCaseError, type TrustCaseKind, type TrustCaseService } from "@pawket/trust";
+import { TrustCaseError, TrustEnforcementError, type ContentHideService, type TrustCaseKind, type TrustCaseService } from "@pawket/trust";
 import { CommissionHttpFailure, commissionJson, readCommissionBody } from "./commission-http.js";
 
 const uuid = z.uuid(); const amount = z.number().int().min(0).max(50_000_000); const text = z.string().max(20_000);
 const date = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
-const evidence = z.strictObject({ section: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination"]), cursor: z.number().int().min(1).max(2_147_483_647).optional() })
+const evidence = z.strictObject({ section: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination", "report_context", "package_revision", "brief", "appeal_source"]), cursor: z.number().int().min(1).max(2_147_483_647).optional() })
   .refine((value) => value.cursor === undefined || value.section === "thread_page");
 const file = z.strictObject({ disposition: z.enum(["attachment", "inline"]) });
 const actionBody = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("hide"), reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
+  z.strictObject({ action: z.literal("restore"), hideId: uuid, reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
+  z.strictObject({ action: z.literal("close_report"), resolution: z.enum(["dismissed", "actioned"]), reason: text, expectedCaseVersion: z.number().int().min(1).max(2_147_483_646) }),
   z.strictObject({ action: z.literal("rule"), outcome: z.enum(RULING_OUTCOMES), refundAmountVnd: amount, reasoning: text, internalNote: text.optional() }),
   z.strictObject({ action: z.literal("correct"), rulingId: uuid, newRefundAmountVnd: amount, reason: text }),
   z.strictObject({ action: z.literal("question"), text }),
@@ -31,6 +34,7 @@ type Input = Readonly<{
   authenticate(headers: Headers): Promise<CommissionActor | null>;
   issueOwnerStepUpProof(command: CommissionActor & { actionClass: string; now: Date }): Promise<{ id: string }>;
   cases: TrustCaseService; owner: OwnerResolutionService; lateClaims: LateClaimService; suspension: SuspensionService;
+  contentHides?: ContentHideService;
   // Runtime binds the database; the adapter never reads private domain tables.
   refunds: Readonly<{ readAging(command: Parameters<Aging>[1]): ReturnType<Aging> }>;
   standing: Readonly<{ readForOrder(orderId: string): Promise<"active" | "suspended" | "none"> }>;
@@ -52,13 +56,13 @@ function query(request: Request, allowed: readonly string[]) {
 function limit(value?: string) { if (value === undefined) return undefined; if (!/^[1-9][0-9]*$/u.test(value)) invalid(); const result = Number(value); if (result > 100) invalid(); return result; }
 function failure(error: unknown): Response {
   if (error instanceof CommissionHttpFailure) return commissionJson(error.status, { code: error.code });
-  if (error instanceof TrustCaseError || error instanceof ResolutionError || error instanceof CommissionRefundError || error instanceof CommissionError || error instanceof CommissionFileError) {
+  if (error instanceof TrustCaseError || error instanceof TrustEnforcementError || error instanceof ResolutionError || error instanceof CommissionRefundError || error instanceof CommissionError || error instanceof CommissionFileError) {
     const code = error.code;
     if (code === "not_authorized") return commissionJson(403, { code: "owner_required" });
     if (code === "not_available") return commissionJson(404, { code });
     if (code === "owner_step_up_required") return commissionJson(403, { code });
     if (code.startsWith("invalid_")) return commissionJson(400, { code });
-    if (["resolution_disabled", "dependency_unavailable", "files_disabled", "fulfillment_disabled", "storage_unavailable"].includes(code)) return commissionJson(503, { code });
+    if (["enforcement_disabled", "resolution_disabled", "dependency_unavailable", "files_disabled", "fulfillment_disabled", "storage_unavailable"].includes(code)) return commissionJson(503, { code });
     return commissionJson(409, { code });
   }
   return commissionJson(503, { code: "dependency_unavailable" });
@@ -92,7 +96,10 @@ export function createCaseHttpHandlers(input: Input) {
     }),
     detail: (request: Request, caseId: string) => run(request, "GET", async () => {
       noQuery(request); const detail = await input.cases.getCase(id(caseId));
-      if (detail.orderId === null) throw new TrustCaseError("not_available");
+      if (detail.orderId === null) {
+        if (detail.kind !== "report" && detail.kind !== "appeal") throw new TrustCaseError("not_available");
+        return { case: detail };
+      }
       const [order, resolution, creatorStanding] = await Promise.all([input.orderMetadata.readForOrder(detail.orderId),
         input.resolutionMetadata.readForCase({ ...detail, orderId: detail.orderId }), input.standing.readForOrder(detail.orderId)]);
       return { case: { ...detail, ...order, ...resolution, creatorStanding } };
@@ -110,6 +117,14 @@ export function createCaseHttpHandlers(input: Input) {
     action: (request: Request, caseId: string) => run(request, "POST", async (owner) => {
       noQuery(request); id(caseId); const idempotencyKey = key(request); const body = await readCommissionBody(request, actionBody);
       const detail = await input.cases.getCase(caseId); const { action } = body;
+      if (body.action === "hide" || body.action === "restore" || body.action === "close_report") {
+        if (detail.kind !== "report" || !input.contentHides) throw new TrustCaseError("not_available");
+        const actionClass = body.action === "close_report" ? "owner.trust_report_close" : `owner.trust_${body.action}`;
+        const base = { owner, caseId, expectedCaseVersion: body.expectedCaseVersion, idempotencyKey, stepUpProofId: await proof(owner, actionClass), requestId: randomUUID() };
+        if (body.action === "hide") return input.contentHides.hide({ ...base, reason: body.reason });
+        if (body.action === "restore") { await input.contentHides.restore({ ...base, hideId: body.hideId, reason: body.reason }); return {}; }
+        await input.contentHides.closeReportCase({ ...base, resolution: body.resolution, reason: body.reason }); return {};
+      }
       if (detail.orderId === null) throw new TrustCaseError("not_available");
       if (["rule", "correct", "question", "extend"].includes(action) && detail.kind !== "dispute"
         || action === "rule_claim" && detail.kind !== "late_payment"
