@@ -88,7 +88,7 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
     reportContext: (tx, caseId) => available(async () => {
       if (!input.keyring) throw new TrustCaseError("not_available");
       const reports = await tx.select({ id: trustReports.id, reason: trustReports.reason, createdAt: trustReports.createdAt, reporterUserId: trustReports.reporterUserId, detailEnvelope: trustReports.detailEnvelope }).from(trustReports).where(eq(trustReports.caseId, caseId)).orderBy(asc(trustReports.createdAt), asc(trustReports.id));
-      const items = reports.map((report) => ({ reportId: report.id, reasonCategory: report.reason, createdAt: report.createdAt.toISOString(), reporterUserId: report.reporterUserId ?? "Khách chưa đăng nhập",
+      const items = reports.map((report) => ({ reportId: report.id, reasonCategory: report.reason, createdAt: report.createdAt.toISOString(), reporterUserId: report.reporterUserId,
         detail: report.detailEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring!, envelope: report.detailEnvelope, binding: { recordType: "trust_reports", recordId: report.id, fieldName: "detail" } }) }));
       const row = await report(tx, caseId);
       if (row.sourceType === "commission_package") return { kind: row.sourceType, reports: items, revision: await packageRevision(tx, caseId) };

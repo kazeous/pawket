@@ -6,7 +6,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { EvidenceView } from "@/ui/cases/evidence-tabs";
-import { openCaseFile, formatTipTime } from "@/ui/cases/case-client";
+import { openCaseFile, formatTipTime, evidenceLabels, type EvidenceSection } from "@/ui/cases/case-client";
 import { penaltyKindLabels, penaltyReasonLabels, penaltyTargetLabels, restrictionLabels, policyKindLabels } from "@/ui/trust/owner-trust-client";
 
 type Review = { title: string; body: string; ready: boolean; returnPath: string; expiresAt: string };
@@ -88,6 +88,8 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
   }
   let fields: Array<[string, unknown]> = [];
   try { const value: unknown = JSON.parse(review?.body || "{}"); if (value && typeof value === "object" && !Array.isArray(value)) fields = Object.entries(value); } catch { /* Invalid stored content is not rendered as HTML. */ }
+  const requestedSection = fields.find(([name]) => name === "section")?.[1];
+  const evidenceSection = typeof requestedSection === "string" && requestedSection !== "file" && Object.hasOwn(evidenceLabels, requestedSection) ? requestedSection as EvidenceSection : undefined;
   let sepayUrl: string | null = null;
   try { if (typeof result?.authorizationUrl === "string") { const url = new URL(result.authorizationUrl); if (url.origin === "https://my.sepay.vn" && url.pathname === "/oauth/authorize" && !url.username && !url.password) sepayUrl = url.href; } } catch { /* No untrusted navigation. */ }
   const secret = typeof result?.webhookSecret === "string" && /^[A-Za-z0-9_-]{43}$/u.test(result.webhookSecret) ? result.webhookSecret : null;
@@ -113,7 +115,7 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
         <Button variant="outline" onClick={() => setResult((current) => current ? { ...current, [name]: null } : null)}>Ẩn thông tin</Button>
       </section> : null) : null}
       {result && "evidence" in result ? <section className="flex flex-col gap-3"><h2 className="font-medium">Bằng chứng của vụ việc</h2>
-        <p>Chỉ owner thấy. Nội dung sẽ ẩn sau 5 phút; quay lại vụ việc để tải tệp hoặc xem trang tin nhắn khác.</p><EvidenceView value={result.evidence} />
+        <p>Chỉ owner thấy. Nội dung sẽ ẩn sau 5 phút; quay lại vụ việc để tải tệp hoặc xem trang tin nhắn khác.</p><EvidenceView value={result.evidence} section={evidenceSection} />
         <Button variant="outline" onClick={() => setResult(null)}>Ẩn bằng chứng</Button></section> : null}
     </CardContent>
     <CardFooter className="flex flex-wrap gap-2">

@@ -2,7 +2,7 @@
 import { useRef, useState } from "react";
 import { caseErrorText, casePost, caseRequest } from "../cases/case-client";
 import { TipRequestError } from "../tips/tip-client";
-export function useOwnerCommand(actorUserId: string, onSuccess: () => Promise<void>) {
+export function useOwnerCommand(actorUserId: string, onSuccess: () => Promise<void>, errorText: (code: string) => string = caseErrorText) {
   const attempt = useRef<{ path: string; init: RequestInit } | null>(null); const inFlight = useRef(false);
   const [working, setWorking] = useState(false); const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
@@ -15,7 +15,7 @@ export function useOwnerCommand(actorUserId: string, onSuccess: () => Promise<vo
     } catch (error) {
       const raw = error instanceof TipRequestError ? error.code : "dependency_unavailable";
       const code = raw === "IDENTITY_UNAVAILABLE" ? "dependency_unavailable" : raw;
-      setNotice({ tone: "error", text: caseErrorText(code) });
+      setNotice({ tone: "error", text: errorText(code) });
       if (code !== "dependency_unavailable") { attempt.current = null; setPending(false); }
     } finally { inFlight.current = false; setWorking(false); }
   }

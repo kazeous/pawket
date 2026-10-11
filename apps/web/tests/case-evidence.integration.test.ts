@@ -37,7 +37,7 @@ async function setup() {
   const files = createCommissionFileService({ ...p.s.creator.common, storage, mode: "enabled", fulfillmentMode: "enabled", sessions: p.s.input.identity, orders: createCommissionFileAccessPort({ catalog: p.s.catalog }) });
   const instance = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-i8", consumeStepUpProof: async (_tx, input) => input.userId === actor.userId && input.sessionId === actor.sessionId,
     deadlines: resolutions.createResolutionCaseDeadlinePort({ refunds }),
-    evidence: createCaseEvidencePort({ orders, refunds, view, files, keyring: p.s.input.keyring }), now: p.s.creator.now });
+    evidence: createCaseEvidencePort({ orders, refunds, view, files, catalog: p.s.catalog, keyring: p.s.input.keyring }), now: p.s.creator.now });
   const disputes = createDisputeService(createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity }), { orders: orderPort, refunds, cases, mode: "enabled" });
   const opened = await disputes.openDispute({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version, reason: "not_as_agreed", statement: "Synthetic statement",
     requestedOutcome: { kind: "close", refundAmountVnd: 100_000 }, acknowledgeStaffReview: true, ...commandIds() });
@@ -59,15 +59,18 @@ test("the owner reads a dispute case's order summary, thread page and resolution
   const log = await accesses(c.caseId); expect(log.map((row) => row.itemType).sort()).toEqual(["order_summary", "resolution_records", "thread_page"]);
   expect(log.every((row) => row.ownerUserId === c.actor.userId && row.ownerSessionId === c.actor.sessionId)).toBe(true);
 }, 30_000);
-test("the owner still sees reporterUserId in the report case's own report_context", async () => {
+test.each(["authenticated", "guest"] as const)("owner report_context keeps the %s reporter identity as a user ID or null", async (reporterKind) => {
   const c = await setup(); const at = c.p.s.creator.now(); const reportId = randomUUID();
-  const { caseId } = await f.db.transaction((tx) => c.cases.openCase(tx, { kind: "report", orderId: c.p.orderId,
-    sourceType: "commission_brief", sourceId: c.p.orderId, policyRevisionId: null, requestId: randomUUID(), at }));
+  const guest = reporterKind === "guest"; const reporterUserId = guest ? null : c.p.creator.userId;
+  const sourceType = guest ? "commission_package" : "commission_brief"; const sourceId = guest ? c.p.s.packageId : c.p.orderId;
+  const { caseId } = await f.db.transaction((tx) => c.cases.openCase(tx, { kind: "report", orderId: guest ? null : c.p.orderId,
+    sourceType, sourceId, policyRevisionId: null, requestId: randomUUID(), at }));
   await f.db.insert(schema.trustReports).values({ id: reportId, reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`,
-    targetKind: "commission_brief", targetId: c.p.orderId, orderId: c.p.orderId, contentOwnerUserId: c.p.buyer.userId,
-    reporterUserId: c.p.creator.userId, reason: "other", caseId, createdAt: at });
+    targetKind: sourceType, targetId: sourceId, orderId: guest ? null : c.p.orderId, packageRevisionId: guest ? c.p.s.revisionId : null, contentOwnerUserId: guest ? c.p.creator.userId : c.p.buyer.userId,
+    reporterUserId, reporterNetworkHmac: guest ? `hmac-sha256:v1:${"a".repeat(43)}` : null, reason: "other", caseId, createdAt: at });
   const evidence = await c.instance.readEvidence({ ...c.access(), caseId, section: "report_context" });
-  expect(evidence).toMatchObject({ kind: "commission_brief", reports: [{ reportId, reporterUserId: c.p.creator.userId }] });
+  expect(evidence).toMatchObject({ kind: sourceType, reports: [{ reportId, reporterUserId }] });
+  expect(JSON.stringify(evidence)).not.toContain("Khách chưa đăng nhập");
   expect(await accesses(caseId)).toMatchObject([{ itemType: "report_context", itemId: caseId }]);
 }, 30_000);
 

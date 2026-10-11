@@ -6,13 +6,13 @@ import { FieldGroup } from "@/components/ui/field";
 import { Field } from "../field";
 import { LoadingState, RetryState } from "../async-state";
 import { StatusBanner } from "../status-banner";
-import { caseRequest, readCase, formatTipTime } from "../cases/case-client";
+import { caseRequest, readCase, formatTipTime, caseErrorText } from "../cases/case-client";
 import { ownerPoliciesSchema, policyKindLabels, ownerText, type OwnerPolicy } from "./owner-trust-client";
 import { useOwnerCommand } from "./use-owner-command";
 export function PolicyPublisher({ actorUserId, enforcementEnabled, initialPolicies }: Readonly<{ actorUserId: string; enforcementEnabled: boolean; initialPolicies?: OwnerPolicy[] }>) {
   const [policies, setPolicies] = useState(initialPolicies ?? []); const [loading, setLoading] = useState(initialPolicies === undefined); const [error, setError] = useState(false);
   const load = useCallback(async () => { setLoading(true); setError(false); try { setPolicies(readCase(ownerPoliciesSchema, await caseRequest("/api/v1/admin/policies")).policies); } catch { setError(true); } finally { setLoading(false); } }, []);
-  const command = useOwnerCommand(actorUserId, load);
+  const command = useOwnerCommand(actorUserId, load, (code) => code === "version_conflict" ? "Chính sách đã có phiên bản mới. Tải lại trang rồi thử lại." : caseErrorText(code));
   useEffect(() => { if (initialPolicies !== undefined) return; const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [initialPolicies, load]);
   return <div className="owner-workspace stack">{command.notice ? <StatusBanner tone={command.notice.tone}><p>{command.notice.text}</p></StatusBanner> : null}
     {command.pending && !command.working ? <Button variant="outline" onClick={command.retry}>Kiểm tra lại cùng yêu cầu</Button> : null}

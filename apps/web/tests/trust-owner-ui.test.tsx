@@ -72,6 +72,7 @@ test("content report workbench offers a penalty for the creator", async () => {
     expect(node.querySelectorAll('[name="subjectUserId"] option')).toHaveLength(1);
     node.querySelector<HTMLTextAreaElement>('[name="explanation"]')!.value = "Lý do"; await submit(node);
     expect(request).toHaveBeenCalledWith(`/api/v1/admin/content-reports/${id}/penalty`, expect.objectContaining({ method: "POST", body: expect.stringContaining('"subjectUserId":"creator"') }), 1_048_576);
+    expect(node.textContent).toContain("Đã áp dụng biện pháp cho nghệ sĩ.");
   });
 });
 test("disabled case detail refuses to render a trust panel or fetch evidence", () => {
@@ -100,9 +101,24 @@ test.each([["report", "commission_package", ["Ngữ cảnh báo cáo", "Phiên b
   for (const label of labels) expect(node.textContent).toContain(label); expect(node.textContent).not.toContain("Thông tin đơn hàng"); expect(read).not.toHaveBeenCalled();
 });
 test("report and appeal evidence renders owner identity, statements and formatted times as text", () => {
-  const node = markup(<EvidenceView value={{ reports: [{ reporterUserId: "reporter", reasonCategory: "privacy", createdAt: at, detail: "<script>private</script>" }], appeal: { statement: "Trình bày" }, action: { kind: "suspension", target: "account", explanation: "Giải thích" } }} />);
+  const node = markup(<EvidenceView section="appeal_source" value={{ reports: [{ reporterUserId: "reporter", reasonCategory: "privacy", createdAt: at, detail: "<script>private</script>" }], appeal: { statement: "Trình bày" }, action: { kind: "suspension", target: "account", explanation: "Giải thích" } }} />);
   for (const text of ["reporter", "Quyền riêng tư", "Trình bày", "Tạm khóa", "Tài khoản", "Giải thích"]) expect(node.textContent).toContain(text);
   expect(node.querySelector("time")?.dateTime).toBe(at); expect(node.textContent).not.toContain(at); expect(node.querySelector("script")).toBeNull();
+});
+test.each(["report_context", "package_revision", "brief", "appeal_source"] as const)("%s evidence renders trust fields and translates a null reporter in the UI", (section) => {
+  const node = markup(<EvidenceView section={section} value={{ reports: [{ reporterUserId: null, detail: "Chi tiết" }], hidden: true, target: "account", messages: [{ text: "Ngữ cảnh" }] }} />);
+  for (const text of ["Khách chưa đăng nhập", "Chi tiết", "Đã ẩn", "Tài khoản", "Ngữ cảnh"]) expect(node.textContent).toContain(text);
+});
+test("policy publisher shows a policy-specific version conflict and permits a fresh attempt", async () => {
+  const policies = [{ kind: "community_rules" as const, current: { revisionId: id, kind: "community_rules" as const, revisionNumber: 3, document: "Quy tắc", effectiveAt: at } }];
+  request.mockRejectedValue(new TipRequestError("version_conflict"));
+  await mounted(<PolicyPublisher initialPolicies={policies} actorUserId="owner" enforcementEnabled />, async (node) => {
+    node.querySelector<HTMLTextAreaElement>("textarea")!.value = "Quy tắc mới"; await submit(node);
+    expect(node.querySelector('[role="alert"]')?.textContent).toBe("Chính sách đã có phiên bản mới. Tải lại trang rồi thử lại.");
+    expect(node.textContent).not.toContain("Vụ việc đã thay đổi");
+    expect(button(node, "Xuất bản").disabled).toBe(false);
+    expect(node.textContent).not.toContain("Kiểm tra lại cùng yêu cầu");
+  });
 });
 test("policy limit is measured in normalized code points and first publish sends revision zero", async () => {
   const policies = [{ kind: "community_rules" as const, current: null }, { kind: "enforcement_appeals" as const, current: null }]; request.mockResolvedValue({ policies });

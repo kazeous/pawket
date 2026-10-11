@@ -28,25 +28,28 @@ const values: Record<string, string> = { buyer: "Người mua", creator: "Nghệ
   awaiting_transfer: "Chờ chuyển khoản", confirmed: "Đã xác nhận", manual_attested: "Xác nhận thủ công", provider_bound: "Đối soát qua nhà cung cấp", creator_manual: "Nghệ sĩ xác nhận", sepay_automatic: "SePay tự đối soát", creator_reviewed_sepay: "Nghệ sĩ kiểm tra giao dịch SePay",
   requested: "Đã yêu cầu", quoted: "Đã báo giá", awaiting_payment: "Chờ thanh toán", agreement: "Theo thỏa thuận", ruling: "Theo kết luận", cancelled_by_agreement: "Hủy theo thỏa thuận", cancelled_by_ruling: "Hủy theo kết luận", buyer_cancelled_after_suspension: "Người mua hủy sau khi nghệ sĩ bị tạm dừng", fulfillment_frozen: "Owner đóng băng thực hiện", increased: "Tăng số tiền hoàn", reduced: "Giảm số tiền hoàn", recorded_only: "Chỉ ghi nhận đính chính" };
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
-Object.assign(labels, { reports: "Báo cáo (chỉ owner thấy)", reporterUserId: "Người báo cáo (chỉ owner thấy)", reasonCategory: "Nhóm lý do", detail: "Chi tiết báo cáo", revision: "Phiên bản gói", messages: "Tin nhắn trong ngữ cảnh", carrier: "Tin nhắn chứa tệp", appeal: "Kháng nghị", statement: "Trình bày của người kháng nghị", action: "Biện pháp ban đầu", source: "Vụ việc nguồn", sections: "Bằng chứng liên quan", explanation: "Giải thích", hidden: "Đã ẩn", restriction: "Thao tác bị hạn chế", target: "Phạm vi", endsAt: "Kết thúc lúc", ...evidenceLabels });
+const trustLabels: Record<string, string> = { ...labels, reports: "Báo cáo (chỉ owner thấy)", reporterUserId: "Người báo cáo (chỉ owner thấy)", reasonCategory: "Nhóm lý do", detail: "Chi tiết báo cáo", revision: "Phiên bản gói", messages: "Tin nhắn trong ngữ cảnh", carrier: "Tin nhắn chứa tệp", appeal: "Kháng nghị", statement: "Trình bày của người kháng nghị", action: "Biện pháp ban đầu", source: "Vụ việc nguồn", sections: "Bằng chứng liên quan", explanation: "Giải thích", hidden: "Đã ẩn", restriction: "Thao tác bị hạn chế", target: "Phạm vi", endsAt: "Kết thúc lúc", ...evidenceLabels };
+const trustSections = new Set<EvidenceSection>(["report_context", "package_revision", "brief", "appeal_source"]);
 const trustValues: Record<string, string> = { ...penaltyKindLabels, ...penaltyTargetLabels, ...restrictionLabels, ...reportReasonLabels, ...targetKindLabels };
 const enumFields = new Set(["state", "kind", "author", "authorRole", "proposerRole", "outcome", "requestedOutcome", "section", "response", "submissionKind", "trigger", "effect", "completionKind", "closeReason", "settlementLane", "confirmationSource"]);
-export function EvidenceView({ value, onFile }: Readonly<{ value: unknown; onFile?(fileId: string): void }>) {
-  return <EvidenceValue value={value} onFile={onFile} />;
+export function EvidenceView({ value, onFile, section }: Readonly<{ value: unknown; onFile?(fileId: string): void; section?: EvidenceSection }>) {
+  return <EvidenceValue value={value} onFile={onFile} trustSection={section !== undefined && trustSections.has(section)} />;
 }
-function EvidenceValue({ value, onFile, field, context }: Readonly<{ value: unknown; onFile?(fileId: string): void; field?: string; context?: string }>) {
+function EvidenceValue({ value, onFile, field, context, trustSection }: Readonly<{ value: unknown; onFile?(fileId: string): void; field?: string; context?: string; trustSection: boolean }>) {
+  if (trustSection && field === "reporterUserId" && value === null) return <span>Khách chưa đăng nhập</span>;
   if (value === null || value === undefined) return <span>Không có</span>;
-  if (Array.isArray(value)) return value.length ? <ul className="stack">{value.map((item, index) => <li key={index}><EvidenceValue value={item} onFile={onFile} field={field} context={context} /></li>)}</ul> : <span>Không có</span>;
+  if (Array.isArray(value)) return value.length ? <ul className="stack">{value.map((item, index) => <li key={index}><EvidenceValue value={item} onFile={onFile} field={field} context={context} trustSection={trustSection} /></li>)}</ul> : <span>Không có</span>;
   if (!record(value)) {
     const text = String(value); const enumValue = field !== undefined && (enumFields.has(field) || field === "reason" && context === "disputes");
     if (field?.endsWith("At") && typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/u.test(value) && Number.isFinite(Date.parse(value))) return <time dateTime={value}>{formatTipTime(value)}</time>;
-    if (field && ["kind", "restriction", "target", "reasonCategory"].includes(field) && Object.hasOwn(trustValues, text)) return <span>{trustValues[text]}</span>;
+    if (trustSection && field && ["kind", "restriction", "target", "reasonCategory"].includes(field) && Object.hasOwn(trustValues, text)) return <span>{trustValues[text]}</span>;
     const translated = enumValue && Object.hasOwn(values, text) ? values[text] : enumValue && field === "section" && Object.hasOwn(evidenceLabels, text) ? evidenceLabels[text as EvidenceSection] : text;
     return <span className="whitespace-pre-wrap break-words">{typeof value === "boolean" ? value ? "Có" : "Không" : translated}</span>;
   }
   if (typeof value.fileId === "string") return <div className="button-row"><span>{typeof value.name === "string" ? value.name : "Tệp đính kèm"}</span>
     {onFile && value.availability === "available" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.fileId) ? <Button variant="outline" onClick={() => onFile(value.fileId as string)}>Tải tệp</Button> : <span>{value.availability === "available" ? "Quay lại vụ việc để tải tệp." : "Tệp không còn khả dụng."}</span>}</div>;
-  return <dl className="summary-list">{Object.entries(value).filter(([key]) => Object.hasOwn(labels, key)).map(([key, item]) => <div key={key}><dt>{labels[key]}</dt><dd><EvidenceValue value={item} onFile={onFile} field={key} context={field ?? context} /></dd></div>)}</dl>;
+  const fieldLabels = trustSection ? trustLabels : labels;
+  return <dl className="summary-list">{Object.entries(value).filter(([key]) => Object.hasOwn(fieldLabels, key)).map(([key, item]) => <div key={key}><dt>{fieldLabels[key]}</dt><dd><EvidenceValue value={item} onFile={onFile} field={key} context={field ?? context} trustSection={trustSection} /></dd></div>)}</dl>;
 }
 export function EvidenceTabs({ kind, sourceType, disabled, onRead, onFile }: Readonly<{ kind: CaseKind; sourceType?: string; disabled: boolean; onRead(section: EvidenceSection, cursor?: number): Promise<unknown>; onFile(fileId: string): void }>) {
   const sections: EvidenceSection[] = kind === "appeal" ? ["appeal_source"] : kind === "report" ? ["report_context", ...sourceType === "commission_package" ? ["package_revision" as const] : sourceType === "commission_brief" ? ["brief" as const] : []] : ["order_summary", "thread_page", "resolution_records", ...kind.startsWith("refund_") ? ["refund_destination" as const] : []];
@@ -66,6 +69,6 @@ export function EvidenceTabs({ kind, sourceType, disabled, onRead, onFile }: Rea
   const nextCursor = record(evidence) && typeof evidence.nextBeforeSequence === "number" ? evidence.nextBeforeSequence : null;
   return <section className="stack"><h2>Bằng chứng riêng tư</h2><p>Mỗi lần xem bằng chứng hoặc tải tệp cần xác thực owner và được ghi vào nhật ký truy cập.</p>
     <div className="button-row" role="navigation" aria-label="Mục bằng chứng">{sections.map((value) => <Button key={value} variant={section === value ? "outline" : "ghost"} aria-pressed={section === value} disabled={disabled || busy} onClick={() => { clear(); setSection(value); }}>{evidenceLabels[value]}</Button>)}</div>
-    {opened ? <><EvidenceView value={evidence} onFile={onFile} /><div className="button-row"><Button variant="outline" onClick={clear}>Ẩn bằng chứng</Button>{nextCursor !== null ? <Button disabled={disabled || busy} onClick={() => void read(nextCursor)}>Xem tin nhắn cũ hơn</Button> : null}</div></> : <><EmptyState title="Bằng chứng chưa được mở" /><Button disabled={disabled || busy} onClick={() => void read()}>{busy ? "Đang mở bằng chứng…" : "Xem bằng chứng"}</Button></>}
+    {opened ? <><EvidenceView value={evidence} onFile={onFile} section={section} /><div className="button-row"><Button variant="outline" onClick={clear}>Ẩn bằng chứng</Button>{nextCursor !== null ? <Button disabled={disabled || busy} onClick={() => void read(nextCursor)}>Xem tin nhắn cũ hơn</Button> : null}</div></> : <><EmptyState title="Bằng chứng chưa được mở" /><Button disabled={disabled || busy} onClick={() => void read()}>{busy ? "Đang mở bằng chứng…" : "Xem bằng chứng"}</Button></>}
   </section>;
 }
