@@ -50,6 +50,7 @@ test.each(["creator_capability", "account"] as const)("%s removal freezes two pa
   const obligations = await f.db.select().from(schema.commissionRefundObligations).where(eq(schema.commissionRefundObligations.creatorUserId, c.p.creator.userId));
   expect(obligations).toHaveLength(2); expect(obligations.map((o) => o.orderId).sort()).toEqual([c.p.orderId, second.orderId].sort()); expect(obligations.every((o) => o.amountVnd === 50_000 && o.source === "fulfillment_freeze")).toBe(true);
   expect((await f.db.select().from(schema.identityCreatorCapabilities).where(eq(schema.identityCreatorCapabilities.id, c.capabilityId)))[0]?.state).toBe("removed");
+  if (target === "account") expect((await f.db.select().from(schema.identityUsers).where(eq(schema.identityUsers.id, c.p.creator.userId)))[0]?.accessStatus).toBe("closed");
 });
 test("removal with live orders refuses resolution_disabled and rolls back proof, standing and penalty", async () => {
   const c = await penaltyContext(f, freeze("disabled")); const command = { ...await c.command(), kind: "removal" as const, target: "creator_capability" as const };

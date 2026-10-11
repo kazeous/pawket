@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isProxy } from "node:util/types";
 import { and, asc, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
+import { z } from "zod";
 import {
   appendAdminAuditEvent, beginIdempotentCommand, completeIdempotentCommand, commissionOrders, commissionPackages, creatorPages,
   creatorPublicationRevisions, identityCreatorCapabilityEvents, insertOutboxEvent, publicContentReports, trustCases, trustPenalties, trustPenaltyEvents, trustReports,
@@ -35,6 +36,7 @@ type Input = Readonly<{ db: PawketDatabase; mode: TrustEnforcementMode; keyring:
   policies: { readCurrentIds(tx: PawketTransaction): Promise<{ enforcementRevisionId: string | null }> };
   notices?: EnforcementNoticePort; now?(): Date; idFactory?(): string }>;
 type Penalty = typeof trustPenalties.$inferSelect;
+const penaltyEndInstant = z.iso.datetime({ offset: true });
 
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []) {
   if (value === null || typeof value !== "object" || isProxy(value)) trustFail("invalid_request");
@@ -67,7 +69,7 @@ function normalizeApply(command: unknown) {
     || row.freezeFulfilment !== undefined && (typeof row.freezeFulfilment !== "boolean" || kind !== "suspension" || target !== "creator_capability")) trustFail("invalid_request");
   let endsAt: Date | null = null;
   if (row.endsAt != null) {
-    if (typeof row.endsAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(row.endsAt)) trustFail("invalid_request");
+    if (typeof row.endsAt !== "string" || !penaltyEndInstant.safeParse(row.endsAt).success) trustFail("invalid_request");
     endsAt = time(new Date(row.endsAt));
   }
   return { ...base, subjectUserId: row.subjectUserId, sourceCaseId: (source.caseId ?? null) as string | null, sourcePublicReportId: (source.publicReportId ?? null) as string | null,
@@ -146,13 +148,18 @@ export function createPenaltyService(input: Input) {
     if (!caseIdentifier(subjectUserId) || !validUuid(c.penaltyId) || !caseIdentifier(c.requestId)) trustFail("invalid_request"); time(c.at);
     const subject = await lockSubject(tx, subjectUserId); const active = await activePenalties(tx, subjectUserId, c.at);
     const capabilityPenalties = active.filter((p) => p.target === "creator_capability" || p.target === "account" && p.kind === "removal");
-    const capabilityState: CapabilityState = capabilityPenalties.some((p) => p.kind === "removal") ? "removed" : capabilityPenalties.some((p) => p.kind === "suspension") ? "suspended" : "active";
+    const requiredCapabilityState: CapabilityState = capabilityPenalties.some((p) => p.kind === "removal") ? "removed" : capabilityPenalties.some((p) => p.kind === "suspension") ? "suspended" : "active";
     const accountPenalties = active.filter((p) => p.target === "account");
     const status: AccessStatus = accountPenalties.some((p) => p.kind === "removal") ? "closed" : accountPenalties.some((p) => p.kind === "suspension") ? "access_suspended" : "active";
-    if (subject.capability && subject.capability.state !== capabilityState) {
-      const [latest] = await tx.select({ penaltyId: identityCreatorCapabilityEvents.penaltyId }).from(identityCreatorCapabilityEvents).where(eq(identityCreatorCapabilityEvents.capabilityId, subject.capability.id)).orderBy(desc(identityCreatorCapabilityEvents.version)).limit(1);
-      // A warning/restriction must not undo a suspension created by the disabled-mode legacy command.
-      if (capabilityState !== "active" || latest?.penaltyId) await input.identity.setCreatorCapability(tx, { ...c, userId: subjectUserId, state: capabilityState });
+    if (subject.capability) {
+      const [legacy] = await tx.select({ state: identityCreatorCapabilityEvents.state }).from(identityCreatorCapabilityEvents)
+        .where(and(eq(identityCreatorCapabilityEvents.capabilityId, subject.capability.id), isNull(identityCreatorCapabilityEvents.penaltyId)))
+        .orderBy(desc(identityCreatorCapabilityEvents.version)).limit(1);
+      // Penalties can strengthen, but never erase, the latest legacy capability baseline.
+      const baseline = legacy?.state ?? "active";
+      const capabilityState: CapabilityState = requiredCapabilityState === "removed" || baseline === "removed" ? "removed"
+        : requiredCapabilityState === "suspended" || baseline === "suspended" ? "suspended" : "active";
+      if (subject.capability.state !== capabilityState) await input.identity.setCreatorCapability(tx, { ...c, userId: subjectUserId, state: capabilityState });
     }
     const [ending] = await tx.select({ target: trustPenalties.target }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1);
     if (subject.accessStatus !== status && (accountPenalties.length > 0 || ending?.target === "account")) await input.identity.setAccountAccess(tx, { ...c, userId: subjectUserId, status });
@@ -194,10 +201,20 @@ export function createPenaltyService(input: Input) {
         if (c.endsAt !== null && (c.endsAt <= at || c.endsAt.getTime() - at.getTime() > 3_650 * 86_400_000)) trustFail("invalid_request");
         if (c.kind !== "warning") {
           const [duplicate] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"),
+            lte(trustPenalties.startsAt, at), or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, at)),
             c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)))).limit(1);
           if (duplicate) trustFail("duplicate");
         }
         await proof(tx, c, "owner.trust_penalty_apply", at);
+        if (c.kind !== "warning") {
+          // The active-row unique indexes also include penalties awaiting expiry maintenance.
+          // End elapsed matches atomically before inserting their replacement, using the normal expiry path.
+          const elapsed = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
+            eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, at), lte(trustPenalties.endsAt, at),
+            c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)),
+          )).for("update");
+          for (const penalty of elapsed) await end(tx, { penaltyId: penalty.id, state: "expired", actor: null, requestId: c.requestId, at, reason: null });
+        }
         const penaltyId = id(); const policy = await input.policies.readCurrentIds(tx);
         const [row] = await tx.insert(trustPenalties).values({ id: penaltyId, subjectUserId: c.subjectUserId, kind: c.kind, restriction: c.restriction, target: c.target, reasonCategory: c.reasonCategory,
           explanationEnvelope: encrypt("trust_penalties", penaltyId, "explanation", c.explanation), internalNoteEnvelope: c.internalNote === null ? null : encrypt("trust_penalties", penaltyId, "internal_note", c.internalNote),

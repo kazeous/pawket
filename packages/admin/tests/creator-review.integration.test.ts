@@ -10,6 +10,7 @@ import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
 import { CREATOR_APPLICATION_ATTESTATION_VERSIONS, createIdentityEnforcementPort } from "@pawket/identity";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
+import { createPenaltyService } from "@pawket/trust";
 
 import * as admin from "../src/index.js";
 
@@ -193,6 +194,47 @@ afterAll(async () => {
 });
 
 describe("owner creator review", () => {
+  test.each([
+    { kind: "removal", target: "creator_capability" },
+    { kind: "removal", target: "account" },
+    { kind: "suspension", target: "creator_capability" },
+  ] as const)("legacy suspension survives $target $kind and lift; reinstatement checks active penalties", async (shape) => {
+    const common = { db, keyring, commandFingerprintKey: new Uint8Array(32).fill(11), now: () => now,
+      consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition };
+    const enabled = admin.createCreatorReviewService({ ...common, enforcementMode: "enabled" });
+    const disabled = admin.createCreatorReviewService({ ...common, enforcementMode: "disabled" });
+    const claimed = await disabled.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: randomUUID() });
+    await disabled.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId,
+      expectedVersion: claimed.version, idempotencyKey: randomUUID(), requestId: randomUUID(), action: "approve", reasonCode: "other", applicantExplanation: "Approved" });
+    const command = { ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, userId: "review-artist",
+      action: "suspend" as const, reasonCode: "other", applicantExplanation: "Legacy suspension", idempotencyKey: randomUUID(), requestId: randomUUID() };
+    await disabled.setCreatorCapability(command);
+    const pageId = randomUUID(); const publicationId = randomUUID(); const publicReportId = randomUUID();
+    await db.insert(schema.creatorPages).values({ id: pageId, userId: "review-artist", initializedFromRevisionId: revisionId, createdAt: now, updatedAt: now });
+    await db.insert(schema.creatorPublicationRevisions).values({ id: publicationId, pageId, revisionNumber: 1, canonicalHandle: "review-artist",
+      displayName: "Artist", shortIntroduction: "Art", primaryDiscipline: "illustration", secondaryDisciplines: [], actorUserId: "review-artist",
+      actorSessionId: "artist-session", expectedDraftVersion: 1, requestId: randomUUID(), publishedAt: now });
+    await db.insert(schema.publicContentReports).values({ id: publicReportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
+      targetType: "page", targetId: pageId, publicationRevisionId: publicationId, reason: "other", reporterUserId: "other-owner", createdAt: now, updatedAt: now });
+    const penalties = createPenaltyService({ db, mode: "enabled", keyring, lookupHmacKey: new Uint8Array(32).fill(12),
+      applicationRevision: "synthetic-review", now: () => now, consumeStepUpProof: async () => true,
+      fence: { async lockCreatorFence(tx, userId) { await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${userId}`}, 0))`); } },
+      identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) }),
+      freeze: { freezeForRemoval: async () => ({ closedOrders: 0 }) }, policies: { readCurrentIds: async () => ({ enforcementRevisionId: null }) } });
+    const ownerCommand = () => ({ owner: { userId: "review-owner", sessionId: "owner-session" }, stepUpProofId: proofId, idempotencyKey: randomUUID(), requestId: randomUUID() });
+    const { penaltyId } = await penalties.apply({ ...ownerCommand(), subjectUserId: "review-artist", source: { publicReportId }, ...shape,
+      reasonCategory: "other", explanation: "Synthetic penalty" });
+    if (shape.target === "account") expect((await client`select access_status from identity_users where id = 'review-artist'`)[0]?.access_status).toBe("closed");
+    if (shape.kind === "suspension") {
+      // Already suspended: applying the penalty changes no capability row or latest event.
+      expect((await client`select penalty_id from identity_creator_capability_events order by version desc limit 1`)[0]?.penalty_id).toBeNull();
+    }
+    const reinstate = { ...command, action: "reinstate" as const, idempotencyKey: randomUUID(), requestId: randomUUID() };
+    await expect(enabled.setCreatorCapability(reinstate)).rejects.toMatchObject({ code: "use_penalty" });
+    await penalties.lift({ ...ownerCommand(), penaltyId, reason: "Lift synthetic penalty" });
+    expect((await client`select state from identity_creator_capabilities where user_id = 'review-artist'`)[0]?.state).toBe("suspended");
+    await expect(enabled.setCreatorCapability(reinstate)).resolves.toEqual({ state: "active" });
+  });
   test("enabled enforcement refuses legacy suspend and penalty reinstatement; disabled legacy suspension can still be reinstated", async () => {
     const common = { db, keyring, commandFingerprintKey: new Uint8Array(32).fill(11), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition };
     const enabled = admin.createCreatorReviewService({ ...common, enforcementMode: "enabled" });

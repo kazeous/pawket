@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { z } from "zod";
 import * as schema from "@pawket/database";
 import { decryptSensitiveField } from "@pawket/security";
 import { createPenaltyService } from "../src/penalty-service.js";
@@ -58,4 +59,34 @@ test("duplicate active target refuses; warnings acknowledge once, privately and 
   expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, penaltyId)))[0]).toMatchObject({ acknowledgedAt: reportAt, version: 2 });
   expect(await f.db.select().from(schema.trustPenaltyEvents).where(eq(schema.trustPenaltyEvents.penaltyId, penaltyId))).toHaveLength(2);
   expect(JSON.stringify(await c.service.listForSubject(c.p.creator.userId))).not.toContain("Private internal note");
+});
+
+test.each([
+  { kind: "suspension", target: "creator_capability" },
+  { kind: "suspension", target: "account" },
+  { kind: "restriction", restriction: "reporting" },
+] as const)("an elapsed $kind can be replaced at its end-date boundary before expiry maintenance", async (shape) => {
+  const c = await penaltyContext(f); const expiry = new Date(reportAt.getTime() + 1_000);
+  const first = await c.service.apply({ ...await c.command(), ...shape, endsAt: expiry.toISOString() });
+  const service = createPenaltyService({ ...c.input, now: () => expiry });
+  await expect(service.apply({ ...await c.command(), ...await c.base("owner.trust_penalty_lift"), ...shape })).rejects.toMatchObject({ code: "owner_step_up_required" });
+  expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, first.penaltyId)))[0]?.state).toBe("active");
+  const command = { ...await c.command(), ...shape };
+  const replacement = await service.apply(command);
+  expect(await service.apply({ ...command, stepUpProofId: randomUUID(), requestId: randomUUID() })).toEqual(replacement);
+  expect(replacement.penaltyId).not.toBe(first.penaltyId);
+  expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, first.penaltyId)))[0]).toMatchObject({ state: "expired", endedAt: expiry });
+  expect(await f.db.select().from(schema.trustPenaltyEvents).where(eq(schema.trustPenaltyEvents.penaltyId, first.penaltyId))).toMatchObject([{ action: "applied" }, { action: "expired" }]);
+  expect((await service.listActive({ subjectUserId: c.p.creator.userId })).map((p) => p.penaltyId)).toEqual([replacement.penaltyId]);
+});
+
+test.each([
+  ["2026-10-02T03:00:00.123456789Z", "2026-10-02T03:00:00.123Z"],
+  ["2026-10-02T10:00:00.123456789+07:00", "2026-10-02T03:00:00.123Z"],
+  ["2026-10-02T03:00Z", "2026-10-02T03:00:00.000Z"],
+])("HTTP-accepted end instant %s is normalized to milliseconds", async (endsAt, normalized) => {
+  expect(z.iso.datetime({ offset: true }).safeParse(endsAt).success).toBe(true);
+  const c = await penaltyContext(f);
+  const { penaltyId } = await c.service.apply({ ...await c.command(), kind: "suspension", target: "account", endsAt });
+  expect((await c.service.listForSubject(c.p.creator.userId)).find((p) => p.penaltyId === penaltyId)?.endsAt).toBe(normalized);
 });

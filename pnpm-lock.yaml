@@ -226,6 +226,9 @@ importers:
       '@pawket/catalog':
         specifier: workspace:*
         version: link:../catalog
+      '@pawket/trust':
+        specifier: workspace:*
+        version: link:../trust
       postgres:
         specifier: 3.4.9
         version: 3.4.9

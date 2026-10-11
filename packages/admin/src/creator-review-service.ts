@@ -17,6 +17,7 @@ import {
   paymentsReceivingAccountOnboarding,
   paymentsVerificationDepositChallenges,
   paymentsVerificationDepositRefundObligations,
+  trustPenalties,
   type PawketDatabase,
   type PawketTransaction,
 } from "@pawket/database";
@@ -288,9 +289,14 @@ export function createCreatorReviewService(input: ServiceInput) {
         policy(capability, "creator_capability_missing");
         await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
         if (input.enforcementMode === "enabled" && command.action === "reinstate") {
-          const [latest] = await tx.select({ penaltyId: identityCreatorCapabilityEvents.penaltyId }).from(identityCreatorCapabilityEvents)
-            .where(eq(identityCreatorCapabilityEvents.capabilityId, capability.id)).orderBy(desc(identityCreatorCapabilityEvents.version)).limit(1);
-          if (latest?.penaltyId !== null && latest?.penaltyId !== undefined) throw new CreatorReviewError("use_penalty");
+          const penaltyAt = now();
+          const [penalty] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
+            eq(trustPenalties.subjectUserId, command.userId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, penaltyAt),
+            or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, penaltyAt)),
+            or(and(eq(trustPenalties.target, "creator_capability"), or(eq(trustPenalties.kind, "suspension"), eq(trustPenalties.kind, "removal"))),
+              and(eq(trustPenalties.target, "account"), eq(trustPenalties.kind, "removal"))),
+          )).limit(1);
+          if (penalty) throw new CreatorReviewError("use_penalty");
         }
         const expectedState = command.action === "suspend" ? "active" : "suspended";
         policy(capability.state === expectedState, "invalid_capability_state");

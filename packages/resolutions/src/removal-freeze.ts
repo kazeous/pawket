@@ -1,4 +1,4 @@
-import { insertOutboxEvent, type PawketTransaction } from "@pawket/database";
+import type { PawketTransaction } from "@pawket/database";
 import { resolutionFail, type ResolutionActor } from "./contracts.js";
 import type { ResolutionCasePort, ResolutionOrderPort, ResolutionPaymentFactsPort, ResolutionRefundPort } from "./ports.js";
 import { closeSuspendedPaidOrder } from "./suspension-service.js";
@@ -16,10 +16,9 @@ export function createRemovalFreezePort(input: ExitPorts & { mode: "disabled" | 
         if (!facts || facts.creatorUserId !== command.creatorUserId || !["in_progress", "delivered"].includes(facts.state) || facts.version !== candidate.version) resolutionFail("version_conflict");
         await closeSuspendedPaidOrder(tx, input, facts, { reason: "fulfillment_frozen", actor: command.actor, requestId: command.requestId, at: command.at });
       }
-      const closedOrders = candidates.length;
-      if (closedOrders > 0) await insertOutboxEvent(tx, { eventType: "resolution.fulfillment_frozen.v1", eventVersion: 1, aggregateType: "creator", aggregateId: command.creatorUserId,
-        payload: { creatorUserId: command.creatorUserId, closedOrders }, occurredAt: command.at });
-      return { closedOrders };
+      // The caller announces the enforcement via trust.penalty_applied.v1.
+      // resolution.fulfillment_frozen.v1 is reserved for the Stage A owner freeze and its audit row.
+      return { closedOrders: candidates.length };
     },
   };
 }
