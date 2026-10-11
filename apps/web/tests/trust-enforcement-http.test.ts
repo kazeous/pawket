@@ -104,7 +104,7 @@ describe("appeals HTTP", () => {
     for (const value of [{ ...body, userId: "someone" }, { ...body, target: { penaltyId: target.packageId, hideId: target.revisionId } }, { ...body, sessionToken: "secret" }]) expect((await f.http.submit(request(value))).status).toBe(400);
     expect(f.appeals.submit).not.toHaveBeenCalled();
   });
-  test.each([["duplicate", 409], ["window_closed", 409], ["not_available", 404], ["enforcement_disabled", 503], ["invalid_request", 400]] as const)("%s returns %s without sensitive details", async (code, status) => {
+  test.each([["duplicate", 409], ["window_closed", 409], ["not_available", 404], ["enforcement_disabled", 503], ["invalid_request", 400], ["rate_limited", 429]] as const)("%s returns %s without sensitive details", async (code, status) => {
     const f = appealFixture(); f.appeals.submit.mockRejectedValue(new TrustEnforcementError(code));
     const response = await f.http.submit(request(body)); expect(response.status).toBe(status); expect(await response.json()).toEqual({ code });
   });

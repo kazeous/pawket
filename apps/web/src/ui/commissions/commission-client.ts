@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { TipRequestError, tipRequest } from "@/ui/tips/tip-client";
-import { trustErrorText } from "../trust/trust-client";
 
 const uuid = z.uuid();
 const time = z.iso.datetime();
@@ -78,7 +77,6 @@ export const closeLabels: Record<string, string> = { buyer_withdrawn: "Người 
   cancelled_by_agreement: "Đã hủy theo thỏa thuận", cancelled_by_ruling: "Đã hủy theo kết luận của Pawket", buyer_cancelled_after_suspension: "Người đặt đã hủy sau khi nghệ sĩ bị tạm ngưng", fulfillment_frozen: "Pawket đã dừng thực hiện đơn",
   request_expired: "Yêu cầu đã hết hạn", quote_expired: "Báo giá đã hết hạn", buyer_cancelled: "Người đặt đã hủy", creator_cancelled: "Nghệ sĩ đã hủy", payment_expired: "Hết hạn thanh toán", security_invalidated: "Đơn bị đóng do điều kiện an toàn", eligibility_invalidated: "Điều kiện nhận thanh toán đã thay đổi" };
 export function commissionErrorText(code: string, context: "brief" | "thread" | "submission" = "brief"): string {
-  const trustText = trustErrorText(code); if (trustText) return trustText;
   if (code === "OIDC_ACTOR_CHANGED") code = "account_changed";
   const messages: Record<string, string> = { authentication_required: "Đăng nhập lại để tiếp tục.", account_changed: "Tài khoản đã thay đổi. Mở lại trang bằng tài khoản ban đầu để tiếp tục.",
     recent_auth_required: "Cần xác thực lại trước khi xác nhận tiền.", totp_required: "Cần xác thực hai bước trước khi xác nhận tiền.", not_available: "Nội dung hoặc thao tác này hiện không khả dụng.",

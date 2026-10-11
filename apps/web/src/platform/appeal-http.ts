@@ -9,7 +9,7 @@ const bodySchema = z.strictObject({ target: z.union([z.strictObject({ penaltyId:
 function failure(error: unknown) {
   if (error instanceof CommissionHttpFailure) return commissionJson(error.status, { code: error.code });
   if (error instanceof TrustEnforcementError) return commissionJson(error.code === "not_available" ? 404 : error.code === "not_authorized" ? 403
-    : ["enforcement_disabled", "dependency_unavailable"].includes(error.code) ? 503 : error.code.startsWith("invalid_") ? 400 : 409, { code: error.code });
+    : ["enforcement_disabled", "dependency_unavailable"].includes(error.code) ? 503 : error.code === "rate_limited" ? 429 : error.code.startsWith("invalid_") ? 400 : 409, { code: error.code });
   return commissionJson(503, { code: "dependency_unavailable" });
 }
 function helpCookie(headers: Headers) {

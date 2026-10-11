@@ -3,7 +3,8 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, test, vi } from "vitest";
-const { execute, solve } = vi.hoisted(() => ({ execute: vi.fn(), solve: vi.fn().mockResolvedValue(1234) }));
+const { execute, solve, refresh } = vi.hoisted(() => ({ execute: vi.fn(), solve: vi.fn().mockResolvedValue(1234), refresh: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh }) }));
 vi.mock("../src/app/creators/[handle]/report-proof", () => ({ solveReportChallenge: solve }));
 vi.mock("../src/ui/commissions/commission-session", () => ({ useCommissionSession: () => async () => "synthetic-actor",
   useCommissionCommand: () => ({ execute, retry: vi.fn(), locked: false, pending: false, code: null }), CommandFeedback: () => null }));
@@ -26,7 +27,7 @@ const penalty: PenaltyView = { penaltyId: id, kind: "restriction", restriction: 
   explanation: "Giải thích dành cho bạn", startsAt: at, endsAt: null, endedAt: null, state: "active", acknowledgedAt: null,
   canAppeal: true, appealDeadline: "2099-10-24T00:00:00.000Z", appealState: null };
 const markup = (node: ReturnType<typeof createElement>) => renderToStaticMarkup(node);
-afterEach(() => { vi.unstubAllGlobals(); execute.mockReset(); });
+afterEach(() => { vi.unstubAllGlobals(); execute.mockReset(); refresh.mockReset(); });
 test.each(["buyer", "creator"] as const)("report action shows on the other participant's message only for %s", (role) => {
   for (const author of ["buyer", "creator"] as const) {
     expect(markup(createElement(CommissionMessage, { order: { ...order, role }, message: { ...message, author }, trustMode: "enabled" })).includes("Báo cáo")).toBe(role !== author);
@@ -97,6 +98,24 @@ test("appeal form enforces 4,000 code points on submit", async () => {
     expect(execute).not.toHaveBeenCalled(); expect(textarea.getAttribute("aria-invalid")).toBe("true");
     textarea.value = "😀".repeat(4000); await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
     expect(execute).toHaveBeenCalledWith("/api/v1/help/appeals", { target: { penaltyId: id }, statement: "😀".repeat(4000) }, expect.any(Function));
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+test("successful appeal refreshes My Cases so the submitted appeal card appears without a reload", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  const cases = { disputes: [], refunds: [], lateClaims: [], penalties: [penalty], reportsFiled: [], hides: [], appeals: [] };
+  const render = (submitted = false) => root.render(createElement(MyCases, { cases: submitted ? { ...cases, penalties: [{ ...penalty, canAppeal: false, appealState: "open" }],
+    appeals: [{ appealId: id, penaltyId: id, hideId: null, state: "open", reasoning: null, createdAt: at, decidedAt: null }] } : cases, orderRoles: {}, trustMode: "enabled" }));
+  refresh.mockImplementation(() => render(true));
+  try {
+    await act(async () => render());
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Kháng nghị")!.click());
+    container.querySelector<HTMLTextAreaElement>("textarea")!.value = "Xin xem lại";
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(refresh).not.toHaveBeenCalled(); expect(container.textContent).not.toContain("Kháng nghị đã gửi");
+    await act(async () => execute.mock.calls[0]![2]({ appealId: id }));
+    expect(refresh).toHaveBeenCalledOnce(); expect(container.textContent).toContain("Kháng nghị đã gửi");
+    expect(container.querySelector("form")).toBeNull();
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
 test("warning banner disappears only after acknowledge succeeds and stays in my cases", async () => {

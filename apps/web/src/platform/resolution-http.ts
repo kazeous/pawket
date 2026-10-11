@@ -40,8 +40,11 @@ const invalid = (): never => { throw new CommissionHttpFailure(400, "invalid_req
 function noQuery(request: Request) { if (new URL(request.url).searchParams.size !== 0) invalid(); }
 function failure(error: unknown): Response {
   if (error instanceof CommissionHttpFailure) return commissionJson(error.status, { code: error.code });
-  if (error instanceof TrustEnforcementError) return commissionJson(["enforcement_disabled", "dependency_unavailable"].includes(error.code) ? 503
-    : ["not_available", "not_authorized"].includes(error.code) ? 404 : error.code.startsWith("invalid_") ? 400 : 409, { code: error.code });
+  if (error instanceof TrustEnforcementError) {
+    const code = error.code === "not_authorized" ? "not_available" : error.code;
+    return commissionJson(["enforcement_disabled", "dependency_unavailable"].includes(code) ? 503
+      : code === "not_available" ? 404 : code === "rate_limited" ? 429 : code.startsWith("invalid_") ? 400 : 409, { code });
+  }
   if (error instanceof ResolutionError || error instanceof CommissionRefundError || error instanceof CommissionError || error instanceof CommissionFileError || error instanceof TipPaymentError) {
     const code = error.code;
     if (["not_authorized", "not_available"].includes(code)) return commissionJson(404, { code: "not_available" });

@@ -9,16 +9,16 @@ import { StatusBanner } from "@/ui/status-banner";
 import { LoadingState } from "@/ui/async-state";
 import { solveReportChallenge } from "@/app/creators/[handle]/report-proof";
 import { tipRequest } from "../tips/tip-client";
-import { CommandFeedback, useCommissionCommand } from "../commissions/commission-session";
+import { TrustCommandFeedback, useTrustCommand } from "./trust-command";
 import { parseCommission } from "../commissions/commission-client";
 import { reportChallengeSchema, reportInputSchema, reportReasonLabels, reportResultSchema, type ReportTarget, type TrustMode } from "./trust-client";
 
 type ReportInput = ReturnType<typeof reportInputSchema.parse>;
-type Props = Readonly<{ target: ReportTarget; mode: TrustMode; ownContent?: boolean; guest?: boolean }>;
+type Props = Readonly<{ target: ReportTarget; mode: TrustMode; ownContent?: boolean; guest?: boolean; actorUserId?: string }>;
 const success = "Đã gửi báo cáo. Pawket sẽ xem xét; người bị báo cáo không biết bạn là ai.";
-export function ReportDialog({ target, mode, ownContent = false, guest = false }: Props) {
+export function ReportDialog({ target, mode, ownContent = false, guest = false, actorUserId }: Props) {
   if (mode !== "enabled" || ownContent || guest && target.kind !== "commission_package") return null;
-  return guest ? <GuestReport target={target} /> : <AuthenticatedReport target={target} />;
+  return guest ? <GuestReport target={target} /> : <AuthenticatedReport target={target} actorUserId={actorUserId} />;
 }
 function ReportSurface({ target, locked, accepted, onSubmit, feedback, onCancel }: Readonly<{
   target: ReportTarget; locked: boolean; accepted: boolean; onSubmit(input: ReportInput): void; feedback?: ReactNode; onCancel?(): void;
@@ -46,9 +46,9 @@ function ReportSurface({ target, locked, accepted, onSubmit, feedback, onCancel 
     </AlertDialogContent>
   </AlertDialog>;
 }
-function AuthenticatedReport({ target }: Readonly<{ target: ReportTarget }>) {
-  const command = useCommissionCommand(); const [accepted, setAccepted] = useState(false);
-  return <ReportSurface target={target} locked={command.locked} accepted={accepted} feedback={<CommandFeedback command={command} />}
+function AuthenticatedReport({ target, actorUserId }: Readonly<{ target: ReportTarget; actorUserId?: string | undefined }>) {
+  const command = useTrustCommand(actorUserId); const [accepted, setAccepted] = useState(false);
+  return <ReportSurface target={target} locked={command.locked} accepted={accepted} feedback={<TrustCommandFeedback command={command} />}
     onSubmit={(input) => command.execute("/api/v1/reports", input, (value) => { parseCommission(reportResultSchema, value); setAccepted(true); })} />;
 }
 function GuestReport({ target }: Readonly<{ target: ReportTarget }>) {
