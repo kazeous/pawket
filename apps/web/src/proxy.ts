@@ -4,6 +4,7 @@ import { trustedRequestId } from "./http/route-context";
 import { applySecurityHeaders } from "./http/security-headers";
 
 const privateNoStore = /^\/(creator(?:\/preview)?|admin\/content-reports|tips|commissions)(?:\/|$)/u;
+const lockedHelp = /^\/help\/locked(?:\/|$)/u;
 const commissionNoReferrer = /^\/(?:commissions|creator\/commissions)(?:\/|$)|^\/api\/v1\/(?:commissions|creator\/commissions)(?:\/|$)|^\/api\/v1\/public\/creators\/[^/]+\/commissions$/u;
 const tipNoReferrer = /^\/(?:tips|creator\/tips)(?:\/|$)|^\/api\/v1\/(?:tips|creator\/(?:tips|tip-settings))(?:\/|$)|^\/api\/v1\/public\/creators\/[^/]+\/tips$/u;
 const publicNoStore = /^\/(creators|media)(?:\/|$)|^\/sitemap\.xml$/u;
@@ -15,7 +16,7 @@ export function proxy(request: NextRequest): NextResponse {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("x-request-id", requestId);
-  if (privateNoStore.test(request.nextUrl.pathname)) {
+  if (privateNoStore.test(request.nextUrl.pathname) || lockedHelp.test(request.nextUrl.pathname)) {
     response.headers.set("cache-control", "private, no-store");
   }
   if (publicNoStore.test(request.nextUrl.pathname)) {
@@ -26,6 +27,6 @@ export function proxy(request: NextRequest): NextResponse {
     response.headers.set("referrer-policy", "no-referrer");
   }
   applySecurityHeaders(response);
-  if (tipNoReferrer.test(request.nextUrl.pathname) || commissionNoReferrer.test(request.nextUrl.pathname) || /^\/creators\/[^/]+\/commissions(?:\/|$)/u.test(request.nextUrl.pathname)) response.headers.set("referrer-policy", "no-referrer");
+  if (lockedHelp.test(request.nextUrl.pathname) || tipNoReferrer.test(request.nextUrl.pathname) || commissionNoReferrer.test(request.nextUrl.pathname) || /^\/creators\/[^/]+\/commissions(?:\/|$)/u.test(request.nextUrl.pathname)) response.headers.set("referrer-policy", "no-referrer");
   return response;
 }

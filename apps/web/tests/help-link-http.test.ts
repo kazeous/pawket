@@ -6,9 +6,9 @@ const token = Buffer.alloc(32, 7).toString("base64url");
 let routeHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
 vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: () => ({ helpLinkHandlers: routeHandlers }) }));
 function fixture() {
-  const helpLinks = { openSession: vi.fn().mockResolvedValue({ sessionToken: token, penaltyId: "private-penalty", expiresAt: new Date("2026-10-12T03:30:00Z") }), requestLink: vi.fn().mockResolvedValue(undefined) };
+  const helpLinks = { openSession: vi.fn().mockResolvedValue({ sessionToken: token, penaltyId: "private-penalty", expiresAt: new Date("2026-10-12T03:30:00Z") }), requestLink: vi.fn().mockResolvedValue(undefined), revokeSession: vi.fn().mockResolvedValue(undefined) };
   const logger = { error: vi.fn() };
-  return { helpLinks, logger, http: createHelpLinkHttpHandlers({ appBaseUrl: origin, lookupHmacKey: key, helpLinks, logger }) };
+  return { helpLinks, logger, http: createHelpLinkHttpHandlers({ appBaseUrl: origin, mode: "enabled", lookupHmacKey: key, helpLinks, logger }) };
 }
 function request(path: string, body: unknown, headers: Record<string, string> = {}) {
   return new Request(`${origin}/help/locked/${path}`, { method: "POST", headers: { origin, "content-type": "application/json", "x-real-ip": "192.0.2.1", ...headers }, body: JSON.stringify(body) });
@@ -20,6 +20,29 @@ test("session route sets the cookie with Path=/help/locked, HttpOnly, Secure, Sa
   expect(response.headers.get("set-cookie")).toBe(`pawket_help=${token}; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`);
   expect(f.helpLinks.openSession).toHaveBeenCalledWith({ token, networkKeyHmac: deriveTrustedNetworkKey(req.headers, key) });
   expect(response.headers.get("cache-control")).toContain("no-store");
+});
+
+test("disabled session exchange returns the expired-link response before opening a session", async () => {
+  const f = fixture(); const http = createHelpLinkHttpHandlers({ appBaseUrl: origin, mode: "disabled", lookupHmacKey: key, helpLinks: f.helpLinks, logger: f.logger });
+  const response = await http.session(request("session", { token }));
+  expect(response.status).toBe(400); expect(response.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.openSession).not.toHaveBeenCalled();
+});
+test("end route revokes the cookie session, expires the scoped cookie and redirects", async () => {
+  const f = fixture(); routeHandlers = f.http; const route = await import("../src/app/help/locked/end/route.js");
+  const response = await route.POST(request("end", {}, { cookie: `pawket_help=${token}; pawket_identity=unrelated` }));
+  expect(f.helpLinks.revokeSession).toHaveBeenCalledWith(token); expect(response.status).toBe(303); expect(response.headers.get("location")).toBe("/help/locked");
+  expect(response.headers.get("set-cookie")).toBe("pawket_help=; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+  expect(response.headers.get("cache-control")).toContain("no-store");
+});
+test("end session is idempotent without a cookie and refuses cross-site requests", async () => {
+  const f = fixture(); expect((await f.http.endSession(request("end", {}))).status).toBe(303); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
+  const rejected = await f.http.endSession(request("end", {}, { cookie: `pawket_help=${token}`, origin: "https://foreign.invalid" }));
+  expect(rejected.status).toBe(403); expect(rejected.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
+});
+test("failed revocation keeps the cookie available for retry and masks private errors", async () => {
+  const f = fixture(); f.helpLinks.revokeSession.mockRejectedValue(new Error(token));
+  const response = await f.http.endSession(request("end", {}, { cookie: `pawket_help=${token}` }));
+  expect(response.status).toBe(503); expect(response.headers.has("set-cookie")).toBe(false); expect(await response.text()).not.toContain(token);
 });
 test("both POST route modules delegate under the help cookie path", async () => {
   const f = fixture(); routeHandlers = f.http;

@@ -31,6 +31,14 @@ describe("HTTP hardening", () => {
     expect(response.headers.has("content-security-policy")).toBe(false);
   });
 
+  it("keeps locked help pages and handlers private with no referrer through the proxy", () => {
+    for (const path of ["/help/locked", "/help/locked/case", "/help/locked/resend", "/help/locked/session", "/help/locked/end", "/help/locked/appeal"]) {
+      const response = proxy(new NextRequest(`https://pawket.test${path}`));
+      expect(response.headers.get("cache-control")).toContain("private, no-store");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    }
+  });
+
   it("configures the required headers globally in Next", async () => {
     const configuredHeaders = await nextConfig.headers?.();
     const globalHeaders = configuredHeaders?.find((entry) => entry.source === "/:path*")?.headers;
@@ -42,7 +50,7 @@ describe("HTTP hardening", () => {
 
   it("marks identity, creator, security, and owner pages as private no-store surfaces", async () => {
     const configuredHeaders = await nextConfig.headers?.();
-    const sensitiveSources = ["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*"];
+    const sensitiveSources = ["/", "/register", "/verify-email/:path*", "/sign-in/:path*", "/forgot-password", "/reset-password", "/settings/:path*", "/creator/:path*", "/admin/:path*", "/help/locked/:path*"];
 
     for (const source of sensitiveSources) {
       const headers = configuredHeaders?.find((entry) => entry.source === source)?.headers ?? [];

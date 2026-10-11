@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { deriveTrustedNetworkKey, type HelpLinkService } from "@pawket/trust";
+import { deriveTrustedNetworkKey, type HelpLinkService, type TrustEnforcementMode } from "@pawket/trust";
 import { COMMISSION_PRIVATE_HEADERS, commissionJson, readCommissionBody } from "./commission-http.js";
 
-type Input = { appBaseUrl: string; lookupHmacKey: Uint8Array; helpLinks: Pick<HelpLinkService, "openSession" | "requestLink">;
+type Input = { appBaseUrl: string; mode: TrustEnforcementMode; lookupHmacKey: Uint8Array; helpLinks: Pick<HelpLinkService, "openSession" | "requestLink" | "revokeSession">;
   logger: { error(message: string): void } };
 const unavailable = (status = 400) => commissionJson(status, { code: "not_available" });
 const empty = () => new Response(null, { status: 204, headers: COMMISSION_PRIVATE_HEADERS });
@@ -18,6 +18,7 @@ export function createHelpLinkHttpHandlers(input: Input) {
   return {
     async session(request: Request): Promise<Response> {
       const rejected = boundary(request); if (rejected) return rejected;
+      if (input.mode !== "enabled") return unavailable();
       try {
         const body = await readCommissionBody(request, z.strictObject({ token: z.string().max(128) }));
         const networkKeyHmac = deriveTrustedNetworkKey(request.headers, key); if (!networkKeyHmac) return unavailable();
@@ -27,6 +28,15 @@ export function createHelpLinkHttpHandlers(input: Input) {
         response.headers.set("set-cookie", `pawket_help=${opened.sessionToken}; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`);
         return response;
       } catch { return unavailable(); }
+    },
+    async endSession(request: Request): Promise<Response> {
+      const rejected = boundary(request); if (rejected) return rejected;
+      const values = (request.headers.get("cookie") ?? "").split(";").map((entry) => entry.trim()).filter((entry) => entry.startsWith("pawket_help="));
+      const token = values.length === 1 ? values[0]!.slice("pawket_help=".length) : null;
+      try { if (token && /^[A-Za-z0-9_-]{43}$/u.test(token)) await input.helpLinks.revokeSession(token); }
+      catch { return unavailable(503); }
+      return new Response(null, { status: 303, headers: { ...COMMISSION_PRIVATE_HEADERS, location: "/help/locked",
+        "set-cookie": "pawket_help=; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT" } });
     },
     async linkRequest(request: Request): Promise<Response> {
       const rejected = boundary(request); if (rejected) return rejected;

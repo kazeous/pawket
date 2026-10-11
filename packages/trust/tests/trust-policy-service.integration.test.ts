@@ -125,4 +125,13 @@ describe("trust policy publishing", () => {
     expect(s.consumeStepUpProof).toHaveBeenCalledTimes(1); expect(await consumed(c.stepUpProofId)).toBeNull();
     expect((await s.instance.readCurrent(c.kind))!.revisionNumber).toBe(c.expectedRevisionNumber);
   });
+  test("public revision reads retain an older published policy and omit owner fields", async () => {
+    const s = service(); const first = await s.instance.publish(await command());
+    await s.instance.publish(await command());
+    const old = await s.instance.readRevision(first.revisionId);
+    expect(old).toMatchObject({ revisionId: first.revisionId, revisionNumber: first.revisionNumber, kind: "community_rules" });
+    expect(Object.keys(old!).sort()).toEqual(["revisionId", "kind", "revisionNumber", "document", "checksum", "effectiveAt"].sort());
+    expect(await s.instance.readRevision(randomUUID())).toBeNull(); expect(await s.instance.readRevision("invalid")).toBeNull();
+    expect(await service({ now: () => new Date(at.getTime() - 1_000) }).instance.readRevision(first.revisionId)).toBeNull();
+  });
 });

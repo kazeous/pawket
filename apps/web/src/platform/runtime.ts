@@ -79,7 +79,7 @@ import {
   createTrustCasePort,
   createTrustCaseService,
   createContentHideReadPort, createContentHideService, createPenaltyService, createAppealService,
-  createHelpLinkService,
+  createHelpLinkService, createHelpCaseService, type TrustEnforcementMode,
   createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
 
@@ -99,6 +99,9 @@ import { oidcCommand } from "./oidc-command-registry.js";
 export type WebPlatformRuntime = {
   helpLinkHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
   helpLinks: ReturnType<typeof createHelpLinkService>;
+  helpCases: ReturnType<typeof createHelpCaseService>;
+  trustPolicies: Pick<ReturnType<typeof createTrustPolicyService>, "readCurrent" | "readRevision">;
+  trustEnforcementMode: TrustEnforcementMode;
   accountPortalUrl: string;
   oidc: ReturnType<typeof createOidcHttpHandlers>;
   pendingCommands: ReturnType<typeof createOidcCommandHttp>;
@@ -547,7 +550,8 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const helpLogger = createLogger({ service: "web", env });
   const helpLinks = createHelpLinkService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, notices: enforcementNotices, logger: helpLogger,
     canonicalizeEmail: (raw) => { try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; } } });
-  const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, helpLinks, logger: helpLogger });
+  const helpCases = createHelpCaseService({ db: database.db, keyring, mode: env.TRUST_ENFORCEMENT_MODE, helpLinks });
+  const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, helpLinks, logger: helpLogger });
   const enforcementIdentity = createIdentityEnforcementPort({ clearPublishedHeadForSuspension: (tx, command) => {
     if (command.actorUserId === null || command.actorSessionId === null) resolutionFail("dependency_unavailable");
     return catalogService.clearPublishedHeadForSuspension(tx, { ...command, actorUserId: command.actorUserId, actorSessionId: command.actorSessionId });
@@ -702,6 +706,9 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     context: commandContext, authenticate, commandFor, runtime: () => runtime! });
   runtime = {
     helpLinks,
+    helpCases,
+    trustPolicies,
+    trustEnforcementMode: env.TRUST_ENFORCEMENT_MODE,
     helpLinkHandlers,
     accountPortalUrl: oidcConfig.accountPortalUrl,
     oidc,

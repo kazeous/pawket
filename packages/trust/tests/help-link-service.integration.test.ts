@@ -5,6 +5,7 @@ import * as schema from "@pawket/database";
 import { decryptSensitiveField, encryptSensitiveField } from "@pawket/security";
 import { createEnforcementNoticePort } from "@pawket/identity";
 import { createHelpLinkService } from "../src/help-link-service.js";
+import { createHelpCaseService } from "../src/help-case-service.js";
 import type { EnforcementNoticePort } from "../src/index.js";
 import { createPenaltyService } from "../src/penalty-service.js";
 import { createAppealService } from "../src/appeal-service.js";
@@ -54,6 +55,33 @@ test("openSession returns a 30-minute session for a fresh token; session expires
   expect(await c.helpLinks.readSession(opened.sessionToken)).toMatchObject({ userId: c.p.creator.userId, penaltyId: c.penaltyId, canAppeal: true });
   const [stored] = await f.db.select().from(schema.trustHelpSessions).where(eq(schema.trustHelpSessions.penaltyId, c.penaltyId)); expect(stored?.sessionHash).toBe(digest(opened.sessionToken));
   c.setTime(opened.expiresAt); expect(await c.helpLinks.readSession(opened.sessionToken)).toBeNull();
+});
+
+test("help case read is session-scoped, allowlisted and unavailable while disabled or revoked", async () => {
+  const c = await context(); const opened = await c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network() });
+  const help = createHelpCaseService({ db: f.db, keyring: fixtureKeyring, mode: "enabled", helpLinks: c.helpLinks });
+  const view = await help.read(opened.sessionToken);
+  expect(view).toMatchObject({ penaltyId: c.penaltyId, kind: "suspension", explanation: c.command.explanation.normalize("NFC"), canAppeal: true, appeal: null });
+  expect(Object.keys(view!).sort()).toEqual(["penaltyId", "kind", "state", "explanation", "startsAt", "endsAt", "enforcementPolicyRevisionId", "canAppeal", "appeal", "readOnlyUntil"].sort());
+  for (const secret of [c.p.creator.userId, c.p.buyer.userId, c.token!, opened.sessionToken, c.command.source.caseId]) expect(JSON.stringify(view)).not.toContain(secret);
+  expect(await help.read("invalid")).toBeNull();
+  expect(await createHelpCaseService({ db: f.db, keyring: fixtureKeyring, mode: "disabled", helpLinks: c.helpLinks }).read(opened.sessionToken)).toBeNull();
+  await c.helpLinks.revokeSession(opened.sessionToken); await c.helpLinks.revokeSession(opened.sessionToken);
+  expect(await c.helpLinks.readSession(opened.sessionToken)).toBeNull(); expect(await help.read(opened.sessionToken)).toBeNull();
+  // Ending one session must not revoke the signed link or other independently exchanged sessions.
+  expect(await c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network() })).toMatchObject({ penaltyId: c.penaltyId });
+});
+test("help case read includes only appeal status and decided reasoning, and suppresses a second appeal", async () => {
+  const c = await context(); const opened = await c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network() });
+  const help = createHelpCaseService({ db: f.db, keyring: fixtureKeyring, mode: "enabled", helpLinks: c.helpLinks });
+  const appeals = createAppealService({ ...c.input, penalties: c.service, hides: createContentHideService(c.input), helpLinks: c.helpLinks });
+  const result = await appeals.submit({ appellant: { kind: "help_session", sessionToken: opened.sessionToken }, target: { penaltyId: c.penaltyId }, statement: "Private appeal statement", idempotencyKey: randomUUID(), requestId: randomUUID() });
+  expect(await help.read(opened.sessionToken)).toMatchObject({ canAppeal: false, appeal: { state: "open", reasoning: null, decidedAt: null } });
+  const decidedAt = reportAt;
+  await appeals.decide({ ...await c.base("owner.trust_appeal_decide"), caseId: result.caseId, expectedCaseVersion: 1, decision: "upheld", reasoning: "Published decision" });
+  const view = await help.read(opened.sessionToken);
+  expect(view?.appeal).toEqual({ state: "upheld", reasoning: "Published decision", decidedAt: decidedAt.toISOString() });
+  for (const secret of [result.caseId, result.appealId, "Private appeal statement"]) expect(JSON.stringify(view)).not.toContain(secret);
 });
 
 test("help canAppeal and signed-in appeal use startsAt even when createdAt differs", async () => {

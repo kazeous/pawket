@@ -39,6 +39,17 @@ export function createTrustPolicyService(input: Input) {
         return row ? { ...row, effectiveAt: row.effectiveAt.toISOString() } : null;
       });
     },
+    async readRevision(revisionId: string): Promise<TrustPolicySnapshot | null> {
+      if (!validUuid(revisionId)) return null;
+      return available(async () => {
+        const at = now();
+        const [row] = await input.db.select({ revisionId: trustPolicyRevisions.id, kind: trustPolicyRevisions.kind,
+          revisionNumber: trustPolicyRevisions.revisionNumber, document: trustPolicyRevisions.document,
+          checksum: trustPolicyRevisions.checksum, effectiveAt: trustPolicyRevisions.effectiveAt }).from(trustPolicyRevisions)
+          .where(and(eq(trustPolicyRevisions.id, revisionId), lte(trustPolicyRevisions.effectiveAt, at), lte(trustPolicyRevisions.createdAt, at))).limit(1);
+        return row ? { ...row, effectiveAt: row.effectiveAt.toISOString() } : null;
+      });
+    },
     async readCurrentIds(tx: PawketTransaction): Promise<{ communityRulesRevisionId: string | null; enforcementRevisionId: string | null }> {
       return available(async () => {
         const rows = await currentRows(tx, now());

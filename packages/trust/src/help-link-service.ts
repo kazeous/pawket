@@ -103,6 +103,13 @@ export function createHelpLinkService(input: Input) {
       };
       return boundary(() => transaction ? read(transaction) : input.db.transaction(read));
     },
+    async revokeSession(sessionToken: string): Promise<void> {
+      if (!tokenValid(sessionToken)) return;
+      await boundary(async () => {
+        await input.db.update(trustHelpSessions).set({ revokedAt: time(clock()) })
+          .where(and(eq(trustHelpSessions.sessionHash, hash(sessionToken)), isNull(trustHelpSessions.revokedAt)));
+      });
+    },
     async requestLink(command: { email: string; networkKeyHmac: string }): Promise<void> {
       if (typeof command.email !== "string" || !networkPattern.test(command.networkKeyHmac)) return;
       const canonical = input.canonicalizeEmail(command.email);
