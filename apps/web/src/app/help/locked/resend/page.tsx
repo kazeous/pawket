@@ -6,5 +6,5 @@ export const dynamic = "force-dynamic";
 export default function LockedResendPage() {
   let enabled = false;
   try { enabled = getPlatformRuntime().trustEnforcementMode === "enabled"; } catch { /* Fail closed. */ }
-  return <LockedHelpShell title="Yêu cầu liên kết mới">{enabled ? <LockedResend /> : <ExpiredHelpLink />}</LockedHelpShell>;
+  return <LockedHelpShell title="Yêu cầu liên kết mới">{enabled ? <LockedResend /> : <ExpiredHelpLink allowResend={false} />}</LockedHelpShell>;
 }

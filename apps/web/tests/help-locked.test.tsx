@@ -47,6 +47,23 @@ test.each(["missing", "malformed", "refused", "network"])("landing shows the exp
     if (["missing", "malformed"].includes(failure)) expect(fetch).not.toHaveBeenCalled();
   });
 });
+test("landing after ending a session shows a neutral message and a help link without exchanging", async () => {
+  window.history.replaceState(null, "", "/help/locked?ended=1");
+  const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    expect(container.textContent).toContain("Phiên đã kết thúc."); expect(container.textContent).not.toContain("Liên kết không còn hiệu lực.");
+    expect(container.querySelector('main a[href="/help"]')).not.toBeNull(); expect(container.querySelector('a[href="/help/locked/resend"]')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled(); expect(window.location.hash).toBe("");
+  });
+});
+test("an end-state query flag does not skip a new fragment exchange", async () => {
+  window.history.replaceState(null, "", `/help/locked?ended=1#t=${token}`);
+  const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LandingPage), async (container) => {
+    expect(fetch).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked/case");
+    expect(container.textContent).not.toContain("Phiên đã kết thúc."); expect(window.location.hash).toBe("");
+  });
+});
 test("case page without a cookie shows the expired-link state without a private read", async () => {
   const markup = renderToStaticMarkup(await CasePage()); expect(markup).toContain("Liên kết không còn hiệu lực."); expect(read).not.toHaveBeenCalled();
 });
@@ -61,7 +78,7 @@ test.each([false, true])("case page shows appeal form only while canAppeal=%s", 
   cookies.mockResolvedValue({ getAll: () => [{ value: token }] }); read.mockResolvedValue({ ...view, canAppeal });
   const markup = renderToStaticMarkup(await CasePage()); expect(read).toHaveBeenCalledWith(token);
   expect(markup.includes('aria-label="Gửi kháng nghị"')).toBe(canAppeal); expect(markup).toContain("Synthetic &lt;explanation&gt;");
-  expect(markup).toContain(`/help/policies/${id}`); expect(markup).toContain('action="/help/locked/end"'); expect(markup).toContain("Kết thúc phiên");
+  expect(markup).toContain(`/help/policies/${id}`); expect(markup).not.toContain('action="/help/locked/end"'); expect(markup).toContain("Kết thúc phiên");
   expect(markup).not.toContain(token); expect(markup).not.toContain("Đăng nhập"); expect(markup).not.toContain("<nav");
 });
 test("an existing appeal hides the form and shows status and decided reasoning", () => {
@@ -81,6 +98,34 @@ test("locked appeal uses the help cookie endpoint without app identity polling a
     expect(container.textContent).toContain("Đã gửi kháng nghị. Pawket đang xem xét.");
   });
 });
+test("ending the help session fetches with POST in cors mode and navigates only after revocation succeeds", async () => {
+  let complete!: (response: Response) => void;
+  const fetch = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LockedCase, { view: { ...view, canAppeal: false } }), async (container) => {
+    const button = container.querySelector<HTMLButtonElement>("button")!;
+    expect(button.textContent).toBe("Kết thúc phiên"); expect(button.closest("form")).toBeNull(); expect(button.type).toBe("button");
+    await act(async () => button.click());
+    expect(fetch).toHaveBeenCalledOnce(); expect(fetch.mock.calls[0]).toEqual(["/help/locked/end", expect.objectContaining({ method: "POST", mode: "cors", credentials: "same-origin", cache: "no-store" })]);
+    expect(button.disabled).toBe(true); expect(replace).not.toHaveBeenCalled();
+    await act(async () => button.click()); expect(fetch).toHaveBeenCalledOnce();
+    await act(async () => complete(new Response(null, { status: 204 })));
+    expect(replace).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked?ended=1"); expect(refresh).not.toHaveBeenCalled();
+  });
+});
+test.each(["refused", "unavailable", "unexpected", "network"])("end-session %s failure stays inline, masks errors and offers a working retry", async (failure) => {
+  const fetch = vi.fn().mockImplementationOnce(async () => {
+    if (failure === "network") throw new Error("private dependency");
+    return new Response(JSON.stringify({ code: "not_available", detail: "private dependency" }), { status: failure === "refused" ? 403 : failure === "unavailable" ? 503 : 200 });
+  }).mockResolvedValueOnce(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LockedCase, { view: { ...view, canAppeal: false } }), async (container) => {
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Không thể kết thúc phiên. Vui lòng thử lại.");
+    expect(container.textContent).not.toContain("not_available"); expect(container.textContent).not.toContain("private dependency"); expect(replace).not.toHaveBeenCalled();
+    const retry = container.querySelector<HTMLButtonElement>("button")!; expect(retry.textContent).toBe("Thử lại"); expect(retry.disabled).toBe(false);
+    await act(async () => retry.click());
+    expect(fetch).toHaveBeenCalledTimes(2); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(replace).toHaveBeenCalledWith("/help/locked?ended=1");
+  });
+});
 test.each(["unknown", "active", "locked"])("resend shows the same confirmation for %s email", async (kind) => {
   const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
   await mount(await ResendPage(), async (container) => {
@@ -94,6 +139,8 @@ test.each(["unknown", "active", "locked"])("resend shows the same confirmation f
 test("resend page is expired while enforcement is disabled", async () => {
   runtime.trustEnforcementMode = "disabled";
   const markup = renderToStaticMarkup(await ResendPage()); expect(markup).toContain("Liên kết không còn hiệu lực."); expect(markup).not.toContain("<form");
+  expect(markup).not.toContain('href="/help/locked/resend"'); expect(markup).toContain('href="/help"');
+  await mount(await ResendPage(), async (container) => { expect(container.querySelector('main [role="status"] a[href="/help"]')).not.toBeNull(); });
 });
 test.each(["refused", "network"])("resend keeps the approved confirmation for a %s failure", async (failure) => {
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => { if (failure === "network") throw new Error("private dependency"); return new Response(null, { status: 400 }); }));

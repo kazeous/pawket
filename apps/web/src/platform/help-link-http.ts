@@ -35,8 +35,9 @@ export function createHelpLinkHttpHandlers(input: Input) {
       const token = values.length === 1 ? values[0]!.slice("pawket_help=".length) : null;
       try { if (token && /^[A-Za-z0-9_-]{43}$/u.test(token)) await input.helpLinks.revokeSession(token); }
       catch { return unavailable(503); }
-      return new Response(null, { status: 303, headers: { ...COMMISSION_PRIVATE_HEADERS, location: "/help/locked",
-        "set-cookie": "pawket_help=; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT" } });
+      const response = empty();
+      response.headers.set("set-cookie", "pawket_help=; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+      return response;
     },
     async linkRequest(request: Request): Promise<Response> {
       const rejected = boundary(request); if (rejected) return rejected;

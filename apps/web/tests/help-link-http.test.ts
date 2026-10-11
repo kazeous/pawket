@@ -27,17 +27,24 @@ test("disabled session exchange returns the expired-link response before opening
   const response = await http.session(request("session", { token }));
   expect(response.status).toBe(400); expect(response.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.openSession).not.toHaveBeenCalled();
 });
-test("end route revokes the cookie session, expires the scoped cookie and redirects", async () => {
+test("end route revokes the cookie session, expires the scoped cookie and returns an empty success for fetch", async () => {
   const f = fixture(); routeHandlers = f.http; const route = await import("../src/app/help/locked/end/route.js");
   const response = await route.POST(request("end", {}, { cookie: `pawket_help=${token}; pawket_identity=unrelated` }));
-  expect(f.helpLinks.revokeSession).toHaveBeenCalledWith(token); expect(response.status).toBe(303); expect(response.headers.get("location")).toBe("/help/locked");
+  expect(f.helpLinks.revokeSession).toHaveBeenCalledWith(token); expect(response.status).toBe(204); expect(response.headers.has("location")).toBe(false); expect(await response.text()).toBe("");
   expect(response.headers.get("set-cookie")).toBe("pawket_help=; Path=/help/locked; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
   expect(response.headers.get("cache-control")).toContain("no-store");
 });
 test("end session is idempotent without a cookie and refuses cross-site requests", async () => {
-  const f = fixture(); expect((await f.http.endSession(request("end", {}))).status).toBe(303); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
+  const f = fixture(); expect((await f.http.endSession(request("end", {}))).status).toBe(204); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
   const rejected = await f.http.endSession(request("end", {}, { cookie: `pawket_help=${token}`, origin: "https://foreign.invalid" }));
   expect(rejected.status).toBe(403); expect(rejected.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
+});
+test.each(["null", "missing"])("end route refuses %s Origin without revoking or clearing the session", async (originValue) => {
+  const f = fixture(); routeHandlers = f.http; const route = await import("../src/app/help/locked/end/route.js");
+  const req = request("end", {}, { cookie: `pawket_help=${token}`, origin: originValue });
+  if (originValue === "missing") req.headers.delete("origin");
+  const response = await route.POST(req);
+  expect(response.status).toBe(403); expect(response.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.revokeSession).not.toHaveBeenCalled();
 });
 test("failed revocation keeps the cookie available for retry and masks private errors", async () => {
   const f = fixture(); f.helpLinks.revokeSession.mockRejectedValue(new Error(token));
