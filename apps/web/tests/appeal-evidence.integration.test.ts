@@ -43,6 +43,18 @@ test("appeal evidence reuses original resolved dispute section readers and logs 
   await expect(c.read(appealed.caseId)).rejects.toMatchObject({ code: "not_available" });
   expect(c.orders.readOrderForCase).toHaveBeenCalledOnce();
 });
+
+test.each(["refund_not_received", "refund_overdue"] as const)("appeal over %s never reveals the refund destination", async (kind) => {
+  const c = await setup();
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind, orderId: c.p.orderId, sourceType: "commission_refund_obligation", sourceId: randomUUID(), policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  c.refunds.revealForCase.mockResolvedValue({ accountNumber: "123456789012", holderName: "Private synthetic holder" });
+  c.refunds.listForOrder.mockResolvedValue([{ bankName: "Synthetic bank", suffix: "•••• 9012" }]);
+  const penalty = await c.service.apply({ ...await c.command(), source: { caseId }, kind: "restriction", restriction: "reporting" });
+  const appeal = await c.submit(penalty.penaltyId); const evidence = await c.read(appeal.caseId);
+  expect(evidence).toMatchObject({ sections: { resolution_records: { refunds: [{ bankName: "Synthetic bank", suffix: "•••• 9012" }] } } });
+  expect(c.refunds.revealForCase).not.toHaveBeenCalled();
+  expect(JSON.stringify(evidence)).not.toMatch(/refund_destination|accountNumber|holderName|123456789012|Private synthetic holder/u);
+});
 test("orderless package appeal reads original report/package sections without order readers or reporter identity", async () => {
   const c = await setup();
   const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: null, sourceType: "commission_package", sourceId: c.p.packageId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));

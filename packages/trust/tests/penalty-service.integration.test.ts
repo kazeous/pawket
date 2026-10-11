@@ -10,6 +10,18 @@ import { createReportFixture } from "./report-fixture.js";
 import { penaltyContext, fixtureKeyring, reportAt } from "./penalty-service-fixture.js";
 const f = createReportFixture("penalties"); beforeAll(f.initialize, 60_000); afterAll(f.dispose, 30_000);
 
+test("maximum multi-byte explanation and internal note apply and replay with a bounded fingerprint", async () => {
+  const c = await penaltyContext(f);
+  const command = { ...await c.command(), explanation: "😀".repeat(2000), internalNote: "🦊".repeat(2000) };
+  const result = await c.service.apply(command);
+  expect(await c.service.apply({ ...command, stepUpProofId: randomUUID(), requestId: randomUUID() })).toEqual(result);
+  expect(c.consume).toHaveBeenCalledOnce();
+  const [row] = await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, result.penaltyId));
+  for (const [fieldName, envelope, plaintext] of [["explanation", row!.explanationEnvelope, command.explanation], ["internal_note", row!.internalNoteEnvelope!, command.internalNote]] as const)
+    expect(decryptSensitiveField({ keyring: fixtureKeyring, envelope, binding: { recordType: "trust_penalties", recordId: result.penaltyId, fieldName } })).toBe(plaintext);
+  await expect(c.service.apply({ ...command, internalNote: "🦊".repeat(1999) + "😀" })).rejects.toMatchObject({ code: "idempotency_conflict" });
+});
+
 test("explanation and internal note are encrypted and absent from audit/outbox; replay needs no second proof", async () => {
   const c = await penaltyContext(f); const command = await c.command(); const result = await c.service.apply(command);
   expect(await c.service.apply({ ...command, stepUpProofId: randomUUID(), requestId: randomUUID() })).toEqual(result); expect(c.consume).toHaveBeenCalledOnce();

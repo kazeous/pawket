@@ -64,7 +64,6 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
         sections.thread_page = await port.threadPage(tx, source.orderId);
         sections.resolution_records = await port.resolutionRecords(tx, source.orderId);
       }
-      if (source?.kind === "refund_not_received" || source?.kind === "refund_overdue") sections.refund_destination = await port.refundDestination(tx, source.sourceId);
       if (source?.kind === "report") {
         sections.report_context = await port.reportContext!(tx, source.id);
         if (source.sourceType === "commission_package") sections.package_revision = await port.packageRevision!(tx, source.id);

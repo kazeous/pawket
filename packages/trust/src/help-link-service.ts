@@ -86,7 +86,8 @@ export function createHelpLinkService(input: Input) {
         return { sessionToken, penaltyId: p.id, expiresAt };
       }));
     },
-    async readSession(sessionToken: string, transaction?: PawketTransaction): Promise<{ userId: string; penaltyId: string; canAppeal: boolean; readOnlyUntil: Date } | null> {
+    // Appeal submission identifies a valid session even after enforcement ends, then validates the locked action itself.
+    async readSession(sessionToken: string, transaction?: PawketTransaction, purpose?: "appeal"): Promise<{ userId: string; penaltyId: string; canAppeal: boolean; readOnlyUntil: Date } | null> {
       if (!tokenValid(sessionToken)) return null;
       const read = async (tx: PawketTransaction) => {
         const at = time(clock());
@@ -94,9 +95,11 @@ export function createHelpLinkService(input: Input) {
           .innerJoin(trustHelpLinks, eq(trustHelpLinks.id, trustHelpSessions.linkId)).innerJoin(trustPenalties, eq(trustPenalties.id, trustHelpSessions.penaltyId))
           .where(and(eq(trustHelpSessions.sessionHash, hash(sessionToken)), isNull(trustHelpSessions.revokedAt), isNull(trustHelpLinks.revokedAt),
             lte(trustHelpSessions.createdAt, at), gt(trustHelpSessions.expiresAt, at), gt(trustHelpLinks.readUntil, at))).limit(1);
-        if (!row || row.session.userId !== row.link.userId || row.link.penaltyId !== row.penalty.id || row.session.userId !== row.penalty.subjectUserId || !readable(row.penalty, at)) return null;
-        const deadline = await effectiveEnforcementDeadline(tx, plus(row.penalty.createdAt, policy.appealWindowMs));
-        return { userId: row.session.userId, penaltyId: row.penalty.id, canAppeal: input.mode === "enabled" && active(row.penalty, at) && deadline !== null && deadline > at, readOnlyUntil: row.link.readUntil };
+        if (!row || row.session.userId !== row.link.userId || row.link.penaltyId !== row.penalty.id || row.session.userId !== row.penalty.subjectUserId
+          || purpose !== "appeal" && !readable(row.penalty, at)) return null;
+        const deadline = await effectiveEnforcementDeadline(tx, plus(row.penalty.startsAt, policy.appealWindowMs));
+        return { userId: row.session.userId, penaltyId: row.penalty.id, canAppeal: input.mode === "enabled" && active(row.penalty, at)
+          && row.penalty.replacesPenaltyId === null && deadline !== null && deadline > at, readOnlyUntil: row.link.readUntil };
       };
       return boundary(() => transaction ? read(transaction) : input.db.transaction(read));
     },

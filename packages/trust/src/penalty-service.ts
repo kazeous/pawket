@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isProxy } from "node:util/types";
 import { and, asc, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { z } from "zod";
@@ -107,8 +107,9 @@ export function createPenaltyService(input: Input) {
     if (!accepted) trustFail("owner_step_up_required");
   }
   async function begin(tx: PawketTransaction, userId: string, scope: string, keyValue: string, payload: unknown) {
+    const digest = createHash("sha256").update(JSON.stringify([scope, payload])).digest("hex");
     const at = now(); const result = await beginIdempotentCommand(tx, { actorUserId: userId, commandScope: `trust.penalty_${scope}`,
-      keyHash: hash("trust-penalty-command-key", keyValue), requestFingerprint: hash("trust-penalty-command", JSON.stringify([scope, payload])), now: at, expiresAt: new Date(at.getTime() + 86_400_000) });
+      keyHash: hash("trust-penalty-command-key", keyValue), requestFingerprint: hash("trust-penalty-command", digest), now: at, expiresAt: new Date(at.getTime() + 86_400_000) });
     if (result.kind !== "acquired" && result.kind !== "replay") trustFail("idempotency_conflict"); return { result, at };
   }
   async function complete(tx: PawketTransaction, recordId: string, reference: string, at: Date) {

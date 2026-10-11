@@ -68,7 +68,11 @@ function normalizeDecision(command: unknown): DecideAppealCommand {
 function milder(original: typeof trustPenalties.$inferSelect, replacement: AppealReplacement, at: Date) {
   const endsAt = replacement.endsAt === null ? null : instant(new Date(replacement.endsAt));
   const ranks = { warning: 0, restriction: 1, suspension: 2, removal: 3 };
+  const keepsScope = replacement.kind === "restriction"
+    ? original.kind !== "restriction" || replacement.restriction === original.restriction
+    : replacement.target === original.target || original.target === "account" && replacement.target === "creator_capability";
   if (endsAt !== null && endsAt <= at || ranks[replacement.kind] > ranks[original.kind]
+    || !keepsScope
     || replacement.kind === original.kind && (endsAt === null || original.endsAt !== null && endsAt >= original.endsAt)) trustFail("invalid_request");
 }
 
@@ -116,7 +120,7 @@ export function createAppealService(input: Input) {
       if (input.mode !== "enabled") trustFail("enforcement_disabled");
       return boundary(async () => {
         const c = normalizeSubmit(command);
-        let help = c.appellant.kind === "help_session" ? await input.helpLinks.readSession(c.appellant.sessionToken) : null;
+        let help = c.appellant.kind === "help_session" ? await input.helpLinks.readSession(c.appellant.sessionToken, undefined, "appeal") : null;
         if (c.appellant.kind === "help_session" && (!help || !("penaltyId" in c.target) || help.penaltyId !== c.target.penaltyId)) trustFail("not_available");
         const userId = c.appellant.kind === "session" ? c.appellant.actor.userId : help!.userId;
         return input.db.transaction(async (tx) => {
@@ -128,18 +132,18 @@ export function createAppealService(input: Input) {
           await subject(tx, userId);
           // Recheck under the user's lock: a link resend or penalty transition may have won the fence meanwhile.
           if (c.appellant.kind === "help_session") {
-            const current = await input.helpLinks.readSession(c.appellant.sessionToken, tx);
+            const current = await input.helpLinks.readSession(c.appellant.sessionToken, tx, "appeal");
             if (!current || current.userId !== userId || !("penaltyId" in c.target) || current.penaltyId !== c.target.penaltyId) trustFail("not_available");
             help = current;
           }
           const penalty = "penaltyId" in c.target ? (await tx.select().from(trustPenalties).where(and(eq(trustPenalties.id, c.target.penaltyId), eq(trustPenalties.subjectUserId, userId))).limit(1).for("update"))[0] : null;
           const hide = "hideId" in c.target ? (await tx.select().from(trustContentHides).where(and(eq(trustContentHides.id, c.target.hideId), eq(trustContentHides.contentOwnerUserId, userId))).limit(1).for("update"))[0] : null;
           if (!penalty && !hide) trustFail("not_available");
-          if (penalty?.kind === "warning") trustFail("invalid_request");
+          const at = now(); const actionAt = penalty?.startsAt ?? hide!.hiddenAt;
+          if (at < actionAt || penalty && (penalty.kind === "warning" || penalty.state !== "active" || penalty.endsAt !== null && penalty.endsAt <= at
+            || penalty.replacesPenaltyId !== null) || hide && hide.releasedAt !== null) trustFail("invalid_request");
           const [duplicate] = await tx.select({ id: trustAppeals.id }).from(trustAppeals).where(penalty ? eq(trustAppeals.penaltyId, penalty.id) : eq(trustAppeals.hideId, hide!.id)).limit(1);
           if (duplicate) trustFail("duplicate");
-          const at = now(); const actionAt = penalty?.startsAt ?? hide!.hiddenAt;
-          if (at < actionAt) trustFail("invalid_request");
           const deadline = await effectiveEnforcementDeadline(tx, new Date(actionAt.getTime() + policy.appealWindowMs));
           if (deadline === null) trustFail("enforcement_disabled");
           if (at >= deadline) trustFail("window_closed");

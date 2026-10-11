@@ -6,7 +6,7 @@ import { createCommissionResolutionOrderPort } from "@pawket/orders";
 import { createCommissionPaymentFactsPort, createCommissionRefundPort } from "@pawket/payments";
 import { createRemovalFreezePort } from "@pawket/resolutions";
 import { decryptSensitiveField } from "@pawket/security";
-import { createAppealService } from "../src/appeal-service.js";
+import { createAppealService, type AppealReplacement } from "../src/appeal-service.js";
 import { createTrustCasePort } from "../src/case-port.js";
 import { createTrustCaseService } from "../src/case-service.js";
 import { createContentHideService } from "../src/content-hide-service.js";
@@ -164,6 +164,61 @@ test("replacement must be strictly milder; invalid decision rolls back proof and
     await expect(c.appeals.decide({ ...decision, replacement })).rejects.toMatchObject({ code: "invalid_request" });
   expect((await f.db.select().from(schema.identityStepUpProofs).where(eq(schema.identityStepUpProofs.id, decision.stepUpProofId)))[0]?.consumedAt).toBeNull();
   await c.appeals.decide({ ...decision, replacement: { kind: "suspension", target: "creator_capability", endsAt: new Date(reportAt.getTime() + 1000).toISOString() } });
+});
+
+test.each([
+  [{ kind: "suspension", target: "creator_capability" }, { kind: "suspension", target: "account" }],
+  [{ kind: "restriction", restriction: "reporting" }, { kind: "restriction", restriction: "commission_buying" }],
+  [{ kind: "removal", target: "creator_capability" }, { kind: "suspension", target: "account" }],
+] as const)("reduction from %j to %j cannot widen or change scope before proof consumption", async (original, replacement) => {
+  const c = await context(); const target = await c.penalties.apply({ ...await c.command(), ...original });
+  const appealed = await c.appeals.submit(c.submit(target)); const command = await c.decide(appealed.caseId, "reduced");
+  c.consume.mockClear();
+  await expect(c.appeals.decide({ ...command, replacement: { ...replacement, endsAt: new Date(reportAt.getTime() + 1000).toISOString() } })).rejects.toMatchObject({ code: "invalid_request" });
+  expect(c.consume).not.toHaveBeenCalled();
+  expect((await f.db.select().from(schema.identityStepUpProofs).where(eq(schema.identityStepUpProofs.id, command.stepUpProofId)))[0]?.consumedAt).toBeNull();
+  expect((await f.db.select().from(schema.trustAppeals).where(eq(schema.trustAppeals.id, appealed.appealId)))[0]?.state).toBe("open");
+});
+
+test("account suspension can be reduced to a shorter creator-capability suspension", async () => {
+  const c = await context(); const target = await c.penalties.apply({ ...await c.command(), kind: "suspension", target: "account" });
+  const appealed = await c.appeals.submit(c.submit(target));
+  await c.appeals.decide({ ...await c.decide(appealed.caseId, "reduced"), replacement: { kind: "suspension", target: "creator_capability", endsAt: new Date(reportAt.getTime() + 1000).toISOString() } });
+  expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.replacesPenaltyId, target.penaltyId)))[0]).toMatchObject({ kind: "suspension", target: "creator_capability", state: "active" });
+});
+
+test.each(["session", "help_session"] as const)("%s appeals reject lifted and elapsed penalties", async (kind) => {
+  for (const ended of ["lifted", "elapsed"] as const) {
+    const c = await context(); const target = await c.penalties.apply({ ...await c.command(), kind: "suspension", target: "account", endsAt: new Date(reportAt.getTime() + 1000).toISOString() });
+    const { token } = await f.db.transaction((tx) => c.helpLinks.issue(tx, { userId: c.p.creator.userId, penaltyId: target.penaltyId, at: reportAt }));
+    const { sessionToken } = await c.helpLinks.openSession({ token, networkKeyHmac: `hmac-sha256:v1:${"a".repeat(43)}` });
+    if (ended === "lifted") await c.penalties.lift({ ...await c.base("owner.trust_penalty_lift"), penaltyId: target.penaltyId, reason: "Lift" });
+    else c.time(new Date(reportAt.getTime() + 1000));
+    const command = c.submit(target);
+    await expect(c.appeals.submit({ ...command, appellant: kind === "session" ? command.appellant : { kind, sessionToken } })).rejects.toMatchObject({ code: "invalid_request" });
+    expect(await f.db.select().from(schema.trustAppeals).where(eq(schema.trustAppeals.penaltyId, target.penaltyId))).toEqual([]);
+  }
+});
+
+test("released hide is not appealable", async () => {
+  const c = await context(); const messageId = await f.message(c.p.orderId, c.p.creator.userId);
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: c.p.orderId, sourceType: "commission_message", sourceId: messageId, policyRevisionId: null, at: reportAt, requestId: randomUUID() }));
+  await f.db.insert(schema.trustReports).values({ id: randomUUID(), reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`, targetKind: "commission_message", targetId: messageId, orderId: c.p.orderId, contentOwnerUserId: c.p.creator.userId, reporterUserId: c.p.buyer.userId, reason: "other", caseId, createdAt: reportAt });
+  const target = await c.hides.hide({ ...await c.base("owner.trust_hide"), caseId, expectedCaseVersion: 1, reason: "Hide" });
+  await f.db.transaction((tx) => c.hides.releaseForAppeal(tx, { hideId: target.hideId, requestId: randomUUID(), at: reportAt }));
+  await expect(c.appeals.submit(c.submit(target))).rejects.toMatchObject({ code: "invalid_request" });
+});
+
+test.each(["session", "help_session"] as const)("%s cannot appeal a replacement penalty from an appeal decision", async (kind) => {
+  const c = await context(); const target = await c.penalties.apply({ ...await c.command(), kind: "removal", target: "account" });
+  const appealed = await c.appeals.submit(c.submit(target));
+  const replacement: AppealReplacement = { kind: "suspension", target: "account", endsAt: null };
+  await c.appeals.decide({ ...await c.decide(appealed.caseId, "reduced"), replacement });
+  const [row] = await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.replacesPenaltyId, target.penaltyId));
+  const { token } = await f.db.transaction((tx) => c.helpLinks.issue(tx, { userId: c.p.creator.userId, penaltyId: row!.id, at: reportAt }));
+  const { sessionToken } = await c.helpLinks.openSession({ token, networkKeyHmac: `hmac-sha256:v1:${"a".repeat(43)}` });
+  const command = c.submit({ penaltyId: row!.id });
+  await expect(c.appeals.submit({ ...command, appellant: kind === "session" ? command.appellant : { kind, sessionToken } })).rejects.toMatchObject({ code: "invalid_request" });
 });
 
 test("upheld leaves action active; stale case, wrong proof, missing reasoning and disabled mode refuse", async () => {

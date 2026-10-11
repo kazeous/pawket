@@ -2,11 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import * as schema from "@pawket/database";
-import { decryptSensitiveField } from "@pawket/security";
+import { decryptSensitiveField, encryptSensitiveField } from "@pawket/security";
 import { createEnforcementNoticePort } from "@pawket/identity";
 import { createHelpLinkService } from "../src/help-link-service.js";
 import type { EnforcementNoticePort } from "../src/index.js";
 import { createPenaltyService } from "../src/penalty-service.js";
+import { createAppealService } from "../src/appeal-service.js";
+import { createContentHideService } from "../src/content-hide-service.js";
 import { recordEnforcementModeTransition } from "../src/enforcement-deadlines.js";
 import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "./report-fixture.js";
 import { canonicalizeHelpEmail, penaltyContext } from "./penalty-service-fixture.js";
@@ -52,6 +54,29 @@ test("openSession returns a 30-minute session for a fresh token; session expires
   expect(await c.helpLinks.readSession(opened.sessionToken)).toMatchObject({ userId: c.p.creator.userId, penaltyId: c.penaltyId, canAppeal: true });
   const [stored] = await f.db.select().from(schema.trustHelpSessions).where(eq(schema.trustHelpSessions.penaltyId, c.penaltyId)); expect(stored?.sessionHash).toBe(digest(opened.sessionToken));
   c.setTime(opened.expiresAt); expect(await c.helpLinks.readSession(opened.sessionToken)).toBeNull();
+});
+
+test("help canAppeal and signed-in appeal use startsAt even when createdAt differs", async () => {
+  const c = await penaltyContext(f); const penaltyId = randomUUID();
+  const startsAt = new Date(reportAt.getTime() + 86_400_000); let at = startsAt;
+  await f.db.insert(schema.trustPenalties).values({ id: penaltyId, subjectUserId: c.p.creator.userId, kind: "suspension", target: "account", reasonCategory: "other", sourceCaseId: c.caseId,
+    explanationEnvelope: encryptSensitiveField({ keyring: fixtureKeyring, plaintext: "Synthetic explanation", binding: { recordType: "trust_penalties", recordId: penaltyId, fieldName: "explanation" } }),
+    startsAt, createdAt: reportAt, ownerUserId: c.owner.userId, ownerSessionId: c.owner.sessionId, stepUpProofId: randomUUID(), requestId: randomUUID() });
+  const now = () => at;
+  const helpLinks = createHelpLinkService({ ...c.input, ...helpInput, now });
+  const appeals = createAppealService({ ...c.input, now, penalties: c.service, hides: createContentHideService(c.input), helpLinks });
+  const { token } = await f.db.transaction((tx) => helpLinks.issue(tx, { userId: c.p.creator.userId, penaltyId, at }));
+  const deadline = new Date(startsAt.getTime() + 14 * 86_400_000);
+  at = new Date(deadline.getTime() - 1);
+  const { sessionToken } = await helpLinks.openSession({ token, networkKeyHmac: network() });
+  const command = { appellant: { kind: "session" as const, actor: c.p.creator }, target: { penaltyId }, statement: "Appeal", idempotencyKey: randomUUID(), requestId: randomUUID() };
+  // Check the exact boundary before submitting just inside it, so duplicate detection cannot mask the window.
+  at = deadline;
+  expect((await helpLinks.readSession(sessionToken))?.canAppeal).toBe(false);
+  await expect(appeals.submit(command)).rejects.toMatchObject({ code: "window_closed" });
+  at = new Date(deadline.getTime() - 1);
+  expect((await helpLinks.readSession(sessionToken))?.canAppeal).toBe(true);
+  await expect(appeals.submit(command)).resolves.toMatchObject({ appealId: expect.any(String) });
 });
 test("a link permits five sessions per rolling 30 minutes, including concurrent opens and revoked sessions", async () => {
   const c = await context();

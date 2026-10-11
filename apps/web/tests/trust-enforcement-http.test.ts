@@ -4,6 +4,9 @@ import { createTrustEnforcementHttpHandlers } from "../src/platform/trust-enforc
 import { oidcCommand } from "../src/platform/oidc-command-registry.js";
 import { createAppealHttpHandlers } from "../src/platform/appeal-http.js";
 
+const routeRuntime = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: routeRuntime.get }));
+
 const origin = "https://pawket.example.invalid";
 const actor = { userId: "synthetic-user", sessionId: "synthetic-session" };
 const target = { kind: "commission_package", packageId: "11111111-1111-4111-8111-111111111111", revisionId: "22222222-2222-4222-8222-222222222222" };
@@ -65,6 +68,15 @@ describe("appeals HTTP", () => {
     return { appeals, authenticate, http: createAppealHttpHandlers({ appBaseUrl: origin, appeals, authenticate }) };
   }
   const body = { target: { penaltyId: target.packageId }, statement: "Xin xem lại" };
+  test.each(["runtime", "handler"])("locked appeal route masks a %s failure", async (failure) => {
+    const error = new Error("Private runtime configuration");
+    if (failure === "runtime") routeRuntime.get.mockImplementation(() => { throw error; });
+    else routeRuntime.get.mockReturnValue({ appealHandlers: { lockedSubmit: vi.fn().mockRejectedValue(error) } });
+    const { POST } = await import("../src/app/help/locked/appeal/route.js");
+    const response = await POST(request(body));
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({ code: "dependency_unavailable" });
+    expect(response.headers.get("cache-control")).toContain("no-store");
+  });
   test("session identity is authoritative, non-fresh OIDC registered, private response", async () => {
     const f = appealFixture(); const response = await f.http.submit(request(body));
     expect(response.status).toBe(202);
