@@ -105,7 +105,11 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     const id = match[1]!; return make("owner.commission_fulfillment_freeze", true, "Dừng thực hiện commission", "/admin/cases", (r, q) => r.caseHandlers.freeze(q, id));
   }
   if ((match = new RegExp(`^/api/v1/admin/penalties/${uuid}/lift$`, "u").exec(path))) {
-    const id = match[1]!; return make("owner.trust_penalty_lift", true, "Gỡ hình phạt", "/admin/penalties", (r, q) => r.caseHandlers.liftPenalty(q, id));
+    const id = match[1]!; return make("owner.trust_penalty_lift", true, "Gỡ biện pháp", "/admin/cases", (r, q) => r.caseHandlers.liftPenalty(q, id));
+  }
+  if (path === "/api/v1/admin/policies") return make("owner.trust_policy_publish", true, "Xuất bản chính sách", "/admin/policies", (r, q) => r.caseHandlers.publishPolicy(q));
+  if ((match = new RegExp(`^/api/v1/admin/content-reports/${uuid}/penalty$`, "u").exec(path))) {
+    const id = match[1]!; return make("owner.trust_penalty_apply", true, "Áp dụng biện pháp", "/admin/content-reports", (r, q) => r.caseHandlers.publicReportPenalty(q, id));
   }
   if ((match = new RegExp(`^/api/v1/admin/creator-applications/${uuid}/(detail|claim|decision|deposit/challenge)$`, "u").exec(path))) {
     const id = match[1]!; const operation = match[2]!; const back = "/admin/creator-applications";

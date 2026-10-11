@@ -80,6 +80,7 @@ test("the owner sees the corrected ruling amount and date, and the correction fo
   const correctedAt = new Date().toISOString(); const correctionEndsAt = new Date(Date.now() + 86_400_000).toISOString();
   const corrected = caseDetailSchema.parse({ case: { ...detail, state: "resolved", ruling: { id, outcome: "close", refundAmountVnd: 200_000,
     currentRefundAmountVnd: 100_000, correctedAt, ruledAt: at, correctionEndsAt } } }).case;
+  if (!("ruling" in corrected)) throw new Error("Expected a Stage A case");
   await mounted(createElement(CaseDetail, { initial: corrected, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {
     const summary = Array.from(node.querySelectorAll("section")).find((section) => section.querySelector("h2")?.textContent === "Kết luận đã ghi nhận")!;
     expect(summary.textContent).toContain(formatVnd(100_000)); expect(summary.textContent).toContain(formatVnd(200_000));

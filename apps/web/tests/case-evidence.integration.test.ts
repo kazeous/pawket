@@ -37,7 +37,7 @@ async function setup() {
   const files = createCommissionFileService({ ...p.s.creator.common, storage, mode: "enabled", fulfillmentMode: "enabled", sessions: p.s.input.identity, orders: createCommissionFileAccessPort({ catalog: p.s.catalog }) });
   const instance = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-i8", consumeStepUpProof: async (_tx, input) => input.userId === actor.userId && input.sessionId === actor.sessionId,
     deadlines: resolutions.createResolutionCaseDeadlinePort({ refunds }),
-    evidence: createCaseEvidencePort({ orders, refunds, view, files }), now: p.s.creator.now });
+    evidence: createCaseEvidencePort({ orders, refunds, view, files, keyring: p.s.input.keyring }), now: p.s.creator.now });
   const disputes = createDisputeService(createResolutionCommandKit({ ...p.s.creator.common, session: p.s.input.identity }), { orders: orderPort, refunds, cases, mode: "enabled" });
   const opened = await disputes.openDispute({ actor: p.buyer, orderId: p.orderId, expectedVersion: (await order(p)).version, reason: "not_as_agreed", statement: "Synthetic statement",
     requestedOutcome: { kind: "close", refundAmountVnd: 100_000 }, acknowledgeStaffReview: true, ...commandIds() });
@@ -59,6 +59,18 @@ test("the owner reads a dispute case's order summary, thread page and resolution
   const log = await accesses(c.caseId); expect(log.map((row) => row.itemType).sort()).toEqual(["order_summary", "resolution_records", "thread_page"]);
   expect(log.every((row) => row.ownerUserId === c.actor.userId && row.ownerSessionId === c.actor.sessionId)).toBe(true);
 }, 30_000);
+test("the owner still sees reporterUserId in the report case's own report_context", async () => {
+  const c = await setup(); const at = c.p.s.creator.now(); const reportId = randomUUID();
+  const { caseId } = await f.db.transaction((tx) => c.cases.openCase(tx, { kind: "report", orderId: c.p.orderId,
+    sourceType: "commission_brief", sourceId: c.p.orderId, policyRevisionId: null, requestId: randomUUID(), at }));
+  await f.db.insert(schema.trustReports).values({ id: reportId, reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`,
+    targetKind: "commission_brief", targetId: c.p.orderId, orderId: c.p.orderId, contentOwnerUserId: c.p.buyer.userId,
+    reporterUserId: c.p.creator.userId, reason: "other", caseId, createdAt: at });
+  const evidence = await c.instance.readEvidence({ ...c.access(), caseId, section: "report_context" });
+  expect(evidence).toMatchObject({ kind: "commission_brief", reports: [{ reportId, reporterUserId: c.p.creator.userId }] });
+  expect(await accesses(caseId)).toMatchObject([{ itemType: "report_context", itemId: caseId }]);
+}, 30_000);
+
 test("queue deadlines and owner ruling metadata use no private evidence or access-log write", async () => {
   const c = await setup(); const detail = await c.instance.getCase(c.caseId);
   const [dispute] = await f.db.select().from(schema.commissionDisputes).where(eq(schema.commissionDisputes.id, c.disputeId));
@@ -87,6 +99,7 @@ test("real open and resolved case HTTP details satisfy the browser contract with
     expect(response.status).toBe(200);
     const parsed = caseDetailSchema.safeParse(await response.json()); expect(parsed.success).toBe(true);
     if (!parsed.success) throw new Error("Case detail does not satisfy the browser contract");
+    if (!("orderState" in parsed.data.case)) throw new Error("Expected a Stage A case");
     return parsed.data.case;
   }
   const opened = await read(); expect(opened.state).toBe("open"); expect(opened.events.map((event) => event.action)).toEqual(["opened"]);

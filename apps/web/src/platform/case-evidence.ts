@@ -29,6 +29,13 @@ function requireOrder(orderId: string | null): string {
   if (orderId === null) throw new TrustCaseError("not_available");
   return orderId;
 }
+// Reused report sections must never carry reporter identity into appeal evidence.
+function withoutReporterFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutReporterFields);
+  if (value === null || typeof value !== "object" || value instanceof Date) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !/reporter/iu.test(key))
+    .map(([key, item]) => [key, withoutReporterFields(item)]));
+}
 /** Private composition, supplied only to Trust's open-case, audited evidence path. */
 export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
   async function report(tx: PawketTransaction, caseId: string) {
@@ -65,9 +72,9 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
         sections.resolution_records = await port.resolutionRecords(tx, source.orderId);
       }
       if (source?.kind === "report") {
-        sections.report_context = await port.reportContext!(tx, source.id);
-        if (source.sourceType === "commission_package") sections.package_revision = await port.packageRevision!(tx, source.id);
-        if (source.sourceType === "commission_brief") sections.brief = await port.brief!(tx, requireOrder(source.orderId));
+        sections.report_context = withoutReporterFields(await port.reportContext!(tx, source.id));
+        if (source.sourceType === "commission_package") sections.package_revision = withoutReporterFields(await port.packageRevision!(tx, source.id));
+        if (source.sourceType === "commission_brief") sections.brief = withoutReporterFields(await port.brief!(tx, requireOrder(source.orderId)));
       }
       if (source?.kind === "appeal") sections.appeal_source = await port.appealSource!(tx, source.id);
       return { appeal: { appealId: row.id, statement: decryptSensitiveField({ keyring: input.keyring, envelope: row.statementEnvelope,
@@ -79,16 +86,20 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
         source: source ? { caseId: source.id, kind: source.kind, state: source.state } : null, sections };
     }),
     reportContext: (tx, caseId) => available(async () => {
+      if (!input.keyring) throw new TrustCaseError("not_available");
+      const reports = await tx.select({ id: trustReports.id, reason: trustReports.reason, createdAt: trustReports.createdAt, reporterUserId: trustReports.reporterUserId, detailEnvelope: trustReports.detailEnvelope }).from(trustReports).where(eq(trustReports.caseId, caseId)).orderBy(asc(trustReports.createdAt), asc(trustReports.id));
+      const items = reports.map((report) => ({ reportId: report.id, reasonCategory: report.reason, createdAt: report.createdAt.toISOString(), reporterUserId: report.reporterUserId ?? "Khách chưa đăng nhập",
+        detail: report.detailEnvelope === null ? null : decryptSensitiveField({ keyring: input.keyring!, envelope: report.detailEnvelope, binding: { recordType: "trust_reports", recordId: report.id, fieldName: "detail" } }) }));
       const row = await report(tx, caseId);
-      if (row.sourceType === "commission_package") return { kind: row.sourceType, revision: await packageRevision(tx, caseId) };
+      if (row.sourceType === "commission_package") return { kind: row.sourceType, reports: items, revision: await packageRevision(tx, caseId) };
       const orderId = requireOrder(row.orderId);
-      if (row.sourceType === "commission_brief") return { kind: row.sourceType, brief: await brief(tx, orderId) };
+      if (row.sourceType === "commission_brief") return { kind: row.sourceType, reports: items, brief: await brief(tx, orderId) };
       if (row.sourceType !== "commission_message" && row.sourceType !== "commission_file") throw new TrustCaseError("not_available");
       const page = await input.orders.readThreadForCase(tx, { orderId, limit: 50, reportTarget: { kind: row.sourceType, id: row.sourceId } });
-      if (row.sourceType === "commission_message") return { kind: row.sourceType, messageId: row.sourceId, messages: page.items };
+      if (row.sourceType === "commission_message") return { kind: row.sourceType, reports: items, messageId: row.sourceId, messages: page.items };
       const carrier = page.items[0]; const file = carrier?.files.find((file) => file.fileId === row.sourceId);
       if (!carrier || !file) throw new TrustCaseError("not_available");
-      return { kind: row.sourceType, file: { ...file, hidden: file.hidden ?? Boolean(await input.contentHides?.activeHide(tx, "commission_file", row.sourceId)) }, carrier };
+      return { kind: row.sourceType, reports: items, file: { ...file, hidden: file.hidden ?? Boolean(await input.contentHides?.activeHide(tx, "commission_file", row.sourceId)) }, carrier };
     }),
     packageRevision: (tx, caseId) => available(() => packageRevision(tx, caseId)),
     brief: (tx, orderId) => available(() => brief(tx, requireOrder(orderId))),

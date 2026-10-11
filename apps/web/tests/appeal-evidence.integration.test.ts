@@ -57,6 +57,8 @@ test.each(["refund_not_received", "refund_overdue"] as const)("appeal over %s ne
 });
 test("orderless package appeal reads original report/package sections without order readers or reporter identity", async () => {
   const c = await setup();
+  c.catalog.readRevisionForCase.mockResolvedValue({ title: "Original package", reporterEmail: "synthetic-reporter@example.invalid",
+    metadata: [{ reporterIdentity: { displayName: "Synthetic reporter" } }] });
   const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: null, sourceType: "commission_package", sourceId: c.p.packageId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
   await f.db.insert(schema.trustReports).values({ id: randomUUID(), reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`, targetKind: "commission_package", targetId: c.p.packageId, packageRevisionId: c.p.packageRevisionId,
     contentOwnerUserId: c.p.creator.userId, reporterUserId: c.p.buyer.userId, reason: "other", caseId, createdAt: reportAt });
@@ -67,6 +69,7 @@ test("orderless package appeal reads original report/package sections without or
   expect(c.orders.readOrderForCase).not.toHaveBeenCalled(); expect(c.orders.readThreadForCase).not.toHaveBeenCalled();
   expect(c.catalog.readRevisionForCase.mock.calls.every((call) => call[1] === c.p.packageRevisionId)).toBe(true);
   expect(JSON.stringify(evidence)).not.toContain(c.p.buyer.userId);
+  expect(JSON.stringify(evidence)).not.toMatch(/reporter/iu);
   c.locks.length = 0;
   await c.appeals.decide({ ...await c.base("owner.trust_appeal_decide"), caseId: appealed.caseId, expectedCaseVersion: 1, decision: "reversed", reasoning: "Restore" });
   expect(c.locks).toEqual([`fence:${c.p.creator.userId}`, `subject:${c.p.creator.userId}`]);

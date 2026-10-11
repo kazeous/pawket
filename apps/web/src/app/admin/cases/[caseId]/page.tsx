@@ -10,5 +10,5 @@ export default async function CasePage({ params }: { params: Promise<{ caseId: s
   if (permission === "unauthenticated") redirect("/sign-in"); if (permission !== "authorized") notFound();
   const actor = await runtime.authenticate(incoming); if (!actor) redirect("/sign-in");
   const { caseId } = await params; if (!z.uuid().safeParse(caseId).success) notFound();
-  return <AppShell context="Owner workspace" action={{ href: "/admin/cases", label: "Hàng đợi vụ việc" }}><header className="workspace-header reveal"><div><p className="eyebrow">Chỉ owner · có nhật ký</p><h1>Chi tiết vụ việc</h1><p className="lede">Kiểm tra bằng chứng, thời hạn và kết quả trước khi xử lý.</p></div></header><CaseDetail caseId={caseId} actorUserId={actor.userId} /></AppShell>;
+  return <AppShell context="Owner workspace" action={{ href: "/admin/cases", label: "Hàng đợi vụ việc" }}><header className="workspace-header reveal"><div><p className="eyebrow">Chỉ owner · có nhật ký</p><h1>Chi tiết vụ việc</h1><p className="lede">Kiểm tra bằng chứng, thời hạn và kết quả trước khi xử lý.</p></div></header><CaseDetail caseId={caseId} actorUserId={actor.userId} enforcementEnabled={runtime.trustEnforcementMode === "enabled"} /></AppShell>;
 }

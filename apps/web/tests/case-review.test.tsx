@@ -3,6 +3,16 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, test, vi } from "vitest";
 import { CommandReview } from "../src/app/auth/review/[id]/review-panel";
+test("trust command review translates the subject, penalty and replacement without translating free text", async () => {
+  const node = document.createElement("div"); document.body.append(node); const root = createRoot(node); vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ title: "Xử lý vụ việc", body: JSON.stringify({ action: "decide_appeal", decision: "reduced", expectedCaseVersion: 2, reasoning: "reporting", replacement: { kind: "restriction", restriction: "reporting", endsAt: "2026-10-20T00:00:00.000Z" } }), ready: true, returnPath: "/admin/cases/synthetic", expiresAt: "2026-10-20T00:00:00.000Z" })));
+  try {
+    await act(async () => root.render(createElement(CommandReview, { id: "synthetic", accountPortalUrl: "https://example.invalid" })));
+    for (const label of ["Quyết định kháng nghị", "Giảm biện pháp", "Biện pháp thay thế", "Hạn chế", "Gửi báo cáo", "Phiên bản vụ việc"]) expect(node.textContent).toContain(label);
+    expect(node.querySelector("time")?.dateTime).toBe("2026-10-20T00:00:00.000Z");
+    expect(Array.from(node.querySelectorAll("dd")).some((field) => field.textContent === "reporting")).toBe(true);
+  } finally { await act(async () => root.unmount()); node.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); }
+});
 test.each(["evidence", "file"])("the shared OIDC resume page handles case %s without persisting grants", async (kind) => {
   const node = document.createElement("div"); document.body.append(node); const root = createRoot(node); vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const open = vi.spyOn(window, "open").mockReturnValue(null);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, test, vi } from "vitest";
-import { TrustCaseError } from "@pawket/trust";
+import { TrustCaseError, TrustEnforcementError } from "@pawket/trust";
 import { createCaseHttpHandlers } from "../src/platform/case-http.js";
 import { oidcCommand } from "../src/platform/oidc-command-registry.js";
 import type { WebPlatformRuntime } from "../src/platform/runtime.js";
@@ -13,7 +13,7 @@ function setup() {
     readEvidence: vi.fn(async () => ({})), fileGrant: vi.fn(async () => ({ url: "https://example.invalid/download" })) };
   const commands = { rule: vi.fn(async () => ({})), correctRuling: vi.fn(async () => ({})), postQuestion: vi.fn(async () => ({})), extendDispute: vi.fn(async () => ({})),
     resolveRefundCase: vi.fn(async () => ({})), ruleLateClaim: vi.fn(async () => ({})), freezeFulfillment: vi.fn(async () => ({})) };
-  const input = { appBaseUrl: origin, authorizeOwner: vi.fn<Input["authorizeOwner"]>(async () => "authorized"), authenticate: vi.fn(async () => owner),
+  const input = { appBaseUrl: origin, enforcementMode: "enabled", authorizeOwner: vi.fn<Input["authorizeOwner"]>(async () => "authorized"), authenticate: vi.fn(async () => owner),
     issueOwnerStepUpProof: vi.fn(async () => ({ id: randomUUID() })), cases, owner: commands, lateClaims: {}, suspension: {},
     refunds: { readAging: vi.fn(async () => []) }, standing: { readForOrder: vi.fn(async () => "active" as const) },
     orderMetadata: { readForOrder: vi.fn(async () => ({ creatorUserId: "synthetic-creator", buyerUserId: "synthetic-buyer", orderState: "delivered", amountVnd: 500_000 })) },
@@ -32,6 +32,56 @@ const routes = (s: ReturnType<typeof setup>) => [
   () => s.http.freeze(request("creators/synthetic-creator/freeze", "POST", { reason: "Synthetic reason" }), "synthetic-creator"),
   () => s.http.agingRefunds(request("refunds/aging")),
 ];
+test("public-report penalty uses a server-bound source and fresh action; policy publish uses expected revision", async () => {
+  const s = setup(); const penalties = { apply: vi.fn(async () => ({ penaltyId: fileId })), lift: vi.fn(), listActive: vi.fn() };
+  const policies = { publish: vi.fn(async () => ({ revisionId: fileId, revisionNumber: 4 })), readCurrent: vi.fn(async () => null) };
+  const http = createCaseHttpHandlers({ ...s.input, enforcementMode: "enabled", penalties, policies });
+  expect((await http.publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", { subjectUserId: "creator", kind: "warning", reasonCategory: "other", explanation: "Reason" }), fileId)).status).toBe(200);
+  expect(penalties.apply).toHaveBeenCalledWith(expect.objectContaining({ source: { publicReportId: fileId }, subjectUserId: "creator", owner }));
+  expect((await http.publishPolicy(request("policies", "POST", { kind: "community_rules", expectedRevisionNumber: 3, document: "Quy tắc" }))).status).toBe(200);
+  expect(policies.publish).toHaveBeenCalledWith(expect.objectContaining({ expectedRevisionNumber: 3, owner }));
+  for (const [path, actionClass] of [[`/api/v1/admin/content-reports/${fileId}/penalty`, "owner.trust_penalty_apply"], ["/api/v1/admin/policies", "owner.trust_policy_publish"]]) {
+    expect(oidcCommand({ method: "POST", path: path!, body: "{}", idempotencyKey: "key", ifMatch: null, returnPath: "/" })?.policy).toEqual({ actionClass, fresh: true });
+  }
+});
+test("disabled enforcement refuses trust routes before proof or mutation but preserves Stage A", async () => {
+  const s = setup(); const penalties = { apply: vi.fn(), lift: vi.fn(), listActive: vi.fn() }; const policies = { publish: vi.fn(), readCurrent: vi.fn() };
+  const http = createCaseHttpHandlers({ ...s.input, enforcementMode: "disabled", penalties, policies });
+  for (const response of [await http.queue(request("cases?kind=report")), await http.queue(request("cases?kind=appeal")), await http.penalties(request("penalties")), await http.liftPenalty(request(`penalties/${fileId}/lift`, "POST", { reason: "Reason" }), fileId), await http.publishPolicy(request("policies", "POST", {})), await http.publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", {}), fileId), await http.action(request(`cases/${caseId}/actions`, "POST", { action: "penalty", subjectUserId: "creator", kind: "warning", reasonCategory: "other", explanation: "Reason" }), caseId)]) {
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({ code: "enforcement_disabled" });
+  }
+  expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled(); expect(policies.publish).not.toHaveBeenCalled(); expect(penalties.apply).not.toHaveBeenCalled(); expect(penalties.lift).not.toHaveBeenCalled(); expect(penalties.listActive).not.toHaveBeenCalled();
+  expect((await http.detail(request(`cases/${caseId}`), caseId)).status).toBe(200);
+});
+test.each(["use_penalty", "duplicate", "resolution_disabled"] as const)("case HTTP preserves readable enforcement error %s", async (code) => {
+  const s = setup(); const penalties = { apply: vi.fn().mockRejectedValue(new TrustEnforcementError(code)), lift: vi.fn(), listActive: vi.fn() };
+  const response = await createCaseHttpHandlers({ ...s.input, enforcementMode: "enabled", penalties }).publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", { subjectUserId: "creator", kind: "warning", reasonCategory: "other", explanation: "Reason" }), fileId);
+  expect(response.status).toBe(code === "resolution_disabled" ? 503 : 409); expect(await response.json()).toEqual({ code });
+});
+test("disabled detail, evidence and file routes refuse trust cases, including legacy evidence sections", async () => {
+  const s = setup(); s.cases.getCase.mockResolvedValue({ ...await s.cases.getCase(), kind: "report", orderId: null });
+  const http = createCaseHttpHandlers({ ...s.input, enforcementMode: "disabled" });
+  for (const response of [await http.detail(request(`cases/${caseId}`), caseId), await http.evidence(request(`cases/${caseId}/evidence`, "POST", { section: "report_context" }), caseId), await http.evidence(request(`cases/${caseId}/evidence`, "POST", { section: "order_summary" }), caseId), await http.file(request(`cases/${caseId}/files/${fileId}`, "POST", { disposition: "attachment" }), caseId, fileId)]) expect(response.status).toBe(503);
+  expect(s.cases.readEvidence).not.toHaveBeenCalled(); expect(s.cases.fileGrant).not.toHaveBeenCalled(); expect(s.input.issueOwnerStepUpProof).not.toHaveBeenCalled();
+});
+test("disabled mixed queue fills a legacy page across hidden trust cases", async () => {
+  const s = setup(); const row = { ...await s.cases.getCase(), state: "open" as const, version: 1, resolutionKind: null, policyRevisionId: null, communityPolicyRevisionId: null, enforcementPolicyRevisionId: null, resolvedAt: null, openedAt: "2026-10-07T00:00:00.000Z", nextDeadline: null };
+  vi.mocked(s.input.cases.listQueue).mockResolvedValueOnce([{ ...row, kind: "report" }, { ...row, kind: "dispute" }]).mockResolvedValueOnce([{ ...row, kind: "appeal" }, { ...row, caseId: fileId, kind: "late_payment" }]).mockResolvedValueOnce([]);
+  const http = createCaseHttpHandlers({ ...s.input, enforcementMode: "disabled" });
+  expect((await (await http.queue(request("cases?limit=2"))).json()).cases.map((item: { kind: string }) => item.kind)).toEqual(["dispute", "late_payment"]);
+  expect(s.cases.listQueue).toHaveBeenCalledTimes(2);
+});
+test("new owner routes reject non-owner, cross-origin, queries and forged source/proof before dispatch", async () => {
+  const s = setup(); const penalties = { apply: vi.fn(), lift: vi.fn(), listActive: vi.fn() }; const policies = { publish: vi.fn(), readCurrent: vi.fn() }; const trustMetadata = { readForCase: vi.fn(), publicReportParties: vi.fn() };
+  const http = createCaseHttpHandlers({ ...s.input, enforcementMode: "enabled", penalties, policies, trustMetadata });
+  const body = { subjectUserId: "creator", kind: "warning", reasonCategory: "other", explanation: "Reason" };
+  for (const extra of [{ source: { publicReportId: caseId } }, { stepUpProofId: caseId }]) expect((await http.publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", { ...body, ...extra }), fileId)).status).toBe(400);
+  expect((await http.publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", body, { origin: "https://other.invalid" }), fileId)).status).toBe(403);
+  expect((await http.publishPolicy(request("policies?kind=community_rules", "POST", { kind: "community_rules", expectedRevisionNumber: 0, document: "Rules" }))).status).toBe(400);
+  vi.mocked(s.input.authorizeOwner).mockResolvedValue("forbidden");
+  for (const response of [await http.publicReportPenalty(request(`content-reports/${fileId}/penalty`, "POST", body), fileId), await http.publicReportParties(request(`content-reports/${fileId}/penalty`), fileId), await http.policies(request("policies")), await http.publishPolicy(request("policies", "POST", {}))]) expect(response.status).toBe(403);
+  for (const fn of [...Object.values(penalties), ...Object.values(policies), ...Object.values(trustMetadata), s.input.issueOwnerStepUpProof]) expect(fn).not.toHaveBeenCalled();
+});
 describe("owner case HTTP", () => {
   test("appeal decision dispatches expected version and server-issued action proof for an orderless appeal", async () => {
     const s = setup(); const decide = vi.fn(async () => undefined);

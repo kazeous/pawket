@@ -89,6 +89,7 @@ import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createResolutionHttpHandlers } from "./resolution-http.js";
 import { createTrustPartyView } from "./trust-party-view.js";
 import { createCaseHttpHandlers } from "./case-http.js";
+import { createTrustOwnerMetadata } from "./trust-owner-metadata.js";
 import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
 import { createHelpLinkHttpHandlers } from "./help-link-http.js";
 import { createAppealHttpHandlers } from "./appeal-http.js";
@@ -198,6 +199,14 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     tip: { primaryFreshMs: env.TIP_RECENT_AUTH_SECONDS * 1000, mfaFreshMs: env.TIP_TOTP_AUTH_SECONDS * 1000 },
     commission: { primaryFreshMs: env.COMMISSION_RECENT_AUTH_SECONDS * 1000, mfaFreshMs: env.COMMISSION_TOTP_AUTH_SECONDS * 1000 },
     });
+    if (env.TRUST_ENFORCEMENT_MODE !== "enabled") {
+      if (command?.policy.actionClass.startsWith("owner.trust_")) return null;
+      if (command?.policy.actionClass === "owner.case_evidence") {
+        try { const section = (JSON.parse(payload.body) as { section?: unknown }).section;
+          if (["report_context", "package_revision", "brief", "appeal_source"].includes(String(section))) return null;
+        } catch { /* The HTTP adapter rejects malformed bodies. */ }
+      }
+    }
     return command && { ...command, policy: { ...command.policy,
       primaryFreshMs: Math.min(command.policy.primaryFreshMs ?? 3_600_000, env.AUTH_PRIMARY_STEP_UP_TTL_SECONDS * 1000),
       mfaFreshMs: Math.min(command.policy.mfaFreshMs ?? 3_600_000, env.AUTH_OWNER_TOTP_STEP_UP_TTL_SECONDS * 1000),
@@ -564,7 +573,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const appeals = createAppealService({ ...enforcementCommon, penalties, hides: hideService, helpLinks, identity: enforcementIdentity });
   const appealHandlers = createAppealHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, appeals });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
-    penalties, contentHides: hideService, appeals,
+    penalties, contentHides: hideService, appeals, policies: trustPolicies, enforcementMode: env.TRUST_ENFORCEMENT_MODE, trustMetadata: createTrustOwnerMetadata(database.db),
     issueOwnerStepUpProof: commandContext.issueOwnerProof,
     async authorizeOwner(headers) {
       const actor = await authenticate(headers); if (!actor) return "unauthenticated";

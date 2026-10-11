@@ -10,16 +10,19 @@ import { EmptyState, LoadingState, RetryState } from "../async-state";
 import { StatusBanner } from "../status-banner";
 import { TipRequestError } from "../tips/tip-client";
 import { resolutionText } from "../resolutions/resolution-client";
-import { caseRequest, casePost, readCase, caseDetailSchema, caseErrorText, caseKindLabels, evidenceLabels, openCaseFile, formatTipTime, formatVnd, type CaseAction, type CaseDetailView, type EvidenceSection } from "./case-client";
+import { caseRequest, casePost, readCase, caseDetailSchema, caseErrorText, caseKindLabels, evidenceLabels, openCaseFile, formatTipTime, formatVnd, type CaseAction, type CaseDetailView, type StageCaseDetailView, type EvidenceSection } from "./case-client";
 import { EvidenceTabs } from "./evidence-tabs";
 import { RulingForm } from "./ruling-form";
 import { RefundCaseActions } from "./refund-case-actions";
+import { ReportCasePanel } from "../trust/report-case-panel";
+import { AppealCasePanel } from "../trust/appeal-case-panel";
+import { PenaltyForm } from "../trust/penalty-form";
 
 const eventLabels: Record<string, string> = { opened: "Mở vụ việc", resolved: "Giải quyết vụ việc", question_posted: "Đặt câu hỏi", deadline_extended: "Gia hạn" };
 const resolutionLabels: Record<string, string> = { ruled: "Đã kết luận", settled: "Hai bên đã thỏa thuận", withdrawn: "Đã rút", superseded: "Đã được thay thế", receipt_accepted: "Chấp nhận đã nhận tiền", resend_required: "Yêu cầu chuyển lại", waived: "Miễn nghĩa vụ", send_recorded: "Đã ghi nhận chuyển", extended: "Đã gia hạn", refund_owed: "Cần hoàn tiền", rejected: "Đã từ chối" };
 const orderLabels: Record<string, string> = { requested: "Đã yêu cầu", quoted: "Đã báo giá", awaiting_payment: "Chờ thanh toán", in_progress: "Đang thực hiện", delivered: "Đã bàn giao", completed: "Đã hoàn tất", closed: "Đã đóng" };
 type Attempt = { path: string; init: RequestInit; file: boolean };
-export function CaseDetail({ caseId, actorUserId, initial }: Readonly<{ caseId: string; actorUserId: string; initial?: CaseDetailView }>) {
+export function CaseDetail({ caseId, actorUserId, initial, enforcementEnabled = false }: Readonly<{ caseId: string; actorUserId: string; initial?: CaseDetailView; enforcementEnabled?: boolean }>) {
   const [detail, setDetail] = useState<CaseDetailView | null>(initial ?? null); const [loading, setLoading] = useState(initial === undefined); const [loadError, setLoadError] = useState(false);
   const [tab, setTab] = useState<"evidence" | "timeline" | "access">("evidence"); const [working, setWorking] = useState(false); const [epoch, setEpoch] = useState(0);
   const [locked, setLocked] = useState(false); const [clock, setClock] = useState(() => Date.now());
@@ -32,7 +35,7 @@ export function CaseDetail({ caseId, actorUserId, initial }: Readonly<{ caseId: 
   }, [caseId]);
   useEffect(() => { if (initial !== undefined) return; const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [initial, load]);
   useEffect(() => { const timer = window.setInterval(() => setClock(Date.now()), 30_000); return () => window.clearInterval(timer); }, []);
-  function failure(error: unknown) { const code = error instanceof TipRequestError ? error.code : "dependency_unavailable"; setNotice({ tone: "error", text: caseErrorText(code) }); return code; }
+  function failure(error: unknown) { const raw = error instanceof TipRequestError ? error.code : "dependency_unavailable"; const code = raw === "IDENTITY_UNAVAILABLE" ? "dependency_unavailable" : raw; setNotice({ tone: "error", text: caseErrorText(code) }); return code; }
   async function send() {
     if (inFlight.current || !attempt.current) return;
     inFlight.current = true; setWorking(true); setNotice(null); setEpoch((value) => value + 1);
@@ -65,29 +68,33 @@ export function CaseDetail({ caseId, actorUserId, initial }: Readonly<{ caseId: 
   }
   if (loading) return <LoadingState label="Đang tải vụ việc…" />;
   if (loadError || !detail) return <RetryState title="Chưa mở được vụ việc" onRetry={() => void load()}><p>Vụ việc có thể không còn khả dụng hoặc phiên owner cần xác thực lại.</p></RetryState>;
+  if (!enforcementEnabled && (detail.kind === "report" || detail.kind === "appeal")) return <EmptyState title="Tính năng xử lý báo cáo và kháng nghị đang tạm đóng" />;
+  const legacy = "creatorStanding" in detail ? detail : null;
   const disabled = working || locked;
   const action = (payload: CaseAction) => execute(`/api/v1/admin/cases/${caseId}/actions`, payload);
   return <div className="owner-workspace stack"><Link className="text-link" href="/admin/cases">Quay lại hàng đợi</Link>
     {notice ? <StatusBanner tone={notice.tone}><p>{notice.text}</p></StatusBanner> : null}
     {locked && !working ? <Button variant="outline" onClick={() => void send()}>Kiểm tra lại cùng yêu cầu</Button> : null}
     <section className="work-surface stack"><h2>{caseKindLabels[detail.kind]}</h2><dl className="summary-list">
-      <div><dt>Đơn hàng</dt><dd className="mono break-all">{detail.orderId}</dd></div><div><dt>Trạng thái vụ việc</dt><dd>{detail.state === "open" ? "Đang mở" : "Đã giải quyết"}{detail.resolutionKind ? ` · ${resolutionLabels[detail.resolutionKind] ?? "Đã ghi nhận kết quả"}` : ""}</dd></div>
-      <div><dt>Trạng thái đơn</dt><dd>{orderLabels[detail.orderState]}</dd></div><div><dt>Số tiền</dt><dd>{detail.amountVnd === null ? "Chưa chốt số tiền" : formatVnd(detail.amountVnd)}</dd></div>
+      <div><dt>{detail.orderId ? "Đơn hàng" : "Nguồn vụ việc"}</dt><dd className="mono break-all">{detail.orderId ?? detail.sourceId}</dd></div><div><dt>Trạng thái vụ việc</dt><dd>{detail.state === "open" ? "Đang mở" : "Đã giải quyết"}{detail.resolutionKind ? ` · ${resolutionLabels[detail.resolutionKind] ?? "Đã ghi nhận kết quả"}` : ""}</dd></div>
+      {legacy ? <><div><dt>Trạng thái đơn</dt><dd>{orderLabels[legacy.orderState]}</dd></div><div><dt>Số tiền</dt><dd>{legacy.amountVnd === null ? "Chưa chốt số tiền" : formatVnd(legacy.amountVnd)}</dd></div></> : null}
       <div><dt>Mở lúc</dt><dd><time dateTime={detail.openedAt}>{formatTipTime(detail.openedAt)}</time></dd></div><div><dt>Phiên bản</dt><dd>{detail.version}</dd></div>
     </dl><Button variant="outline" disabled={working} onClick={() => void load()}>Tải lại vụ việc</Button></section>
     <section className="work-surface stack"><div className="owner-tabs" role="navigation" aria-label="Chi tiết vụ việc">
       {(["evidence", "timeline", "access"] as const).map((value) => <Button key={value} variant={tab === value ? "outline" : "ghost"} aria-pressed={tab === value} disabled={working} onClick={() => { setEpoch((current) => current + 1); setTab(value); }}>{value === "evidence" ? "Bằng chứng" : value === "timeline" ? "Lịch sử vụ việc" : "Nhật ký truy cập"}</Button>)}</div>
-      {tab === "evidence" ? detail.state === "open" ? <EvidenceTabs key={`${detail.caseId}-${epoch}`} kind={detail.kind} disabled={disabled} onRead={readEvidence} onFile={(fileId) => execute(`/api/v1/admin/cases/${caseId}/files/${fileId}`, { disposition: "attachment" }, true)} /> : <EmptyState title="Vụ việc đã giải quyết; bằng chứng riêng tư đã đóng" /> : null}
+      {tab === "evidence" ? detail.state === "open" ? <EvidenceTabs key={`${detail.caseId}-${epoch}`} kind={detail.kind} sourceType={detail.sourceType} disabled={disabled} onRead={readEvidence} onFile={(fileId) => execute(`/api/v1/admin/cases/${caseId}/files/${fileId}`, { disposition: "attachment" }, true)} /> : <EmptyState title="Vụ việc đã giải quyết; bằng chứng riêng tư đã đóng" /> : null}
       {tab === "timeline" ? <><h2>Lịch sử vụ việc</h2><ol className="stack">{detail.events.map((event) => <li key={event.id}><p>{eventLabels[event.action] ?? "Thao tác đã ghi nhận"} · <time dateTime={event.occurredAt}>{formatTipTime(event.occurredAt)}</time> · phiên bản {event.resultingVersion}</p>{event.reason ? <p className="whitespace-pre-wrap break-words">Lý do (chỉ owner thấy): {event.reason}</p> : null}</li>)}</ol></> : null}
       {tab === "access" ? <><h2>Nhật ký truy cập</h2><p className="muted">100 lượt truy cập gần nhất, chỉ owner thấy.</p>{detail.accessLog.length === 0 ? <EmptyState title="Chưa có lượt truy cập bằng chứng" /> : <ol className="stack">{detail.accessLog.map((entry) => <li key={entry.id}><p>{evidenceLabels[entry.itemType]} · <time dateTime={entry.accessedAt}>{formatTipTime(entry.accessedAt)}</time></p><p className="mono break-all">Owner {entry.ownerUserId} · phiên {entry.ownerSessionId} · mục {entry.itemId}</p></li>)}</ol>}</> : null}
     </section>
     {detail.kind === "dispute" && detail.state === "open" ? <section className="work-surface stack">{detail.amountVnd !== null ? <RulingForm key={`${detail.version}-${detail.orderState}`} orderState={detail.orderState} amountVnd={detail.amountVnd} disabled={disabled} onSubmit={action} /> : null}<DisputeActions detail={detail} disabled={disabled} onSubmit={action} clock={clock} /></section> : null}
     {detail.kind.startsWith("refund_") && detail.state === "open" ? <section className="work-surface"><RefundCaseActions kind={detail.kind as "refund_not_received" | "refund_overdue"} disabled={disabled} onSubmit={action} /></section> : null}
     {detail.kind === "late_payment" && detail.state === "open" ? <section className="work-surface"><LateClaimActions disabled={disabled} onSubmit={action} /></section> : null}
-    {detail.ruling ? <section className="work-surface stack"><h2>Kết luận đã ghi nhận</h2><p>{detail.ruling.outcome === "complete" ? "Hoàn tất đơn" : "Đóng đơn"} · hoàn {formatVnd(detail.ruling.currentRefundAmountVnd)} · {formatTipTime(detail.ruling.ruledAt)}</p>
-      {detail.ruling.correctedAt ? <p>Số tiền hoàn ban đầu: {formatVnd(detail.ruling.refundAmountVnd)} · Đính chính lúc <time dateTime={detail.ruling.correctedAt}>{formatTipTime(detail.ruling.correctedAt)}</time></p> : null}
-      {detail.ruling.correctionEndsAt && clock <= Date.parse(detail.ruling.correctionEndsAt) ? <CorrectionForm key={`${detail.ruling.id}:${detail.ruling.correctedAt}`} detail={detail} disabled={disabled} onSubmit={action} /> : <p>Đính chính tiền hiện không khả dụng hoặc đã hết thời hạn 30 ngày.</p>}</section> : null}
-    {detail.creatorStanding === "suspended" ? <section className="work-surface"><FreezeForm disabled={disabled} onSubmit={(reason) => execute(`/api/v1/admin/creators/${encodeURIComponent(detail.creatorUserId)}/freeze`, { reason })} /></section> : null}
+    {legacy?.ruling ? <section className="work-surface stack"><h2>Kết luận đã ghi nhận</h2><p>{legacy.ruling.outcome === "complete" ? "Hoàn tất đơn" : "Đóng đơn"} · hoàn {formatVnd(legacy.ruling.currentRefundAmountVnd)} · {formatTipTime(legacy.ruling.ruledAt)}</p>
+      {legacy.ruling.correctedAt ? <p>Số tiền hoàn ban đầu: {formatVnd(legacy.ruling.refundAmountVnd)} · Đính chính lúc <time dateTime={legacy.ruling.correctedAt}>{formatTipTime(legacy.ruling.correctedAt)}</time></p> : null}
+      {legacy.ruling.correctionEndsAt && clock <= Date.parse(legacy.ruling.correctionEndsAt) ? <CorrectionForm key={`${legacy.ruling.id}:${legacy.ruling.correctedAt}`} detail={legacy} disabled={disabled} onSubmit={action} /> : <p>Đính chính tiền hiện không khả dụng hoặc đã hết thời hạn 30 ngày.</p>}</section> : null}
+    {legacy?.creatorStanding === "suspended" ? <section className="work-surface"><FreezeForm disabled={disabled} onSubmit={(reason) => execute(`/api/v1/admin/creators/${encodeURIComponent(legacy.creatorUserId)}/freeze`, { reason })} /></section> : null}
+    {detail.kind === "report" ? <ReportCasePanel key={`${detail.caseId}-${detail.version}`} detail={detail} disabled={disabled} onSubmit={action} /> : detail.kind === "appeal" ? <AppealCasePanel key={`${detail.caseId}-${detail.version}`} detail={detail} disabled={disabled} onSubmit={action} /> : null}
+    {enforcementEnabled && legacy ? <section className="work-surface"><PenaltyForm parties={legacy.parties ?? []} disabled={disabled} onSubmit={action} /></section> : null}
   </div>;
 }
 function ReasonForm({ title, label = "Lý do", name = "reason", maximum = 2_000, disabled, children, onSubmit }: Readonly<{ title: string; label?: string; name?: string; maximum?: number; disabled: boolean; children?: React.ReactNode; onSubmit(reason: string, data: FormData): boolean | void }>) {
@@ -98,7 +105,7 @@ function ReasonForm({ title, label = "Lý do", name = "reason", maximum = 2_000,
   }
   return <form className="stack" onSubmit={submit}><h3>{title}</h3><FieldGroup>{children}<Field htmlFor={id} label={label} required error={error} hint={`1–${maximum.toLocaleString("vi-VN")} ký tự.`}><Textarea id={id} name={name} required disabled={disabled} /></Field></FieldGroup>{error ? <p role="alert">{error}</p> : null}<Button type="submit" disabled={disabled}>{title}</Button></form>;
 }
-function DisputeActions({ detail, disabled, onSubmit, clock }: Readonly<{ detail: CaseDetailView; disabled: boolean; onSubmit(action: CaseAction): void; clock: number }>) {
+function DisputeActions({ detail, disabled, onSubmit, clock }: Readonly<{ detail: StageCaseDetailView; disabled: boolean; onSubmit(action: CaseAction): void; clock: number }>) {
   const id = useId(); const maximum = detail.disputeOpenedAt ? new Date(Date.parse(detail.disputeOpenedAt) + 14 * 86_400_000) : null;
   return <><ReasonForm title="Gửi câu hỏi cho hai bên" label="Câu hỏi (hai bên sẽ thấy)" maximum={4_000} disabled={disabled} onSubmit={(text) => onSubmit({ action: "question", text })} />
     {maximum && maximum.getTime() > clock ? <ReasonForm title="Gia hạn phản hồi khiếu nại" disabled={disabled} onSubmit={(reason, data) => {
@@ -106,7 +113,7 @@ function DisputeActions({ detail, disabled, onSubmit, clock }: Readonly<{ detail
       onSubmit({ action: "extend", until: until.toISOString(), reason });
     }}><Field htmlFor={id} label="Hạn phản hồi mới" required hint={`Không quá ${formatTipTime(maximum.toISOString())}; giờ trên thiết bị của bạn.`}><Input id={id} name="until" type="datetime-local" required disabled={disabled} /></Field></ReasonForm> : <p>Đã hết cửa sổ gia hạn phản hồi khiếu nại.</p>}</>;
 }
-function CorrectionForm({ detail, disabled, onSubmit }: Readonly<{ detail: CaseDetailView; disabled: boolean; onSubmit(action: CaseAction): void }>) {
+function CorrectionForm({ detail, disabled, onSubmit }: Readonly<{ detail: StageCaseDetailView; disabled: boolean; onSubmit(action: CaseAction): void }>) {
   const id = useId(); const ruling = detail.ruling!; const max = ruling.outcome === "complete" ? (detail.amountVnd ?? 0) - 1 : detail.amountVnd ?? 0;
   return <ReasonForm title="Đính chính số tiền hoàn" disabled={disabled} onSubmit={(reason, data) => {
     const value = Number(data.get("amount")); if (!Number.isSafeInteger(value) || value < 0 || value > max) return false;

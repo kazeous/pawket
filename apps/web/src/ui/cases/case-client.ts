@@ -2,23 +2,30 @@ import { z } from "zod";
 import { tipRequest, TipRequestError, formatTipTime, formatVnd } from "../tips/tip-client";
 export { formatTipTime, formatVnd };
 const uuid = z.uuid(); const time = z.iso.datetime(); const amount = z.number().int().min(0).max(50_000_000);
-export const caseKindLabels = { dispute: "Khiếu nại đơn hàng", refund_not_received: "Chưa nhận được hoàn tiền", refund_overdue: "Hoàn tiền quá hạn", late_payment: "Thanh toán sau khi đơn đóng" };
+export const caseKindLabels = { dispute: "Khiếu nại đơn hàng", refund_not_received: "Chưa nhận được hoàn tiền", refund_overdue: "Hoàn tiền quá hạn", late_payment: "Thanh toán sau khi đơn đóng", report: "Báo cáo", appeal: "Kháng nghị" };
 export type CaseKind = keyof typeof caseKindLabels;
-export const evidenceLabels = { order_summary: "Thông tin đơn hàng", thread_page: "Tin nhắn và bàn giao", resolution_records: "Khiếu nại và hoàn tiền", refund_destination: "Tài khoản nhận hoàn tiền", file: "Tệp" };
+export const evidenceLabels = { order_summary: "Thông tin đơn hàng", thread_page: "Tin nhắn và bàn giao", resolution_records: "Khiếu nại và hoàn tiền", refund_destination: "Tài khoản nhận hoàn tiền", report_context: "Ngữ cảnh báo cáo", package_revision: "Phiên bản gói commission", brief: "Yêu cầu sáng tác", appeal_source: "Nguồn kháng nghị", file: "Tệp" };
 export type EvidenceSection = Exclude<keyof typeof evidenceLabels, "file">;
-const summary = z.object({ caseId: uuid, orderId: uuid, sourceId: uuid, sourceType: z.string(), kind: z.enum(["dispute", "refund_not_received", "refund_overdue", "late_payment"]),
+const summary = z.object({ caseId: uuid, orderId: uuid.nullable(), sourceId: uuid, sourceType: z.string(), kind: z.enum(["dispute", "refund_not_received", "refund_overdue", "late_payment", "report", "appeal"]),
   state: z.enum(["open", "resolved"]), resolutionKind: z.string().nullable(), policyRevisionId: uuid.nullable(), version: z.number().int().positive(), openedAt: time, resolvedAt: time.nullable() });
 export const queueSchema = z.object({ cases: z.array(summary.extend({ nextDeadline: time.nullable() })).max(100) });
-export const caseDetailSchema = z.object({ case: summary.extend({ creatorStanding: z.enum(["active", "suspended", "none"]), creatorUserId: z.string().min(1), buyerUserId: z.string().min(1),
+const history = { events: z.array(z.object({ id: uuid, action: z.string(), reason: z.string().nullable(), beforeState: z.string().nullable(), afterState: z.string(), occurredAt: time, resultingVersion: z.number().int().positive() })),
+  accessLog: z.array(z.object({ id: uuid, itemType: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination", "report_context", "package_revision", "brief", "appeal_source", "file"]), itemId: uuid, ownerUserId: z.string(), ownerSessionId: z.string(), accessedAt: time })).max(100) };
+export const sourcePartiesSchema = z.object({ parties: z.array(z.object({ userId: z.string().min(1).max(200), label: z.string().min(1).max(200) })).max(10) });
+export type SourceParty = z.infer<typeof sourcePartiesSchema>["parties"][number];
+export const appealActionSchema = z.object({ penaltyId: uuid.optional(), hideId: uuid.optional(), kind: z.string(), restriction: z.enum(["commission_intake", "commission_buying", "dispute_opening", "reporting"]).nullable().optional(), target: z.enum(["creator_capability", "account"]).nullable().optional(), endsAt: time.nullable().optional() });
+const stageDetail = summary.extend({ kind: z.enum(["dispute", "refund_not_received", "refund_overdue", "late_payment"]), orderId: uuid, ...history, parties: sourcePartiesSchema.shape.parties.optional(), creatorStanding: z.enum(["active", "suspended", "none"]), creatorUserId: z.string().min(1), buyerUserId: z.string().min(1),
   orderState: z.enum(["requested", "quoted", "awaiting_payment", "in_progress", "delivered", "completed", "closed"]), amountVnd: amount.nullable(),
   disputeOpenedAt: time.nullable(), respondBy: time.nullable(), nextDeadline: time.nullable().optional(),
   ruling: z.object({ id: uuid, outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, currentRefundAmountVnd: amount, correctedAt: time.nullable(), ruledAt: time, correctionEndsAt: time.nullable() }).nullable(),
-  events: z.array(z.object({ id: uuid, action: z.string(), reason: z.string().nullable(), beforeState: z.string().nullable(), afterState: z.string(), occurredAt: time, resultingVersion: z.number().int().positive() })),
-  accessLog: z.array(z.object({ id: uuid, itemType: z.enum(["order_summary", "thread_page", "resolution_records", "refund_destination", "file"]), itemId: uuid,
-    ownerUserId: z.string(), ownerSessionId: z.string(), accessedAt: time })).max(100) }) });
+});
+const trustDetail = summary.extend({ kind: z.enum(["report", "appeal"]), ...history, parties: sourcePartiesSchema.shape.parties, activeHideId: uuid.nullable().optional(), appealAction: appealActionSchema.nullable().optional() });
+export const caseDetailSchema = z.object({ case: z.union([stageDetail, trustDetail]) });
 export const agingSchema = z.object({ refunds: z.array(z.object({ orderId: uuid, amountVnd: amount, ageDays: z.number().int().nonnegative() })).max(100) });
 export type CaseQueueRow = z.infer<typeof queueSchema>["cases"][number];
 export type CaseDetailView = z.infer<typeof caseDetailSchema>["case"];
+export type StageCaseDetailView = z.infer<typeof stageDetail>;
+export type TrustCaseDetailView = z.infer<typeof trustDetail>;
 export type AgingRefund = z.infer<typeof agingSchema>["refunds"][number];
 export type CaseAction = Readonly<
   { action: "rule"; outcome: "complete" | "close"; refundAmountVnd: number; reasoning: string; internalNote?: string }
@@ -26,7 +33,11 @@ export type CaseAction = Readonly<
   | { action: "question"; text: string }
   | { action: "extend" | "extend_deadline"; until: string; reason: string }
   | { action: "accept_evidence" | "require_resend" | "waive"; reason: string }
-  | { action: "rule_claim"; outcome: "refund_owed" | "rejected"; amountVnd?: number; reason: string }>;
+  | { action: "rule_claim"; outcome: "refund_owed" | "rejected"; amountVnd?: number; reason: string }
+  | { action: "hide" | "close_report"; expectedCaseVersion: number; reason: string; resolution?: "dismissed" | "actioned" }
+  | { action: "restore"; expectedCaseVersion: number; hideId: string; reason: string }
+  | { action: "penalty"; subjectUserId: string; kind: "warning" | "restriction" | "suspension" | "removal"; restriction?: "commission_intake" | "commission_buying" | "dispute_opening" | "reporting"; target?: "creator_capability" | "account"; endsAt?: string | null; reasonCategory: string; explanation: string; internalNote?: string; freezeFulfilment?: boolean }
+  | { action: "decide_appeal"; expectedCaseVersion: number; decision: "upheld" | "reduced" | "reversed"; reasoning: string; replacement?: { kind: "restriction" | "suspension"; restriction?: "commission_intake" | "commission_buying" | "dispute_opening" | "reporting"; target?: "creator_capability" | "account"; endsAt: string | null } }>;
 // The shared request follows only the server's opaque OIDC review reference.
 export const caseRequest: typeof tipRequest = (path, init = {}, maximumBytes = 1_048_576) => tipRequest(path, init, maximumBytes);
 export function casePost(payload: unknown, actorUserId: string, key = crypto.randomUUID()): RequestInit {
@@ -44,6 +55,9 @@ export function openCaseFile(value: unknown) {
 export function caseErrorText(code: string) {
   if (code === "OIDC_STEP_UP_REQUIRED") return "Đang chuyển đến trang xem lại và xác thực tài khoản.";
   if (code === "resolution_disabled") return "Tính năng xử lý khiếu nại và hoàn tiền đang tạm đóng.";
+  if (code === "enforcement_disabled") return "Tính năng xử lý báo cáo, biện pháp và kháng nghị đang tạm đóng.";
+  if (code === "use_penalty") return "Hãy áp dụng biện pháp từ vụ việc hoặc báo cáo để người dùng có thể kháng nghị.";
+  if (code === "duplicate") return "Người dùng đã có biện pháp này đang có hiệu lực. Kiểm tra tab Biện pháp trước khi xử lý tiếp.";
   if (["not_available", "invalid_transition", "version_conflict", "deadline_passed"].includes(code)) return "Vụ việc đã thay đổi hoặc thời hạn đã kết thúc. Hãy kiểm tra trạng thái hiện tại trước khi xử lý tiếp.";
   if (["owner_required", "authentication_required", "owner_step_up_required", "OIDC_ACTOR_CHANGED"].includes(code)) return "Cần xác thực lại tài khoản owner để tiếp tục.";
   if (code.startsWith("invalid_")) return "Thông tin chưa hợp lệ. Hãy kiểm tra số tiền, thời hạn và lý do.";
