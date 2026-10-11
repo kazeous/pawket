@@ -456,6 +456,7 @@ const allowedRefundOutcomes = new Map<string, ReadonlySet<string>>([
   ["attention_required", new Set(["attention_required", "rejected", "retryable_failure"])],
 ]);
 const allowedEmailPurposes = new Set([
+  "enforcement_notice",
   "application_outcome",
   "creator_status",
   "email_change",

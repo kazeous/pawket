@@ -156,3 +156,37 @@ export const trustPenaltyEvents = pgTable("trust_penalty_events", {
   check("trust_penalty_events_actor_check", sql`(${t.actorUserId} is null) = (${t.actorSessionId} is null)`),
   check("trust_penalty_events_version_check", sql`${t.expectedVersion} >= 0 and ${t.resultingVersion} = ${t.expectedVersion} + 1`),
 ]);
+
+export const trustHelpLinks = pgTable("trust_help_links", {
+  id: uuid("id").primaryKey(), tokenHash: text("token_hash").notNull(),
+  userId: text("user_id").notNull().references(() => identityUsers.id, reference),
+  penaltyId: uuid("penalty_id").notNull().references(() => trustPenalties.id, reference),
+  issuedAt: time("issued_at").notNull(), appealUntil: time("appeal_until").notNull(), readUntil: time("read_until").notNull(), revokedAt: time("revoked_at"),
+}, (t) => [
+  uniqueIndex("trust_help_links_token_uidx").on(t.tokenHash),
+  uniqueIndex("trust_help_links_active_penalty_uidx").on(t.penaltyId).where(sql`${t.revokedAt} is null`),
+  check("trust_help_links_hash_check", sql`${t.tokenHash} ~ '^sha256:v1:[a-f0-9]{64}$'`),
+  check("trust_help_links_time_check", sql`${t.issuedAt} < ${t.readUntil} and ${t.appealUntil} < ${t.readUntil} and (${t.revokedAt} is null or ${t.revokedAt} >= ${t.issuedAt})`),
+]);
+
+export const trustHelpSessions = pgTable("trust_help_sessions", {
+  id: uuid("id").primaryKey(), sessionHash: text("session_hash").notNull(),
+  linkId: uuid("link_id").notNull().references(() => trustHelpLinks.id, reference),
+  userId: text("user_id").notNull().references(() => identityUsers.id, reference),
+  penaltyId: uuid("penalty_id").notNull().references(() => trustPenalties.id, reference),
+  createdAt: time("created_at").notNull(), expiresAt: time("expires_at").notNull(), revokedAt: time("revoked_at"),
+}, (t) => [
+  uniqueIndex("trust_help_sessions_hash_uidx").on(t.sessionHash), index("trust_help_sessions_link_idx").on(t.linkId),
+  check("trust_help_sessions_hash_check", sql`${t.sessionHash} ~ '^sha256:v1:[a-f0-9]{64}$'`),
+  check("trust_help_sessions_time_check", sql`${t.expiresAt} = ${t.createdAt} + interval '30 minutes' and (${t.revokedAt} is null or ${t.revokedAt} >= ${t.createdAt})`),
+]);
+
+export const trustHelpLinkRequests = pgTable("trust_help_link_requests", {
+  id: uuid("id").primaryKey(), networkKeyHmac: text("network_key_hmac").notNull(), addressHmac: text("address_hmac").notNull(),
+  outcome: text("outcome").$type<"issued" | "ignored" | "rate_limited">().notNull(), createdAt: time("created_at").notNull(), expiresAt: time("expires_at").notNull(),
+}, (t) => [
+  index("trust_help_link_requests_address_idx").on(t.addressHmac, t.createdAt), index("trust_help_link_requests_network_idx").on(t.networkKeyHmac, t.createdAt),
+  check("trust_help_link_requests_hmac_check", sql`${t.addressHmac} ~ '^hmac-sha256:v1:[A-Za-z0-9_-]{43}$' and ${t.networkKeyHmac} ~ '^hmac-sha256:v1:[A-Za-z0-9_-]{43}$'`),
+  check("trust_help_link_requests_outcome_check", sql`${t.outcome} in ('issued','ignored','rate_limited')`),
+  check("trust_help_link_requests_time_check", sql`${t.expiresAt} > ${t.createdAt} and ${t.expiresAt} <= ${t.createdAt} + interval '24 hours'`),
+]);

@@ -10,6 +10,7 @@ export * from "./creator-application-http.js";
 export * from "./identity-repository.js";
 export * from "./security-email.js";
 export * from "./security-email-handoff.js";
+export * from "./enforcement-notice-port.js";
 export * from "./commission-assurance-port.js";
 export * from "./creator-standing-port.js";
 export * from "./oidc-account-http.js";

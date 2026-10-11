@@ -17,6 +17,7 @@ type Setup = Awaited<ReturnType<typeof f.setup>>;
 async function restrict(s: Setup, orderId: string, userId: string, restriction: TrustRestriction) {
   const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "dispute", orderId, sourceType: "commission_dispute", sourceId: randomUUID(), policyRevisionId: s.policyId, requestId: randomUUID(), at: s.creator.now() }));
   const service = createPenaltyService({ db: f.db, mode: "enabled", keyring: s.input.keyring, lookupHmacKey: s.input.lookupHmacKey, applicationRevision: "synthetic-restrictions", fence: { lockCreatorFence: lockCommissionCreator },
+    helpLinks: { async issue() { throw new Error("Restrictions must not issue help links"); } }, notices: { async queue() { throw new Error("Restrictions must not send notices"); } },
     identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) }),
     freeze: { freezeForRemoval: async () => ({ closedOrders: 0 }) }, policies: { readCurrentIds: async () => ({ enforcementRevisionId: null }) }, consumeStepUpProof: async () => true, now: s.creator.now });
   const result = await service.apply({ owner: s.creator.actor, stepUpProofId: randomUUID(), subjectUserId: userId, source: { caseId }, kind: "restriction", restriction, reasonCategory: "other", explanation: "Synthetic restriction", ...commandIds() });

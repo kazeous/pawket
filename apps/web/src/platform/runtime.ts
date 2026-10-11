@@ -30,6 +30,7 @@ import {
   createIdentityCommissionAssurancePort,
   createCreatorStandingPort,
   createIdentityEnforcementPort,
+  createEnforcementNoticePort,
   createIdentitySePayAssurancePort,
   createCreatorApplicationHttpHandlers,
   createCreatorApplicationService,
@@ -77,6 +78,7 @@ import {
   createTrustCasePort,
   createTrustCaseService,
   createContentHideReadPort, createContentHideService, createPenaltyService,
+  createHelpLinkService,
   createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
 
@@ -86,11 +88,14 @@ import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createResolutionHttpHandlers } from "./resolution-http.js";
 import { createCaseHttpHandlers } from "./case-http.js";
 import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
+import { createHelpLinkHttpHandlers } from "./help-link-http.js";
 import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
 export type WebPlatformRuntime = {
+  helpLinkHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
+  helpLinks: ReturnType<typeof createHelpLinkService>;
   accountPortalUrl: string;
   oidc: ReturnType<typeof createOidcHttpHandlers>;
   pendingCommands: ReturnType<typeof createOidcCommandHttp>;
@@ -535,9 +540,13 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
     deadlines: createResolutionCaseDeadlinePort({ refunds }),
     evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides }) });
+  const enforcementNotices = createEnforcementNoticePort({ keyring });
+  const helpLinks = createHelpLinkService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, notices: enforcementNotices });
+  const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, helpLinks });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
     penalties: createPenaltyService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
       consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator }, policies: trustPolicies,
+      helpLinks, notices: enforcementNotices,
       identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: (tx, command) => {
         if (command.actorUserId === null || command.actorSessionId === null) resolutionFail("dependency_unavailable");
         return catalogService.clearPublishedHeadForSuspension(tx, { ...command, actorUserId: command.actorUserId, actorSessionId: command.actorSessionId });
@@ -680,6 +689,8 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commandHttp = createOidcCommandHttp({ db: database.db, baseUrl: env.APP_BASE_URL, commands: pendingCommands,
     context: commandContext, authenticate, commandFor, runtime: () => runtime! });
   runtime = {
+    helpLinks,
+    helpLinkHandlers,
     accountPortalUrl: oidcConfig.accountPortalUrl,
     oidc,
     pendingCommands: commandHttp,

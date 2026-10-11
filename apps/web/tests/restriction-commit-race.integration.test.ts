@@ -19,6 +19,7 @@ test.each(["commission_buying", "dispute_opening"] as const)("%s racing enforcem
     const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "dispute", orderId: p.orderId, sourceType: "commission_dispute", sourceId: randomUUID(), policyRevisionId: p.s.policyId, requestId: randomUUID(), at: at() }));
     const identity = createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) });
     const penalties = createPenaltyService({ db: f.db, mode: "enabled", keyring: p.s.input.keyring, lookupHmacKey: p.s.input.lookupHmacKey, applicationRevision: "synthetic-race", fence: { lockCreatorFence: lockCommissionCreator },
+      helpLinks: { async issue() { throw new Error("Restrictions must not issue help links"); } }, notices: { async queue() { throw new Error("Restrictions must not send notices"); } },
       identity: { ...identity, async lockSubject(tx, userId) {
         writerPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0]!.pid;
         if (commandFirst) contender.resolve();

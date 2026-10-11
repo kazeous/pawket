@@ -13,6 +13,8 @@ import { activePenalties } from "./penalty-port.js";
 import { normalizeTrustText, TRUST_ENFORCEMENT_POLICY, TRUST_PENALTY_KINDS, TRUST_PENALTY_REASONS, TRUST_PENALTY_TARGETS, TRUST_RESTRICTIONS,
   TrustEnforcementError, trustFail, type TrustEnforcementMode, type TrustPenaltyKind, type TrustPenaltyReason, type TrustPenaltyTarget, type TrustRestriction } from "./enforcement-policy.js";
 import { readExactOwnDataRecord, validUuid } from "./report-policy.js";
+import type { EnforcementNoticePort } from "@pawket/identity";
+import type { HelpLinkService } from "./help-link-service.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
 type EnforcementActor = Actor & { stepUpProofId: string };
@@ -24,8 +26,7 @@ type OwnerCommand = Readonly<{ owner: Actor; stepUpProofId: string; idempotencyK
 export type ApplyPenaltyCommand = OwnerCommand & Readonly<{ subjectUserId: string; source: { caseId: string } | { publicReportId: string }; kind: TrustPenaltyKind;
   restriction?: TrustRestriction; target?: TrustPenaltyTarget; endsAt?: string | null; reasonCategory: TrustPenaltyReason; explanation: string; internalNote?: string; freezeFulfilment?: boolean }>;
 export type EndPenaltyCommand = Readonly<{ penaltyId: string; state: "expired" | "lifted" | "reversed" | "reduced"; actor: EnforcementActor | null; requestId: string; at: Date; reason: string | null }>;
-// Task 7 owns notices/link issuance. This optional dependency is deliberately never called here.
-export type EnforcementNoticePort = object;
+export type { EnforcementNoticePort } from "@pawket/identity";
 type Input = Readonly<{ db: PawketDatabase; mode: TrustEnforcementMode; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; applicationRevision: string;
   consumeStepUpProof(tx: PawketTransaction, proof: { proofId: string; userId: string; sessionId: string; actionClass: string; now: Date }): Promise<boolean>;
   fence: { lockCreatorFence(tx: PawketTransaction, userId: string): Promise<void> };
@@ -34,7 +35,7 @@ type Input = Readonly<{ db: PawketDatabase; mode: TrustEnforcementMode; keyring:
     setAccountAccess(tx: PawketTransaction, c: StandingCommand & { userId: string; status: AccessStatus }): Promise<{ changed: boolean }> };
   freeze: { freezeForRemoval(tx: PawketTransaction, c: { creatorUserId: string; actor: Actor; requestId: string; at: Date }): Promise<{ closedOrders: number }> };
   policies: { readCurrentIds(tx: PawketTransaction): Promise<{ enforcementRevisionId: string | null }> };
-  notices?: EnforcementNoticePort; now?(): Date; idFactory?(): string }>;
+  helpLinks: Pick<HelpLinkService, "issue">; notices: EnforcementNoticePort; now?(): Date; idFactory?(): string }>;
 type Penalty = typeof trustPenalties.$inferSelect;
 const penaltyEndInstant = z.iso.datetime({ offset: true });
 
@@ -81,7 +82,8 @@ function normalizeApply(command: unknown) {
 export function createPenaltyService(input: Input) {
   if (!["disabled", "enabled"].includes(input.mode) || input.lookupHmacKey.length < 32 || !caseIdentifier(input.applicationRevision)
     || typeof input.consumeStepUpProof !== "function" || typeof input.fence?.lockCreatorFence !== "function" || typeof input.identity?.lockSubject !== "function"
-    || typeof input.freeze?.freezeForRemoval !== "function" || typeof input.policies?.readCurrentIds !== "function") trustFail("invalid_request");
+    || typeof input.freeze?.freezeForRemoval !== "function" || typeof input.policies?.readCurrentIds !== "function"
+    || typeof input.helpLinks?.issue !== "function" || typeof input.notices?.queue !== "function") trustFail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date()); const factory = input.idFactory ?? randomUUID;
   const now = () => time(clock()); const id = () => { const value = factory(); if (!validUuid(value)) trustFail("dependency_unavailable"); return value; };
   const cases = createTrustCasePort({ newId: id });
@@ -226,6 +228,10 @@ export function createPenaltyService(input: Input) {
         const effect = { actor: { ...c.owner, stepUpProofId: c.stepUpProofId }, requestId: c.requestId, at, penaltyId, userId: c.subjectUserId };
         // Recompute prevents a new suspension from weakening a pre-existing removal.
         if (c.kind === "suspension" || c.kind === "removal") await recomputeStanding(tx, c.subjectUserId, effect);
+        if (c.target === "account" && (c.kind === "suspension" || c.kind === "removal")) {
+          const { token } = await input.helpLinks.issue(tx, { userId: c.subjectUserId, penaltyId, at });
+          await input.notices.queue(tx, { userId: c.subjectUserId, penaltyId, token, kind: c.kind, endsAt: c.endsAt, at });
+        }
         if (c.kind === "removal" && (c.target === "creator_capability" || subject.capability) || c.freezeFulfilment) {
           await input.freeze.freezeForRemoval(tx, { creatorUserId: c.subjectUserId, actor: c.owner, requestId: c.requestId, at });
         }

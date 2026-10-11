@@ -81,8 +81,7 @@ function isCompleteSmtpConfig(
 function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
   switch (purpose) {
     case "enforcement_notice":
-      // The enforcement delivery task supplies the purpose-bound template.
-      throw new Error("Invalid security email message");
+      return "Thông báo về tài khoản Pawket";
     case "email_verification":
     case "password_reset":
     case "email_change":
@@ -126,8 +125,25 @@ function noticeContent(event: string | undefined): SecurityEmailContent {
   };
 }
 
-function safePawketLink(appBaseUrl: string, path: string): string {
-  return new URL(path, appBaseUrl).toString();
+function safePawketLink(appBaseUrl: string, path: string, fragment?: string): string {
+  const url = new URL(path, appBaseUrl);
+  if (fragment !== undefined) url.hash = fragment;
+  return url.toString();
+}
+
+function enforcementNoticeContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
+  const { kind, endsAt } = message.templateData;
+  if (Object.keys(message.templateData).sort().join() !== "endsAt,kind" || !["suspension", "removal"].includes(kind ?? "")
+    || typeof message.secret !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(message.secret)
+    || Buffer.from(message.secret, "base64url").toString("base64url") !== message.secret
+    || typeof endsAt !== "string" || (kind === "removal" && endsAt !== "")
+    || (endsAt !== "" && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(endsAt)
+      || !Number.isFinite(new Date(endsAt).getTime()) || new Date(endsAt).toISOString() !== endsAt))) throw new Error("Invalid security email message");
+  const paragraphs = [kind === "removal" ? "Tài khoản Pawket của bạn đã bị đóng." : "Tài khoản Pawket của bạn đã bị tạm ngưng."];
+  if (endsAt) paragraphs.push(`Thời gian kết thúc: ${new Intl.DateTimeFormat("vi-VN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date(endsAt))}.`);
+  paragraphs.push("Bạn có thể xem chi tiết và gửi kháng nghị một lần trong 14 ngày.");
+  return { heading: "Thông báo về tài khoản Pawket", paragraphs,
+    action: { intro: "Xem thông báo và kháng nghị:", label: "Xem thông báo và kháng nghị", url: safePawketLink(appBaseUrl, "/help/locked", `t=${message.secret}`) } };
 }
 
 function applicationOutcomeContent(appBaseUrl: string, state: string | undefined): SecurityEmailContent {
@@ -210,7 +226,7 @@ function tipStatusContent(appBaseUrl: string, message: SecurityEmailMessage): Se
 function renderContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
   switch (message.purpose) {
     case "enforcement_notice":
-      throw new Error("Invalid security email message");
+      return enforcementNoticeContent(appBaseUrl, message);
     case "security_notice":
       return noticeContent(message.templateData.event);
     case "application_outcome":

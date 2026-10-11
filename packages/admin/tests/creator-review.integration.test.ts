@@ -8,9 +8,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
-import { CREATOR_APPLICATION_ATTESTATION_VERSIONS, createIdentityEnforcementPort } from "@pawket/identity";
+import { CREATOR_APPLICATION_ATTESTATION_VERSIONS, createIdentityEnforcementPort, createEnforcementNoticePort } from "@pawket/identity";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
-import { createPenaltyService } from "@pawket/trust";
+import { createPenaltyService, createHelpLinkService } from "@pawket/trust";
 
 import * as admin from "../src/index.js";
 
@@ -216,7 +216,9 @@ describe("owner creator review", () => {
       actorSessionId: "artist-session", expectedDraftVersion: 1, requestId: randomUUID(), publishedAt: now });
     await db.insert(schema.publicContentReports).values({ id: publicReportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
       targetType: "page", targetId: pageId, publicationRevisionId: publicationId, reason: "other", reporterUserId: "other-owner", createdAt: now, updatedAt: now });
-    const penalties = createPenaltyService({ db, mode: "enabled", keyring, lookupHmacKey: new Uint8Array(32).fill(12),
+    const notices = createEnforcementNoticePort({ keyring });
+    const helpLinks = createHelpLinkService({ db, mode: "enabled", lookupHmacKey: new Uint8Array(32).fill(12), notices, now: () => now });
+    const penalties = createPenaltyService({ db, mode: "enabled", keyring, lookupHmacKey: new Uint8Array(32).fill(12), helpLinks, notices,
       applicationRevision: "synthetic-review", now: () => now, consumeStepUpProof: async () => true,
       fence: { async lockCreatorFence(tx, userId) { await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${userId}`}, 0))`); } },
       identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) }),

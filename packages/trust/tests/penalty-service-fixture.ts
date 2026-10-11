@@ -3,7 +3,8 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import { vi } from "vitest";
 import * as schema from "@pawket/database";
 import { lockCommissionCreator } from "@pawket/orders";
-import { createIdentityEnforcementPort } from "@pawket/identity";
+import { createIdentityEnforcementPort, createEnforcementNoticePort } from "@pawket/identity";
+import { createHelpLinkService } from "../src/help-link-service.js";
 import { createPenaltyService } from "../src/penalty-service.js";
 import { createTrustCasePort } from "../src/case-port.js";
 import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "./report-fixture.js";
@@ -33,8 +34,10 @@ export async function penaltyContext(f: ReturnType<typeof createReportFixture>, 
     return { pageId: page.id, previousPublishedRevisionId: page.publishedRevisionId };
   } });
   const frozen = vi.fn(async () => ({ closedOrders: 0 }));
+  const notices = createEnforcementNoticePort({ keyring: fixtureKeyring });
+  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, now: () => reportAt });
   const input = { db: f.db, mode: "enabled" as const, keyring: fixtureKeyring, lookupHmacKey: fixtureLookupKey, applicationRevision: "synthetic-penalty", consumeStepUpProof: consume,
-    fence: { lockCreatorFence: lockCommissionCreator }, identity, freeze: freeze ?? { freezeForRemoval: frozen }, policies: { readCurrentIds: async () => ({ communityRulesRevisionId: null, enforcementRevisionId: null }) }, now: () => reportAt };
+    fence: { lockCreatorFence: lockCommissionCreator }, identity, helpLinks, notices, freeze: freeze ?? { freezeForRemoval: frozen }, policies: { readCurrentIds: async () => ({ communityRulesRevisionId: null, enforcementRevisionId: null }) }, now: () => reportAt };
   const service = createPenaltyService(input);
   async function base(actionClass = "owner.trust_penalty_apply") {
     const stepUpProofId = randomUUID(); await f.db.insert(schema.identityStepUpProofs).values({ id: stepUpProofId, ...owner, actionClass, assuranceMethod: "mfa", issuedAt: reportAt, expiresAt: new Date(reportAt.getTime() + 3_600_000) });

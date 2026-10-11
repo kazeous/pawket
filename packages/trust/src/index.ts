@@ -45,3 +45,4 @@ export { createTrustRestrictionPort, activePenalties, type TrustRestrictionPort 
 export { createContentHideReadPort, type ContentHideReadPort, type ContentHideKind } from "./content-hide-port.js";
 export { createContentHideService, type ContentHideService, type OwnerCase } from "./content-hide-service.js";
 export { createPenaltyService, type PenaltyService, type ApplyPenaltyCommand, type EndPenaltyCommand, type EnforcementNoticePort } from "./penalty-service.js";
+export { createHelpLinkService, type HelpLinkService } from "./help-link-service.js";
