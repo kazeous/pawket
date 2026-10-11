@@ -6,6 +6,8 @@ import { CommissionRefundError, TipPaymentError, type CommissionRefundService } 
 import { DISPUTE_REASONS, PROPOSAL_KINDS, RULING_OUTCOMES, ResolutionError, type createProposalService, type createDisputeService,
   type createResolutionViewService, type LateClaimService, type SuspensionService } from "@pawket/resolutions";
 import { CommissionHttpFailure, commissionJson, commissionNetworkKey, readCommissionBody } from "./commission-http.js";
+import { TrustEnforcementError, type PenaltyService } from "@pawket/trust";
+import type { createTrustPartyView } from "./trust-party-view.js";
 
 const uuid = z.uuid(); const version = z.number().int().min(1).max(2_147_483_646);
 const amount = z.number().int().min(0).max(50_000_000);
@@ -32,11 +34,14 @@ type Input = Readonly<{
   view: ReturnType<typeof createResolutionViewService>;
   refunds: Pick<CommissionRefundService, "enterDestination" | "confirmReceipt" | "revealDestination" | "recordSend">;
   lateClaims: Pick<LateClaimService, "fileLateClaim" | "answerLateClaim">; suspension: SuspensionService; orders: CommissionOrderService;
+  trust?: { mode: "disabled" | "enabled"; listForUser: ReturnType<typeof createTrustPartyView>["listForUser"]; acknowledgeWarning: PenaltyService["acknowledgeWarning"] };
 }>;
 const invalid = (): never => { throw new CommissionHttpFailure(400, "invalid_request"); };
 function noQuery(request: Request) { if (new URL(request.url).searchParams.size !== 0) invalid(); }
 function failure(error: unknown): Response {
   if (error instanceof CommissionHttpFailure) return commissionJson(error.status, { code: error.code });
+  if (error instanceof TrustEnforcementError) return commissionJson(["enforcement_disabled", "dependency_unavailable"].includes(error.code) ? 503
+    : ["not_available", "not_authorized"].includes(error.code) ? 404 : error.code.startsWith("invalid_") ? 400 : 409, { code: error.code });
   if (error instanceof ResolutionError || error instanceof CommissionRefundError || error instanceof CommissionError || error instanceof CommissionFileError || error instanceof TipPaymentError) {
     const code = error.code;
     if (["not_authorized", "not_available"].includes(code)) return commissionJson(404, { code: "not_available" });
@@ -131,6 +136,17 @@ export function createResolutionHttpHandlers(input: Input) {
     cancelAfterSuspension: (request: Request, orderId: string) => run(request, "POST", async (actor) => {
       const base = await command(request, actor, orderId, "buyer"); return input.suspension.cancelAfterSuspension({ ...base, orderId, ...await readCommissionBody(request, cancel) });
     }, orderId),
-    myCases: (request: Request) => run(request, "GET", async (actor) => { noQuery(request); return { cases: await input.view.listMyCases({ actor }) }; }),
+    myCases: (request: Request) => run(request, "GET", async (actor) => {
+      noQuery(request); const cases = await input.view.listMyCases({ actor }); const trustMode = input.trust?.mode ?? "disabled";
+      return { controls: { trustMode }, cases: { ...cases, ...(input.trust && trustMode === "enabled" ? await input.trust.listForUser(actor.userId) : {}) } };
+    }),
+    acknowledgeWarning: (request: Request, penaltyId: string) => run(request, "POST", async (actor) => {
+      noQuery(request); if (!uuid.safeParse(penaltyId).success) invalid();
+      if (!input.trust || input.trust.mode !== "enabled") throw new CommissionHttpFailure(503, "enforcement_disabled");
+      const idempotencyKey = request.headers.get("idempotency-key"); if (!commissionIdempotencyKey(idempotencyKey)) invalid();
+      await readCommissionBody(request, empty);
+      await input.trust.acknowledgeWarning({ actor, penaltyId, idempotencyKey: idempotencyKey!, requestId: randomUUID() });
+      return { acknowledged: true };
+    }),
   };
 }

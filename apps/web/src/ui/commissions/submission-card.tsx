@@ -10,9 +10,11 @@ import { formatTipTime } from "@/ui/tips/tip-client";
 import { commissionPath, orderResultSchema, parseCommission, type OrderView, type SubmissionView } from "./commission-client";
 import { CommandFeedback, useCommissionCommand } from "./commission-session";
 import { AttachedFileList } from "./reference-files";
+import type { TrustMode } from "../trust/trust-client";
 
-export function SubmissionCard({ submission, order, disabled, onUpdated }: Readonly<{
+export function SubmissionCard({ submission, order, disabled, onUpdated, trustMode = "disabled" }: Readonly<{
   submission: SubmissionView; order: OrderView["order"]; disabled: boolean; onUpdated(): void;
+  trustMode?: TrustMode;
 }>) {
   const id = useId(); const command = useCommissionCommand(); const [changes, setChanges] = useState(false); const [note, setNote] = useState("");
   const remaining = Math.max(0, (order.fulfillment?.revisionAllowance ?? 0) - (order.fulfillment?.revisionsUsed ?? 0));
@@ -35,7 +37,7 @@ export function SubmissionCard({ submission, order, disabled, onUpdated }: Reado
       <CardDescription><time dateTime={submission.submittedAt}>{formatTipTime(submission.submittedAt)}</time>{submission.late ? <Badge variant="outline">Giao trễ hạn</Badge> : null}</CardDescription></CardHeader>
     <CardContent className="flex min-w-0 flex-col gap-4">
       {submission.note ? <p className="whitespace-pre-wrap wrap-anywhere">{submission.note}</p> : null}
-      <AttachedFileList order={order} files={submission.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer"} />
+      <AttachedFileList order={order} files={submission.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer"} trustMode={trustMode} reportable={order.role === "buyer"} />
       {submission.respondedAt ? <div className="flex flex-col gap-2 text-sm"><time dateTime={submission.respondedAt}>{formatTipTime(submission.respondedAt)}</time>
         {submission.response === "approved" ? <p>Duyệt và tiếp tục</p> : null}
         {submission.responseNote ? <p className="whitespace-pre-wrap wrap-anywhere">{submission.responseNote}</p> : null}</div> : null}

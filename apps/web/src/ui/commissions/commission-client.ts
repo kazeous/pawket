@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TipRequestError, tipRequest } from "@/ui/tips/tip-client";
+import { trustErrorText } from "../trust/trust-client";
 
 const uuid = z.uuid();
 const time = z.iso.datetime();
@@ -31,14 +32,15 @@ const paymentSchema = z.object({ id: uuid, orderId: uuid, amountVnd: amount, sta
   instruction: z.object({ creator: z.object({ displayName: text(80), handle: z.string().max(30) }), reference: z.string().regex(/^PW[A-F0-9]{20}$/u), amountVnd: amount,
     expiresAt: time, qrPayload: z.string().min(50).max(1000), settlementLane: z.enum(["manual_attested", "provider_bound"]),
     destination: z.object({ bankBin: z.string().regex(/^[0-9]{6}$/u), bankName: text(120), accountNumber: z.string().regex(/^[0-9]{6,19}$/u), accountName: text(120) }) }).nullable() });
-export const referenceFileSchema = z.object({ fileId: uuid, name: z.string().max(255).nullable(), sizeBytes: z.number().int().min(1).max(262_144_000), detectedType: z.enum(["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"]), sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/u), previewable: z.boolean(), availability: z.enum(["available", "withdrawn", "deleted"]) });
+export const referenceFileSchema = z.object({ fileId: uuid, name: z.string().max(255).nullable(), sizeBytes: z.number().int().min(1).max(262_144_000), detectedType: z.enum(["jpeg", "png", "webp", "gif", "pdf", "psd", "clip", "zip"]), sha256: z.string().regex(/^sha256:[a-f0-9]{64}$/u), previewable: z.boolean(), availability: z.enum(["available", "withdrawn", "deleted", "hidden"]) });
 export type ReferenceFileView = z.infer<typeof referenceFileSchema>;
-const attachedFileSchema = referenceFileSchema.extend({ availability: z.enum(["available", "deleted"]) });
+const attachedFileSchema = referenceFileSchema.extend({ availability: z.enum(["available", "deleted", "hidden"]) });
 export const submissionSchema = z.object({ sequence: z.number().int().positive(), kind: z.literal("submission"), id: uuid, submissionKind: z.enum(["draft", "final"]),
   note: text(2000).nullable(), files: z.array(attachedFileSchema).min(1).max(20), submittedAt: time, late: z.boolean(),
   response: z.enum(["approved", "changes_requested", "superseded"]).nullable(), responseNote: text(2000).nullable(), respondedAt: time.nullable(), actionable: z.boolean() });
 export const threadSchema = z.object({ thread: z.object({ items: z.array(z.discriminatedUnion("kind", [
-  z.object({ sequence: z.number().int().positive(), kind: z.literal("message"), id: uuid, author: z.enum(["buyer", "creator"]), text: text(4000).nullable(), files: z.array(attachedFileSchema).max(10), createdAt: time }),
+  z.object({ sequence: z.number().int().positive(), kind: z.literal("message"), id: uuid, author: z.enum(["buyer", "creator"]), text: text(4000).nullable(), hidden: z.boolean().optional(), files: z.array(attachedFileSchema).max(10), createdAt: time })
+    .refine((message) => !message.hidden || message.text === null),
   submissionSchema,
 ])).max(50), nextBeforeSequence: z.number().int().positive().nullable(), writable: z.boolean() }) });
 export const messageResultSchema = z.object({ message: z.object({ messageId: uuid, sequence: z.number().int().positive() }) });
@@ -76,6 +78,7 @@ export const closeLabels: Record<string, string> = { buyer_withdrawn: "Người 
   cancelled_by_agreement: "Đã hủy theo thỏa thuận", cancelled_by_ruling: "Đã hủy theo kết luận của Pawket", buyer_cancelled_after_suspension: "Người đặt đã hủy sau khi nghệ sĩ bị tạm ngưng", fulfillment_frozen: "Pawket đã dừng thực hiện đơn",
   request_expired: "Yêu cầu đã hết hạn", quote_expired: "Báo giá đã hết hạn", buyer_cancelled: "Người đặt đã hủy", creator_cancelled: "Nghệ sĩ đã hủy", payment_expired: "Hết hạn thanh toán", security_invalidated: "Đơn bị đóng do điều kiện an toàn", eligibility_invalidated: "Điều kiện nhận thanh toán đã thay đổi" };
 export function commissionErrorText(code: string, context: "brief" | "thread" | "submission" = "brief"): string {
+  const trustText = trustErrorText(code); if (trustText) return trustText;
   if (code === "OIDC_ACTOR_CHANGED") code = "account_changed";
   const messages: Record<string, string> = { authentication_required: "Đăng nhập lại để tiếp tục.", account_changed: "Tài khoản đã thay đổi. Mở lại trang bằng tài khoản ban đầu để tiếp tục.",
     recent_auth_required: "Cần xác thực lại trước khi xác nhận tiền.", totp_required: "Cần xác thực hai bước trước khi xác nhận tiền.", not_available: "Nội dung hoặc thao tác này hiện không khả dụng.",

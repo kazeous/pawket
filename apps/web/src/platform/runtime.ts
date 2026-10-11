@@ -87,6 +87,7 @@ import { createMediaCommandHttpHandlers } from "./media-command-http.js";
 import { createCommissionHttpHandlers } from "./commission-http.js";
 import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createResolutionHttpHandlers } from "./resolution-http.js";
+import { createTrustPartyView } from "./trust-party-view.js";
 import { createCaseHttpHandlers } from "./case-http.js";
 import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
 import { createHelpLinkHttpHandlers } from "./help-link-http.js";
@@ -130,6 +131,7 @@ export type WebPlatformRuntime = {
   appealHandlers: ReturnType<typeof createAppealHttpHandlers>;
   trustEnforcementHandlers: ReturnType<typeof createTrustEnforcementHttpHandlers>;
   privateReports: ReturnType<typeof createPrivateReportService>;
+  isOwnCommissionPackage(userId: string, packageId: string): Promise<boolean>;
   trustHandlers: ReturnType<typeof createTrustHttpHandlers>;
   reports: ReturnType<typeof createReportService>;
   triage: ReturnType<typeof createTriageService>;
@@ -521,8 +523,6 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     ]);
     return results.every((result) => result.allowed);
   };
-  const resolutionHandlers = createResolutionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, mode: env.COMMISSION_RESOLUTION_MODE,
-    authenticate, throttle: commissionThrottle, proposals, disputes, view: resolutionView, refunds: commissionRefunds, lateClaims, suspension, orders: commissions });
   const commissionHandlers = createCommissionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, intakeMode: env.COMMISSION_INTAKE_MODE,
     paymentsMode: env.COMMISSION_PAYMENTS_MODE, fulfillmentMode: env.COMMISSION_FULFILLMENT_MODE, authenticate, orders: commissions, thread: commissionThread, catalog: commissionCatalog, manual: commissionManual,
     onOperation: ({ operation, outcome }) => recordCommissionOperation({ operation: operation === "message" ? "command" : operation, outcome }),
@@ -676,6 +676,10 @@ export function getPlatformRuntime(): WebPlatformRuntime {
       : target.kind === "commission_brief" ? briefReportTargets.resolve(tx, target, reporter) : threadReportTargets.resolve(tx, target, reporter) },
     restrictions, policies: trustPolicies, authorizeCommand });
   const trustEnforcementHandlers = createTrustEnforcementHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, reports: privateReports });
+  const partyTrust = createTrustPartyView({ db: database.db, penalties, appeals, reports: privateReports });
+  const resolutionHandlers = createResolutionHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, mode: env.COMMISSION_RESOLUTION_MODE,
+    authenticate, throttle: commissionThrottle, proposals, disputes, view: resolutionView, refunds: commissionRefunds, lateClaims, suspension, orders: commissions,
+    trust: { mode: env.TRUST_ENFORCEMENT_MODE, listForUser: partyTrust.listForUser, acknowledgeWarning: penalties.acknowledgeWarning } });
   const trustHandlers = createTrustHttpHandlers({
     appBaseUrl: env.APP_BASE_URL,
     lookupHmacKey,
@@ -730,6 +734,8 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     media: mediaService,
     appealHandlers: { ...commandHttp.wrap({ submit: appealHandlers.submit }), lockedSubmit: appealHandlers.lockedSubmit },
     trustEnforcementHandlers: commandHttp.wrap(trustEnforcementHandlers),
+    isOwnCommissionPackage: async (userId, packageId) => !!await database.db.query.commissionPackages.findFirst({ columns: { id: true },
+      where: (table, { and, eq }) => and(eq(table.id, packageId), eq(table.creatorUserId, userId)) }),
     privateReports,
     trustHandlers: commandHttp.wrap(trustHandlers),
     reports: reportService,

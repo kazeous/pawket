@@ -10,6 +10,7 @@ type Input = { appBaseUrl: string; lookupHmacKey: Uint8Array;
   reports: Pick<PrivateReportService, "submit" | "issueChallenge"> };
 const failure = (status = 400) => commissionJson(status, { code: "REPORT_NOT_ACCEPTED" });
 function failed(error: unknown) {
+  if (error instanceof TrustEnforcementError && error.code === "enforcement_disabled") return commissionJson(503, { code: "enforcement_disabled" });
   if (error instanceof TrustEnforcementError) return failure(error.code === "rate_limited" ? 429 : error.code === "enforcement_disabled" ? 404 : error.code === "dependency_unavailable" ? 503 : 400);
   if (error instanceof PublicReportError) return failure(error.status);
   if (error instanceof CommissionHttpFailure) return failure(error.status);

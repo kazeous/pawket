@@ -24,11 +24,15 @@ describe("trust reports HTTP", () => {
     const f = fixture(); f.reports.submit.mockRejectedValue(new TrustEnforcementError(code));
     const response = await f.http.submit(request()); expect(response.status).toBe(400); expect(await response.json()).toEqual({ code: "REPORT_NOT_ACCEPTED" });
   });
-  test("rate limit is 429 and disabled is 404 with generic bodies", async () => {
-    for (const [code, status] of [["rate_limited", 429], ["enforcement_disabled", 404]] as const) {
+  test("rate limit stays generic and disabled reporting returns enforcement_disabled", async () => {
+    for (const [code, status] of [["rate_limited", 429], ["enforcement_disabled", 503]] as const) {
       const f = fixture(); f.reports.submit.mockRejectedValue(new TrustEnforcementError(code));
-      const response = await f.http.submit(request()); expect(response.status).toBe(status); expect(await response.json()).toEqual({ code: "REPORT_NOT_ACCEPTED" });
+      const response = await f.http.submit(request()); expect(response.status).toBe(status); expect(await response.json()).toEqual({ code: code === "enforcement_disabled" ? code : "REPORT_NOT_ACCEPTED" });
     }
+  });
+  test("disabled guest challenges return enforcement_disabled", async () => {
+    const f = fixture(true); f.reports.issueChallenge.mockRejectedValue(new TrustEnforcementError("enforcement_disabled"));
+    const response = await f.http.challenge(request({})); expect(response.status).toBe(503); expect(await response.json()).toEqual({ code: "enforcement_disabled" });
   });
   test("authenticated submit uses only session identity and requires idempotency", async () => {
     const f = fixture(); const response = await f.http.submit(request()); expect(response.status).toBe(202);

@@ -22,6 +22,13 @@ const request = (body = payload.body, extra: HeadersInit = {}, target = path) =>
   method: "POST", headers: { origin: "https://pawket.example", "content-type": "application/json", "idempotency-key": payload.idempotencyKey, ...extra }, body,
 });
 describe("OIDC command HTTP boundary", () => {
+  test("warning acknowledgement enters the non-fresh context and refuses changed actors", async () => {
+    const f = fixture(); const execute = vi.fn(async () => Response.json({ acknowledged: true })); const target = `/api/v1/help/warnings/${id}/acknowledge`;
+    expect((await f.http.run(request("{}", {}, target), execute)).status).toBe(200);
+    expect(f.ready).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ policy: { actionClass: "trust.warning_acknowledge", fresh: false } }));
+    expect((await f.http.run(request("{}", { "x-pawket-actor": "someone-else" }, target), execute)).status).toBe(409);
+    expect(execute).toHaveBeenCalledOnce();
+  });
   test("signed-in appeals enter the non-fresh party command context and guests are refused", async () => {
     const f = fixture(); const execute = vi.fn(async () => Response.json({ accepted: true }));
     expect((await f.http.run(request("{}", {}, "/api/v1/help/appeals"), execute)).status).toBe(200);
