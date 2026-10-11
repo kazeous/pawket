@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
 import { CREATOR_APPLICATION_ATTESTATION_VERSIONS, createIdentityEnforcementPort, createEnforcementNoticePort } from "@pawket/identity";
+import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 import { createPenaltyService, createHelpLinkService } from "@pawket/trust";
 
@@ -217,7 +218,8 @@ describe("owner creator review", () => {
     await db.insert(schema.publicContentReports).values({ id: publicReportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
       targetType: "page", targetId: pageId, publicationRevisionId: publicationId, reason: "other", reporterUserId: "other-owner", createdAt: now, updatedAt: now });
     const notices = createEnforcementNoticePort({ keyring });
-    const helpLinks = createHelpLinkService({ db, mode: "enabled", lookupHmacKey: new Uint8Array(32).fill(12), notices, now: () => now });
+    const helpLinks = createHelpLinkService({ db, mode: "enabled", lookupHmacKey: new Uint8Array(32).fill(12), notices, logger: { error() {} },
+      canonicalizeEmail: (raw) => { try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; } }, now: () => now });
     const penalties = createPenaltyService({ db, mode: "enabled", keyring, lookupHmacKey: new Uint8Array(32).fill(12), helpLinks, notices,
       applicationRevision: "synthetic-review", now: () => now, consumeStepUpProof: async () => true,
       fence: { async lockCreatorFence(tx, userId) { await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${userId}`}, 0))`); } },

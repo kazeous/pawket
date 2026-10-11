@@ -1,22 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import * as schema from "@pawket/database";
 import { decryptSensitiveField } from "@pawket/security";
 import { createEnforcementNoticePort } from "@pawket/identity";
 import { createHelpLinkService } from "../src/help-link-service.js";
+import type { EnforcementNoticePort } from "../src/index.js";
 import { createPenaltyService } from "../src/penalty-service.js";
 import { recordEnforcementModeTransition } from "../src/enforcement-deadlines.js";
 import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "./report-fixture.js";
-import { penaltyContext } from "./penalty-service-fixture.js";
+import { canonicalizeHelpEmail, penaltyContext } from "./penalty-service-fixture.js";
 const f = createReportFixture("help_links"); beforeAll(f.initialize, 60_000); afterAll(f.dispose, 30_000);
 const network = (n = 1) => `hmac-sha256:v1:${Buffer.alloc(32, n).toString("base64url")}`;
 const digest = (token: string) => `sha256:v1:${createHash("sha256").update(token).digest("hex")}`;
+const helpInput = { canonicalizeEmail: canonicalizeHelpEmail, logger: { error: vi.fn() } };
 async function context(verified = true, shape: { kind: "suspension" | "removal"; target: "account" | "creator_capability"; endsAt?: string } = { kind: "suspension", target: "account" }) {
   const c = await penaltyContext(f); const email = `locked-${randomUUID()}@example.invalid`;
   if (verified) await f.db.insert(schema.identityEmailAddresses).values({ userId: c.p.creator.userId, displayEmail: email, canonicalEmail: email, status: "primary", verifiedAt: reportAt, verificationProvenance: "provider_assertion" });
-  let at = reportAt; const notices = createEnforcementNoticePort({ keyring: fixtureKeyring });
-  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, now: () => at });
+  let at = reportAt; const notices: EnforcementNoticePort = createEnforcementNoticePort({ keyring: fixtureKeyring });
+  const helpLinks = createHelpLinkService({ ...helpInput, db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, now: () => at });
   const service = createPenaltyService({ ...c.input, helpLinks, notices }); const command = { ...await c.command(), ...shape };
   const result = await service.apply(command);
   const [handoff] = await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.userId, c.p.creator.userId));
@@ -51,6 +53,69 @@ test("openSession returns a 30-minute session for a fresh token; session expires
   const [stored] = await f.db.select().from(schema.trustHelpSessions).where(eq(schema.trustHelpSessions.penaltyId, c.penaltyId)); expect(stored?.sessionHash).toBe(digest(opened.sessionToken));
   c.setTime(opened.expiresAt); expect(await c.helpLinks.readSession(opened.sessionToken)).toBeNull();
 });
+test("a link permits five sessions per rolling 30 minutes, including concurrent opens and revoked sessions", async () => {
+  const c = await context();
+  const attempts = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network(60 + i) })));
+  expect(attempts.filter((r) => r.status === "fulfilled")).toHaveLength(5);
+  for (const r of attempts.filter((r) => r.status === "rejected")) expect(r.reason).toMatchObject({ code: "not_available" });
+  const sessions = await f.db.select().from(schema.trustHelpSessions).where(eq(schema.trustHelpSessions.penaltyId, c.penaltyId));
+  expect(sessions).toHaveLength(5);
+  await f.db.update(schema.trustHelpSessions).set({ revokedAt: reportAt }).where(eq(schema.trustHelpSessions.id, sessions[0]!.id));
+  c.setTime(new Date(reportAt.getTime() + 1_799_999));
+  await expect(c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network(70) })).rejects.toMatchObject({ code: "not_available" });
+  const other = await context();
+  await expect(other.helpLinks.openSession({ token: other.token!, networkKeyHmac: network(70) })).resolves.toMatchObject({ penaltyId: other.penaltyId });
+  c.setTime(new Date(reportAt.getTime() + 1_800_000));
+  await expect(c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network(70) })).resolves.toMatchObject({ penaltyId: c.penaltyId });
+});
+
+test.each(["session", "resend", "issue"] as const)("a lift holding the user row and a concurrent help %s finish without deadlock", async (operation) => {
+  const c = await context(); const held = Promise.withResolvers<void>(); const readerStarted = Promise.withResolvers<number>();
+  let firstLock = true;
+  const identity = { ...c.identity, async lockSubject(tx: schema.PawketTransaction, userId: string) {
+    const subject = await c.identity.lockSubject(tx, userId);
+    if (firstLock) {
+      firstLock = false;
+      await tx.execute(sql`set local statement_timeout = '8s'`);
+      const [writer] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      held.resolve(); const readerPid = await readerStarted.promise;
+      // Observe the second connection blocked on this writer before the lift locks the penalty.
+      const deadline = Date.now() + 4_000;
+      for (;;) {
+        const [row] = await tx.execute<{ blocked: boolean }>(sql`select ${writer!.pid} = any(pg_blocking_pids(${readerPid})) as blocked`);
+        if (row?.blocked) break;
+        if (Date.now() >= deadline) throw new Error("Help connection did not wait for the user lock");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    return subject;
+  } };
+  const db = { transaction: <T>(run: (tx: schema.PawketTransaction) => Promise<T>) => f.db.transaction(async (tx) => {
+    await tx.execute(sql`set local statement_timeout = '8s'`);
+    const [reader] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    readerStarted.resolve(reader!.pid); return run(tx);
+  }) } as schema.PawketDatabase;
+  const logger = { error: vi.fn() };
+  const helpLinks = createHelpLinkService({ ...helpInput, ...c.input, db, logger });
+  const service = createPenaltyService({ ...c.input, identity });
+  const liftCommand = { ...await c.base("owner.trust_penalty_lift"), penaltyId: c.penaltyId, reason: "Reviewed" };
+  const lift = service.lift(liftCommand);
+  await Promise.race([held.promise, lift]);
+  const help = operation === "session" ? helpLinks.openSession({ token: c.token!, networkKeyHmac: network(71) })
+    : operation === "resend" ? helpLinks.requestLink({ email: c.email, networkKeyHmac: network(71) })
+    : db.transaction((tx) => helpLinks.issue(tx, { userId: c.p.creator.userId, penaltyId: c.penaltyId, at: reportAt }));
+  const [liftResult, helpResult] = await Promise.allSettled([lift, help]);
+  expect(liftResult).toEqual({ status: "fulfilled", value: undefined });
+  if (operation === "resend") expect(helpResult).toEqual({ status: "fulfilled", value: undefined });
+  else {
+    expect(helpResult.status).toBe("rejected");
+    if (helpResult.status === "rejected") expect(helpResult.reason).toMatchObject({ code: "not_available" });
+  }
+  expect(logger.error).not.toHaveBeenCalled();
+  expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, c.penaltyId)))[0]?.state).toBe("lifted");
+  expect(await f.db.select().from(schema.trustHelpSessions).where(eq(schema.trustHelpSessions.penaltyId, c.penaltyId))).toEqual([]);
+  expect(await f.db.select().from(schema.trustHelpLinks).where(eq(schema.trustHelpLinks.penaltyId, c.penaltyId))).toHaveLength(1);
+}, 15_000);
 test("revoked, expired and foreign tokens are refused without revealing the case; resends revoke sessions too", async () => {
   const c = await context(); const opened = await c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network() });
   const fresh = await f.db.transaction((tx) => c.helpLinks.issue(tx, { userId: c.p.creator.userId, penaltyId: c.penaltyId, at: reportAt }));
@@ -80,7 +145,7 @@ test("requestLink limits to 3 per address per day and 10 per network per hour, i
 });
 test("disabled, unverified, creator-only and past-read-window resends are ignored with the same result", async () => {
   const c = await context();
-  const disabled = createHelpLinkService({ db: f.db, mode: "disabled", lookupHmacKey: fixtureLookupKey, notices: createEnforcementNoticePort({ keyring: fixtureKeyring }), now: () => reportAt });
+  const disabled = createHelpLinkService({ ...helpInput, db: f.db, mode: "disabled", lookupHmacKey: fixtureLookupKey, notices: createEnforcementNoticePort({ keyring: fixtureKeyring }), now: () => reportAt });
   expect(await disabled.requestLink({ email: c.email, networkKeyHmac: network(40) })).toBeUndefined();
   c.setTime(new Date(reportAt.getTime() + 90 * 86_400_000)); expect(await c.helpLinks.requestLink({ email: c.email, networkKeyHmac: network(41) })).toBeUndefined();
   expect(await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.userId, c.p.creator.userId))).toHaveLength(1);
@@ -107,7 +172,7 @@ test.each(["expired", "lifted", "reversed", "reduced"] as const)("ended penalty 
 test("appeal checks effective deadline while read-only expiry and penalty expiry keep running", async () => {
   const c = await context(); await recordEnforcementModeTransition(f.db, { mode: "disabled", at: new Date(reportAt.getTime() + 13 * 86_400_000) });
   c.setTime(new Date(reportAt.getTime() + 15 * 86_400_000));
-  const disabled = createHelpLinkService({ db: f.db, mode: "disabled", lookupHmacKey: fixtureLookupKey, notices: createEnforcementNoticePort({ keyring: fixtureKeyring }), now: () => new Date(reportAt.getTime() + 15 * 86_400_000) });
+  const disabled = createHelpLinkService({ ...helpInput, db: f.db, mode: "disabled", lookupHmacKey: fixtureLookupKey, notices: createEnforcementNoticePort({ keyring: fixtureKeyring }), now: () => new Date(reportAt.getTime() + 15 * 86_400_000) });
   const session = await disabled.openSession({ token: c.token!, networkKeyHmac: network() }); expect((await disabled.readSession(session.sessionToken))?.canAppeal).toBe(false);
   await recordEnforcementModeTransition(f.db, { mode: "enabled", at: new Date(reportAt.getTime() + 15 * 86_400_000) });
   expect((await c.helpLinks.readSession(session.sessionToken))?.canAppeal).toBe(true);
@@ -117,7 +182,7 @@ test("appeal checks effective deadline while read-only expiry and penalty expiry
 });
 test("notice dependency failure rolls back standing, penalty, links, proof and handoff", async () => {
   const c = await penaltyContext(f); const notices = { queue: vi.fn().mockRejectedValue(new Error("private dependency")) };
-  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices });
+  const helpLinks = createHelpLinkService({ ...helpInput, db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices });
   const service = createPenaltyService({ ...c.input, notices, helpLinks }); const command = { ...await c.command(), kind: "suspension" as const, target: "account" as const };
   await expect(service.apply(command)).rejects.toMatchObject({ code: "dependency_unavailable" });
   expect(await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.subjectUserId, c.p.creator.userId))).toEqual([]);
@@ -125,9 +190,11 @@ test("notice dependency failure rolls back standing, penalty, links, proof and h
   expect((await f.db.select().from(schema.identityStepUpProofs).where(eq(schema.identityStepUpProofs.id, command.stepUpProofId)))[0]?.consumedAt).toBeNull();
 });
 test("resend delivery dependency failure resolves identically and rolls back link revocation", async () => {
-  const c = await context(); const notices = { queue: vi.fn().mockRejectedValue(new Error("synthetic dependency")) };
-  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, now: () => reportAt });
+  const c = await context(); const notices = { queue: vi.fn().mockRejectedValue(new Error(`${c.email} ${c.token} ${c.p.creator.userId}`)) };
+  const logger = { error: vi.fn() };
+  const helpLinks = createHelpLinkService({ ...helpInput, db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, logger, now: () => reportAt });
   expect(await helpLinks.requestLink({ email: c.email, networkKeyHmac: network(50) })).toBeUndefined();
+  expect(logger.error.mock.calls).toEqual([["Help-link resend failed"]]);
   await expect(c.helpLinks.openSession({ token: c.token!, networkKeyHmac: network() })).resolves.toMatchObject({ penaltyId: c.penaltyId });
   expect(await f.db.select().from(schema.trustHelpLinks).where(eq(schema.trustHelpLinks.penaltyId, c.penaltyId))).toHaveLength(1);
 });

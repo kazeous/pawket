@@ -41,6 +41,7 @@ import {
   resolveSessionCookie,
   revokeOidcLocalSessions,
 } from "@pawket/identity";
+import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
 import {
   createCreatorReceivingAccountReferenceValidator,
   createPaymentsHttpHandlers,
@@ -55,7 +56,7 @@ import {
   createSePayConnectionService, createSePayInboxService, createSePayReconciliationService, createSePayReviewService,
   createSePayOAuthProvider, createSePayBudgetedProvider, createSePayHttpHandlers,
 } from "@pawket/payments";
-import { recordAuthAbuseControl } from "@pawket/observability";
+import { createLogger, recordAuthAbuseControl } from "@pawket/observability";
 import {
   createMediaHttpHandlers,
   createPublicMediaService,
@@ -541,8 +542,10 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     deadlines: createResolutionCaseDeadlinePort({ refunds }),
     evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides }) });
   const enforcementNotices = createEnforcementNoticePort({ keyring });
-  const helpLinks = createHelpLinkService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, notices: enforcementNotices });
-  const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, helpLinks });
+  const helpLogger = createLogger({ service: "web", env });
+  const helpLinks = createHelpLinkService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, notices: enforcementNotices, logger: helpLogger,
+    canonicalizeEmail: (raw) => { try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; } } });
+  const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, helpLinks, logger: helpLogger });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
     penalties: createPenaltyService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
       consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator }, policies: trustPolicies,

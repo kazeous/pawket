@@ -4,12 +4,16 @@ import { vi } from "vitest";
 import * as schema from "@pawket/database";
 import { lockCommissionCreator } from "@pawket/orders";
 import { createIdentityEnforcementPort, createEnforcementNoticePort } from "@pawket/identity";
+import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
 import { createHelpLinkService } from "../src/help-link-service.js";
 import { createPenaltyService } from "../src/penalty-service.js";
 import { createTrustCasePort } from "../src/case-port.js";
 import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "./report-fixture.js";
 
 export { fixtureKeyring, reportAt };
+export function canonicalizeHelpEmail(raw: string): string | null {
+  try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; }
+}
 export async function penaltyContext(f: ReturnType<typeof createReportFixture>, freeze?: Parameters<typeof createPenaltyService>[0]["freeze"]) {
   const p = await f.paidOrder();
   const [grant] = await f.db.select().from(schema.identityRoleGrants).where(and(eq(schema.identityRoleGrants.role, "owner"), eq(schema.identityRoleGrants.state, "active")));
@@ -35,7 +39,8 @@ export async function penaltyContext(f: ReturnType<typeof createReportFixture>, 
   } });
   const frozen = vi.fn(async () => ({ closedOrders: 0 }));
   const notices = createEnforcementNoticePort({ keyring: fixtureKeyring });
-  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices, now: () => reportAt });
+  const helpLinks = createHelpLinkService({ db: f.db, mode: "enabled", lookupHmacKey: fixtureLookupKey, notices,
+    canonicalizeEmail: canonicalizeHelpEmail, logger: { error: vi.fn() }, now: () => reportAt });
   const input = { db: f.db, mode: "enabled" as const, keyring: fixtureKeyring, lookupHmacKey: fixtureLookupKey, applicationRevision: "synthetic-penalty", consumeStepUpProof: consume,
     fence: { lockCreatorFence: lockCommissionCreator }, identity, helpLinks, notices, freeze: freeze ?? { freezeForRemoval: frozen }, policies: { readCurrentIds: async () => ({ communityRulesRevisionId: null, enforcementRevisionId: null }) }, now: () => reportAt };
   const service = createPenaltyService(input);

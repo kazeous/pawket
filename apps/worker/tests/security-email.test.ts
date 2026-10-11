@@ -22,7 +22,9 @@ test.each(["suspension", "removal"])("renders enforcement_notice %s with a fragm
     expect(body).not.toContain("explanation");
   }
   expect(mail.html).toContain("Xem thông báo và kháng nghị");
-  if (kind === "suspension") expect(mail.text).toContain("20/10/2026");
+  if (kind === "suspension") for (const body of [mail.text, mail.html]) {
+    expect(body).toContain("10:00 20/10/2026 (giờ Việt Nam)");
+  }
 });
 test("refuses malformed enforcement secrets and free-text template data before SMTP", async () => {
   const f = fixture();

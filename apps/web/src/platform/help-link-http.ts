@@ -2,7 +2,8 @@ import { z } from "zod";
 import { deriveTrustedNetworkKey, type HelpLinkService } from "@pawket/trust";
 import { COMMISSION_PRIVATE_HEADERS, commissionJson, readCommissionBody } from "./commission-http.js";
 
-type Input = { appBaseUrl: string; lookupHmacKey: Uint8Array; helpLinks: Pick<HelpLinkService, "openSession" | "requestLink"> };
+type Input = { appBaseUrl: string; lookupHmacKey: Uint8Array; helpLinks: Pick<HelpLinkService, "openSession" | "requestLink">;
+  logger: { error(message: string): void } };
 const unavailable = (status = 400) => commissionJson(status, { code: "not_available" });
 const empty = () => new Response(null, { status: 204, headers: COMMISSION_PRIVATE_HEADERS });
 
@@ -33,7 +34,7 @@ export function createHelpLinkHttpHandlers(input: Input) {
         const body = await readCommissionBody(request, z.strictObject({ email: z.string().max(512) }));
         const networkKeyHmac = deriveTrustedNetworkKey(request.headers, key);
         if (networkKeyHmac) await input.helpLinks.requestLink({ email: body.email, networkKeyHmac });
-      } catch { /* Resend responses disclose no address, quota or delivery outcome. */ }
+      } catch { input.logger.error("Help-link resend handler failed"); }
       return empty();
     },
   };

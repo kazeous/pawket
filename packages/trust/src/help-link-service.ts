@@ -1,15 +1,15 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
-import { identityEmailAddresses, trustHelpLinkRequests, trustHelpLinks, trustHelpSessions, trustPenalties,
+import { identityEmailAddresses, identityUsers, trustHelpLinkRequests, trustHelpLinks, trustHelpSessions, trustPenalties,
   type PawketDatabase, type PawketTransaction } from "@pawket/database";
-import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
-import type { EnforcementNoticePort } from "@pawket/identity";
 import { createLookupHmac } from "@pawket/security";
+import type { EnforcementNoticePort } from "./enforcement-notice-port.js";
 import { effectiveEnforcementDeadline } from "./enforcement-deadlines.js";
 import { TRUST_ENFORCEMENT_POLICY as policy, TrustEnforcementError, trustFail, type TrustEnforcementMode } from "./enforcement-policy.js";
 import { validUuid } from "./report-policy.js";
 
 type Input = { db: PawketDatabase; mode: TrustEnforcementMode; lookupHmacKey: Uint8Array; notices: EnforcementNoticePort;
+  canonicalizeEmail(raw: string): string | null; logger: { error(message: string): void };
   now?(): Date; idFactory?(): string; randomBytes?(size: number): Uint8Array };
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 const networkPattern = /^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u;
@@ -31,7 +31,8 @@ function readable(p: Penalty, at: Date) {
 }
 
 export function createHelpLinkService(input: Input) {
-  if (!["disabled", "enabled"].includes(input.mode) || input.lookupHmacKey.length < 32 || typeof input.notices?.queue !== "function") trustFail("invalid_request");
+  if (!["disabled", "enabled"].includes(input.mode) || input.lookupHmacKey.length < 32 || typeof input.notices?.queue !== "function"
+    || typeof input.canonicalizeEmail !== "function" || typeof input.logger?.error !== "function") trustFail("invalid_request");
   const key = new Uint8Array(input.lookupHmacKey); const clock = input.now ?? (() => new Date());
   const factory = input.idFactory ?? randomUUID; const bytes = input.randomBytes ?? randomBytes;
   const id = () => { const value = factory(); if (!validUuid(value)) trustFail("dependency_unavailable"); return value; };
@@ -39,11 +40,17 @@ export function createHelpLinkService(input: Input) {
   async function boundary<T>(run: () => Promise<T>): Promise<T> {
     try { return await run(); } catch (error) { if (error instanceof TrustEnforcementError) throw error; return trustFail("dependency_unavailable"); }
   }
-  async function issue(tx: PawketTransaction, command: { userId: string; penaltyId: string; at: Date }): Promise<{ token: string }> {
+  async function lockUser(tx: PawketTransaction, userId: string) {
+    const [user] = await tx.select({ id: identityUsers.id }).from(identityUsers).where(eq(identityUsers.id, userId)).limit(1).for("share");
+    if (!user) trustFail("not_available");
+  }
+  async function issue(tx: PawketTransaction, command: { userId: string; penaltyId: string; at: Date }, options: { subjectLocked?: boolean } = {}): Promise<{ token: string }> {
     if (input.mode !== "enabled") trustFail("enforcement_disabled");
     const at = time(command.at);
     if (!validUuid(command.penaltyId) || typeof command.userId !== "string") trustFail("not_available");
     return boundary(async () => {
+      // Penalty application already holds the user UPDATE lock; standalone issuance takes SHARE first.
+      if (!options.subjectLocked) await lockUser(tx, command.userId);
       // Serialize issuance for a penalty so concurrent resends leave exactly one live link.
       const [p] = await tx.select().from(trustPenalties).where(and(eq(trustPenalties.id, command.penaltyId), eq(trustPenalties.subjectUserId, command.userId))).limit(1).for("update");
       if (!p || !active(p, at) || !readable(p, at)) trustFail("not_available");
@@ -60,13 +67,20 @@ export function createHelpLinkService(input: Input) {
     async openSession(command: { token: string; networkKeyHmac: string }): Promise<{ sessionToken: string; penaltyId: string; expiresAt: Date }> {
       if (!tokenValid(command.token) || !networkPattern.test(command.networkKeyHmac)) trustFail("not_available");
       return boundary(() => input.db.transaction(async (tx) => {
-        // Lock the penalty before the link, matching issuance; neither path takes an identity/fence lock afterwards.
-        const [candidate] = await tx.select({ penaltyId: trustHelpLinks.penaltyId }).from(trustHelpLinks).where(eq(trustHelpLinks.tokenHash, hash(command.token))).limit(1);
+        // User -> penalty -> link matches writers, including implicit user locks from session foreign keys.
+        const [candidate] = await tx.select({ penaltyId: trustHelpLinks.penaltyId, userId: trustHelpLinks.userId }).from(trustHelpLinks).where(eq(trustHelpLinks.tokenHash, hash(command.token))).limit(1);
         if (!candidate) trustFail("not_available");
+        await lockUser(tx, candidate.userId);
         const [p] = await tx.select().from(trustPenalties).where(eq(trustPenalties.id, candidate.penaltyId)).limit(1).for("share");
-        const [link] = await tx.select().from(trustHelpLinks).where(and(eq(trustHelpLinks.tokenHash, hash(command.token)), isNull(trustHelpLinks.revokedAt))).limit(1).for("share");
+        const [link] = await tx.select().from(trustHelpLinks).where(and(eq(trustHelpLinks.tokenHash, hash(command.token)), isNull(trustHelpLinks.revokedAt))).limit(1).for("update");
         const at = time(clock());
         if (!p || !link || link.userId !== p.subjectUserId || link.penaltyId !== p.id || link.issuedAt > at || link.readUntil <= at || !readable(p, at)) trustFail("not_available");
+        // The link UPDATE lock makes the count and insert atomic across concurrent exchanges.
+        const [count] = await tx.select({ value: sql<number>`count(*)::int` }).from(trustHelpSessions).where(and(
+          eq(trustHelpSessions.linkId, link.id), gt(trustHelpSessions.createdAt, plus(at, -policy.helpSessionMs)), lte(trustHelpSessions.createdAt, at),
+        ));
+        if (!count) trustFail("dependency_unavailable");
+        if (count.value >= policy.helpSessionsPerLink) trustFail("not_available");
         const sessionToken = token(); const expiresAt = plus(at, policy.helpSessionMs);
         await tx.insert(trustHelpSessions).values({ id: id(), sessionHash: hash(sessionToken), linkId: link.id, userId: link.userId, penaltyId: p.id, createdAt: at, expiresAt });
         return { sessionToken, penaltyId: p.id, expiresAt };
@@ -87,8 +101,8 @@ export function createHelpLinkService(input: Input) {
     },
     async requestLink(command: { email: string; networkKeyHmac: string }): Promise<void> {
       if (typeof command.email !== "string" || !networkPattern.test(command.networkKeyHmac)) return;
-      let canonical: string;
-      try { canonical = canonicalizeEmailAddress(command.email).canonical; } catch { return; }
+      const canonical = input.canonicalizeEmail(command.email);
+      if (canonical === null) return;
       const addressHmac = createLookupHmac({ key, context: "trust-help-link-address", value: canonical });
       await boundary(() => input.db.transaction(async (tx) => {
         // Address then network advisory locks serialize both independent quotas, including unknown addresses.
@@ -110,17 +124,18 @@ export function createHelpLinkService(input: Input) {
           .orderBy(desc(trustPenalties.createdAt), desc(trustPenalties.id)).limit(1);
         let outcome: "issued" | "ignored" | "rate_limited" = limited ? "rate_limited" : "ignored";
         if (!limited && input.mode === "enabled" && p) {
+          await lockUser(tx, p.penalty.subjectUserId);
           // Recheck after acquiring the penalty lock: it may have ended during the lookup.
           const [current] = await tx.select().from(trustPenalties).where(eq(trustPenalties.id, p.penalty.id)).limit(1).for("update");
           const issuedAt = time(clock());
           if (current && active(current, issuedAt) && readable(current, issuedAt)) {
-            const { token } = await issue(tx, { userId: current.subjectUserId, penaltyId: current.id, at: issuedAt });
+            const { token } = await issue(tx, { userId: current.subjectUserId, penaltyId: current.id, at: issuedAt }, { subjectLocked: true });
             await input.notices.queue(tx, { userId: current.subjectUserId, penaltyId: current.id, token, kind: current.kind as "suspension" | "removal", endsAt: current.endsAt, at: issuedAt });
             outcome = "issued";
           }
         }
         await tx.insert(trustHelpLinkRequests).values({ id: id(), networkKeyHmac: command.networkKeyHmac, addressHmac, outcome, createdAt: at, expiresAt: plus(at, policy.linkAddressWindowMs) });
-      })).catch(() => undefined); // Dependency/delivery failures also disclose no address outcome on resends.
+      })).catch(() => { input.logger.error("Help-link resend failed"); }); // Never log dependency errors or request identifiers.
     },
   };
 }

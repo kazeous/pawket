@@ -44,5 +44,6 @@ export { createTrustPolicyService, type TrustPolicyService, type TrustPolicySnap
 export { createTrustRestrictionPort, activePenalties, type TrustRestrictionPort } from "./penalty-port.js";
 export { createContentHideReadPort, type ContentHideReadPort, type ContentHideKind } from "./content-hide-port.js";
 export { createContentHideService, type ContentHideService, type OwnerCase } from "./content-hide-service.js";
-export { createPenaltyService, type PenaltyService, type ApplyPenaltyCommand, type EndPenaltyCommand, type EnforcementNoticePort } from "./penalty-service.js";
+export { createPenaltyService, type PenaltyService, type ApplyPenaltyCommand, type EndPenaltyCommand } from "./penalty-service.js";
+export type { EnforcementNoticePort } from "./enforcement-notice-port.js";
 export { createHelpLinkService, type HelpLinkService } from "./help-link-service.js";

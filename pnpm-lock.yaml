@@ -480,9 +480,6 @@ importers:
       '@pawket/database':
         specifier: workspace:*
         version: link:../database
-      '@pawket/identity':
-        specifier: workspace:*
-        version: link:../identity
       '@pawket/security':
         specifier: workspace:*
         version: link:../security
@@ -499,6 +496,9 @@ importers:
       '@pawket/commission-files':
         specifier: workspace:*
         version: link:../commission-files
+      '@pawket/identity':
+        specifier: workspace:*
+        version: link:../identity
       '@pawket/orders':
         specifier: workspace:*
         version: link:../orders

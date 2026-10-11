@@ -7,7 +7,8 @@ let routeHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
 vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: () => ({ helpLinkHandlers: routeHandlers }) }));
 function fixture() {
   const helpLinks = { openSession: vi.fn().mockResolvedValue({ sessionToken: token, penaltyId: "private-penalty", expiresAt: new Date("2026-10-12T03:30:00Z") }), requestLink: vi.fn().mockResolvedValue(undefined) };
-  return { helpLinks, http: createHelpLinkHttpHandlers({ appBaseUrl: origin, lookupHmacKey: key, helpLinks }) };
+  const logger = { error: vi.fn() };
+  return { helpLinks, logger, http: createHelpLinkHttpHandlers({ appBaseUrl: origin, lookupHmacKey: key, helpLinks, logger }) };
 }
 function request(path: string, body: unknown, headers: Record<string, string> = {}) {
   return new Request(`${origin}/help/locked/${path}`, { method: "POST", headers: { origin, "content-type": "application/json", "x-real-ip": "192.0.2.1", ...headers }, body: JSON.stringify(body) });
@@ -47,8 +48,9 @@ test("cross-site, unknown fields, query tokens, and untrusted networks are refus
   expect(f.helpLinks.openSession).not.toHaveBeenCalled();
 });
 test("invalid email requests and unavailable dependencies disclose no address outcome", async () => {
-  const f = fixture(); f.helpLinks.requestLink.mockRejectedValue(new TrustEnforcementError("dependency_unavailable"));
+  const f = fixture(); f.helpLinks.requestLink.mockRejectedValue(new Error(`unknown@example.invalid ${token} private-user`));
   const response = await f.http.linkRequest(request("link-request", { email: "unknown@example.invalid" }));
   expect(response.status).toBe(204); expect(await response.text()).toBe("");
+  expect(f.logger.error.mock.calls).toEqual([["Help-link resend handler failed"]]);
   expect((await f.http.linkRequest(request("link-request", { email: "" }))).status).toBe(204);
 });

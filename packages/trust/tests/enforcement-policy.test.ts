@@ -26,7 +26,7 @@ describe("trust enforcement policy", () => {
   });
   test("policy values and names are stable and frozen", () => {
     expect(TRUST_ENFORCEMENT_POLICY).toEqual({ appealWindowMs: 1_209_600_000, helpLinkAppealMs: 1_209_600_000,
-      helpReadOnlyMs: 7_776_000_000, helpSessionMs: 1_800_000, resumeGraceMs: 172_800_000, messageContext: 20,
+      helpReadOnlyMs: 7_776_000_000, helpSessionMs: 1_800_000, helpSessionsPerLink: 5, resumeGraceMs: 172_800_000, messageContext: 20,
       reportDetailMax: 1_000, explanationMax: 2_000, internalNoteMax: 2_000, actionReasonMax: 2_000,
       appealStatementMax: 4_000, decisionReasoningMax: 4_000, policyDocumentMax: 16_000, actorReportLimit: 10,
       guestReportLimit: 5, reportWindowMs: 900_000, linkRequestsPerAddress: 3, linkAddressWindowMs: 86_400_000,

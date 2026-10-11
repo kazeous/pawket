@@ -6,6 +6,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsup", "typecheck": "tsc --noEmit" },
   "devDependencies": {
+    "@pawket/identity": "workspace:*",
     "@pawket/payments": "workspace:*",
     "@pawket/resolutions": "workspace:*",
     "postgres": "3.4.9",
@@ -13,7 +14,6 @@
     "@pawket/commission-files": "workspace:*"
   },
   "dependencies": {
-    "@pawket/identity": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/security": "workspace:*",
     "drizzle-orm": "0.45.2",

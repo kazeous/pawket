@@ -13,7 +13,7 @@ import { activePenalties } from "./penalty-port.js";
 import { normalizeTrustText, TRUST_ENFORCEMENT_POLICY, TRUST_PENALTY_KINDS, TRUST_PENALTY_REASONS, TRUST_PENALTY_TARGETS, TRUST_RESTRICTIONS,
   TrustEnforcementError, trustFail, type TrustEnforcementMode, type TrustPenaltyKind, type TrustPenaltyReason, type TrustPenaltyTarget, type TrustRestriction } from "./enforcement-policy.js";
 import { readExactOwnDataRecord, validUuid } from "./report-policy.js";
-import type { EnforcementNoticePort } from "@pawket/identity";
+import type { EnforcementNoticePort } from "./enforcement-notice-port.js";
 import type { HelpLinkService } from "./help-link-service.js";
 
 type Actor = Readonly<{ userId: string; sessionId: string }>;
@@ -26,7 +26,6 @@ type OwnerCommand = Readonly<{ owner: Actor; stepUpProofId: string; idempotencyK
 export type ApplyPenaltyCommand = OwnerCommand & Readonly<{ subjectUserId: string; source: { caseId: string } | { publicReportId: string }; kind: TrustPenaltyKind;
   restriction?: TrustRestriction; target?: TrustPenaltyTarget; endsAt?: string | null; reasonCategory: TrustPenaltyReason; explanation: string; internalNote?: string; freezeFulfilment?: boolean }>;
 export type EndPenaltyCommand = Readonly<{ penaltyId: string; state: "expired" | "lifted" | "reversed" | "reduced"; actor: EnforcementActor | null; requestId: string; at: Date; reason: string | null }>;
-export type { EnforcementNoticePort } from "@pawket/identity";
 type Input = Readonly<{ db: PawketDatabase; mode: TrustEnforcementMode; keyring: EncryptionKeyring; lookupHmacKey: Uint8Array; applicationRevision: string;
   consumeStepUpProof(tx: PawketTransaction, proof: { proofId: string; userId: string; sessionId: string; actionClass: string; now: Date }): Promise<boolean>;
   fence: { lockCreatorFence(tx: PawketTransaction, userId: string): Promise<void> };
@@ -229,7 +228,7 @@ export function createPenaltyService(input: Input) {
         // Recompute prevents a new suspension from weakening a pre-existing removal.
         if (c.kind === "suspension" || c.kind === "removal") await recomputeStanding(tx, c.subjectUserId, effect);
         if (c.target === "account" && (c.kind === "suspension" || c.kind === "removal")) {
-          const { token } = await input.helpLinks.issue(tx, { userId: c.subjectUserId, penaltyId, at });
+          const { token } = await input.helpLinks.issue(tx, { userId: c.subjectUserId, penaltyId, at }, { subjectLocked: true });
           await input.notices.queue(tx, { userId: c.subjectUserId, penaltyId, token, kind: c.kind, endsAt: c.endsAt, at });
         }
         if (c.kind === "removal" && (c.target === "creator_capability" || subject.capability) || c.freezeFulfilment) {
