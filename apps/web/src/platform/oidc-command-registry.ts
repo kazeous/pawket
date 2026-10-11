@@ -24,6 +24,7 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     const id = match[1]!; return make("payments.tip_confirm", true, "Xác nhận đã nhận tip", "/creator/tips", (r, q) => r.creatorTipHandlers.confirm(q, id));
   }
   if (path === "/api/v1/creator/tip-settings") return make("catalog.tip_settings", true, "Cập nhật nhận tip", "/creator/tips", (r, q) => r.creatorTipSettingsHandlers.save(q));
+  if (path === "/api/v1/reports") return make("trust.report_submit", false, "Gửi báo cáo", "/help/cases", (r, q) => r.trustEnforcementHandlers.submit(q));
   if (path === "/api/v1/commissions") return make("orders.commission_request", false, "Gửi yêu cầu commission", "/commissions", (r, q) => r.commissionHandlers.request(q));
   if (path === "/api/v1/creator/commissions/packages") return make("catalog.commission_package", false, "Lưu gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.savePackage(q));
   if (path === "/api/v1/creator/commissions/packages/change") return make("catalog.commission_publish", false, "Cập nhật gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.changePackage(q));

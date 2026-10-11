@@ -35,7 +35,7 @@ export function createOidcCommandHttp(options: {
   }
   async function run(request: Request, execute: () => Promise<Response>): Promise<Response> {
     if (request.method !== "POST" || dispatched.has(request)) return execute();
-    if (!/^\/api\/v1\/(?:admin\/|creator-application\/receiving-account$|creator\/tips\/|creator\/tip-settings$|(?:creator\/)?commissions(?:\/|$))/u.test(new URL(request.url).pathname)) return execute();
+    if (!/^\/api\/v1\/(?:reports$|admin\/|creator-application\/receiving-account$|creator\/tips\/|creator\/tip-settings$|(?:creator\/)?commissions(?:\/|$))/u.test(new URL(request.url).pathname)) return execute();
     try {
       const url = new URL(request.url); const raw = await body(request);
       if (raw === null) return json(413, { code: "INVALID_REQUEST" });
@@ -46,6 +46,7 @@ export function createOidcCommandHttp(options: {
       if (url.search) return json(400, { code: "INVALID_REQUEST" });
       payload = { ...payload, returnPath: command.returnPath };
       const actor = await options.authenticate(request.headers, true);
+      if (!actor && url.pathname === "/api/v1/reports") return execute();
       if (!actor) return json(401, { code: "AUTHENTICATION_REQUIRED" });
       const expectedActor = request.headers.get("x-pawket-actor");
       if (expectedActor !== null && expectedActor !== actor.userId) return json(409, { code: "OIDC_ACTOR_CHANGED" });

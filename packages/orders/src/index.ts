@@ -12,3 +12,5 @@ export * from "./order-operations.js";
 export * from "./command-fingerprint.js";
 export * from "./file-access-port.js";
 export * from "./resolution-port.js";
+
+export { createBriefReportTargetPort } from "./brief-report-target.js";

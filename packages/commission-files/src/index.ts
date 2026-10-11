@@ -13,3 +13,5 @@ export * from "./maintenance.js";
 export * from "./message-text.js";
 export * from "./thread-port.js";
 export * from "./thread-service.js";
+
+export { createThreadReportTargetPort } from "./thread-report-target.js";

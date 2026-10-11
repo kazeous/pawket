@@ -3,6 +3,7 @@ export {
   normalizeReportDetail,
   normalizeReportReason,
   normalizeReportTarget,
+  readExactOwnDataRecord,
   type PublicReportReason,
 } from "./report-policy.js";
 export {
@@ -27,7 +28,10 @@ export type {
   ModerationTargetSnapshot,
   ReportTarget,
 } from "./trust-ports.js";
-export { createTrustHttpHandlers, type TrustHttpHandlers } from "./trust-http.js";
+export { createTrustHttpHandlers, deriveTrustedNetworkKey, type TrustHttpHandlers } from "./trust-http.js";
+export { issueReportChallenge, issueReportChallengeToken, verifyReportChallengeToken, type ReportChallengeContext } from "./report-service.js";
+export { createPrivateReportService, type PrivateReportService, type PrivateReportCommand } from "./private-report-service.js";
+export { normalizeTrustReportTarget, type TrustReportTarget, type ResolvedReportTarget, type TrustReportTargetPort } from "./report-target-port.js";
 export { createCommissionTrustPort } from "./commission-trust-port.js";
 export { createTrustCasePort, TrustCaseError, type TrustCasePort, type TrustCaseActor, type TrustCaseKind, type TrustCaseSourceType } from "./case-port.js";
 export { createTrustCaseService, type TrustCaseService, type TrustCaseEvidencePort, type TrustCaseDeadlinePort, type TrustCaseDeadlineRow } from "./case-service.js";

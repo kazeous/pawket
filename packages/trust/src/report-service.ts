@@ -139,11 +139,15 @@ function safeNonce(provider: () => string): string {
   }
 }
 
-function signPayload(payload: string, key: Uint8Array): string {
-  return createHmac("sha256", key).update(payload, "utf8").digest("base64url");
+export type ReportChallengeContext = "public-report-challenge" | "trust-private-report-challenge";
+function signPayload(payload: string, key: Uint8Array, context: ReportChallengeContext = "public-report-challenge"): string {
+  const hmac = createHmac("sha256", key);
+  // Preserve I3 signatures; the private challenge has its own domain separator.
+  if (context !== "public-report-challenge") hmac.update(context, "utf8").update("\0", "utf8");
+  return hmac.update(payload, "utf8").digest("base64url");
 }
 
-function issueToken(now: Date, nonce: string, key: Uint8Array): ReportChallenge {
+export function issueReportChallengeToken(now: Date, nonce: string, key: Uint8Array, context?: ReportChallengeContext): ReportChallenge {
   const expiresAt = new Date(now.getTime() + CHALLENGE_LIFETIME_MS);
   const payload = Buffer.from(JSON.stringify({
     version: 1,
@@ -151,7 +155,7 @@ function issueToken(now: Date, nonce: string, key: Uint8Array): ReportChallenge 
     issuedAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
   }), "utf8").toString("base64url");
-  return { token: `${payload}.${signPayload(payload, key)}`, difficulty: CHALLENGE_DIFFICULTY, expiresAt: expiresAt.toISOString() };
+  return { token: `${payload}.${signPayload(payload, key, context)}`, difficulty: CHALLENGE_DIFFICULTY, expiresAt: expiresAt.toISOString() };
 }
 
 function parseIso(value: unknown): Date | null {
@@ -162,13 +166,13 @@ function parseIso(value: unknown): Date | null {
   return date.toISOString() === value ? date : null;
 }
 
-function verifySignedToken(token: string, solution: number, now: Date, key: Uint8Array): boolean {
+export function verifyReportChallengeToken(token: string, solution: number, now: Date, key: Uint8Array, context?: ReportChallengeContext): boolean {
   try {
     if (token.length > 512 || !TOKEN.test(token) || !Number.isSafeInteger(solution) || solution < 0) return false;
     const separator = token.indexOf(".");
     const payload = token.slice(0, separator);
     const signature = token.slice(separator + 1);
-    const expected = signPayload(payload, key);
+    const expected = signPayload(payload, key, context);
     if (!constantTimeEqual(Buffer.from(signature, "utf8"), Buffer.from(expected, "utf8"))) return false;
     const decodedText = Buffer.from(payload, "base64url").toString("utf8");
     const decoded = readExactOwnDataRecord(JSON.parse(decodedText) as unknown, [["version", "nonce", "issuedAt", "expiresAt"]]);
@@ -272,7 +276,7 @@ function targetHashes(target: ReportTarget) {
   };
 }
 
-async function lockRequester(tx: PawketTransaction, requester: SafeRequester) {
+export async function lockRequester(tx: PawketTransaction, requester: SafeRequester) {
   const requesterKey = requester.kind === "guest" ? requester.networkKeyHmac : requester.actorUserId;
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`pawket.trust.requester.${requester.kind}.${requesterKey}`}, 0))`);
 }
@@ -282,7 +286,7 @@ async function lockAbuseKeys(tx: PawketTransaction, requester: SafeRequester, ta
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`pawket.trust.target.${targetHash}.${revisionHash}`}, 0))`);
 }
 
-async function insertSecurityEvent(
+export async function insertSecurityEvent(
   tx: PawketTransaction,
   input: { requester: SafeRequester; targetHash: string; revisionHash: string; outcome: "accepted" | "rejected"; category: "accepted" | RejectCategory; now: Date },
 ) {
@@ -314,7 +318,7 @@ async function insertRejectedSecurityEventIfAllowed(
   }
 }
 
-async function countAccepted(tx: PawketTransaction, requester: SafeRequester, targetHash: string, revisionHash: string, now: Date) {
+export async function countAccepted(tx: PawketTransaction, requester: SafeRequester, targetHash: string, revisionHash: string, now: Date) {
   const requesterCutoff = new Date(now.getTime() - REQUESTER_WINDOW_MS);
   const targetCutoff = new Date(now.getTime() - SECURITY_RETENTION_MS);
   const requesterRows = requester.kind === "guest"
@@ -430,57 +434,9 @@ export function createReportService(input: ReportServiceFactoryInput) {
 
   return {
     async issueChallenge(command: Readonly<{ networkKeyHmac: string }>): Promise<ReportChallenge> {
-      const normalized = normalizeIssueCommand(command);
-      if (!normalized) fail();
-      const now = safeNow(clock);
-      let challenge: ReportChallenge;
-      try {
-        challenge = issueToken(now, safeNonce(nonce), key);
-      } catch {
-        fail();
-      }
-      let result: unknown;
-      try {
-        result = await runTransaction(async (tx) => {
-          const requester = { kind: "guest", networkKeyHmac: normalized.networkKeyHmac } as const;
-          await lockRequester(tx, requester);
-          await tx.execute(sql`
-            with expired as (
-              select id
-              from public_report_challenges
-              where expires_at <= statement_timestamp()
-              order by expires_at, id
-              limit ${CHALLENGE_CLEANUP_LIMIT}
-              for update skip locked
-            )
-            delete from public_report_challenges as challenge
-            using expired
-            where challenge.id = expired.id
-          `);
-          const active = await tx.execute<{ count: number }>(sql`
-            select count(*)::int as count
-            from public_report_challenges
-            where network_key_hmac = ${normalized.networkKeyHmac}
-              and consumed_at is null
-              and expires_at > ${now.toISOString()}::timestamptz
-          `);
-          if ((active[0]?.count ?? 0) >= ACTIVE_CHALLENGE_LIMIT) return TRANSACTION_CAPPED;
-          await tx.insert(publicReportChallenges).values({
-            id: randomUUID(),
-            tokenHash: hashOpaqueToken(challenge.token, "public-report-challenge"),
-            networkKeyHmac: normalized.networkKeyHmac,
-            issuedAt: now,
-            expiresAt: new Date(Date.parse(challenge.expiresAt)),
-            consumedAt: null,
-          });
-          return TRANSACTION_ISSUED;
-        });
-      } catch {
-        fail();
-      }
-      if (result === TRANSACTION_CAPPED) fail(429);
-      if (result !== TRANSACTION_ISSUED) fail();
-      return challenge;
+      const normalized = normalizeIssueCommand(command); if (!normalized) fail();
+      return issueReportChallenge({ db: { transaction: runTransaction }, networkKeyHmac: normalized.networkKeyHmac,
+        key, now: safeNow(clock), nonce: safeNonce(nonce) });
     },
 
     async submitReport(command: SubmitReportCommand): Promise<Readonly<{ accepted: true; reportReference: string }>> {
@@ -497,7 +453,7 @@ export function createReportService(input: ReportServiceFactoryInput) {
           const snapshot = exactModerationSnapshot(rawSnapshot, normalized.target);
           await lockAbuseKeys(tx, normalized.requester, hashes.targetHash, hashes.revisionHash);
           if (normalized.requester.kind === "guest") {
-            if (!normalized.challenge || !verifySignedToken(normalized.challenge.token, normalized.challenge.solution, now, key)) {
+            if (!normalized.challenge || !verifyReportChallengeToken(normalized.challenge.token, normalized.challenge.solution, now, key)) {
               return TRANSACTION_REJECTED;
             }
             const consumed = await tx.update(publicReportChallenges).set({ consumedAt: now }).where(and(
@@ -567,4 +523,64 @@ export function createReportService(input: ReportServiceFactoryInput) {
       return { accepted: true, reportReference: acceptedReportReference };
     },
   };
+}
+
+/** Shared issuance, network binding, active-token cap and bounded cleanup for both report surfaces. */
+export async function issueReportChallenge(input: { db: Pick<PawketDatabase, "transaction">; networkKeyHmac: string;
+  key: Uint8Array; now: Date; nonce: string; context?: ReportChallengeContext }): Promise<ReportChallenge> {
+  const command = { networkKeyHmac: input.networkKeyHmac };
+  const normalized = normalizeIssueCommand(command);
+  if (!normalized) fail();
+  const now = safeNow(() => input.now);
+  const key = snapshotKey(input.key);
+  const context = input.context ?? "public-report-challenge";
+  const runTransaction = <T>(callback: (tx: PawketTransaction) => Promise<T>) => input.db.transaction(callback);
+  let challenge: ReportChallenge;
+  try {
+    challenge = issueReportChallengeToken(now, safeNonce(() => input.nonce), key, context);
+  } catch {
+    fail();
+  }
+  let result: unknown;
+  try {
+    result = await runTransaction(async (tx) => {
+      const requester = { kind: "guest", networkKeyHmac: normalized.networkKeyHmac } as const;
+      await lockRequester(tx, requester);
+      await tx.execute(sql`
+        with expired as (
+          select id
+          from public_report_challenges
+          where expires_at <= statement_timestamp()
+          order by expires_at, id
+          limit ${CHALLENGE_CLEANUP_LIMIT}
+          for update skip locked
+        )
+        delete from public_report_challenges as challenge
+        using expired
+        where challenge.id = expired.id
+      `);
+      const active = await tx.execute<{ count: number }>(sql`
+        select count(*)::int as count
+        from public_report_challenges
+        where network_key_hmac = ${normalized.networkKeyHmac}
+          and consumed_at is null
+          and expires_at > ${now.toISOString()}::timestamptz
+      `);
+      if ((active[0]?.count ?? 0) >= ACTIVE_CHALLENGE_LIMIT) return TRANSACTION_CAPPED;
+      await tx.insert(publicReportChallenges).values({
+        id: randomUUID(),
+        tokenHash: hashOpaqueToken(challenge.token, context),
+        networkKeyHmac: normalized.networkKeyHmac,
+        issuedAt: now,
+        expiresAt: new Date(Date.parse(challenge.expiresAt)),
+        consumedAt: null,
+      });
+      return TRANSACTION_ISSUED;
+    });
+  } catch {
+    fail();
+  }
+  if (result === TRANSACTION_CAPPED) fail(429);
+  if (result !== TRANSACTION_ISSUED) fail();
+  return challenge;
 }

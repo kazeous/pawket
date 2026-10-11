@@ -7,6 +7,7 @@ import {
   createCatalogService,
   createCreatorTipSettingsService,
   createCommissionPackageService,
+  createPackageReportTargetPort,
   createPlatformTipPolicyService,
   createPublicCatalogQuery,
   type VisibilityReadPort,
@@ -61,8 +62,8 @@ import {
 } from "@pawket/public-media";
 import { createEncryptionKeyring, createLookupHmac } from "@pawket/security";
 import { recordTipOperation, setTipPaymentsEnabledMetric, recordSePayOperation, recordCommissionOperation, recordCommissionFileOperation } from "@pawket/observability";
-import { createCommissionOrderService, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
-import { createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
+import { createCommissionOrderService, createBriefReportTargetPort, createCommissionPolicyReadPort, createCommissionFileAccessPort, createCommissionResolutionOrderPort, lockCommissionCreator, type CommissionPolicySnapshot } from "@pawket/orders";
+import { createThreadReportTargetPort, createCommissionFileAttachmentPort, createCommissionFileService, createCommissionThreadPort, createCommissionThreadService, createS3CommissionFileStorage, createCommissionEvidenceAttachmentPort, type CommissionFileStoragePort } from "@pawket/commission-files";
 import { createProposalService, createDisputeService, createResolutionViewService, createLateClaimService, createSuspensionService,
   createOwnerResolutionService, resolutionFail, createResolutionCommandKit, createResolutionHoldPort, createCommissionIntakeFencePort, createCommissionEvidenceUploadPort,
   createResolutionCaseDeadlinePort, createResolutionCaseMetadataPort, effectiveResolutionDeadline } from "@pawket/resolutions";
@@ -74,6 +75,7 @@ import {
   createCommissionTrustPort,
   createTrustCasePort,
   createTrustCaseService,
+  createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
 
 import { createMediaCommandHttpHandlers } from "./media-command-http.js";
@@ -81,6 +83,7 @@ import { createCommissionHttpHandlers } from "./commission-http.js";
 import { createCommissionFileHttpHandlers } from "./commission-file-http.js";
 import { createResolutionHttpHandlers } from "./resolution-http.js";
 import { createCaseHttpHandlers } from "./case-http.js";
+import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
 import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
@@ -115,6 +118,8 @@ export type WebPlatformRuntime = {
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
+  trustEnforcementHandlers: ReturnType<typeof createTrustEnforcementHttpHandlers>;
+  privateReports: ReturnType<typeof createPrivateReportService>;
   trustHandlers: ReturnType<typeof createTrustHttpHandlers>;
   reports: ReturnType<typeof createReportService>;
   triage: ReturnType<typeof createTriageService>;
@@ -630,6 +635,15 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     catalog: publicCatalog,
     authenticate,
   });
+  const packageReportTargets = createPackageReportTargetPort({ intakeMode: env.COMMISSION_INTAKE_MODE,
+    publishingMode: env.CREATOR_PUBLISHING_MODE, visibility: publicCatalog });
+  const briefReportTargets = createBriefReportTargetPort(); const threadReportTargets = createThreadReportTargetPort();
+  const trustPolicies = createTrustPolicyService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof });
+  const privateReports = createPrivateReportService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, challengeKey: lookupHmacKey,
+    targets: { resolve: (tx, target, reporter) => target.kind === "commission_package" ? packageReportTargets.resolve(tx, target, reporter)
+      : target.kind === "commission_brief" ? briefReportTargets.resolve(tx, target, reporter) : threadReportTargets.resolve(tx, target, reporter) },
+    restrictions: createTrustRestrictionPort({ mode: env.TRUST_ENFORCEMENT_MODE }), policies: trustPolicies, authorizeCommand });
+  const trustEnforcementHandlers = createTrustEnforcementHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, authenticate, reports: privateReports });
   const trustHandlers = createTrustHttpHandlers({
     appBaseUrl: env.APP_BASE_URL,
     lookupHmacKey,
@@ -680,6 +694,8 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,
+    trustEnforcementHandlers: commandHttp.wrap(trustEnforcementHandlers),
+    privateReports,
     trustHandlers: commandHttp.wrap(trustHandlers),
     reports: reportService,
     triage: triageService,

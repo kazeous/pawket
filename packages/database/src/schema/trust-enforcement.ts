@@ -10,6 +10,9 @@ import { trustCases } from "./trust-cases";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
 import { publicContentReports } from "./public-trust";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { commissionOrders, commissionPackageRevisions, commissionEnvelopeCheck } from "./commissions";
 
 type TrustPolicyKind = "community_rules" | "enforcement_appeals";
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
@@ -54,6 +57,36 @@ type PenaltyTarget = "creator_capability" | "account";
 type PenaltyReason = "spam_or_scam" | "harassment_or_hate" | "prohibited_or_age_restricted_content" | "intellectual_property"
   | "privacy" | "impersonation" | "refund_non_compliance" | "dispute_or_report_abuse" | "other";
 const reference = { onDelete: "restrict", onUpdate: "restrict" } as const;
+
+type ReportTargetKind = "commission_package" | "commission_brief" | "commission_message" | "commission_file";
+type ReportReason = "impersonation" | "prohibited_or_age_restricted_content" | "harassment_or_hate" | "violence_or_self_harm"
+  | "privacy" | "intellectual_property" | "spam_or_scam" | "other";
+export const trustReports = pgTable("trust_reports", {
+  id: uuid("id").primaryKey(), reportReference: text("report_reference").notNull(), targetKind: text("target_kind").$type<ReportTargetKind>().notNull(),
+  targetId: uuid("target_id").notNull(), orderId: uuid("order_id").references(() => commissionOrders.id, reference),
+  packageRevisionId: uuid("package_revision_id").references(() => commissionPackageRevisions.id, reference),
+  contentOwnerUserId: text("content_owner_user_id").notNull().references(() => identityUsers.id, reference),
+  reporterUserId: text("reporter_user_id").references(() => identityUsers.id, reference), reporterNetworkHmac: text("reporter_network_hmac"),
+  reason: text("reason").$type<ReportReason>().notNull(), detailEnvelope: jsonb("detail_envelope").$type<Envelope>(),
+  caseId: uuid("case_id").notNull().references(() => trustCases.id, reference),
+  state: text("state").$type<"open" | "closed">().notNull().default("open"), createdAt: time("created_at").notNull(), closedAt: time("closed_at"),
+}, (t) => [
+  uniqueIndex("trust_reports_reference_uidx").on(t.reportReference),
+  uniqueIndex("trust_reports_actor_target_uidx").on(t.targetKind, t.targetId, t.reporterUserId).where(sql`${t.reporterUserId} is not null`),
+  index("trust_reports_filed_idx").on(t.reporterUserId, t.createdAt, t.id).where(sql`${t.reporterUserId} is not null`),
+  index("trust_reports_case_idx").on(t.caseId, t.createdAt, t.id),
+  check("trust_reports_reference_check", sql`${t.reportReference} ~ '^report:v2:[A-Za-z0-9_-]{32}$'`),
+  check("trust_reports_kind_check", sql`${t.targetKind} in ('commission_package','commission_brief','commission_message','commission_file')`),
+  check("trust_reports_target_check", sql`(${t.targetKind} = 'commission_package' and ${t.packageRevisionId} is not null and ${t.orderId} is null)
+    or (${t.targetKind} <> 'commission_package' and ${t.packageRevisionId} is null and ${t.orderId} is not null)`),
+  check("trust_reports_reporter_check", sql`(${t.reporterUserId} is not null) <> (${t.reporterNetworkHmac} is not null)`),
+  check("trust_reports_network_check", sql`${t.reporterNetworkHmac} is null or (${t.targetKind} = 'commission_package' and ${t.reporterNetworkHmac} ~ '^hmac-sha256:v1:[A-Za-z0-9_-]{43}$')`),
+  check("trust_reports_owner_check", sql`${t.reporterUserId} is null or ${t.reporterUserId} <> ${t.contentOwnerUserId}`),
+  check("trust_reports_reason_check", sql`${t.reason} in ('impersonation','prohibited_or_age_restricted_content','harassment_or_hate','violence_or_self_harm','privacy','intellectual_property','spam_or_scam','other')`),
+  check("trust_reports_detail_check", sql`${t.detailEnvelope} is null or ${commissionEnvelopeCheck(t.detailEnvelope)}`),
+  check("trust_reports_state_check", sql`(${t.state} = 'open' and ${t.closedAt} is null)
+    or (${t.state} = 'closed' and ${t.closedAt} is not null and ${t.closedAt} >= ${t.createdAt})`),
+]);
 
 export const trustPenalties = pgTable("trust_penalties", {
   id: uuid("id").primaryKey(), subjectUserId: text("subject_user_id").notNull().references(() => identityUsers.id, reference),

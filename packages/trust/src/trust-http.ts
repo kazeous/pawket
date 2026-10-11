@@ -152,7 +152,7 @@ async function readBoundedJson(request: Request): Promise<BodyResult> {
   }
 }
 
-function deriveTrustedNetworkKey(headers: Headers, key: Uint8Array): string | null {
+export function deriveTrustedNetworkKey(headers: Headers, key: Uint8Array): string | null {
   try {
     const value = headers.get("x-real-ip");
     if (value === null || value.length < 2 || value.length > 64 || value.trim() !== value || value.includes(",")) return null;
