@@ -57,6 +57,8 @@ const pausedCommissionMaintenance = {
 };
 
 const terminalDomainEvents = [
+  "trust.appeal_submitted.v1",
+  "trust.appeal_decided.v1",
   "trust.penalty_applied.v1",
   "trust.penalty_ended.v1",
   "creator.page_initialized.v1",

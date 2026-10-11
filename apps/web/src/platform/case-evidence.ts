@@ -1,7 +1,8 @@
 import type { CommissionFileService } from "@pawket/commission-files";
 import type { CommissionPackageService } from "@pawket/catalog";
 import { and, asc, eq } from "drizzle-orm";
-import { trustCases, trustReports, type PawketTransaction } from "@pawket/database";
+import { trustAppeals, trustCases, trustContentHides, trustPenalties, trustReports, type PawketTransaction } from "@pawket/database";
+import { decryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import type { CommissionOrderService } from "@pawket/orders";
 import type { CommissionRefundPort } from "@pawket/payments";
 import type { createResolutionViewService } from "@pawket/resolutions";
@@ -14,6 +15,7 @@ type Input = Readonly<{
   files: Pick<CommissionFileService, "caseDownloadGrant">;
   catalog?: Pick<CommissionPackageService, "readRevisionForCase">;
   contentHides?: ContentHideReadPort;
+  keyring?: EncryptionKeyring;
 }>;
 async function available<T>(read: () => Promise<T>): Promise<T> {
   try { return await read(); } catch (error) {
@@ -44,7 +46,39 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
     if (row.sourceType !== "commission_package" || !row.packageRevisionId || !input.catalog) throw new TrustCaseError("not_available");
     return input.catalog.readRevisionForCase(tx, row.packageRevisionId);
   }
-  return {
+  const port: TrustCaseEvidencePort = {
+    appealSource: (tx, caseId) => available(async () => {
+      const [appeal] = await tx.select({ appeal: trustAppeals }).from(trustAppeals).innerJoin(trustCases, eq(trustCases.id, trustAppeals.caseId))
+        .where(and(eq(trustCases.id, caseId), eq(trustCases.kind, "appeal"), eq(trustCases.sourceId, trustAppeals.id))).limit(1);
+      if (!appeal || !input.keyring) throw new TrustCaseError("not_available");
+      const row = appeal.appeal;
+      const [penalty] = row.penaltyId === null ? [] : await tx.select().from(trustPenalties).where(eq(trustPenalties.id, row.penaltyId)).limit(1);
+      const [hide] = row.hideId === null ? [] : await tx.select().from(trustContentHides).where(eq(trustContentHides.id, row.hideId)).limit(1);
+      if (!penalty && !hide) throw new TrustCaseError("not_available");
+      const sourceCaseId = penalty?.sourceCaseId ?? hide?.caseId ?? null;
+      const [source] = sourceCaseId === null ? [] : await tx.select().from(trustCases).where(eq(trustCases.id, sourceCaseId)).limit(1);
+      const sections: Record<string, unknown> = {};
+      // These readers operate in the appeal's already-authorized transaction; access is logged against the appeal case.
+      if (source?.orderId !== null && source?.orderId !== undefined) {
+        sections.order_summary = await port.orderSummary(tx, source.orderId);
+        sections.thread_page = await port.threadPage(tx, source.orderId);
+        sections.resolution_records = await port.resolutionRecords(tx, source.orderId);
+      }
+      if (source?.kind === "refund_not_received" || source?.kind === "refund_overdue") sections.refund_destination = await port.refundDestination(tx, source.sourceId);
+      if (source?.kind === "report") {
+        sections.report_context = await port.reportContext!(tx, source.id);
+        if (source.sourceType === "commission_package") sections.package_revision = await port.packageRevision!(tx, source.id);
+        if (source.sourceType === "commission_brief") sections.brief = await port.brief!(tx, requireOrder(source.orderId));
+      }
+      if (source?.kind === "appeal") sections.appeal_source = await port.appealSource!(tx, source.id);
+      return { appeal: { appealId: row.id, statement: decryptSensitiveField({ keyring: input.keyring, envelope: row.statementEnvelope,
+        binding: { recordType: "trust_appeals", recordId: row.id, fieldName: "statement" } }) },
+        action: penalty ? { penaltyId: penalty.id, kind: penalty.kind, restriction: penalty.restriction, target: penalty.target, state: penalty.state,
+          explanation: decryptSensitiveField({ keyring: input.keyring, envelope: penalty.explanationEnvelope, binding: { recordType: "trust_penalties", recordId: penalty.id, fieldName: "explanation" } }) }
+          : { hideId: hide!.id, kind: hide!.targetKind, reason: decryptSensitiveField({ keyring: input.keyring, envelope: hide!.reasonEnvelope,
+            binding: { recordType: "trust_content_hides", recordId: hide!.id, fieldName: "reason" } }) },
+        source: source ? { caseId: source.id, kind: source.kind, state: source.state } : null, sections };
+    }),
     reportContext: (tx, caseId) => available(async () => {
       const row = await report(tx, caseId);
       if (row.sourceType === "commission_package") return { kind: row.sourceType, revision: await packageRevision(tx, caseId) };
@@ -65,4 +99,5 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
     refundDestination: (tx, obligationId) => available(() => input.refunds.revealForCase(tx, obligationId)),
     fileGrant: (tx, command) => available(() => input.files.caseDownloadGrant(tx, { ...command, orderId: requireOrder(command.orderId) })),
   };
+  return port;
 }

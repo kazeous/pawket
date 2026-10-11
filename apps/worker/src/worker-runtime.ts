@@ -115,6 +115,8 @@ const SAFE_PAYMENTS_EVENTS = new Set([
   "payments.verification_deposit_refund_attention_required.v1",
 ]);
 const SAFE_DOMAIN_EVENTS = new Set([
+  "trust.appeal_submitted.v1",
+  "trust.appeal_decided.v1",
   "trust.penalty_applied.v1",
   "trust.penalty_ended.v1",
   "identity.credential_email_retired.v1",

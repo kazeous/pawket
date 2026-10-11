@@ -22,6 +22,14 @@ const request = (body = payload.body, extra: HeadersInit = {}, target = path) =>
   method: "POST", headers: { origin: "https://pawket.example", "content-type": "application/json", "idempotency-key": payload.idempotencyKey, ...extra }, body,
 });
 describe("OIDC command HTTP boundary", () => {
+  test("signed-in appeals enter the non-fresh party command context and guests are refused", async () => {
+    const f = fixture(); const execute = vi.fn(async () => Response.json({ accepted: true }));
+    expect((await f.http.run(request("{}", {}, "/api/v1/help/appeals"), execute)).status).toBe(200);
+    expect(f.ready).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ policy: { actionClass: "trust.appeal_submit", fresh: false } }));
+    f.authenticate.mockResolvedValueOnce(null as never);
+    expect((await f.http.run(request("{}", {}, "/api/v1/help/appeals"), execute)).status).toBe(401);
+    expect(execute).toHaveBeenCalledOnce();
+  });
   test("report guests reach the guest handler and authenticated reports use the party command context", async () => {
     const f = fixture(); const execute = vi.fn(async () => Response.json({ accepted: true }));
     f.authenticate.mockResolvedValueOnce(null as never);

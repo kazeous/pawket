@@ -61,7 +61,7 @@ export function createTrustCaseService(input: FactoryInput) {
       if (itemType === "report_context" && (row.kind !== "report" || !evidence.reportContext)) caseFail("not_available");
       if (itemType === "package_revision" && (row.kind !== "report" || row.sourceType !== "commission_package" || !evidence.packageRevision)) caseFail("not_available");
       if (itemType === "brief" && (row.kind !== "report" || row.sourceType !== "commission_brief" || !evidence.brief)) caseFail("not_available");
-      if (itemType === "appeal_source" && (row.kind !== "appeal" || !evidence.appealSource)) caseFail("not_available");
+      if (itemType === "appeal_source" && (row.kind !== "appeal" || row.sourceType !== "trust_appeal" || !evidence.appealSource)) caseFail("not_available");
       let accepted = false;
       try { accepted = await consumeStepUpProof(tx, { proofId: command.stepUpProofId, ...owner, actionClass, now: at }); }
       catch { caseFail("owner_step_up_required"); }

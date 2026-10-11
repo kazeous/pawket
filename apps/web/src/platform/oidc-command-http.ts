@@ -35,7 +35,7 @@ export function createOidcCommandHttp(options: {
   }
   async function run(request: Request, execute: () => Promise<Response>): Promise<Response> {
     if (request.method !== "POST" || dispatched.has(request)) return execute();
-    if (!/^\/api\/v1\/(?:reports$|admin\/|creator-application\/receiving-account$|creator\/tips\/|creator\/tip-settings$|(?:creator\/)?commissions(?:\/|$))/u.test(new URL(request.url).pathname)) return execute();
+    if (!/^\/api\/v1\/(?:reports$|help\/appeals$|admin\/|creator-application\/receiving-account$|creator\/tips\/|creator\/tip-settings$|(?:creator\/)?commissions(?:\/|$))/u.test(new URL(request.url).pathname)) return execute();
     try {
       const url = new URL(request.url); const raw = await body(request);
       if (raw === null) return json(413, { code: "INVALID_REQUEST" });

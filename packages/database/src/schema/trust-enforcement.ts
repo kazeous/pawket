@@ -190,3 +190,22 @@ export const trustHelpLinkRequests = pgTable("trust_help_link_requests", {
   check("trust_help_link_requests_outcome_check", sql`${t.outcome} in ('issued','ignored','rate_limited')`),
   check("trust_help_link_requests_time_check", sql`${t.expiresAt} > ${t.createdAt} and ${t.expiresAt} <= ${t.createdAt} + interval '24 hours'`),
 ]);
+
+export const trustAppeals = pgTable("trust_appeals", {
+  id: uuid("id").primaryKey(), appellantUserId: text("appellant_user_id").notNull().references(() => identityUsers.id, reference),
+  penaltyId: uuid("penalty_id").references(() => trustPenalties.id, reference), hideId: uuid("hide_id").references(() => trustContentHides.id, reference),
+  statementEnvelope: jsonb("statement_envelope").$type<Envelope>().notNull(), submittedVia: text("submitted_via").$type<"session" | "help_link">().notNull(),
+  caseId: uuid("case_id").notNull().references(() => trustCases.id, reference), state: text("state").$type<"open" | "upheld" | "reduced" | "reversed">().notNull().default("open"),
+  reasoningEnvelope: jsonb("reasoning_envelope").$type<Envelope>(), decidedAt: time("decided_at"), decidedByUserId: text("decided_by_user_id").references(() => identityUsers.id, reference),
+  version: integer("version").notNull().default(1), createdAt: time("created_at").notNull(),
+}, (t) => [
+  uniqueIndex("trust_appeals_penalty_uidx").on(t.penaltyId), uniqueIndex("trust_appeals_hide_uidx").on(t.hideId), uniqueIndex("trust_appeals_case_uidx").on(t.caseId),
+  index("trust_appeals_appellant_idx").on(t.appellantUserId, t.createdAt, t.id), check("trust_appeals_target_check", sql`num_nonnulls(${t.penaltyId}, ${t.hideId}) = 1`),
+  check("trust_appeals_via_check", sql`${t.submittedVia} in ('session','help_link') and (${t.submittedVia} <> 'help_link' or ${t.penaltyId} is not null)`),
+  check("trust_appeals_statement_check", commissionEnvelopeCheck(t.statementEnvelope)),
+  check("trust_appeals_reasoning_check", sql`${t.reasoningEnvelope} is null or ${commissionEnvelopeCheck(t.reasoningEnvelope)}`),
+  check("trust_appeals_decision_check", sql`(${t.state} = 'open' and ${t.reasoningEnvelope} is null and ${t.decidedAt} is null and ${t.decidedByUserId} is null)
+    or (${t.state} in ('upheld','reduced','reversed') and ${t.reasoningEnvelope} is not null and ${t.decidedAt} is not null and ${t.decidedByUserId} is not null
+      and ${t.decidedAt} >= ${t.createdAt} and (${t.state} <> 'reduced' or ${t.penaltyId} is not null))`),
+  check("trust_appeals_version_check", sql`${t.version} > 0`),
+]);

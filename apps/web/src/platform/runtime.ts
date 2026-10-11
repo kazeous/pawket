@@ -78,7 +78,7 @@ import {
   createCommissionTrustPort,
   createTrustCasePort,
   createTrustCaseService,
-  createContentHideReadPort, createContentHideService, createPenaltyService,
+  createContentHideReadPort, createContentHideService, createPenaltyService, createAppealService,
   createHelpLinkService,
   createPrivateReportService, createTrustRestrictionPort, createTrustPolicyService,
 } from "@pawket/trust";
@@ -90,6 +90,7 @@ import { createResolutionHttpHandlers } from "./resolution-http.js";
 import { createCaseHttpHandlers } from "./case-http.js";
 import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
 import { createHelpLinkHttpHandlers } from "./help-link-http.js";
+import { createAppealHttpHandlers } from "./appeal-http.js";
 import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
@@ -126,6 +127,7 @@ export type WebPlatformRuntime = {
   mediaCommandHandlers: ReturnType<typeof createMediaCommandHttpHandlers>;
   mediaHandlers: ReturnType<typeof createMediaHttpHandlers>;
   media: ReturnType<typeof createPublicMediaService>;
+  appealHandlers: ReturnType<typeof createAppealHttpHandlers>;
   trustEnforcementHandlers: ReturnType<typeof createTrustEnforcementHttpHandlers>;
   privateReports: ReturnType<typeof createPrivateReportService>;
   trustHandlers: ReturnType<typeof createTrustHttpHandlers>;
@@ -540,22 +542,25 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const ownerResolution = createOwnerResolutionService(ownerKit, { ...resolutionCommon, applicationRevision: env.APP_REVISION, standing });
   const caseService = createTrustCaseService({ db: database.db, applicationRevision: env.APP_REVISION, consumeStepUpProof: commandContext.consumeOwnerProof,
     deadlines: createResolutionCaseDeadlinePort({ refunds }),
-    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides }) });
+    evidence: createCaseEvidencePort({ orders: commissions, refunds, view: resolutionView, files: commissionFiles, catalog: commissionCatalog, contentHides, keyring }) });
   const enforcementNotices = createEnforcementNoticePort({ keyring });
   const helpLogger = createLogger({ service: "web", env });
   const helpLinks = createHelpLinkService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, lookupHmacKey, notices: enforcementNotices, logger: helpLogger,
     canonicalizeEmail: (raw) => { try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; } } });
   const helpLinkHandlers = createHelpLinkHttpHandlers({ appBaseUrl: env.APP_BASE_URL, lookupHmacKey, helpLinks, logger: helpLogger });
+  const enforcementIdentity = createIdentityEnforcementPort({ clearPublishedHeadForSuspension: (tx, command) => {
+    if (command.actorUserId === null || command.actorSessionId === null) resolutionFail("dependency_unavailable");
+    return catalogService.clearPublishedHeadForSuspension(tx, { ...command, actorUserId: command.actorUserId, actorSessionId: command.actorSessionId });
+  } });
+  const enforcementCommon = { db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
+    consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator } };
+  const penalties = createPenaltyService({ ...enforcementCommon, policies: trustPolicies, helpLinks, notices: enforcementNotices,
+    identity: enforcementIdentity, freeze: createRemovalFreezePort(resolutionCommon) });
+  const hideService = createContentHideService(enforcementCommon);
+  const appeals = createAppealService({ ...enforcementCommon, penalties, hides: hideService, helpLinks, identity: enforcementIdentity });
+  const appealHandlers = createAppealHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, appeals });
   const caseHandlers = createCaseHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, cases: caseService, owner: ownerResolution, lateClaims, suspension,
-    penalties: createPenaltyService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
-      consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator }, policies: trustPolicies,
-      helpLinks, notices: enforcementNotices,
-      identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: (tx, command) => {
-        if (command.actorUserId === null || command.actorSessionId === null) resolutionFail("dependency_unavailable");
-        return catalogService.clearPublishedHeadForSuspension(tx, { ...command, actorUserId: command.actorUserId, actorSessionId: command.actorSessionId });
-      } }), freeze: createRemovalFreezePort(resolutionCommon) }),
-    contentHides: createContentHideService({ db: database.db, mode: env.TRUST_ENFORCEMENT_MODE, keyring, lookupHmacKey, applicationRevision: env.APP_REVISION,
-      consumeStepUpProof: commandContext.consumeOwnerProof, fence: { lockCreatorFence: lockCommissionCreator } }),
+    penalties, contentHides: hideService, appeals,
     issueOwnerStepUpProof: commandContext.issueOwnerProof,
     async authorizeOwner(headers) {
       const actor = await authenticate(headers); if (!actor) return "unauthenticated";
@@ -723,6 +728,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     mediaCommandHandlers,
     mediaHandlers,
     media: mediaService,
+    appealHandlers: { ...commandHttp.wrap({ submit: appealHandlers.submit }), lockedSubmit: appealHandlers.lockedSubmit },
     trustEnforcementHandlers: commandHttp.wrap(trustEnforcementHandlers),
     privateReports,
     trustHandlers: commandHttp.wrap(trustHandlers),

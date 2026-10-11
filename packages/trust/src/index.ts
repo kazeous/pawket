@@ -47,3 +47,4 @@ export { createContentHideService, type ContentHideService, type OwnerCase } fro
 export { createPenaltyService, type PenaltyService, type ApplyPenaltyCommand, type EndPenaltyCommand } from "./penalty-service.js";
 export type { EnforcementNoticePort } from "./enforcement-notice-port.js";
 export { createHelpLinkService, type HelpLinkService } from "./help-link-service.js";
+export { createAppealService, type AppealService, type SubmitAppealCommand, type DecideAppealCommand, type AppealReplacement, type AppealTarget } from "./appeal-service.js";

@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { TrustEnforcementError } from "@pawket/trust";
 import { createTrustEnforcementHttpHandlers } from "../src/platform/trust-enforcement-http.js";
 import { oidcCommand } from "../src/platform/oidc-command-registry.js";
+import { createAppealHttpHandlers } from "../src/platform/appeal-http.js";
 
 const origin = "https://pawket.example.invalid";
 const actor = { userId: "synthetic-user", sessionId: "synthetic-session" };
@@ -54,5 +55,41 @@ describe("trust reports HTTP", () => {
   test("OIDC registry assigns a non-fresh party action", () => {
     const command = oidcCommand({ method: "POST", path: "/api/v1/reports", body: "{}", idempotencyKey: "key", ifMatch: null, returnPath: "/" });
     expect(command?.policy).toEqual({ actionClass: "trust.report_submit", fresh: false });
+  });
+});
+
+describe("appeals HTTP", () => {
+  function appealFixture() {
+    const appeals = { submit: vi.fn().mockResolvedValue({ appealId: target.packageId, caseId: target.revisionId }) };
+    const authenticate = vi.fn().mockResolvedValue(actor);
+    return { appeals, authenticate, http: createAppealHttpHandlers({ appBaseUrl: origin, appeals, authenticate }) };
+  }
+  const body = { target: { penaltyId: target.packageId }, statement: "Xin xem lại" };
+  test("session identity is authoritative, non-fresh OIDC registered, private response", async () => {
+    const f = appealFixture(); const response = await f.http.submit(request(body));
+    expect(response.status).toBe(202);
+    expect(f.appeals.submit).toHaveBeenCalledWith(expect.objectContaining({ appellant: { kind: "session", actor }, ...body, idempotencyKey: "synthetic-key" }));
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(oidcCommand({ method: "POST", path: "/api/v1/help/appeals", body: "{}", idempotencyKey: "key", ifMatch: null, returnPath: "/" })?.policy).toEqual({ actionClass: "trust.appeal_submit", fresh: false });
+    expect(oidcCommand({ method: "POST", path: `/api/v1/admin/cases/${target.packageId}/actions`, body: JSON.stringify({ action: "decide_appeal" }), idempotencyKey: "key", ifMatch: null, returnPath: "/" })?.policy).toEqual({ actionClass: "owner.trust_appeal_decide", fresh: true });
+  });
+  test("help appeal reads only one pawket_help cookie and needs no signed-in session", async () => {
+    const f = appealFixture(); const sessionToken = "a".repeat(43);
+    expect((await f.http.lockedSubmit(request(body, { cookie: `unrelated=x; pawket_help=${sessionToken}` }))).status).toBe(202);
+    expect(f.authenticate).not.toHaveBeenCalled();
+    expect(f.appeals.submit).toHaveBeenCalledWith(expect.objectContaining({ appellant: { kind: "help_session", sessionToken } }));
+    for (const cookie of ["", "pawket_help=invalid", `pawket_help=${sessionToken}; pawket_help=${sessionToken}`]) expect((await f.http.lockedSubmit(request(body, { cookie }))).status).toBe(401);
+  });
+  test("authentication, origin, query, idempotency and exact shapes are checked before submit", async () => {
+    const f = appealFixture(); f.authenticate.mockResolvedValueOnce(null);
+    expect((await f.http.submit(request(body))).status).toBe(401);
+    expect((await f.http.submit(request(body, { origin: "https://foreign.invalid" }))).status).toBe(403);
+    const missing = request(body); missing.headers.delete("idempotency-key"); expect((await f.http.submit(missing)).status).toBe(400);
+    for (const value of [{ ...body, userId: "someone" }, { ...body, target: { penaltyId: target.packageId, hideId: target.revisionId } }, { ...body, sessionToken: "secret" }]) expect((await f.http.submit(request(value))).status).toBe(400);
+    expect(f.appeals.submit).not.toHaveBeenCalled();
+  });
+  test.each([["duplicate", 409], ["window_closed", 409], ["not_available", 404], ["enforcement_disabled", 503], ["invalid_request", 400]] as const)("%s returns %s without sensitive details", async (code, status) => {
+    const f = appealFixture(); f.appeals.submit.mockRejectedValue(new TrustEnforcementError(code));
+    const response = await f.http.submit(request(body)); expect(response.status).toBe(status); expect(await response.json()).toEqual({ code });
   });
 });

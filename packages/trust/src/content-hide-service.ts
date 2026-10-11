@@ -112,6 +112,18 @@ export function createContentHideService(input: Input) {
     }
   }
   return {
+    /** Internal appeal path. Caller holds the content owner's fence/user lock and the appeal decision proof. */
+    async releaseForAppeal(tx: PawketTransaction, c: { hideId: string; requestId: string; at: Date }): Promise<void> {
+      if (input.mode !== "enabled") trustFail("enforcement_disabled");
+      if (!validUuid(c.hideId) || !identifier(c.requestId) || !(c.at instanceof Date) || !Number.isFinite(c.at.getTime())) trustFail("invalid_request");
+      const [hide] = await tx.select().from(trustContentHides).where(eq(trustContentHides.id, c.hideId)).limit(1).for("update");
+      if (!hide) trustFail("not_available");
+      if (c.at < hide.hiddenAt) trustFail("invalid_request");
+      if (hide.releasedAt !== null) return;
+      await tx.update(trustContentHides).set({ releasedAt: c.at, releasedByUserId: null, releaseKind: "appeal_reversed", releaseRequestId: c.requestId }).where(eq(trustContentHides.id, hide.id));
+      await insertOutboxEvent(tx, { eventType: "trust.content_restored.v1", eventVersion: 1, aggregateType: "trust_content_hide", aggregateId: hide.id,
+        payload: { hideId: hide.id, caseId: hide.caseId, targetKind: hide.targetKind }, occurredAt: c.at });
+    },
     async hide(command: OwnerCase & { reason: string }): Promise<{ hideId: string }> { return { hideId: await execute("hide", command) }; },
     async restore(command: OwnerCase & { hideId: string; reason: string }): Promise<void> { await execute("restore", command); },
     async closeReportCase(command: OwnerCase & { resolution: "dismissed" | "actioned"; reason: string }): Promise<void> { await execute("report_close", command); },

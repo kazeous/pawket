@@ -86,9 +86,9 @@ export function createHelpLinkService(input: Input) {
         return { sessionToken, penaltyId: p.id, expiresAt };
       }));
     },
-    async readSession(sessionToken: string): Promise<{ userId: string; penaltyId: string; canAppeal: boolean; readOnlyUntil: Date } | null> {
+    async readSession(sessionToken: string, transaction?: PawketTransaction): Promise<{ userId: string; penaltyId: string; canAppeal: boolean; readOnlyUntil: Date } | null> {
       if (!tokenValid(sessionToken)) return null;
-      return boundary(() => input.db.transaction(async (tx) => {
+      const read = async (tx: PawketTransaction) => {
         const at = time(clock());
         const [row] = await tx.select({ session: trustHelpSessions, link: trustHelpLinks, penalty: trustPenalties }).from(trustHelpSessions)
           .innerJoin(trustHelpLinks, eq(trustHelpLinks.id, trustHelpSessions.linkId)).innerJoin(trustPenalties, eq(trustPenalties.id, trustHelpSessions.penaltyId))
@@ -97,7 +97,8 @@ export function createHelpLinkService(input: Input) {
         if (!row || row.session.userId !== row.link.userId || row.link.penaltyId !== row.penalty.id || row.session.userId !== row.penalty.subjectUserId || !readable(row.penalty, at)) return null;
         const deadline = await effectiveEnforcementDeadline(tx, plus(row.penalty.createdAt, policy.appealWindowMs));
         return { userId: row.session.userId, penaltyId: row.penalty.id, canAppeal: input.mode === "enabled" && active(row.penalty, at) && deadline !== null && deadline > at, readOnlyUntil: row.link.readUntil };
-      }));
+      };
+      return boundary(() => transaction ? read(transaction) : input.db.transaction(read));
     },
     async requestLink(command: { email: string; networkKeyHmac: string }): Promise<void> {
       if (typeof command.email !== "string" || !networkPattern.test(command.networkKeyHmac)) return;

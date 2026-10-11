@@ -33,6 +33,21 @@ const routes = (s: ReturnType<typeof setup>) => [
   () => s.http.agingRefunds(request("refunds/aging")),
 ];
 describe("owner case HTTP", () => {
+  test("appeal decision dispatches expected version and server-issued action proof for an orderless appeal", async () => {
+    const s = setup(); const decide = vi.fn(async () => undefined);
+    s.cases.getCase.mockResolvedValue({ ...await s.cases.getCase(), kind: "appeal", sourceType: "trust_appeal", orderId: null });
+    const http = createCaseHttpHandlers({ ...s.input, appeals: { decide } });
+    const body = { action: "decide_appeal", decision: "reduced", expectedCaseVersion: 1, reasoning: "Xin xem lại",
+      replacement: { kind: "restriction", restriction: "reporting", endsAt: null } };
+    expect((await http.action(request(`cases/${caseId}/actions`, "POST", body), caseId)).status).toBe(200);
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ owner, caseId, decision: "reduced", expectedCaseVersion: 1, replacement: body.replacement }));
+    expect(s.input.issueOwnerStepUpProof).toHaveBeenCalledWith(expect.objectContaining({ actionClass: "owner.trust_appeal_decide" }));
+    expect(s.input.orderMetadata.readForOrder).not.toHaveBeenCalled();
+    expect((await http.action(request(`cases/${caseId}/actions`, "POST", { ...body, stepUpProofId: fileId }), caseId)).status).toBe(400);
+    vi.mocked(s.input.authorizeOwner).mockResolvedValue("forbidden");
+    expect((await http.action(request(`cases/${caseId}/actions`, "POST", body), caseId)).status).toBe(403);
+    expect(decide).toHaveBeenCalledOnce();
+  });
   test.each(["dispute", "report", "late_payment", "refund_overdue", "refund_not_received", "appeal"])("penalty dispatch accepts %s cases and binds source/proof server-side", async (kind) => {
     const s = setup(); s.cases.getCase.mockResolvedValue({ ...await s.cases.getCase(), kind, orderId: null });
     const apply = vi.fn(async () => ({ penaltyId: fileId }));

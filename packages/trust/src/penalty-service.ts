@@ -54,7 +54,7 @@ function ownerCommand(row: Record<string, unknown>): OwnerCommand {
   return { owner: actor(row.owner), stepUpProofId: row.stepUpProofId, idempotencyKey: row.idempotencyKey, requestId: row.requestId };
 }
 function time(at: Date) { if (!(at instanceof Date) || !Number.isFinite(at.getTime())) trustFail("invalid_request"); return new Date(at); }
-function normalizeApply(command: unknown) {
+function normalizeApply(command: unknown, explanationMax: number = TRUST_ENFORCEMENT_POLICY.explanationMax) {
   const row = exact(command, ["owner", "stepUpProofId", "idempotencyKey", "requestId", "subjectUserId", "source", "kind", "reasonCategory", "explanation"], ["restriction", "target", "endsAt", "internalNote", "freezeFulfilment"]);
   const base = ownerCommand(row);
   if (!caseIdentifier(row.subjectUserId) || !(TRUST_PENALTY_KINDS as readonly unknown[]).includes(row.kind) || !(TRUST_PENALTY_REASONS as readonly unknown[]).includes(row.reasonCategory)) trustFail("invalid_request");
@@ -74,7 +74,7 @@ function normalizeApply(command: unknown) {
   }
   return { ...base, subjectUserId: row.subjectUserId, sourceCaseId: (source.caseId ?? null) as string | null, sourcePublicReportId: (source.publicReportId ?? null) as string | null,
     kind, restriction: restriction as TrustRestriction | null, target: target as TrustPenaltyTarget | null, endsAt, reasonCategory: row.reasonCategory as TrustPenaltyReason,
-    explanation: normalizeTrustText(row.explanation, 1, TRUST_ENFORCEMENT_POLICY.explanationMax, { multiline: true }),
+    explanation: normalizeTrustText(row.explanation, 1, explanationMax, { multiline: true }),
     internalNote: row.internalNote === undefined ? null : normalizeTrustText(row.internalNote, 1, TRUST_ENFORCEMENT_POLICY.internalNoteMax, { multiline: true }), freezeFulfilment: row.freezeFulfilment === true };
 }
 
@@ -168,7 +168,7 @@ export function createPenaltyService(input: Input) {
   async function end(tx: PawketTransaction, c: EndPenaltyCommand): Promise<void> {
     if (!validUuid(c.penaltyId) || !["expired", "lifted", "reversed", "reduced"].includes(c.state) || !caseIdentifier(c.requestId)) trustFail("invalid_request"); const at = time(c.at);
     if (c.actor !== null) { actor({ userId: c.actor.userId, sessionId: c.actor.sessionId }); if (!validUuid(c.actor.stepUpProofId)) trustFail("invalid_request"); }
-    const reason = c.reason === null ? null : normalizeTrustText(c.reason, 1, TRUST_ENFORCEMENT_POLICY.actionReasonMax);
+    const reason = c.reason === null ? null : normalizeTrustText(c.reason, 1, c.state === "reversed" || c.state === "reduced" ? TRUST_ENFORCEMENT_POLICY.decisionReasoningMax : TRUST_ENFORCEMENT_POLICY.actionReasonMax, { multiline: c.state === "reversed" || c.state === "reduced" });
     const [candidate] = await tx.select({ userId: trustPenalties.subjectUserId }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1); if (!candidate) trustFail("not_available");
     await lockSubject(tx, candidate.userId);
     const [row] = await tx.select().from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1).for("update"); if (!row) trustFail("not_available");
@@ -181,6 +181,58 @@ export function createPenaltyService(input: Input) {
     await insertOutboxEvent(tx, { eventType: "trust.penalty_ended.v1", eventVersion: 1, aggregateType: "trust_penalty", aggregateId: row.id,
       payload: { penaltyId: row.id, subjectUserId: row.subjectUserId, state: c.state }, occurredAt: at });
   }
+  async function applyInternal(tx: PawketTransaction, c: ReturnType<typeof normalizeApply>, at: Date, replacesPenaltyId: string | null = null): Promise<{ penaltyId: string }> {
+    const subject = await lockSubject(tx, c.subjectUserId); if (subject.isOwner) trustFail("not_authorized");
+    if (c.target === "creator_capability" && !subject.capability) trustFail("not_available");
+    const source = c.sourceCaseId === null ? null : await sourceCase(tx, c.sourceCaseId, c.subjectUserId);
+    if (c.sourcePublicReportId !== null) await sourcePublicReport(tx, c.sourcePublicReportId, c.subjectUserId);
+
+    if (c.endsAt !== null && (c.endsAt <= at || c.endsAt.getTime() - at.getTime() > 3_650 * 86_400_000)) trustFail("invalid_request");
+    if (c.kind !== "warning") {
+      const [duplicate] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"),
+        lte(trustPenalties.startsAt, at), or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, at)),
+        c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)))).limit(1);
+      if (duplicate) trustFail("duplicate");
+    }
+
+    if (c.kind !== "warning") {
+      // The active-row unique indexes also include penalties awaiting expiry maintenance.
+      // End elapsed matches atomically before inserting their replacement, using the normal expiry path.
+      const elapsed = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
+        eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, at), lte(trustPenalties.endsAt, at),
+        c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)),
+      )).for("update");
+      for (const penalty of elapsed) await end(tx, { penaltyId: penalty.id, state: "expired", actor: null, requestId: c.requestId, at, reason: null });
+    }
+    const penaltyId = id(); const policy = await input.policies.readCurrentIds(tx);
+    const [row] = await tx.insert(trustPenalties).values({ id: penaltyId, subjectUserId: c.subjectUserId, kind: c.kind, restriction: c.restriction, target: c.target, reasonCategory: c.reasonCategory,
+      explanationEnvelope: encrypt("trust_penalties", penaltyId, "explanation", c.explanation), internalNoteEnvelope: c.internalNote === null ? null : encrypt("trust_penalties", penaltyId, "internal_note", c.internalNote),
+      sourceCaseId: c.sourceCaseId, sourcePublicReportId: c.sourcePublicReportId, enforcementPolicyRevisionId: policy.enforcementRevisionId, replacesPenaltyId,
+      startsAt: at, endsAt: c.endsAt, ownerUserId: c.owner.userId, ownerSessionId: c.owner.sessionId, stepUpProofId: c.stepUpProofId, requestId: c.requestId, createdAt: at }).returning();
+    if (!row) trustFail("dependency_unavailable");
+    await record(tx, row, "applied", { actor: c.owner, reason: null, requestId: c.requestId, at }, 0);
+    if (source?.state === "open") await cases.recordCaseEvent(tx, { caseId: source.id, action: "penalty_applied", actor: c.owner, reason: null, requestId: c.requestId, at });
+    const effect = { actor: { ...c.owner, stepUpProofId: c.stepUpProofId }, requestId: c.requestId, at, penaltyId, userId: c.subjectUserId };
+    // Recompute prevents a new suspension from weakening a pre-existing removal.
+    if (c.kind === "suspension" || c.kind === "removal") await recomputeStanding(tx, c.subjectUserId, effect);
+    if (c.target === "account" && (c.kind === "suspension" || c.kind === "removal")) {
+      const { token } = await input.helpLinks.issue(tx, { userId: c.subjectUserId, penaltyId, at }, { subjectLocked: true });
+      await input.notices.queue(tx, { userId: c.subjectUserId, penaltyId, token, kind: c.kind, endsAt: c.endsAt, at });
+    }
+    if (c.kind === "removal" && (c.target === "creator_capability" || subject.capability) || c.freezeFulfilment) {
+      await input.freeze.freezeForRemoval(tx, { creatorUserId: c.subjectUserId, actor: c.owner, requestId: c.requestId, at });
+    }
+    await audit(tx, c, row, replacesPenaltyId === null ? "owner.trust_penalty_apply" : "owner.trust_appeal_decide", null, at);
+    await insertOutboxEvent(tx, { eventType: "trust.penalty_applied.v1", eventVersion: 1, aggregateType: "trust_penalty", aggregateId: penaltyId, payload: { penaltyId, subjectUserId: c.subjectUserId, kind: c.kind }, occurredAt: at });
+    return { penaltyId };
+  }
+  /** Internal appeal path: caller owns the subject fence, user lock and decision proof in this transaction. */
+  async function applyReplacement(tx: PawketTransaction, command: ApplyPenaltyCommand & { replacesPenaltyId: string }, at: Date) {
+    if (input.mode !== "enabled") trustFail("enforcement_disabled");
+    const { replacesPenaltyId, ...application } = command;
+    if (!validUuid(replacesPenaltyId)) trustFail("invalid_request");
+    return applyInternal(tx, normalizeApply(application, TRUST_ENFORCEMENT_POLICY.decisionReasoningMax), time(at), replacesPenaltyId);
+  }
   function projection(row: Penalty) {
     return { penaltyId: row.id, subjectUserId: row.subjectUserId, kind: row.kind, restriction: row.restriction, target: row.target, state: row.state, reasonCategory: row.reasonCategory,
       explanation: decryptSensitiveField({ keyring: input.keyring, envelope: row.explanationEnvelope, binding: { recordType: "trust_penalties", recordId: row.id, fieldName: "explanation" } }),
@@ -188,54 +240,17 @@ export function createPenaltyService(input: Input) {
       startsAt: row.startsAt.toISOString(), endsAt: row.endsAt?.toISOString() ?? null, endedAt: row.endedAt?.toISOString() ?? null, acknowledgedAt: row.acknowledgedAt?.toISOString() ?? null, version: row.version };
   }
   return {
-    end, recomputeStanding,
+    end, recomputeStanding, applyReplacement,
     async apply(command: ApplyPenaltyCommand): Promise<{ penaltyId: string }> {
       if (input.mode !== "enabled") trustFail("enforcement_disabled"); const c = normalizeApply(command);
       return boundary(() => input.db.transaction(async (tx) => {
         const { result: started, at: startedAt } = await begin(tx, c.owner.userId, "apply", c.idempotencyKey, [c.subjectUserId, c.sourceCaseId, c.sourcePublicReportId, c.kind, c.restriction, c.target, c.endsAt, c.reasonCategory, c.explanation, c.internalNote, c.freezeFulfilment]);
         if (started.kind === "replay") return { penaltyId: started.resultReference };
-        const subject = await lockSubject(tx, c.subjectUserId); if (subject.isOwner) trustFail("not_authorized");
-        if (c.target === "creator_capability" && !subject.capability) trustFail("not_available");
-        const source = c.sourceCaseId === null ? null : await sourceCase(tx, c.sourceCaseId, c.subjectUserId);
-        if (c.sourcePublicReportId !== null) await sourcePublicReport(tx, c.sourcePublicReportId, c.subjectUserId);
+        // Lock before consuming the proof; internal application reuses this same fence and subject.
+        await lockSubject(tx, c.subjectUserId);
         const at = now(); if (at < startedAt) trustFail("dependency_unavailable");
-        if (c.endsAt !== null && (c.endsAt <= at || c.endsAt.getTime() - at.getTime() > 3_650 * 86_400_000)) trustFail("invalid_request");
-        if (c.kind !== "warning") {
-          const [duplicate] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"),
-            lte(trustPenalties.startsAt, at), or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, at)),
-            c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)))).limit(1);
-          if (duplicate) trustFail("duplicate");
-        }
         await proof(tx, c, "owner.trust_penalty_apply", at);
-        if (c.kind !== "warning") {
-          // The active-row unique indexes also include penalties awaiting expiry maintenance.
-          // End elapsed matches atomically before inserting their replacement, using the normal expiry path.
-          const elapsed = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
-            eq(trustPenalties.subjectUserId, c.subjectUserId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, at), lte(trustPenalties.endsAt, at),
-            c.kind === "restriction" ? and(eq(trustPenalties.kind, "restriction"), eq(trustPenalties.restriction, c.restriction!)) : and(eq(trustPenalties.kind, c.kind), eq(trustPenalties.target, c.target!)),
-          )).for("update");
-          for (const penalty of elapsed) await end(tx, { penaltyId: penalty.id, state: "expired", actor: null, requestId: c.requestId, at, reason: null });
-        }
-        const penaltyId = id(); const policy = await input.policies.readCurrentIds(tx);
-        const [row] = await tx.insert(trustPenalties).values({ id: penaltyId, subjectUserId: c.subjectUserId, kind: c.kind, restriction: c.restriction, target: c.target, reasonCategory: c.reasonCategory,
-          explanationEnvelope: encrypt("trust_penalties", penaltyId, "explanation", c.explanation), internalNoteEnvelope: c.internalNote === null ? null : encrypt("trust_penalties", penaltyId, "internal_note", c.internalNote),
-          sourceCaseId: c.sourceCaseId, sourcePublicReportId: c.sourcePublicReportId, enforcementPolicyRevisionId: policy.enforcementRevisionId,
-          startsAt: at, endsAt: c.endsAt, ownerUserId: c.owner.userId, ownerSessionId: c.owner.sessionId, stepUpProofId: c.stepUpProofId, requestId: c.requestId, createdAt: at }).returning();
-        if (!row) trustFail("dependency_unavailable");
-        await record(tx, row, "applied", { actor: c.owner, reason: null, requestId: c.requestId, at }, 0);
-        if (source?.state === "open") await cases.recordCaseEvent(tx, { caseId: source.id, action: "penalty_applied", actor: c.owner, reason: null, requestId: c.requestId, at });
-        const effect = { actor: { ...c.owner, stepUpProofId: c.stepUpProofId }, requestId: c.requestId, at, penaltyId, userId: c.subjectUserId };
-        // Recompute prevents a new suspension from weakening a pre-existing removal.
-        if (c.kind === "suspension" || c.kind === "removal") await recomputeStanding(tx, c.subjectUserId, effect);
-        if (c.target === "account" && (c.kind === "suspension" || c.kind === "removal")) {
-          const { token } = await input.helpLinks.issue(tx, { userId: c.subjectUserId, penaltyId, at }, { subjectLocked: true });
-          await input.notices.queue(tx, { userId: c.subjectUserId, penaltyId, token, kind: c.kind, endsAt: c.endsAt, at });
-        }
-        if (c.kind === "removal" && (c.target === "creator_capability" || subject.capability) || c.freezeFulfilment) {
-          await input.freeze.freezeForRemoval(tx, { creatorUserId: c.subjectUserId, actor: c.owner, requestId: c.requestId, at });
-        }
-        await audit(tx, c, row, "owner.trust_penalty_apply", null, at);
-        await insertOutboxEvent(tx, { eventType: "trust.penalty_applied.v1", eventVersion: 1, aggregateType: "trust_penalty", aggregateId: penaltyId, payload: { penaltyId, subjectUserId: c.subjectUserId, kind: c.kind }, occurredAt: at });
+        const { penaltyId } = await applyInternal(tx, c, at);
         await complete(tx, started.recordId, penaltyId, at); return { penaltyId };
       }));
     },
