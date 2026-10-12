@@ -38,6 +38,40 @@ function withoutReporterFields(value: unknown): unknown {
 }
 /** Private composition, supplied only to Trust's open-case, audited evidence path. */
 export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
+  const stageAKinds = ["dispute", "refund_not_received", "refund_overdue", "late_payment"];
+  async function appealOrigin(tx: PawketTransaction, caseId: string) {
+    const [appeal] = await tx.select({ appeal: trustAppeals }).from(trustAppeals).innerJoin(trustCases, eq(trustCases.id, trustAppeals.caseId))
+      .where(and(eq(trustCases.id, caseId), eq(trustCases.kind, "appeal"), eq(trustCases.sourceId, trustAppeals.id))).limit(1);
+    if (!appeal) throw new TrustCaseError("not_available");
+    const row = appeal.appeal;
+    const [penalty] = row.penaltyId === null ? [] : await tx.select().from(trustPenalties).where(eq(trustPenalties.id, row.penaltyId)).limit(1);
+    const [hide] = row.hideId === null ? [] : await tx.select().from(trustContentHides).where(eq(trustContentHides.id, row.hideId)).limit(1);
+    if (!penalty && !hide) throw new TrustCaseError("not_available");
+    const sourceCaseId = penalty?.sourceCaseId ?? hide?.caseId ?? null;
+    const [source] = sourceCaseId === null ? [] : await tx.select().from(trustCases).where(eq(trustCases.id, sourceCaseId)).limit(1);
+    return { row, penalty, hide, source };
+  }
+  async function fileInScope(tx: PawketTransaction, caseId: string, fileId: string, visited = new Set<string>()): Promise<boolean> {
+    if (visited.has(caseId)) return false;
+    visited.add(caseId);
+    const [row] = await tx.select().from(trustCases).where(eq(trustCases.id, caseId)).limit(1);
+    if (!row || row.orderId === null) return false;
+    if (stageAKinds.includes(row.kind)) return true;
+    if (row.kind === "appeal") {
+      const { source } = await appealOrigin(tx, caseId);
+      return source ? fileInScope(tx, source.id, fileId, visited) : false;
+    }
+    if (row.kind !== "report") return false;
+    if (row.sourceType === "commission_brief") {
+      const order = await input.orders.readOrderForCase(tx, row.orderId);
+      return order.referenceFiles.some((file) => file.fileId === fileId);
+    }
+    if (row.sourceType !== "commission_file" && row.sourceType !== "commission_message") return false;
+    const page = await input.orders.readThreadForCase(tx, { orderId: row.orderId, limit: 50, reportTarget: { kind: row.sourceType, id: row.sourceId } });
+    const carrier = row.sourceType === "commission_message" ? page.items.find((item) => item.kind === "message" && item.id === row.sourceId)
+      : page.items.find((item) => item.files.some((file) => file.fileId === row.sourceId));
+    return carrier?.files.some((file) => file.fileId === fileId) ?? false;
+  }
   async function report(tx: PawketTransaction, caseId: string) {
     const [row] = await tx.select({ sourceType: trustCases.sourceType, sourceId: trustCases.sourceId, orderId: trustCases.orderId,
       packageRevisionId: trustReports.packageRevisionId }).from(trustCases).innerJoin(trustReports, eq(trustReports.caseId, trustCases.id))
@@ -54,19 +88,13 @@ export function createCaseEvidencePort(input: Input): TrustCaseEvidencePort {
     return input.catalog.readRevisionForCase(tx, row.packageRevisionId);
   }
   const port: TrustCaseEvidencePort = {
+    fileInScope: (tx, caseId, fileId) => available(() => fileInScope(tx, caseId, fileId)),
     appealSource: (tx, caseId) => available(async () => {
-      const [appeal] = await tx.select({ appeal: trustAppeals }).from(trustAppeals).innerJoin(trustCases, eq(trustCases.id, trustAppeals.caseId))
-        .where(and(eq(trustCases.id, caseId), eq(trustCases.kind, "appeal"), eq(trustCases.sourceId, trustAppeals.id))).limit(1);
-      if (!appeal || !input.keyring) throw new TrustCaseError("not_available");
-      const row = appeal.appeal;
-      const [penalty] = row.penaltyId === null ? [] : await tx.select().from(trustPenalties).where(eq(trustPenalties.id, row.penaltyId)).limit(1);
-      const [hide] = row.hideId === null ? [] : await tx.select().from(trustContentHides).where(eq(trustContentHides.id, row.hideId)).limit(1);
-      if (!penalty && !hide) throw new TrustCaseError("not_available");
-      const sourceCaseId = penalty?.sourceCaseId ?? hide?.caseId ?? null;
-      const [source] = sourceCaseId === null ? [] : await tx.select().from(trustCases).where(eq(trustCases.id, sourceCaseId)).limit(1);
+      if (!input.keyring) throw new TrustCaseError("not_available");
+      const { row, penalty, hide, source } = await appealOrigin(tx, caseId);
       const sections: Record<string, unknown> = {};
       // These readers operate in the appeal's already-authorized transaction; access is logged against the appeal case.
-      if (source?.orderId !== null && source?.orderId !== undefined) {
+      if (source && stageAKinds.includes(source.kind) && source.orderId !== null) {
         sections.order_summary = await port.orderSummary(tx, source.orderId);
         sections.thread_page = await port.threadPage(tx, source.orderId);
         sections.resolution_records = await port.resolutionRecords(tx, source.orderId);

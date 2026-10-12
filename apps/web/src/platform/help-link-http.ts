@@ -41,6 +41,7 @@ export function createHelpLinkHttpHandlers(input: Input) {
     },
     async linkRequest(request: Request): Promise<Response> {
       const rejected = boundary(request); if (rejected) return rejected;
+      if (input.mode !== "enabled") return empty();
       try {
         const body = await readCommissionBody(request, z.strictObject({ email: z.string().max(512) }));
         const networkKeyHmac = deriveTrustedNetworkKey(request.headers, key);

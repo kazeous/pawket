@@ -38,6 +38,33 @@ async function revision(kind: string, number: number, document = "Synthetic poli
 }
 
 describe("trust enforcement database boundaries", () => {
+  test("help guards retain their schema and elapsed-hour windows across DST", async () => {
+    const subject = await seedPenaltySubject(client); const penaltyId = await insertTestPenalty(client, subject, { target: "account" });
+    const linkId = randomUUID(); const hash = () => `sha256:v1:${createHash("sha256").update(randomUUID()).digest("hex")}`;
+    await client.begin(async (tx) => {
+      await tx.unsafe("set local timezone to 'Europe/London'");
+      await tx`insert into trust_help_links (id, token_hash, user_id, penalty_id, issued_at, appeal_until, read_until)
+        values (${linkId}, ${hash()}, ${subject.userId}, ${penaltyId}, ${penaltyAt.toISOString()},
+          ${new Date(penaltyAt.getTime() + 336 * 3_600_000).toISOString()}, ${new Date(penaltyAt.getTime() + 2160 * 3_600_000).toISOString()})`;
+      await tx.unsafe("set local search_path to public");
+      await tx.unsafe(`insert into "${schemaName}".trust_help_sessions (id, session_hash, link_id, user_id, penalty_id, created_at, expires_at)
+        values ($1, $2, $3, $4, $5, $6, $7)`, [randomUUID(), hash(), linkId, subject.userId, penaltyId, penaltyAt.toISOString(), new Date(penaltyAt.getTime() + 1_800_000).toISOString()]);
+    });
+    const functions = await client`select proconfig from pg_proc join pg_namespace on pg_namespace.oid = pronamespace
+      where pg_namespace.nspname = ${schemaName} and proname in ('trust_help_link_guard', 'trust_help_session_guard')`;
+    expect(functions).toHaveLength(2); for (const fn of functions) expect(JSON.stringify(fn.proconfig)).toContain(schemaName);
+  });
+  test.each(["explanation", "internalNote"] as const)("penalty %s rejects malformed envelopes", async (field) => {
+    const subject = await seedPenaltySubject(client);
+    for (const invalid of [{}, { version: 1 }, [], "plaintext"]) await refused(insertTestPenalty(client, subject, { [field]: invalid }));
+    await insertTestPenalty(client, subject);
+  });
+  test("penalty events reject malformed reason envelopes and allow null", async () => {
+    const subject = await seedPenaltySubject(client); const penaltyId = await insertTestPenalty(client, subject);
+    const event = (reason: unknown) => client`insert into trust_penalty_events (id, penalty_id, action, actor_user_id, actor_session_id, reason_envelope, request_id, expected_version, resulting_version, occurred_at)
+      values (${randomUUID()}, ${penaltyId}, 'applied', ${subject.ownerUserId}, 'owner-session', ${reason === null ? null : JSON.stringify(reason)}::jsonb, 'test', 0, 1, ${penaltyAt.toISOString()})`;
+    await refused(event({})); await event(null);
+  });
   test("a second active suspension of the same target is rejected", async () => {
     const subject = await seedPenaltySubject(client);
     const first = await insertTestPenalty(client, subject);

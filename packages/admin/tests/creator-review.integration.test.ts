@@ -253,7 +253,8 @@ describe("owner creator review", () => {
       await tx`insert into trust_cases (id, kind, source_type, source_id, opened_at) values (${caseId}, 'report', 'commission_package', ${randomUUID()}, ${at})`;
       await tx`insert into trust_case_events (case_id, action, request_id, expected_version, resulting_version, after_state, occurred_at) values (${caseId}, 'opened', 'fixture', 0, 1, 'open', ${at})`;
     });
-    await client`insert into trust_penalties (id, subject_user_id, kind, target, reason_category, explanation_envelope, source_case_id, starts_at, owner_user_id, owner_session_id, step_up_proof_id, request_id, created_at) values (${penaltyId}, 'review-artist', 'suspension', 'creator_capability', 'other', '{}'::jsonb, ${caseId}, ${at}, 'review-owner', 'owner-session', ${proofId}, 'fixture', ${at})`;
+    const explanation = encryptSensitiveField({ keyring, plaintext: "Synthetic penalty", binding: { recordType: "trust_penalties", recordId: penaltyId, fieldName: "explanation" } });
+    await client`insert into trust_penalties (id, subject_user_id, kind, target, reason_category, explanation_envelope, source_case_id, starts_at, owner_user_id, owner_session_id, step_up_proof_id, request_id, created_at) values (${penaltyId}, 'review-artist', 'suspension', 'creator_capability', 'other', ${JSON.stringify(explanation)}::jsonb, ${caseId}, ${at}, 'review-owner', 'owner-session', ${proofId}, 'fixture', ${at})`;
     const identity = createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) });
     await db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${'commissions:creator:review-artist'}, 0))`);
@@ -261,6 +262,7 @@ describe("owner creator review", () => {
       await identity.setCreatorCapability(tx, { userId: "review-artist", state: "suspended", penaltyId, actor: { userId: "review-owner", sessionId: "owner-session", stepUpProofId: proofId }, requestId: randomUUID(), at: now });
     });
     await expect(enabled.setCreatorCapability({ ...command, action: "reinstate", idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "use_penalty" });
+    await expect(disabled.setCreatorCapability({ ...command, action: "reinstate", idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "use_penalty" });
   });
   test("rejects stale claims and permits a different owner to reclaim only after the 15-minute lease expires", async () => {
     type QueueItem = { state: string; version: number; claimedByCurrentOwner: boolean };

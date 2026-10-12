@@ -23,6 +23,11 @@ const report = () => caseDetailSchema.parse({ case: { caseId: id, orderId: id, s
 const appeal = () => caseDetailSchema.parse({ case: { ...report(), kind: "appeal", sourceType: "trust_appeal", appealAction: { penaltyId: id, kind: "restriction", restriction: "reporting", target: null, endsAt: "2027-01-01T00:00:00.000Z" } } }).case as TrustCaseDetailView;
 afterEach(() => { request.mockReset(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 function markup(element: ReactElement) { const node = document.createElement("div"); node.innerHTML = renderToStaticMarkup(element); return node; }
+test.each(["report", "appeal"] as const)("%s tabs never offer order-wide evidence", (kind) => {
+  const node = markup(<EvidenceTabs kind={kind} sourceType={kind === "report" ? "commission_brief" : "trust_appeal"} disabled={false} onRead={vi.fn()} onFile={vi.fn()} />);
+  const navigation = node.querySelector('[aria-label="Mục bằng chứng"]')!;
+  for (const label of ["Thông tin đơn hàng", "Tin nhắn và bàn giao", "Khiếu nại và hoàn tiền"]) expect(navigation.textContent).not.toContain(label);
+});
 async function mounted(element: ReactElement, run: (node: HTMLDivElement) => Promise<void>) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); const node = document.createElement("div"); document.body.append(node); const root = createRoot(node);
   try { await act(async () => root.render(element)); await run(node); } finally { await act(async () => root.unmount()); node.remove(); }

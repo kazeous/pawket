@@ -196,6 +196,14 @@ test("requestLink limits to 3 per address per day and 10 per network per hour, i
   c.setTime(new Date(reportAt.getTime() + 86_400_000)); await c.helpLinks.requestLink({ email: c.email, networkKeyHmac: network(31) });
   expect(await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.userId, c.p.creator.userId))).toHaveLength(5);
 });
+test("rate-limited requests never grow the request ledger", async () => {
+  const c = await context(); const networkKeyHmac = network(99);
+  for (let i = 0; i < 3; i++) await c.helpLinks.requestLink({ email: c.email, networkKeyHmac });
+  const rows = () => f.db.select().from(schema.trustHelpLinkRequests).where(eq(schema.trustHelpLinkRequests.networkKeyHmac, networkKeyHmac));
+  expect(await rows()).toHaveLength(3);
+  await Promise.all(Array.from({ length: 6 }, () => c.helpLinks.requestLink({ email: c.email, networkKeyHmac })));
+  expect(await rows()).toHaveLength(3);
+});
 test("disabled, unverified, creator-only and past-read-window resends are ignored with the same result", async () => {
   const c = await context();
   const disabled = createHelpLinkService({ ...helpInput, db: f.db, mode: "disabled", lookupHmacKey: fixtureLookupKey, notices: createEnforcementNoticePort({ keyring: fixtureKeyring }), now: () => reportAt });

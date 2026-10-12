@@ -36,6 +36,7 @@ describe("trust reports HTTP", () => {
   });
   test("authenticated submit uses only session identity and requires idempotency", async () => {
     const f = fixture(); const response = await f.http.submit(request()); expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ accepted: true, reportReference: `report:v2:${"a".repeat(32)}` });
     expect(f.reports.submit).toHaveBeenCalledWith(expect.objectContaining({ requester: { kind: "authenticated", actor }, idempotencyKey: "synthetic-key" }));
     const missing = request(); missing.headers.delete("idempotency-key"); expect((await f.http.submit(missing)).status).toBe(400);
     for (const header of ["cache-control", "referrer-policy", "x-content-type-options"]) expect(response.headers.has(header)).toBe(true);
@@ -84,6 +85,7 @@ describe("appeals HTTP", () => {
   test("session identity is authoritative, non-fresh OIDC registered, private response", async () => {
     const f = appealFixture(); const response = await f.http.submit(request(body));
     expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ appealId: target.packageId });
     expect(f.appeals.submit).toHaveBeenCalledWith(expect.objectContaining({ appellant: { kind: "session", actor }, ...body, idempotencyKey: "synthetic-key" }));
     expect(response.headers.get("cache-control")).toContain("no-store");
     expect(oidcCommand({ method: "POST", path: "/api/v1/help/appeals", body: "{}", idempotencyKey: "key", ifMatch: null, returnPath: "/" })?.policy).toEqual({ actionClass: "trust.appeal_submit", fresh: false });
@@ -91,7 +93,8 @@ describe("appeals HTTP", () => {
   });
   test("help appeal reads only one pawket_help cookie and needs no signed-in session", async () => {
     const f = appealFixture(); const sessionToken = "a".repeat(43);
-    expect((await f.http.lockedSubmit(request(body, { cookie: `unrelated=x; pawket_help=${sessionToken}` }))).status).toBe(202);
+    const response = await f.http.lockedSubmit(request(body, { cookie: `unrelated=x; pawket_help=${sessionToken}` }));
+    expect(response.status).toBe(202); expect(await response.json()).toEqual({ appealId: target.packageId });
     expect(f.authenticate).not.toHaveBeenCalled();
     expect(f.appeals.submit).toHaveBeenCalledWith(expect.objectContaining({ appellant: { kind: "help_session", sessionToken } }));
     for (const cookie of ["", "pawket_help=invalid", `pawket_help=${sessionToken}; pawket_help=${sessionToken}`]) expect((await f.http.lockedSubmit(request(body, { cookie }))).status).toBe(401);

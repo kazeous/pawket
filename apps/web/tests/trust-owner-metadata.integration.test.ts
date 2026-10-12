@@ -34,6 +34,10 @@ test("appeal metadata carries the original penalty scope and deadline without de
   const appealId = randomUUID(); const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "appeal", orderId: null, sourceType: "trust_appeal", sourceId: appealId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
   await f.db.insert(schema.trustAppeals).values({ id: appealId, appellantUserId: c.p.creator.userId, penaltyId, caseId, submittedVia: "session", statementEnvelope: encryptSensitiveField({ keyring: fixtureKeyring, plaintext: "Private statement", binding: { recordType: "trust_appeals", recordId: appealId, fieldName: "statement" } }), createdAt: reportAt });
   const metadata = await createTrustOwnerMetadata(f.db).readForCase(caseId); expect(metadata.appealAction).toEqual({ penaltyId, kind: "restriction", restriction: "reporting", target: null, endsAt });
+  expect(metadata.parties).toEqual([{ userId: c.p.creator.userId, label: "Người kháng nghị" }]);
+  await f.db.update(schema.identityRoleGrants).set({ state: "revoked", revokedAt: reportAt }).where(eq(schema.identityRoleGrants.userId, c.owner.userId));
+  await f.db.insert(schema.identityRoleGrants).values({ userId: c.p.creator.userId, role: "owner", grantSource: "bootstrap_cli" });
+  expect((await createTrustOwnerMetadata(f.db).readForCase(caseId)).parties).toEqual([]);
   expect(JSON.stringify(metadata)).not.toMatch(/Private statement|Private explanation|Envelope|reporter/u);
 });
 test("report identity and encrypted detail are exposed only through an audited explicit evidence read", async () => {

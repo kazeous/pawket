@@ -126,15 +126,16 @@ export function createHelpLinkService(input: Input) {
             or(eq(trustHelpLinkRequests.addressHmac, addressHmac), eq(trustHelpLinkRequests.networkKeyHmac, command.networkKeyHmac))));
         if (!counts) trustFail("dependency_unavailable");
         const limited = counts.address >= policy.linkRequestsPerAddress || counts.network >= policy.linkRequestsPerNetwork;
-        // One joined lookup for every valid address, even when rate limited or disabled. No early account-existence branch.
+        if (limited) return;
+        // One joined lookup for every address within quota. No early account-existence branch.
         const [p] = await tx.select({ penalty: trustPenalties }).from(identityEmailAddresses)
           .innerJoin(trustPenalties, eq(trustPenalties.subjectUserId, identityEmailAddresses.userId))
           .where(and(eq(identityEmailAddresses.canonicalEmail, canonical), eq(identityEmailAddresses.status, "primary"), isNotNull(identityEmailAddresses.verifiedAt),
             eq(trustPenalties.target, "account"), inArray(trustPenalties.kind, ["suspension", "removal"]), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, at),
-            or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, at)), gt(sql`${trustPenalties.createdAt} + interval '90 days'`, at.toISOString())))
+            or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, at)), gt(sql`${trustPenalties.createdAt} + interval '2160 hours'`, at.toISOString())))
           .orderBy(desc(trustPenalties.createdAt), desc(trustPenalties.id)).limit(1);
-        let outcome: "issued" | "ignored" | "rate_limited" = limited ? "rate_limited" : "ignored";
-        if (!limited && input.mode === "enabled" && p) {
+        let outcome: "issued" | "ignored" = "ignored";
+        if (input.mode === "enabled" && p) {
           await lockUser(tx, p.penalty.subjectUserId);
           // Recheck after acquiring the penalty lock: it may have ended during the lookup.
           const [current] = await tx.select().from(trustPenalties).where(eq(trustPenalties.id, p.penalty.id)).limit(1).for("update");

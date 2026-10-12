@@ -106,11 +106,11 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
 
 export function CommissionMessage({ order, message, trustMode }: Readonly<{ order: OrderView["order"]; message: Extract<ThreadView["items"][number], { kind: "message" }>; trustMode: TrustMode }>) {
   return <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={3}><Badge variant="outline">{message.author === "creator" ? "nghệ sĩ" : "người đặt"}</Badge></CardTitle><CardDescription><time dateTime={message.createdAt}>{formatTipTime(message.createdAt)}</time></CardDescription></CardHeader>
-    <CardContent className="flex min-w-0 flex-col gap-3">{message.hidden ? <HiddenContent kind="message" /> : <>
-      {message.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{message.text}</p> : null}
+    <CardContent className="flex min-w-0 flex-col gap-3">
+      {message.hidden ? <HiddenContent kind="message" /> : message.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{message.text}</p> : null}
       <AttachedFileList order={order} files={message.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer" && message.author === "creator"} trustMode={trustMode} reportable={order.role !== message.author} />
-      <ReportDialog mode={trustMode} ownContent={order.role === message.author} target={{ kind: "commission_message", orderId: order.id, messageId: message.id }} />
-    </>}</CardContent></Card>;
+      {message.hidden ? null : <ReportDialog mode={trustMode} ownContent={order.role === message.author} target={{ kind: "commission_message", orderId: order.id, messageId: message.id }} />}
+    </CardContent></Card>;
 }
 
 function MessageComposer({ order, disabled, onUpdated }: Readonly<{ order: OrderView["order"]; disabled: boolean; onUpdated(): void }>) {

@@ -14,6 +14,7 @@ export type TrustCaseEvidencePort = Readonly<{
   packageRevision?(tx: PawketTransaction, caseId: string): Promise<unknown>;
   brief?(tx: PawketTransaction, orderId: string): Promise<unknown>;
   appealSource?(tx: PawketTransaction, caseId: string): Promise<unknown>;
+  fileInScope?(tx: PawketTransaction, caseId: string, fileId: string): Promise<boolean>;
 }>;
 type Case = typeof trustCases.$inferSelect;
 export type TrustCaseDeadlineRow = Readonly<{ caseId: string; kind: string; orderId: string | null; sourceId: string; state: string }>;
@@ -56,12 +57,16 @@ export function createTrustCaseService(input: FactoryInput) {
       // Keep the case open until the evidence read and both audit writes commit.
       const [row] = await tx.select().from(trustCases).where(eq(trustCases.id, command.caseId)).limit(1).for("share");
       if (!row || row.state !== "open") caseFail("not_available");
+      if (["order_summary", "thread_page", "resolution_records"].includes(itemType)
+        && !["dispute", "refund_not_received", "refund_overdue", "late_payment"].includes(row.kind)) caseFail("not_available");
       if (itemType === "refund_destination" && row.kind !== "refund_not_received" && row.kind !== "refund_overdue") caseFail("not_available");
       if (["order_summary", "thread_page", "resolution_records", "file", "brief"].includes(itemType)) caseOrderId(row);
       if (itemType === "report_context" && (row.kind !== "report" || !evidence.reportContext)) caseFail("not_available");
       if (itemType === "package_revision" && (row.kind !== "report" || row.sourceType !== "commission_package" || !evidence.packageRevision)) caseFail("not_available");
       if (itemType === "brief" && (row.kind !== "report" || row.sourceType !== "commission_brief" || !evidence.brief)) caseFail("not_available");
       if (itemType === "appeal_source" && (row.kind !== "appeal" || row.sourceType !== "trust_appeal" || !evidence.appealSource)) caseFail("not_available");
+      if (itemType === "file" && (row.kind === "report" || row.kind === "appeal")
+        && (!fileId || !evidence.fileInScope || !await evidence.fileInScope(tx, row.id, fileId))) caseFail("not_available");
       let accepted = false;
       try { accepted = await consumeStepUpProof(tx, { proofId: command.stepUpProofId, ...owner, actionClass, now: at }); }
       catch { caseFail("owner_step_up_required"); }

@@ -7,12 +7,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 const { env, platform, solve } = vi.hoisted(() => ({
   env: { APP_BASE_URL: "https://pawket.invalid", COMMISSION_INTAKE_MODE: "enabled", TRUST_ENFORCEMENT_MODE: "enabled", CREATOR_PUBLISHING_MODE: "enabled" },
   platform: { authenticate: vi.fn(), authorizeCreator: vi.fn(), isOwnCommissionPackage: vi.fn(),
-    commissionHandlers: { publicPackages: vi.fn() }, resolutionHandlers: { myCases: vi.fn() }, catalog: { initialize: vi.fn() } },
+    commissionHandlers: { publicPackages: vi.fn() }, resolutionHandlers: { myCases: vi.fn() }, partyTrust: { listForUser: vi.fn() }, catalog: { initialize: vi.fn() } },
   solve: vi.fn().mockResolvedValue(1234),
 }));
 vi.mock("@pawket/config", () => ({ loadServerEnv: () => env }));
 vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: () => platform }));
-vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/headers", () => ({ headers: async () => new Headers({ "sec-fetch-site": "cross-site" }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }), redirect: vi.fn(), notFound: vi.fn() }));
 vi.mock("../src/ui/app-shell", () => ({ AppShell: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../src/app/creator/creator-page-workbench", () => ({ CreatorPageWorkbench: () => null }));
@@ -49,6 +49,7 @@ beforeEach(() => {
   platform.isOwnCommissionPackage.mockReset().mockResolvedValue(false); platform.catalog.initialize.mockResolvedValue({});
   platform.commissionHandlers.publicPackages.mockImplementation(async () => Response.json({ packages: [1, 2, 3].map((n) => ({ ...offering, id: id.slice(0, -1) + n })) }));
   platform.resolutionHandlers.myCases.mockImplementation(async () => Response.json({ controls: { trustMode: "enabled" }, cases: { disputes: [], refunds: [], lateClaims: [], penalties: [], hides: [], appeals: [], reportsFiled: [] } }));
+  platform.partyTrust.listForUser.mockReset().mockResolvedValue({ penalties: [], hides: [], appeals: [], reportsFiled: [] });
   fetch = vi.fn(async () => Response.json({ user: { id: actor.userId } })); vi.stubGlobal("fetch", fetch);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -104,8 +105,10 @@ test.each(["authentication_required", "AUTHENTICATION_REQUIRED", "not_authorized
   expect(dialog.textContent).toContain("Đã gửi báo cáo.");
 });
 test("creator warning acknowledges without a new session boundary", async () => {
-  platform.resolutionHandlers.myCases.mockImplementation(async () => Response.json({ controls: { trustMode: "enabled" }, cases: { disputes: [], refunds: [], lateClaims: [], penalties: [warning] } }));
+  platform.resolutionHandlers.myCases.mockImplementation(async () => new Response(null, { status: 403 }));
+  platform.partyTrust.listForUser.mockResolvedValue({ penalties: [warning], hides: [], appeals: [], reportsFiled: [] });
   await mount(await CreatorShellPage()); expect(fetch).not.toHaveBeenCalled();
+  expect(platform.partyTrust.listForUser).toHaveBeenCalledWith(actor.userId);
   fetch.mockImplementation(async () => Response.json({ acknowledged: true }));
   await act(async () => Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Tôi đã hiểu")!.click());
   expect(fetch.mock.calls[0]![0]).toBe(`/api/v1/help/warnings/${id}/acknowledge`); expect(fetch.mock.calls).toHaveLength(1);

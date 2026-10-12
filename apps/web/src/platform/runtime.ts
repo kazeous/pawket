@@ -98,6 +98,7 @@ import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
 export type WebPlatformRuntime = {
+  partyTrust: ReturnType<typeof createTrustPartyView>;
   helpLinkHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
   helpLinks: ReturnType<typeof createHelpLinkService>;
   helpCases: ReturnType<typeof createHelpCaseService>;
@@ -201,6 +202,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
     });
     if (env.TRUST_ENFORCEMENT_MODE !== "enabled") {
       if (command?.policy.actionClass.startsWith("owner.trust_")) return null;
+      if (command && ["trust.report_submit", "trust.appeal_submit", "trust.warning_acknowledge"].includes(command.policy.actionClass)) return null;
       if (command?.policy.actionClass === "owner.case_evidence") {
         try { const section = (JSON.parse(payload.body) as { section?: unknown }).section;
           if (["report_context", "package_revision", "brief", "appeal_source"].includes(String(section))) return null;
@@ -714,6 +716,7 @@ export function getPlatformRuntime(): WebPlatformRuntime {
   const commandHttp = createOidcCommandHttp({ db: database.db, baseUrl: env.APP_BASE_URL, commands: pendingCommands,
     context: commandContext, authenticate, commandFor, runtime: () => runtime! });
   runtime = {
+    partyTrust,
     helpLinks,
     helpCases,
     trustPolicies,

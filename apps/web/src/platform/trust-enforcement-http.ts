@@ -53,8 +53,9 @@ export function createTrustEnforcementHttpHandlers(input: Input) {
           if (!networkKeyHmac || !challenge || typeof challenge.token !== "string" || challenge.token.length < 1 || challenge.token.length > 512 || !Number.isSafeInteger(challenge.solution) || (challenge.solution as number) < 0) return failure();
           requester = { kind: "guest", networkKeyHmac, challenge: { token: challenge.token, solution: challenge.solution as number } }; idempotencyKey = randomUUID();
         }
-        return commissionJson(202, await input.reports.submit({ requester, target, reason, detail: row.detail as string | null | undefined ?? null,
-          idempotencyKey, requestId: randomUUID() }));
+        const result = await input.reports.submit({ requester, target, reason, detail: row.detail as string | null | undefined ?? null,
+          idempotencyKey, requestId: randomUUID() });
+        return commissionJson(202, { accepted: result.accepted, reportReference: result.reportReference });
       } catch (error) { return failed(error); }
     },
   };

@@ -6,8 +6,17 @@ import { createAppealService, createContentHideService, createTrustCasePort, cre
 import { createCaseEvidencePort } from "../src/platform/case-evidence.js";
 import { createReportFixture, fixtureKeyring, reportAt } from "../../../packages/trust/tests/report-fixture.js";
 import { penaltyContext } from "../../../packages/trust/tests/penalty-service-fixture.js";
+import { createHelpLinkHttpHandlers } from "../src/platform/help-link-http.js";
 
 const f = createReportFixture("web_appeal_evidence"); beforeAll(f.initialize, 60_000); afterAll(f.dispose, 30_000);
+test("disabled help link requests return 204 without database rows or service calls", async () => {
+  const c = await penaltyContext(f); const requestLink = vi.spyOn(c.input.helpLinks, "requestLink");
+  const before = await f.db.select().from(schema.trustHelpLinkRequests);
+  const origin = "https://pawket.example.invalid";
+  const http = createHelpLinkHttpHandlers({ appBaseUrl: origin, mode: "disabled", lookupHmacKey: c.input.lookupHmacKey, helpLinks: c.input.helpLinks, logger: { error: vi.fn() } });
+  const response = await http.linkRequest(new Request(`${origin}/help/locked/link-request`, { method: "POST", headers: { origin, "content-type": "application/json", "x-real-ip": "192.0.2.1" }, body: JSON.stringify({ email: "locked@example.invalid" }) }));
+  expect(response.status).toBe(204); expect(requestLink).not.toHaveBeenCalled(); expect(await f.db.select().from(schema.trustHelpLinkRequests)).toEqual(before);
+});
 async function setup() {
   const c = await penaltyContext(f);
   const locks: string[] = [];
@@ -19,7 +28,8 @@ async function setup() {
   const refunds = { listForOrder: vi.fn().mockResolvedValue([]), revealForCase: vi.fn().mockResolvedValue({ accountNumber: "Synthetic account" }) };
   const view = { readForCase: vi.fn().mockResolvedValue({ disputes: [{ statement: "Original statement" }] }) };
   const catalog = { readRevisionForCase: vi.fn().mockResolvedValue({ title: "Original package" }) };
-  const port = createCaseEvidencePort({ orders, refunds, view, catalog, files: { caseDownloadGrant: vi.fn() }, keyring: fixtureKeyring });
+  const files = { caseDownloadGrant: vi.fn().mockResolvedValue({ url: "https://example.invalid/scoped-file" }) };
+  const port = createCaseEvidencePort({ orders, refunds, view, catalog, files, keyring: fixtureKeyring });
   const service = createTrustCaseService({ ...c.input, evidence: port });
   async function submit(penaltyId: string) {
     return appeals.submit({ appellant: { kind: "session", actor: c.p.creator }, target: { penaltyId }, statement: "Private appeal statement", idempotencyKey: randomUUID(), requestId: randomUUID() });
@@ -28,7 +38,7 @@ async function setup() {
     const proof = await c.base("owner.case_evidence");
     return service.readEvidence({ owner: c.owner, stepUpProofId: proof.stepUpProofId, requestId: proof.requestId, caseId, section: "appeal_source" });
   }
-  return { ...c, appeals, orders, refunds, view, catalog, cases: service, read, submit, locks };
+  return { ...c, appeals, orders, refunds, view, catalog, files, port, cases: service, read, submit, locks };
 }
 test("appeal evidence reuses original resolved dispute section readers and logs only appeal access", async () => {
   const c = await setup(); const penalty = await c.service.apply({ ...await c.command(), kind: "restriction", restriction: "reporting" });
@@ -73,4 +83,39 @@ test("orderless package appeal reads original report/package sections without or
   c.locks.length = 0;
   await c.appeals.decide({ ...await c.base("owner.trust_appeal_decide"), caseId: appealed.caseId, expectedCaseVersion: 1, decision: "reversed", reasoning: "Restore" });
   expect(c.locks).toEqual([`fence:${c.p.creator.userId}`, `subject:${c.p.creator.userId}`]);
+});
+test("appeal over an order report contains only report-scoped evidence", async () => {
+  const c = await setup(); const messageId = randomUUID();
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: c.p.orderId, sourceType: "commission_message", sourceId: messageId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  await f.db.insert(schema.trustReports).values({ id: randomUUID(), reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`, targetKind: "commission_message", targetId: messageId,
+    orderId: c.p.orderId, contentOwnerUserId: c.p.creator.userId, reporterUserId: c.p.buyer.userId, reason: "other", caseId, createdAt: reportAt });
+  const penalty = await c.service.apply({ ...await c.command(), source: { caseId }, kind: "restriction", restriction: "reporting" });
+  const appealed = await c.submit(penalty.penaltyId); const evidence = await c.read(appealed.caseId) as { sections: Record<string, unknown> };
+  expect(Object.keys(evidence.sections)).toEqual(["report_context"]);
+  expect(c.orders.readOrderForCase).not.toHaveBeenCalled(); expect(c.view.readForCase).not.toHaveBeenCalled(); expect(c.refunds.listForOrder).not.toHaveBeenCalled();
+  expect(c.orders.readThreadForCase).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reportTarget: { kind: "commission_message", id: messageId } }));
+  expect(JSON.stringify(evidence)).not.toMatch(/reporter/iu);
+});
+test.each(["commission_message", "commission_file", "commission_brief"] as const)("%s file scope is inherited by its appeal", async (sourceType) => {
+  const c = await setup(); const messageId = randomUUID(); const fileId = randomUUID(); const siblingFileId = randomUUID(); const unrelatedFileId = randomUUID();
+  c.orders.readThreadForCase.mockResolvedValue({ items: [{ kind: "message", id: messageId, files: [{ fileId }, { fileId: siblingFileId }] },
+    { kind: "message", id: randomUUID(), files: [{ fileId: unrelatedFileId }] }] });
+  c.orders.readOrderForCase.mockResolvedValue({ id: c.p.orderId, brief: { text: "Brief" }, referenceFiles: [{ fileId }] });
+  const sourceId = sourceType === "commission_brief" ? c.p.orderId : sourceType === "commission_file" ? fileId : messageId;
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: c.p.orderId, sourceType, sourceId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  await f.db.insert(schema.trustReports).values({ id: randomUUID(), reportReference: `report:v2:${randomUUID().replaceAll("-", "")}`, targetKind: sourceType, targetId: sourceId,
+    orderId: c.p.orderId, contentOwnerUserId: c.p.creator.userId, reporterUserId: c.p.buyer.userId, reason: "other", caseId, createdAt: reportAt });
+  const penalty = await c.service.apply({ ...await c.command(), source: { caseId }, kind: "restriction", restriction: "reporting" });
+  const appeal = await c.submit(penalty.penaltyId);
+  for (const id of [caseId, appeal.caseId]) {
+    const proof = await c.base("owner.case_file"); const before = c.consume.mock.calls.length;
+    const grant = (fileId: string) => c.cases.fileGrant({ owner: c.owner, stepUpProofId: proof.stepUpProofId, caseId: id, requestId: proof.requestId, fileId, disposition: "attachment" });
+    await expect(grant(unrelatedFileId)).rejects.toMatchObject({ code: "not_available" }); expect(c.consume.mock.calls).toHaveLength(before);
+    expect(await f.db.select().from(schema.trustCaseAccessLog).where(eq(schema.trustCaseAccessLog.caseId, id))).toEqual([]);
+    expect(await grant(fileId)).toEqual({ url: "https://example.invalid/scoped-file" });
+    const siblingProof = await c.base("owner.case_file");
+    const siblingGrant = c.cases.fileGrant({ owner: c.owner, stepUpProofId: siblingProof.stepUpProofId, caseId: id, requestId: siblingProof.requestId, fileId: siblingFileId, disposition: "attachment" });
+    if (sourceType === "commission_brief") await expect(siblingGrant).rejects.toMatchObject({ code: "not_available" });
+    else expect(await siblingGrant).toEqual({ url: "https://example.invalid/scoped-file" });
+  }
 });

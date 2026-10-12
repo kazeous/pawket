@@ -63,7 +63,7 @@ function evidence() {
     fileGrant: vi.fn<TrustCaseEvidencePort["fileGrant"]>(async () => ({ url: "synthetic-grant" })),
   };
 }
-function service(options: { accepted?: boolean; throws?: boolean; evidence?: Pick<TrustCaseEvidencePort, "reportContext" | "packageRevision" | "brief" | "appealSource"> } = {}) {
+function service(options: { accepted?: boolean; throws?: boolean; evidence?: Pick<TrustCaseEvidencePort, "reportContext" | "packageRevision" | "brief" | "appealSource" | "fileInScope"> } = {}) {
   const port = { ...evidence(), ...options.evidence };
   const consumeStepUpProof = vi.fn(async () => { if (options.throws) throw new Error("Synthetic proof failure"); return options.accepted ?? true; });
   const instance = trust.createTrustCaseService({ db: fixture.db, applicationRevision: "synthetic-i8", consumeStepUpProof, evidence: port, now: () => at });
@@ -89,6 +89,17 @@ describe("case-scoped owner evidence", () => {
     const command = { kind, sourceType, orderId, sourceId: randomUUID(), policyRevisionId: null, requestId: randomUUID(), at };
     return { ...await fixture.db.transaction((tx) => port.openCase(tx, command)), command, port };
   }
+  test.each(["report", "appeal"] as const)("%s refuses order-wide evidence and files outside scope before proof or log", async (kind) => {
+    const p = await order(); const c = await openNew(kind, kind === "report" ? "commission_file" : "trust_appeal", p.orderId);
+    const fileInScope = vi.fn(async (_tx: schema.PawketTransaction, _caseId: string, fileId: string) => fileId === c.command.sourceId);
+    const s = service({ evidence: { fileInScope } });
+    for (const section of ["order_summary", "thread_page", "resolution_records"] as const) await expect(s.instance.readEvidence(read(c.caseId, section))).rejects.toMatchObject({ code: "not_available" });
+    const grant = (fileId: string) => s.instance.fileGrant({ owner, stepUpProofId: randomUUID(), requestId: randomUUID(), caseId: c.caseId, fileId, disposition: "attachment" });
+    await expect(grant(randomUUID())).rejects.toMatchObject({ code: "not_available" });
+    expect(s.consumeStepUpProof).not.toHaveBeenCalled(); expect(await accesses(c.caseId)).toEqual([]); expect(s.port.fileGrant).not.toHaveBeenCalled();
+    expect(await grant(c.command.sourceId)).toEqual({ url: "synthetic-grant" }); expect(s.consumeStepUpProof).toHaveBeenCalledOnce();
+    expect(await accesses(c.caseId)).toMatchObject([{ itemType: "file", itemId: c.command.sourceId }]);
+  });
   test("listQueue filters kind report and appeal", async () => {
     const report = await openNew("report", "commission_package"); const appeal = await openNew("appeal", "trust_appeal");
     const s = service();

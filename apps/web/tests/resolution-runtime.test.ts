@@ -11,6 +11,7 @@ import * as database from "@pawket/database";
 import type { PawketTransaction } from "@pawket/database";
 import { getPlatformRuntime } from "../src/platform/runtime.js";
 import { syntheticOidcProvider } from "./oidc-test-support.js";
+import * as commandHttp from "../src/platform/oidc-command-http.js";
 
 afterEach(() => vi.restoreAllMocks());
 test("runtime uses the real resolution holds, intake fence, refund creator lock and evidence ports", async () => {
@@ -29,7 +30,12 @@ test("runtime uses the real resolution holds, intake fence, refund creator lock 
   const owner = vi.spyOn(resolutions, "createOwnerResolutionService"); const cases = vi.spyOn(trust, "createTrustCaseService");
   const assurance = vi.spyOn(identity, "createOidcAssurancePort");
   const sharedDatabase = vi.spyOn(database, "createDatabase"); const policyPort = vi.spyOn(orders, "createCommissionPolicyReadPort");
+  const http = vi.spyOn(commandHttp, "createOidcCommandHttp");
   const runtime = getPlatformRuntime();
+  const commandFor = http.mock.calls[0]![0].commandFor!;
+  for (const path of ["/api/v1/reports", "/api/v1/help/appeals", "/api/v1/help/warnings/10000000-0000-4000-8000-000000000001/acknowledge"]) {
+    expect(commandFor({ method: "POST", path, body: "{}", idempotencyKey: "key", ifMatch: null, returnPath: "/" })).toBeNull();
+  }
   expect(hold).toHaveBeenCalledOnce(); expect(order.mock.calls[0]?.[0].holds).toBe(hold.mock.results[0]?.value);
   expect(fence).toHaveBeenCalledOnce(); expect(packages.mock.calls[0]?.[0].intakeFence).toBe(fence.mock.results[0]?.value);
   expect(fence.mock.calls[0]?.[0]).toEqual({ mode: "enabled", refunds: refundPort.mock.results[0]?.value });

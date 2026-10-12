@@ -6,6 +6,7 @@ export type CommissionSessionProof = Readonly<{ sessionExpiresAt: Date }>;
 /** Trust implements this structural port; the SHARE lock is retained until command commit. */
 export type CommissionRestrictionPort = Readonly<{
   assertAllowed(tx: PawketTransaction, command: { userId: string; restriction: "commission_intake" | "commission_buying" | "dispute_opening" | "reporting"; at: Date }): Promise<void>;
+  isRestricted?(tx: PawketTransaction, command: { userId: string; restriction: "commission_intake" | "commission_buying" | "dispute_opening" | "reporting"; at: Date }): Promise<boolean>;
 }>;
 export type CommissionIdentityPort = Readonly<{
   getTipSessionAssurance(tx: PawketTransaction, actor: CommissionActor, at: Date): Promise<CommissionSessionProof | null>;

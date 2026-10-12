@@ -245,6 +245,7 @@ export function createCommissionPackageService(input: Input) {
           .where(and(eq(commissionPackages.creatorUserId, page.userId), inArray(commissionPackages.state, ["open", "paused"]))).orderBy(asc(commissionPackages.createdAt), asc(commissionPackages.id)).limit(12);
         const used = await usage(tx, page.userId);
         const intakePaused = await intakeFence.isIntakePaused(tx, page.userId, now());
+        const intakeRestricted = await input.restrictions?.isRestricted?.(tx, { userId: page.userId, restriction: "commission_intake", at: now() }) ?? false;
         const receiving = input.paymentsMode === "disabled" ? null : await input.receivingAccount.getCurrentTipReceivingAccount(tx, page.userId, now());
         const result = [];
         const hiddenIds = await input.contentHides?.hiddenIds(tx, "commission_package", packages.map((row) => row.package.id)) ?? new Set<string>();
@@ -255,7 +256,7 @@ export function createCommissionPackageService(input: Input) {
           result.push({ id: entry.package.id, revisionId: revision.id, title: revision.title, description: revision.description, discipline: revision.discipline,
             route: revision.route, briefInstructions: revision.briefInstructions, terms: revision.terms, showcaseId: linked?.showcaseId ?? null,
             policy: policy?.revisionId === revision.policyRevisionId ? { revisionId: policy.revisionId, document: policy.document, checksum: policy.checksum } : null,
-            accepting: !intakePaused && entry.package.state === "open" && !!settings?.enabled && !!policy?.acceptsOrders && policy.revisionId === revision.policyRevisionId &&
+            accepting: !intakePaused && !intakeRestricted && entry.package.state === "open" && !!settings?.enabled && !!policy?.acceptsOrders && policy.revisionId === revision.policyRevisionId &&
               (revision.route !== "fixed_immediate" || !!receiving),
             capacityAvailable: !!settings && used < settings.capacityLimit });
         }

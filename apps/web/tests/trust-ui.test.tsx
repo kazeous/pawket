@@ -37,6 +37,13 @@ test("hidden message renders the notice and no text even with enforcement disabl
   const html = markup(createElement(CommissionMessage, { order, message: { ...message, hidden: true, text: "must-not-render" }, trustMode: "disabled" }));
   expect(html).toContain("Tin nhắn này đã bị Pawket ẩn vì vi phạm quy định cộng đồng."); expect(html).not.toContain("must-not-render"); expect(html).not.toContain("Báo cáo");
 });
+test("hidden message keeps available files and their report action for the other party", () => {
+  const html = markup(createElement(CommissionMessage, { order, trustMode: "enabled", message: { ...message, hidden: true, text: "must-not-render",
+    files: [{ fileId: id, name: "still-available.png", sizeBytes: 16, detectedType: "png", sha256: `sha256:${"a".repeat(64)}`, previewable: true, availability: "available" }] } }));
+  expect(html).toContain("still-available.png"); expect(html).toContain("Báo cáo"); expect(html).not.toContain("must-not-render");
+  const node = document.createElement("div"); node.innerHTML = html;
+  expect(node.querySelector("li button")?.textContent).toBe("Báo cáo");
+});
 test("hidden file has no metadata, download or preview link", () => {
   const html = markup(createElement(AttachedFileList, { order, files: [{ fileId: id, name: "private-name", sizeBytes: 16, detectedType: "png", sha256: `sha256:${"a".repeat(64)}`, previewable: true, availability: "hidden" }], trustMode: "enabled", reportable: true }));
   expect(html).toContain("Tệp này đã bị Pawket ẩn vì vi phạm quy định cộng đồng.");

@@ -3,6 +3,14 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, test, vi } from "vitest";
 import { CommandReview } from "../src/app/auth/review/[id]/review-panel";
+test("dispute opening review keeps the statement key", async () => {
+  const node = document.createElement("div"); document.body.append(node); const root = createRoot(node); vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ title: "Mở khiếu nại", body: JSON.stringify({ statement: "Original statement" }), ready: true, returnPath: "/commissions", expiresAt: "2026-10-20T00:00:00.000Z" })));
+  try {
+    await act(async () => root.render(createElement(CommandReview, { id: "synthetic", accountPortalUrl: "https://example.invalid" })));
+    expect(node.querySelector("dt")?.textContent).toBe("statement"); expect(node.querySelector("dd")?.textContent).toBe("Original statement");
+  } finally { await act(async () => root.unmount()); node.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); }
+});
 test.each([
   ["commission_package", "Gói commission", { packageId: "private-package-id", revisionId: "private-revision-id" }],
   ["commission_brief", "Brief", { orderId: "private-order-id" }],

@@ -9,6 +9,7 @@ import { identityUsers } from "@pawket/database";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { insertTestPenalty, penaltyAt, seedPenaltySubject } from "./penalty-test-fixture.js";
 import { activePenalties, createTrustRestrictionPort } from "../src/penalty-port.js";
+import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL required");
@@ -50,11 +51,13 @@ describe("trust restriction commit fence", () => {
   });
   test("assertAllowed waits for a concurrent writer holding the user row FOR UPDATE", async () => {
     const subject = await seedPenaltySubject(client); const held = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+    const penaltyId = randomUUID(); const envelope = encryptSensitiveField({ keyring: createEncryptionKeyring({ activeKeyId: "schema-tests", keys: { "schema-tests": new Uint8Array(32).fill(73) } }),
+      plaintext: "Synthetic restriction", binding: { recordType: "trust_penalties", recordId: penaltyId, fieldName: "explanation" } });
     const writer = db.transaction(async (tx) => {
       await tx.select().from(identityUsers).where(eq(identityUsers.id, subject.userId)).for("update");
       await tx.execute(sql`insert into trust_penalties (id, subject_user_id, kind, restriction, state, reason_category,
         explanation_envelope, source_case_id, starts_at, owner_user_id, owner_session_id, step_up_proof_id, request_id, created_at)
-        values (${randomUUID()}, ${subject.userId}, 'restriction', 'reporting', 'active', 'other', '{}'::jsonb,
+        values (${penaltyId}, ${subject.userId}, 'restriction', 'reporting', 'active', 'other', ${JSON.stringify(envelope)}::jsonb,
           ${subject.sourceCaseId}, ${penaltyAt.toISOString()}, ${subject.ownerUserId}, 'owner-session', ${subject.actor.stepUpProofId}, 'writer', ${penaltyAt.toISOString()})`);
       held.resolve(); await release.promise;
     });

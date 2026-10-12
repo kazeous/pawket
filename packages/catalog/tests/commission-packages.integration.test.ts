@@ -7,9 +7,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import * as schema from "@pawket/database";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
-import { createCommissionPolicyReadPort } from "@pawket/orders";
 import { createCommissionPackageService } from "../src/commission-packages.js";
 import type { CommissionPackageHoldPort } from "../src/catalog-ports.js";
+import type { CommissionRestrictionPort } from "@pawket/orders";
 
 const url = process.env.TEST_DATABASE_URL; if (!url) throw new Error("TEST_DATABASE_URL is required");
 const parsed = new URL(url);
@@ -21,6 +21,9 @@ beforeAll(async () => { await client.unsafe(`create schema "${name}"`); await mi
 afterAll(async () => { await client.unsafe(`drop schema if exists "${name}" cascade`); await client.unsafe(`drop schema if exists "${journal}" cascade`); await client.end(); }, 30_000);
 
 test("held packages disappear publicly, refuse old-revision intake, remain marked in workspace, and restore", async () => {
+  const { createTrustRestrictionPort } = await import(new URL("../../trust/src/penalty-port.ts", import.meta.url).href) as {
+    createTrustRestrictionPort(input: { mode: "enabled" }): CommissionRestrictionPort;
+  };
   const actor = { userId: randomUUID(), sessionId: "synthetic-session" }; const pageId = randomUUID(); const packageId = randomUUID(); const oldRevisionId = randomUUID();
   const revisionId = randomUUID(); const publicationId = randomUUID(); const handle = "synthetic-artist";
   await db.insert(schema.identityUsers).values({ id: actor.userId, name: "Synthetic", email: `${actor.userId}@example.invalid`, canonicalEmail: `${actor.userId}@example.invalid`, createdAt: at, updatedAt: at });
@@ -34,7 +37,7 @@ test("held packages disappear publicly, refuse old-revision intake, remain marke
   for (const [index, id] of [oldRevisionId, revisionId].entries()) await db.insert(schema.commissionPackageRevisions).values({ id, packageId, creatorUserId: actor.userId, revisionNumber: index + 1,
     ...draft, policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID, actorSessionId: actor.sessionId, requestId: randomUUID(), publishedAt: at });
   await db.update(schema.commissionPackages).set({ state: "open", publishedRevisionId: revisionId, version: 2 }).where(eq(schema.commissionPackages.id, packageId));
-  // Exercise Catalog's structural contract against actual active hide rows, without importing Trust.
+  // Exercise Catalog's structural contracts against actual active hide and restriction rows.
   const caseId = randomUUID(); const reportId = randomUUID(); const hideId = randomUUID(); const keyring = createEncryptionKeyring({ activeKeyId: "test", keys: { test: new Uint8Array(32).fill(72) } });
   await db.transaction(async (tx) => {
     await tx.insert(schema.trustCases).values({ id: caseId, kind: "report", sourceType: "commission_package", sourceId: packageId, openedAt: at });
@@ -48,10 +51,23 @@ test("held packages disappear publicly, refuse old-revision intake, remain marke
     activeHide: async (tx, kind, id) => { const rows = await tx.select().from(schema.trustContentHides); const row = rows.find((row) => row.targetKind === kind && row.targetId === id && row.releasedAt === null); return row ? { hideId: row.id, hiddenAt: row.hiddenAt } : null; },
   };
   const catalog = createCommissionPackageService({ db, applicationRevision: "synthetic-hide", lookupHmacKey: new Uint8Array(32).fill(73), intakeMode: "enabled", paymentsMode: "manual_only", publishingMode: "general_audience",
-    contentHides, policy: createCommissionPolicyReadPort({ environment: "test" }), identity: { lockCreator: async () => ({ sessionExpiresAt: new Date(at.getTime() + 60_000) }) },
+    contentHides, restrictions: createTrustRestrictionPort({ mode: "enabled" }), policy: { readCurrent: async () => ({ revisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID, revisionNumber: 1,
+      document: "Synthetic commission policy", checksum: "synthetic", acceptsOrders: true }) }, identity: { lockCreator: async () => ({ sessionExpiresAt: new Date(at.getTime() + 60_000) }) },
     receivingAccount: { getCurrentTipReceivingAccount: async () => null }, now: () => at,
     visibility: { resolveVisibleReportTarget: async (_tx, target) => ({ target, pageId, creatorUserId: actor.userId, canonicalHandle: handle, displayName: "Artist", showcaseTitle: null, mediaAssetIds: [] }) } });
   expect(await catalog.listPublic(handle)).toHaveLength(1);
+  const restrictionId = randomUUID();
+  await db.insert(schema.trustPenalties).values({ id: restrictionId, subjectUserId: actor.userId, kind: "restriction", restriction: "commission_intake", reasonCategory: "other",
+    explanationEnvelope: encryptSensitiveField({ keyring, plaintext: "Private restriction", binding: { recordType: "trust_penalties", recordId: restrictionId, fieldName: "explanation" } }),
+    sourceCaseId: caseId, startsAt: at, endsAt: new Date(at.getTime() + 60_000), ownerUserId: actor.userId, ownerSessionId: actor.sessionId, stepUpProofId: randomUUID(), requestId: randomUUID(), createdAt: at });
+  // A public read must finish even while another transaction owns the user row.
+  await db.transaction(async (tx) => {
+    await tx.select().from(schema.identityUsers).where(eq(schema.identityUsers.id, actor.userId)).for("update");
+    const publicRows = await catalog.listPublic(handle); expect(publicRows[0]?.accepting).toBe(false);
+    expect(JSON.stringify(publicRows)).not.toContain("Private restriction");
+  });
+  await db.update(schema.trustPenalties).set({ state: "lifted", endedAt: at, endReason: "lifted", version: 2 }).where(eq(schema.trustPenalties.id, restrictionId));
+  expect((await catalog.listPublic(handle))[0]?.accepting).toBe(true);
   await db.insert(schema.trustContentHides).values({ id: hideId, caseId, targetKind: "commission_package", targetId: packageId, contentOwnerUserId: actor.userId,
     hiddenAt: at, hiddenByUserId: actor.userId, hiddenBySessionId: actor.sessionId, requestId: randomUUID(),
     reasonEnvelope: encryptSensitiveField({ keyring, plaintext: "Private reason", binding: { recordType: "trust_content_hides", recordId: hideId, fieldName: "reason" } }) });

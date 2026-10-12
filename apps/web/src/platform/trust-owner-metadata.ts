@@ -30,7 +30,8 @@ export function createTrustOwnerMetadata(db: PawketDatabase) {
       }
       const [hide] = row.kind !== "report" ? [] : await tx.select({ hideId: trustContentHides.id }).from(trustContentHides)
         .where(and(eq(trustContentHides.caseId, caseId), eq(trustContentHides.targetKind, row.sourceType as "commission_message" | "commission_file" | "commission_package"), eq(trustContentHides.targetId, row.sourceId), isNull(trustContentHides.releasedAt))).limit(1);
-      const [appeal] = row.kind !== "appeal" ? [] : await tx.select({ penaltyId: trustAppeals.penaltyId, hideId: trustAppeals.hideId }).from(trustAppeals).where(eq(trustAppeals.caseId, caseId)).limit(1);
+      const [appeal] = row.kind !== "appeal" ? [] : await tx.select({ penaltyId: trustAppeals.penaltyId, hideId: trustAppeals.hideId, appellantUserId: trustAppeals.appellantUserId }).from(trustAppeals).where(eq(trustAppeals.caseId, caseId)).limit(1);
+      if (appeal) candidates.push({ userId: appeal.appellantUserId, label: "Người kháng nghị" });
       const [penalty] = !appeal?.penaltyId ? [] : await tx.select({ penaltyId: trustPenalties.id, kind: trustPenalties.kind, restriction: trustPenalties.restriction, target: trustPenalties.target, endsAt: trustPenalties.endsAt }).from(trustPenalties).where(eq(trustPenalties.id, appeal.penaltyId)).limit(1);
       const [originalHide] = !appeal?.hideId ? [] : await tx.select({ hideId: trustContentHides.id, kind: trustContentHides.targetKind }).from(trustContentHides).where(eq(trustContentHides.id, appeal.hideId)).limit(1);
       return { parties: await parties(tx, candidates), activeHideId: hide?.hideId ?? null,

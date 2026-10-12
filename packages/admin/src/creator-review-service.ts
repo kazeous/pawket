@@ -288,7 +288,7 @@ export function createCreatorReviewService(input: ServiceInput) {
         const [capability] = await tx.select().from(identityCreatorCapabilities).where(eq(identityCreatorCapabilities.userId, command.userId)).limit(1).for("update");
         policy(capability, "creator_capability_missing");
         await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
-        if (input.enforcementMode === "enabled" && command.action === "reinstate") {
+        if (command.action === "reinstate") {
           const penaltyAt = now();
           const [penalty] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
             eq(trustPenalties.subjectUserId, command.userId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, penaltyAt),

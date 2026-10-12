@@ -31,8 +31,9 @@ export function createAppealHttpHandlers(input: Input) {
       const idempotencyKey = request.headers.get("idempotency-key");
       if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(idempotencyKey)) throw new CommissionHttpFailure(400, "invalid_request");
       const body = await readCommissionBody(request, bodySchema);
-      return commissionJson(202, await input.appeals.submit({ ...body, appellant: locked ? { kind: "help_session", sessionToken: sessionToken! }
-        : { kind: "session", actor: { userId: actor!.userId, sessionId: actor!.sessionId } }, idempotencyKey, requestId: randomUUID() }));
+      const result = await input.appeals.submit({ ...body, appellant: locked ? { kind: "help_session", sessionToken: sessionToken! }
+        : { kind: "session", actor: { userId: actor!.userId, sessionId: actor!.sessionId } }, idempotencyKey, requestId: randomUUID() });
+      return commissionJson(202, { appealId: result.appealId });
     } catch (error) { return failure(error); }
   }
   return { submit: (request: Request) => submit(request, false), lockedSubmit: (request: Request) => submit(request, true) };

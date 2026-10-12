@@ -124,6 +124,9 @@ export const trustPenalties = pgTable("trust_penalties", {
   createdAt: time("created_at").notNull(),
 }, (t) => [
   index("trust_penalties_subject_idx").on(t.subjectUserId, t.createdAt, t.id),
+  index("trust_penalties_expiry_idx").on(t.endsAt, t.id).where(sql`${t.state} = 'active' and ${t.endsAt} is not null`),
+  check("trust_penalties_explanation_envelope_check", commissionEnvelopeCheck(t.explanationEnvelope)),
+  check("trust_penalties_internal_note_envelope_check", sql`${t.internalNoteEnvelope} is null or ${commissionEnvelopeCheck(t.internalNoteEnvelope)}`),
   uniqueIndex("trust_penalties_active_restriction_uidx").on(t.subjectUserId, t.restriction).where(sql`${t.state} = 'active' and ${t.kind} = 'restriction'`),
   uniqueIndex("trust_penalties_active_suspension_uidx").on(t.subjectUserId, t.target).where(sql`${t.state} = 'active' and ${t.kind} = 'suspension'`),
   uniqueIndex("trust_penalties_active_removal_uidx").on(t.subjectUserId, t.target).where(sql`${t.state} = 'active' and ${t.kind} = 'removal'`),
@@ -152,6 +155,7 @@ export const trustPenaltyEvents = pgTable("trust_penalty_events", {
   expectedVersion: integer("expected_version").notNull(), resultingVersion: integer("resulting_version").notNull(), occurredAt: time("occurred_at").notNull(),
 }, (t) => [
   index("trust_penalty_events_penalty_idx").on(t.penaltyId, t.occurredAt),
+  check("trust_penalty_events_reason_envelope_check", sql`${t.reasonEnvelope} is null or ${commissionEnvelopeCheck(t.reasonEnvelope)}`),
   check("trust_penalty_events_action_check", sql`${t.action} in ('applied','expired','lifted','reversed','reduced','acknowledged')`),
   check("trust_penalty_events_actor_check", sql`(${t.actorUserId} is null) = (${t.actorSessionId} is null)`),
   check("trust_penalty_events_version_check", sql`${t.expectedVersion} >= 0 and ${t.resultingVersion} = ${t.expectedVersion} + 1`),

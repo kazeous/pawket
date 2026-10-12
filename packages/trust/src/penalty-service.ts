@@ -161,10 +161,15 @@ export function createPenaltyService(input: Input) {
       const baseline = legacy?.state ?? "active";
       const capabilityState: CapabilityState = requiredCapabilityState === "removed" || baseline === "removed" ? "removed"
         : requiredCapabilityState === "suspended" || baseline === "suspended" ? "suspended" : "active";
-      if (subject.capability.state !== capabilityState) await input.identity.setCreatorCapability(tx, { ...c, userId: subjectUserId, state: capabilityState });
+      const severity: Record<CapabilityState, number> = { active: 0, suspended: 1, removed: 2 };
+      if (subject.capability.state !== capabilityState && (c.actor !== null || severity[capabilityState] < severity[subject.capability.state])) {
+        await input.identity.setCreatorCapability(tx, { ...c, userId: subjectUserId, state: capabilityState });
+      }
     }
     const [ending] = await tx.select({ target: trustPenalties.target }).from(trustPenalties).where(eq(trustPenalties.id, c.penaltyId)).limit(1);
-    if (subject.accessStatus !== status && (accountPenalties.length > 0 || ending?.target === "account")) await input.identity.setAccountAccess(tx, { ...c, userId: subjectUserId, status });
+    const severity: Record<AccessStatus, number> = { active: 0, access_suspended: 1, closed: 2 };
+    if (subject.accessStatus !== status && (c.actor !== null || severity[status] < severity[subject.accessStatus])
+      && (accountPenalties.length > 0 || ending?.target === "account")) await input.identity.setAccountAccess(tx, { ...c, userId: subjectUserId, status });
   }
   async function end(tx: PawketTransaction, c: EndPenaltyCommand, options: { skipLocked?: boolean } = {}): Promise<boolean> {
     if (!validUuid(c.penaltyId) || !["expired", "lifted", "reversed", "reduced"].includes(c.state) || !caseIdentifier(c.requestId)) trustFail("invalid_request"); const at = time(c.at);

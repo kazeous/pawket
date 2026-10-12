@@ -27,6 +27,11 @@ test("disabled session exchange returns the expired-link response before opening
   const response = await http.session(request("session", { token }));
   expect(response.status).toBe(400); expect(response.headers.has("set-cookie")).toBe(false); expect(f.helpLinks.openSession).not.toHaveBeenCalled();
 });
+test("disabled link request returns 204 without calling the service", async () => {
+  const f = fixture(); const http = createHelpLinkHttpHandlers({ appBaseUrl: origin, mode: "disabled", lookupHmacKey: key, helpLinks: f.helpLinks, logger: f.logger });
+  const response = await http.linkRequest(request("link-request", { email: "locked@example.invalid" }));
+  expect(response.status).toBe(204); expect(await response.text()).toBe(""); expect(f.helpLinks.requestLink).not.toHaveBeenCalled();
+});
 test("end route revokes the cookie session, expires the scoped cookie and returns an empty success for fetch", async () => {
   const f = fixture(); routeHandlers = f.http; const route = await import("../src/app/help/locked/end/route.js");
   const response = await route.POST(request("end", {}, { cookie: `pawket_help=${token}; pawket_identity=unrelated` }));

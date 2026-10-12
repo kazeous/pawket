@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
+import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
 
 export const penaltyAt = new Date("2026-10-10T00:00:00Z");
 
@@ -31,12 +32,14 @@ export async function insertTestPenalty(client: postgres.Sql, subject: Awaited<R
   kind?: string; restriction?: string | null; target?: string | null; endsAt?: Date | null; startsAt?: Date;
 } = {}) {
   const id = randomUUID(); const kind = options.kind ?? "suspension";
+  const explanation = encryptSensitiveField({ keyring: createEncryptionKeyring({ activeKeyId: "schema-tests", keys: { "schema-tests": new Uint8Array(32).fill(73) } }),
+    plaintext: "Synthetic explanation", binding: { recordType: "trust_penalties", recordId: id, fieldName: "explanation" } });
   const restriction = options.restriction ?? (kind === "restriction" ? "reporting" : null);
   const target = options.target ?? (kind === "suspension" || kind === "removal" ? "creator_capability" : null);
   const endsAt = options.endsAt === undefined ? (kind === "warning" || kind === "removal" ? null : new Date("2026-10-11T00:00:00Z")) : options.endsAt;
   await client`insert into trust_penalties (id, subject_user_id, kind, restriction, target, state, reason_category,
     explanation_envelope, source_case_id, starts_at, ends_at, owner_user_id, owner_session_id, step_up_proof_id, request_id, created_at)
-    values (${id}, ${subject.userId}, ${kind}, ${restriction}, ${target}, 'active', 'other', '{}'::jsonb,
+    values (${id}, ${subject.userId}, ${kind}, ${restriction}, ${target}, 'active', 'other', ${JSON.stringify(explanation)}::jsonb,
       ${subject.sourceCaseId}, ${(options.startsAt ?? penaltyAt).toISOString()}, ${endsAt?.toISOString() ?? null},
       ${subject.ownerUserId}, 'owner-session', ${subject.actor.stepUpProofId}, 'fixture', ${penaltyAt.toISOString()})`;
   return id;

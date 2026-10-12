@@ -139,3 +139,38 @@ test("disabled mode still expires penalties and records one pause, then enabled 
   await createEnforcementMaintenance({ db: f.db, penalties: disabled, mode: "enabled", now: () => at }).runOnce();
   expect(await f.db.select().from(schema.trustEnforcementPauses).where(isNull(schema.trustEnforcementPauses.endedAt))).toHaveLength(0);
 });
+async function mismatchedStanding() {
+  const c = await expiring();
+  await c.service.apply({ ...await c.command(), kind: "suspension", target: "creator_capability", endsAt: new Date(at.getTime() + 86_400_000).toISOString() });
+  return c;
+}
+test("legacy reinstate refuses an active creator penalty while enforcement is disabled", async () => {
+  const { createCreatorReviewService } = await import(new URL("../../admin/src/creator-review-service.ts", import.meta.url).href);
+  const c = await mismatchedStanding();
+  const legacy = createCreatorReviewService({ db: f.db, keyring: c.input.keyring, commandFingerprintKey: c.input.lookupHmacKey,
+    consumeStepUpProof: c.consume, enforcementMode: "disabled", now: () => at,
+    catalogCapabilityTransition: { apply: async () => ({ pageId: null, previousPublishedRevisionId: null }) } });
+  await expect(legacy.setCreatorCapability({ ownerUserId: c.owner.userId, ownerSessionId: c.owner.sessionId, stepUpProofId: randomUUID(),
+    userId: c.p.creator.userId, action: "reinstate", reasonCode: "other", applicantExplanation: "Restore", idempotencyKey: randomUUID(), requestId: randomUUID() })).rejects.toMatchObject({ code: "use_penalty" });
+  await createEnforcementMaintenance({ db: f.db, penalties: c.penalties, mode: "disabled", now: () => at }).runOnce();
+});
+test.each(["scan", "apply"] as const)("actorless pre-expiry during %s never tightens mismatched capability", async (path) => {
+  const c = await mismatchedStanding();
+  await f.db.update(schema.identityCreatorCapabilities).set({ state: "active", suspendedAt: null }).where(eq(schema.identityCreatorCapabilities.id, c.capabilityId));
+  const events = () => f.db.select().from(schema.identityCreatorCapabilityEvents).where(eq(schema.identityCreatorCapabilityEvents.capabilityId, c.capabilityId));
+  const before = await events(); const onPenaltyFailure = vi.fn();
+  if (path === "scan") expect(await createEnforcementMaintenance({ db: f.db, penalties: c.penalties, mode: "disabled", now: () => at, onPenaltyFailure }).runOnce()).toMatchObject({ expired: 1 });
+  else await expect(c.penalties.apply({ ...await c.command(), kind: "restriction", restriction: "reporting", endsAt: new Date(at.getTime() + 60_000).toISOString() })).resolves.toHaveProperty("penaltyId");
+  expect(onPenaltyFailure).not.toHaveBeenCalled(); expect(await events()).toEqual(before);
+  expect((await f.db.select().from(schema.identityCreatorCapabilities).where(eq(schema.identityCreatorCapabilities.id, c.capabilityId)))[0]?.state).toBe("active");
+  expect((await f.db.select().from(schema.trustPenalties).where(eq(schema.trustPenalties.id, c.penaltyId)))[0]?.state).toBe("expired");
+});
+test("actorless expiry never tightens mismatched account access", async () => {
+  const c = await expiring();
+  await c.service.apply({ ...await c.command(), kind: "suspension", target: "account", endsAt: new Date(at.getTime() + 86_400_000).toISOString() });
+  await f.db.update(schema.identityUsers).set({ accessStatus: "active" }).where(eq(schema.identityUsers.id, c.p.creator.userId));
+  const setAccountAccess = vi.spyOn(c.identity, "setAccountAccess"); const onPenaltyFailure = vi.fn();
+  expect(await createEnforcementMaintenance({ db: f.db, penalties: c.penalties, mode: "disabled", now: () => at, onPenaltyFailure }).runOnce()).toMatchObject({ expired: 1 });
+  expect(setAccountAccess).not.toHaveBeenCalled(); expect(onPenaltyFailure).not.toHaveBeenCalled();
+  expect((await f.db.select().from(schema.identityUsers).where(eq(schema.identityUsers.id, c.p.creator.userId)))[0]?.accessStatus).toBe("active");
+});
