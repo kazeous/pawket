@@ -24,6 +24,11 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     const id = match[1]!; return make("payments.tip_confirm", true, "Xác nhận đã nhận tip", "/creator/tips", (r, q) => r.creatorTipHandlers.confirm(q, id));
   }
   if (path === "/api/v1/creator/tip-settings") return make("catalog.tip_settings", true, "Cập nhật nhận tip", "/creator/tips", (r, q) => r.creatorTipSettingsHandlers.save(q));
+  if (path === "/api/v1/help/appeals") return make("trust.appeal_submit", false, "Gửi kháng nghị", "/help/cases", (r, q) => r.appealHandlers.submit(q));
+  if ((match = new RegExp(`^/api/v1/help/warnings/${uuid}/acknowledge$`, "u").exec(path))) {
+    const id = match[1]!; return make("trust.warning_acknowledge", false, "Xác nhận đã hiểu cảnh cáo", "/help/cases", (r, q) => r.resolutionHandlers.acknowledgeWarning(q, id));
+  }
+  if (path === "/api/v1/reports") return make("trust.report_submit", false, "Gửi báo cáo", "/help/cases", (r, q) => r.trustEnforcementHandlers.submit(q));
   if (path === "/api/v1/commissions") return make("orders.commission_request", false, "Gửi yêu cầu commission", "/commissions", (r, q) => r.commissionHandlers.request(q));
   if (path === "/api/v1/creator/commissions/packages") return make("catalog.commission_package", false, "Lưu gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.savePackage(q));
   if (path === "/api/v1/creator/commissions/packages/change") return make("catalog.commission_publish", false, "Cập nhật gói commission", "/creator/commissions", (r, q) => r.commissionHandlers.changePackage(q));
@@ -92,11 +97,19 @@ export function oidcCommand(payload: OidcPendingPayload, freshness: { tip?: Oidc
     const id = match[1]!; const fileId = match[2]!; return make("owner.case_file", true, "Xem tệp của vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.file(q, id, fileId));
   }
   if ((match = new RegExp(`^/api/v1/admin/cases/${uuid}/actions$`, "u").exec(path))) {
-    const id = match[1]!; const decision = action(payload, ["rule", "correct", "question", "extend", "accept_evidence", "require_resend", "waive", "extend_deadline", "rule_claim"]);
-    return decision ? make(`owner.case_${decision}`, true, "Xử lý vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.action(q, id)) : null;
+    const id = match[1]!; const decision = action(payload, ["rule", "correct", "question", "extend", "accept_evidence", "require_resend", "waive", "extend_deadline", "rule_claim", "hide", "restore", "close_report", "penalty", "decide_appeal"]);
+    const actionClass = decision === "decide_appeal" ? "owner.trust_appeal_decide" : decision === "penalty" ? "owner.trust_penalty_apply" : decision === "hide" || decision === "restore" ? `owner.trust_${decision}` : decision === "close_report" ? "owner.trust_report_close" : `owner.case_${decision}`;
+    return decision ? make(actionClass, true, "Xử lý vụ việc", `/admin/cases/${id}`, (r, q) => r.caseHandlers.action(q, id)) : null;
   }
   if ((match = /^\/api\/v1\/admin\/creators\/([A-Za-z0-9][A-Za-z0-9._:-]{0,199})\/freeze$/u.exec(path))) {
     const id = match[1]!; return make("owner.commission_fulfillment_freeze", true, "Dừng thực hiện commission", "/admin/cases", (r, q) => r.caseHandlers.freeze(q, id));
+  }
+  if ((match = new RegExp(`^/api/v1/admin/penalties/${uuid}/lift$`, "u").exec(path))) {
+    const id = match[1]!; return make("owner.trust_penalty_lift", true, "Gỡ biện pháp", "/admin/cases", (r, q) => r.caseHandlers.liftPenalty(q, id));
+  }
+  if (path === "/api/v1/admin/policies") return make("owner.trust_policy_publish", true, "Xuất bản chính sách", "/admin/policies", (r, q) => r.caseHandlers.publishPolicy(q));
+  if ((match = new RegExp(`^/api/v1/admin/content-reports/${uuid}/penalty$`, "u").exec(path))) {
+    const id = match[1]!; return make("owner.trust_penalty_apply", true, "Áp dụng biện pháp", "/admin/content-reports", (r, q) => r.caseHandlers.publicReportPenalty(q, id));
   }
   if ((match = new RegExp(`^/api/v1/admin/creator-applications/${uuid}/(detail|claim|decision|deposit/challenge)$`, "u").exec(path))) {
     const id = match[1]!; const operation = match[2]!; const back = "/admin/creator-applications";

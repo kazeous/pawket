@@ -7,20 +7,25 @@ import { commissionOrders, commissionPolicyRevisions } from "./commissions";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
 import { identityUsers } from "./identity-core";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
+// @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
+import { trustPolicyRevisions } from "./trust-enforcement";
 
-export const TRUST_CASE_KINDS = ["dispute", "refund_not_received", "refund_overdue", "late_payment"] as const;
+export const TRUST_CASE_KINDS = ["dispute", "refund_not_received", "refund_overdue", "late_payment", "report", "appeal"] as const;
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const reference = { onDelete: "restrict", onUpdate: "restrict" } as const;
 
 export const trustCases = pgTable("trust_cases", {
   id: uuid("id").primaryKey().defaultRandom(),
   kind: text("kind").notNull(),
-  orderId: uuid("order_id").notNull().references(() => commissionOrders.id, reference),
+  orderId: uuid("order_id").references(() => commissionOrders.id, reference),
   sourceType: text("source_type").notNull(),
   sourceId: uuid("source_id").notNull(),
   state: text("state").notNull().default("open"),
   resolutionKind: text("resolution_kind"),
   policyRevisionId: uuid("policy_revision_id").references(() => commissionPolicyRevisions.id, reference),
+  communityPolicyRevisionId: uuid("community_policy_revision_id").references(() => trustPolicyRevisions.id, reference),
+  enforcementPolicyRevisionId: uuid("enforcement_policy_revision_id").references(() => trustPolicyRevisions.id, reference),
   openedAt: time("opened_at").notNull(),
   resolvedAt: time("resolved_at"),
   version: integer("version").notNull().default(1),
@@ -30,14 +35,21 @@ export const trustCases = pgTable("trust_cases", {
   index("trust_cases_order_hold_idx").on(table.orderId, table.state, table.resolvedAt),
   check("trust_cases_source_check", sql`(${table.kind} = 'dispute' and ${table.sourceType} = 'commission_dispute')
     or (${table.kind} in ('refund_not_received','refund_overdue') and ${table.sourceType} = 'commission_refund_obligation')
-    or (${table.kind} = 'late_payment' and ${table.sourceType} = 'commission_late_payment_claim')`),
+    or (${table.kind} = 'late_payment' and ${table.sourceType} = 'commission_late_payment_claim')
+    or (${table.kind} = 'report' and ${table.sourceType} in ('commission_package','commission_brief','commission_message','commission_file'))
+    or (${table.kind} = 'appeal' and ${table.sourceType} = 'trust_appeal')`),
+  check("trust_cases_order_check", sql`(${table.kind} not in ('dispute','refund_not_received','refund_overdue','late_payment') or ${table.orderId} is not null)
+    and (${table.sourceType} not in ('commission_brief','commission_message','commission_file') or ${table.orderId} is not null)
+    and (${table.sourceType} <> 'commission_package' or ${table.orderId} is null)`),
   check("trust_cases_resolution_check", sql`(${table.state} = 'open' and ${table.resolutionKind} is null and ${table.resolvedAt} is null)
     or (${table.state} = 'resolved' and ${table.resolvedAt} is not null and ${table.resolvedAt} >= ${table.openedAt}
       and ${table.resolutionKind} is not null and (
         (${table.kind} = 'dispute' and ${table.resolutionKind} in ('ruled','settled','withdrawn','superseded'))
         or (${table.kind} = 'refund_not_received' and ${table.resolutionKind} in ('receipt_accepted','resend_required','waived'))
         or (${table.kind} = 'refund_overdue' and ${table.resolutionKind} in ('send_recorded','extended','waived'))
-        or (${table.kind} = 'late_payment' and ${table.resolutionKind} in ('refund_owed','rejected'))))`),
+        or (${table.kind} = 'late_payment' and ${table.resolutionKind} in ('refund_owed','rejected'))
+        or (${table.kind} = 'report' and ${table.resolutionKind} in ('dismissed','actioned'))
+        or (${table.kind} = 'appeal' and ${table.resolutionKind} in ('upheld','reduced','reversed'))))`),
   check("trust_cases_version_check", sql`${table.version} > 0`),
 ]);
 
@@ -60,7 +72,7 @@ export const trustCaseEvents = pgTable("trust_case_events", {
   index("trust_case_events_timeline_idx").on(table.caseId, table.occurredAt, table.id),
   check("trust_case_events_version_check", sql`${table.expectedVersion} >= 0 and ${table.resultingVersion} = ${table.expectedVersion} + 1`),
   check("trust_case_events_transition_check", sql`(${table.action} = 'opened' and ${table.expectedVersion} = 0 and ${table.beforeState} is null and ${table.afterState} = 'open' and ${table.resolutionKind} is null)
-    or (${table.action} in ('question_posted','deadline_extended') and ${table.expectedVersion} > 0 and ${table.beforeState} is not null and ${table.beforeState} = 'open' and ${table.afterState} = 'open' and ${table.resolutionKind} is null)
+    or (${table.action} in ('question_posted','deadline_extended','report_added','content_hidden','content_restored','penalty_applied') and ${table.expectedVersion} > 0 and ${table.beforeState} is not null and ${table.beforeState} = 'open' and ${table.afterState} = 'open' and ${table.resolutionKind} is null)
     or (${table.action} = 'resolved' and ${table.expectedVersion} > 0 and ${table.beforeState} is not null and ${table.beforeState} = 'open' and ${table.afterState} = 'resolved' and ${table.resolutionKind} is not null)`),
   check("trust_case_events_actor_check", sql`(${table.actorUserId} is null and ${table.actorSessionId} is null)
     or (${table.actorUserId} is not null and ${table.actorSessionId} is not null and ${table.actorSessionId} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$')`),
@@ -79,6 +91,6 @@ export const trustCaseAccessLog = pgTable("trust_case_access_log", {
   accessedAt: time("accessed_at").notNull(),
 }, (table) => [
   index("trust_case_access_log_case_idx").on(table.caseId, table.accessedAt, table.id),
-  check("trust_case_access_log_item_check", sql`${table.itemType} in ('order_summary','thread_page','file','resolution_records','refund_destination')`),
+  check("trust_case_access_log_item_check", sql`${table.itemType} in ('order_summary','thread_page','file','resolution_records','refund_destination','report_context','package_revision','brief','appeal_source')`),
   check("trust_case_access_log_actor_check", sql`${table.ownerSessionId} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' and ${table.requestId} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'`),
 ]);

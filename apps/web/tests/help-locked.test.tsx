@@ -1,0 +1,232 @@
+// @vitest-environment jsdom
+import { act, createElement, StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type { HelpCaseView } from "@pawket/trust";
+
+const { replace, refresh, cookies, read, runtime } = vi.hoisted(() => {
+  const read = vi.fn(); return { replace: vi.fn(), refresh: vi.fn(), cookies: vi.fn(), read,
+    runtime: { trustEnforcementMode: "enabled", helpCases: { read } } };
+});
+vi.mock("next/navigation", () => ({ useRouter: () => ({ replace, refresh }) }));
+vi.mock("next/headers", () => ({ cookies }));
+vi.mock("../src/platform/runtime", () => ({ getPlatformRuntime: () => runtime }));
+vi.mock("../src/ui/app-shell", () => ({ AppShell: () => { throw new Error("Locked help must not render app navigation"); } }));
+import LandingPage from "../src/app/help/locked/page";
+import CasePage from "../src/app/help/locked/case/page";
+import ResendPage from "../src/app/help/locked/resend/page";
+import { LockedCase } from "../src/ui/trust/locked-case";
+
+const token = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+const id = "10000000-0000-4000-8000-000000000001";
+const view: HelpCaseView = { penaltyId: id, kind: "suspension", state: "active", explanation: "Synthetic <explanation>",
+  startsAt: "2026-10-10T00:00:00.000Z", endsAt: null, enforcementPolicyRevisionId: id, canAppeal: true, appeal: null,
+  readOnlyUntil: "2027-01-08T00:00:00.000Z" };
+beforeEach(() => { vi.resetAllMocks(); runtime.trustEnforcementMode = "enabled"; cookies.mockResolvedValue({ getAll: () => [] }); vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); window.history.replaceState(null, "", "/help/locked"); });
+afterEach(() => { vi.unstubAllGlobals(); });
+async function mount(node: React.ReactNode, check: (container: HTMLDivElement) => Promise<void>) {
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  try { await act(async () => root.render(node)); await check(container); }
+  finally { await act(async () => root.unmount()); container.remove(); }
+}
+async function changeHelpFragment(fragment: string) {
+  await act(async () => {
+    window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + fragment);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+}
+test("landing removes the fragment before posting, exchanges once in StrictMode and navigates without the token", async () => {
+  window.history.replaceState(null, "", `/help/locked#t=${token}`);
+  const fetch = vi.fn().mockImplementation(async () => { expect(window.location.hash).toBe(""); return new Response(null, { status: 204 }); }); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    expect(fetch).toHaveBeenCalledOnce(); expect(fetch.mock.calls[0]).toEqual(["/help/locked/session", expect.objectContaining({ method: "POST", body: JSON.stringify({ token }), credentials: "same-origin", cache: "no-store" })]);
+    expect(replace).toHaveBeenCalledWith("/help/locked/case"); expect(container.textContent).not.toContain(token);
+  });
+});
+test("a new fragment on the expired landing page is cleared before one exchange and navigation", async () => {
+  const newToken = "C".repeat(43);
+  window.history.replaceState(null, "", `/help/locked#t=${token}`);
+  const fetch = vi.fn().mockImplementation(async (_url, options) => {
+    expect(window.location.hash).toBe("");
+    return new Response(null, { status: JSON.parse(options.body).token === newToken ? 204 : 400 });
+  }); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull();
+    expect(fetch).toHaveBeenCalledOnce(); expect(replace).not.toHaveBeenCalled();
+    await changeHelpFragment(`#t=${newToken}`);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1]).toEqual(["/help/locked/session", expect.objectContaining({ method: "POST", body: JSON.stringify({ token: newToken }), credentials: "same-origin", cache: "no-store" })]);
+    expect(replace).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked/case");
+    expect(window.location.hash).toBe(""); expect(container.textContent).not.toContain(newToken);
+  });
+});
+test("repeated hashchanges never re-post a token while pending, after refusal or after a different token", async () => {
+  let complete!: (response: Response) => void;
+  const fetch = vi.fn().mockImplementationOnce(() => {
+    expect(window.location.hash).toBe("");
+    return new Promise<Response>((resolve) => { complete = resolve; });
+  }).mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    await changeHelpFragment(`#t=${token}`); expect(fetch).toHaveBeenCalledOnce();
+    await changeHelpFragment(`#t=${token}`); expect(fetch).toHaveBeenCalledOnce(); expect(window.location.hash).toBe("");
+    await act(async () => complete(new Response(null, { status: 400 })));
+    expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull(); expect(replace).not.toHaveBeenCalled();
+    await changeHelpFragment(`#t=${token}`); expect(fetch).toHaveBeenCalledOnce(); expect(window.location.hash).toBe("");
+    await changeHelpFragment(`#t=${"C".repeat(43)}`); expect(fetch).toHaveBeenCalledTimes(2); expect(replace).toHaveBeenCalledOnce();
+    await changeHelpFragment(`#t=${token}`); expect(fetch).toHaveBeenCalledTimes(2); expect(replace).toHaveBeenCalledOnce(); expect(window.location.hash).toBe("");
+  });
+});
+test.each(["malformed", "refused", "network"])("a new fragment retains the same refusal state for %s", async (failure) => {
+  window.history.replaceState(null, "", "/help/locked?ended=1");
+  const fetch = vi.fn().mockImplementation(async () => {
+    expect(window.location.hash).toBe("");
+    if (failure === "network") throw new Error("private dependency");
+    return new Response(null, { status: 400 });
+  }); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    expect(container.querySelector('a[href="/help/locked/resend"]')).toBeNull();
+    await changeHelpFragment(failure === "malformed" ? "#t=bad&t=other" : `#t=${token}`);
+    expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull();
+    expect(window.location.hash).toBe(""); expect(replace).not.toHaveBeenCalled(); expect(container.textContent).not.toContain("private dependency");
+    if (failure === "malformed") expect(fetch).not.toHaveBeenCalled(); else expect(fetch).toHaveBeenCalledOnce();
+  });
+});
+test.each([204, 400])("an older exchange with status %s cannot override the new fragment result", async (oldStatus) => {
+  let complete!: (response: Response) => void;
+  window.history.replaceState(null, "", `/help/locked#t=${token}`);
+  const fetch = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { complete = resolve; }))
+    .mockResolvedValueOnce(new Response(null, { status: oldStatus === 204 ? 400 : 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    await changeHelpFragment(`#t=${"C".repeat(43)}`); expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async () => complete(new Response(null, { status: oldStatus })));
+    if (oldStatus === 204) {
+      expect(replace).not.toHaveBeenCalled(); expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull();
+    } else {
+      expect(replace).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked/case");
+      expect(container.querySelector('a[href="/help/locked/resend"]')).toBeNull();
+    }
+  });
+});
+test.each(["missing", "malformed", "refused", "network"])("landing shows the expired-link state for %s", async (failure) => {
+  if (failure !== "missing") window.history.replaceState(null, "", failure === "malformed" ? "/help/locked#t=bad&t=other" : `/help/locked#t=${token}`);
+  const fetch = vi.fn().mockImplementation(async () => { if (failure === "network") throw new Error("private dependency"); return new Response(null, { status: 400 }); }); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LandingPage), async (container) => {
+    expect(container.textContent).toContain("Liên kết không còn hiệu lực."); expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull();
+    expect(window.location.hash).toBe(""); expect(replace).not.toHaveBeenCalled();
+    if (["missing", "malformed"].includes(failure)) expect(fetch).not.toHaveBeenCalled();
+  });
+});
+test("landing after ending a session shows a neutral message and a help link without exchanging", async () => {
+  window.history.replaceState(null, "", "/help/locked?ended=1");
+  const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(StrictMode, null, createElement(LandingPage)), async (container) => {
+    expect(container.textContent).toContain("Phiên đã kết thúc."); expect(container.textContent).not.toContain("Liên kết không còn hiệu lực.");
+    expect(container.querySelector('main a[href="/help"]')).not.toBeNull(); expect(container.querySelector('a[href="/help/locked/resend"]')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled(); expect(window.location.hash).toBe("");
+  });
+});
+test("an end-state query flag does not skip a new fragment exchange", async () => {
+  window.history.replaceState(null, "", `/help/locked?ended=1#t=${token}`);
+  const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LandingPage), async (container) => {
+    expect(fetch).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked/case");
+    expect(container.textContent).not.toContain("Phiên đã kết thúc."); expect(window.location.hash).toBe("");
+  });
+});
+test("case page without a cookie shows the expired-link state without a private read", async () => {
+  const markup = renderToStaticMarkup(await CasePage()); expect(markup).toContain("Liên kết không còn hiệu lực."); expect(read).not.toHaveBeenCalled();
+});
+test.each(["disabled", "expired", "duplicate-cookie", "unavailable"])("case page refuses %s with the same state", async (state) => {
+  cookies.mockResolvedValue({ getAll: () => state === "duplicate-cookie" ? [{ value: token }, { value: token }] : [{ value: token }] });
+  runtime.trustEnforcementMode = state === "disabled" ? "disabled" : "enabled";
+  if (state === "unavailable") read.mockRejectedValue(new Error("must not render")); else read.mockResolvedValue(null);
+  expect(renderToStaticMarkup(await CasePage())).toContain("Liên kết không còn hiệu lực.");
+  if (["disabled", "duplicate-cookie"].includes(state)) expect(read).not.toHaveBeenCalled();
+});
+test.each([false, true])("case page shows appeal form only while canAppeal=%s", async (canAppeal) => {
+  cookies.mockResolvedValue({ getAll: () => [{ value: token }] }); read.mockResolvedValue({ ...view, canAppeal });
+  const markup = renderToStaticMarkup(await CasePage()); expect(read).toHaveBeenCalledWith(token);
+  expect(markup.includes('aria-label="Gửi kháng nghị"')).toBe(canAppeal); expect(markup).toContain("Synthetic &lt;explanation&gt;");
+  expect(markup).toContain(`/help/policies/${id}`); expect(markup).not.toContain('action="/help/locked/end"'); expect(markup).toContain("Kết thúc phiên");
+  expect(markup).not.toContain(token); expect(markup).not.toContain("Đăng nhập"); expect(markup).not.toContain("<nav");
+});
+test("an existing appeal hides the form and shows status and decided reasoning", () => {
+  const markup = renderToStaticMarkup(createElement(LockedCase, { view: { ...view, appeal: { state: "upheld", reasoning: "Synthetic <decision>", decidedAt: view.startsAt } } }));
+  expect(markup).not.toContain('aria-label="Gửi kháng nghị"'); expect(markup).toContain("Đã giữ nguyên biện pháp"); expect(markup).toContain("Synthetic &lt;decision&gt;");
+  expect(renderToStaticMarkup(createElement(LockedCase, { view: { ...view, appeal: { state: "open", reasoning: "private-pending-reason", decidedAt: null } } }))).not.toContain("private-pending-reason");
+});
+test("locked appeal uses the help cookie endpoint without app identity polling and refreshes after success", async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ appealId: id }), { status: 202, headers: { "content-type": "application/json" } })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LockedCase, { view }), async (container) => {
+    expect(fetch).not.toHaveBeenCalled(); const form = container.querySelector('form[aria-label="Gửi kháng nghị"]')!;
+    form.querySelector("textarea")!.value = "Synthetic appeal";
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(fetch).toHaveBeenCalledOnce(); expect(fetch.mock.calls[0]![0]).toBe("/help/locked/appeal");
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ target: { penaltyId: id }, statement: "Synthetic appeal" });
+    expect(fetch.mock.calls[0]![1].headers["idempotency-key"]).toEqual(expect.any(String)); expect(refresh).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("Đã gửi kháng nghị. Pawket đang xem xét.");
+  });
+});
+test("ending the help session fetches with POST in cors mode and navigates only after revocation succeeds", async () => {
+  let complete!: (response: Response) => void;
+  const fetch = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LockedCase, { view: { ...view, canAppeal: false } }), async (container) => {
+    const button = container.querySelector<HTMLButtonElement>("button")!;
+    expect(button.textContent).toBe("Kết thúc phiên"); expect(button.closest("form")).toBeNull(); expect(button.type).toBe("button");
+    await act(async () => button.click());
+    expect(fetch).toHaveBeenCalledOnce(); expect(fetch.mock.calls[0]).toEqual(["/help/locked/end", expect.objectContaining({ method: "POST", mode: "cors", credentials: "same-origin", cache: "no-store" })]);
+    expect(button.disabled).toBe(true); expect(replace).not.toHaveBeenCalled();
+    await act(async () => button.click()); expect(fetch).toHaveBeenCalledOnce();
+    await act(async () => complete(new Response(null, { status: 204 })));
+    expect(replace).toHaveBeenCalledOnce(); expect(replace).toHaveBeenCalledWith("/help/locked?ended=1"); expect(refresh).not.toHaveBeenCalled();
+  });
+});
+test.each(["refused", "unavailable", "unexpected", "network"])("end-session %s failure stays inline, masks errors and offers a working retry", async (failure) => {
+  const fetch = vi.fn().mockImplementationOnce(async () => {
+    if (failure === "network") throw new Error("private dependency");
+    return new Response(JSON.stringify({ code: "not_available", detail: "private dependency" }), { status: failure === "refused" ? 403 : failure === "unavailable" ? 503 : 200 });
+  }).mockResolvedValueOnce(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(createElement(LockedCase, { view: { ...view, canAppeal: false } }), async (container) => {
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Không thể kết thúc phiên. Vui lòng thử lại.");
+    expect(container.textContent).not.toContain("not_available"); expect(container.textContent).not.toContain("private dependency"); expect(replace).not.toHaveBeenCalled();
+    const retry = container.querySelector<HTMLButtonElement>("button")!; expect(retry.textContent).toBe("Thử lại"); expect(retry.disabled).toBe(false);
+    await act(async () => retry.click());
+    expect(fetch).toHaveBeenCalledTimes(2); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(replace).toHaveBeenCalledWith("/help/locked?ended=1");
+  });
+});
+test.each(["unknown", "active", "locked"])("resend shows the same confirmation for %s email", async (kind) => {
+  const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetch);
+  await mount(await ResendPage(), async (container) => {
+    const input = container.querySelector<HTMLInputElement>('input[type="email"]')!; input.value = `${kind}@example.invalid`;
+    expect(container.querySelectorAll("input")).toHaveLength(1); expect(container.querySelector("label")?.htmlFor).toBe(input.id);
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(fetch.mock.calls[0]![0]).toBe("/help/locked/link-request"); expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ email: input.value });
+    expect(container.textContent).toContain("Nếu email này thuộc một tài khoản đang bị khóa, Pawket đã gửi liên kết mới."); expect(container.textContent).not.toContain(input.value);
+  });
+});
+test("resend page is expired while enforcement is disabled", async () => {
+  runtime.trustEnforcementMode = "disabled";
+  const markup = renderToStaticMarkup(await ResendPage()); expect(markup).toContain("Liên kết không còn hiệu lực."); expect(markup).not.toContain("<form");
+  expect(markup).not.toContain('href="/help/locked/resend"'); expect(markup).toContain('href="/help"');
+  await mount(await ResendPage(), async (container) => { expect(container.querySelector('main [role="status"] a[href="/help"]')).not.toBeNull(); });
+});
+test.each(["refused", "network"])("resend keeps the approved confirmation for a %s failure", async (failure) => {
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => { if (failure === "network") throw new Error("private dependency"); return new Response(null, { status: 400 }); }));
+  await mount(await ResendPage(), async (container) => {
+    container.querySelector<HTMLInputElement>('input[type="email"]')!.value = "synthetic@example.invalid";
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(container.textContent).toContain("Nếu email này thuộc một tài khoản đang bị khóa, Pawket đã gửi liên kết mới.");
+    expect(container.textContent).not.toContain("private dependency");
+  });
+});
+test("an expired help session offers a fresh link without the app sign-in flow", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "authentication_required" }), { status: 401, headers: { "content-type": "application/json" } })));
+  await mount(createElement(LockedCase, { view }), async (container) => {
+    const form = container.querySelector('form[aria-label="Gửi kháng nghị"]')!; form.querySelector("textarea")!.value = "Synthetic appeal";
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(container.textContent).toContain("Liên kết không còn hiệu lực."); expect(container.querySelector('a[href="/help/locked/resend"]')).not.toBeNull();
+    expect(container.querySelector('a[href="/sign-in"]')).toBeNull(); expect(refresh).not.toHaveBeenCalled();
+  });
+});

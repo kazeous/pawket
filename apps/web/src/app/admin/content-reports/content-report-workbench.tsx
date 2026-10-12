@@ -4,13 +4,18 @@ import { useCallback, useEffect, useState } from "react";
 
 import { StatusBanner } from "../../../ui/status-banner";
 import { redirectToOidcReview } from "../../../auth/oidc-review-redirect";
+import { Button } from "@/components/ui/button";
+import { caseErrorText, caseRequest, readCase, sourcePartiesSchema, type CaseAction, type SourceParty } from "../../../ui/cases/case-client";
+import { TipRequestError } from "../../../ui/tips/tip-client";
+import { PenaltyForm } from "../../../ui/trust/penalty-form";
+import { useOwnerCommand } from "../../../ui/trust/use-owner-command";
 
 type Report = Readonly<{ reportId: string; target: Readonly<{ targetType: "page" | "showcase"; targetId: string; publicationRevisionId: string }>; reason: string; detail: string | null; state: "open" | "dismissed" | "held" | "closed"; version: number; snapshot: Readonly<{ target: Readonly<{ targetType: string; targetId: string; publicationRevisionId: string }>; pageId: string; canonicalHandle: string; displayName: string; showcaseTitle: string | null }>; activeHold: null | Readonly<{ holdId: string; targetType: string }>; priorActions: readonly Readonly<{ action: string; reason: string; beforeState: string; afterState: string; resultingReportVersion: number; occurredAt: string | Date }>[] }>;
 
 class TriageError extends Error { constructor(readonly code: string) { super(code); } }
 async function payload(response: Response) { try { const value = await response.json() as Record<string, unknown>; if (!response.ok) redirectToOidcReview(value); return value; } catch { return {}; } }
 
-export function ContentReportWorkbench({ initialActorUserId }: { initialActorUserId: string }) {
+export function ContentReportWorkbench({ initialActorUserId, enforcementEnabled = false }: { initialActorUserId: string; enforcementEnabled?: boolean }) {
   const [reports, setReports] = useState<readonly Report[]>([]); const [loading, setLoading] = useState(true); const [working, setWorking] = useState(false); const [notice, setNotice] = useState<{ tone: "success" | "error" | "warning"; text: string } | null>(null);
   const load = useCallback(async () => { setLoading(true); try { const response = await fetch("/api/v1/admin/content-reports", { cache: "no-store" }); if (!response.ok) throw new Error(); const result = await payload(response); setReports(Array.isArray(result.reports) ? result.reports as Report[] : []); } catch { setNotice({ tone: "error", text: "Chưa tải được hàng đợi báo cáo." }); } finally { setLoading(false); } }, []);
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
@@ -23,6 +28,26 @@ export function ContentReportWorkbench({ initialActorUserId }: { initialActorUse
   }
 
   if (loading) return <p role="status">Đang tải hàng đợi báo cáo…</p>;
-  return <div className="content-report-workbench stack">{notice ? <StatusBanner tone={notice.tone}><p>{notice.text}</p></StatusBanner> : null}{reports.length === 0 ? <section className="work-surface"><h2>Không có báo cáo cần xử lý</h2></section> : <div className="triage-layout">{reports.map((report) => <article className="work-surface stack" key={report.reportId}><div><p className="eyebrow">{report.state} · phiên bản {report.version}</p><h2>{report.snapshot.displayName}</h2><p className="muted">@{report.snapshot.canonicalHandle}{report.snapshot.showcaseTitle ? ` · ${report.snapshot.showcaseTitle}` : ""}</p></div><dl className="summary-list"><div><dt>Lý do</dt><dd>{report.reason}</dd></div><div><dt>Chi tiết</dt><dd>{report.detail || "Không có"}</dd></div><div><dt>Mục tiêu</dt><dd>{report.target.targetType} · revision {report.target.publicationRevisionId}</dd></div></dl><div className="button-row">{report.state === "open" ? <><button type="button" className="secondary" disabled={working} onClick={() => void triage(report, "dismiss")}>Bỏ qua báo cáo</button><button type="button" disabled={working} onClick={() => void triage(report, "hide")}>Ẩn mục tiêu</button></> : null}{report.state === "held" && report.activeHold ? <button type="button" disabled={working} onClick={() => void triage(report, "restore")}>Khôi phục mục tiêu</button> : null}</div>{report.priorActions.length > 0 ? <details><summary>Lịch sử audit</summary><ul>{report.priorActions.map((item) => <li key={`${item.action}-${item.resultingReportVersion}`}>{item.action}: {item.beforeState} → {item.afterState} · {item.reason}</li>)}</ul></details> : null}</article>)}</div>}
+  return <div className="content-report-workbench stack">{notice ? <StatusBanner tone={notice.tone}><p>{notice.text}</p></StatusBanner> : null}{reports.length === 0 ? <section className="work-surface"><h2>Không có báo cáo cần xử lý</h2></section> : <div className="triage-layout">{reports.map((report) => <article className="work-surface stack" key={report.reportId}><div><p className="eyebrow">{report.state} · phiên bản {report.version}</p><h2>{report.snapshot.displayName}</h2><p className="muted">@{report.snapshot.canonicalHandle}{report.snapshot.showcaseTitle ? ` · ${report.snapshot.showcaseTitle}` : ""}</p></div><dl className="summary-list"><div><dt>Lý do</dt><dd>{report.reason}</dd></div><div><dt>Chi tiết</dt><dd>{report.detail || "Không có"}</dd></div><div><dt>Mục tiêu</dt><dd>{report.target.targetType} · revision {report.target.publicationRevisionId}</dd></div></dl><div className="button-row">{report.state === "open" ? <><button type="button" className="secondary" disabled={working} onClick={() => void triage(report, "dismiss")}>Bỏ qua báo cáo</button><button type="button" disabled={working} onClick={() => void triage(report, "hide")}>Ẩn mục tiêu</button></> : null}{report.state === "held" && report.activeHold ? <button type="button" disabled={working} onClick={() => void triage(report, "restore")}>Khôi phục mục tiêu</button> : null}</div>{report.priorActions.length > 0 ? <details><summary>Lịch sử audit</summary><ul>{report.priorActions.map((item) => <li key={`${item.action}-${item.resultingReportVersion}`}>{item.action}: {item.beforeState} → {item.afterState} · {item.reason}</li>)}</ul></details> : null}{enforcementEnabled ? <ReportPenaltyAction reportId={report.reportId} actorUserId={initialActorUserId} disabled={working} onSuccess={async () => { await load(); setNotice({ tone: "success", text: "Đã áp dụng biện pháp cho nghệ sĩ." }); }} /> : null}</article>)}</div>}
   </div>;
+}
+
+function ReportPenaltyAction({ reportId, actorUserId, disabled, onSuccess }: Readonly<{ reportId: string; actorUserId: string; disabled: boolean; onSuccess(): Promise<void> }>) {
+  const [parties, setParties] = useState<SourceParty[] | null>(null); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null);
+  const command = useOwnerCommand(actorUserId, onSuccess);
+  async function open() {
+    if (disabled || loading || command.disabled) return;
+    setLoading(true); setError(null);
+    try { setParties(readCase(sourcePartiesSchema, await caseRequest(`/api/v1/admin/content-reports/${reportId}/penalty`)).parties); }
+    catch (error) { setError(caseErrorText(error instanceof TipRequestError ? error.code : "dependency_unavailable")); }
+    finally { setLoading(false); }
+  }
+  function submit(action: Extract<CaseAction, { action: "penalty" }>) {
+    if (disabled) return;
+    const { action: commandKind, ...body } = action; if (commandKind !== "penalty") return;
+    command.submit(`/api/v1/admin/content-reports/${reportId}/penalty`, body);
+  }
+  return <section className="stack">{command.notice ? <StatusBanner tone={command.notice.tone}><p>{command.notice.text}</p></StatusBanner> : null}{error ? <p role="alert">{error}</p> : null}
+    {command.pending && !command.working ? <Button variant="outline" onClick={command.retry}>Kiểm tra lại cùng yêu cầu</Button> : null}
+    {parties ? <PenaltyForm parties={parties} disabled={disabled || command.disabled} onSubmit={submit} /> : <Button variant="outline" disabled={disabled || loading} onClick={() => void open()}>{loading ? "Đang tải người dùng…" : "Áp dụng biện pháp"}</Button>}</section>;
 }

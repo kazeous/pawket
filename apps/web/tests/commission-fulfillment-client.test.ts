@@ -27,6 +27,7 @@ test("retains creator grouping facts", () => {
   expect(orders.items[0]!.awaitingBuyer).toBe(true); expect(orders.items[0]!.overdue).toBe(true);
 });
 test("uses the approved fulfilment error copy and context byte limit", () => {
+  expect(commissionErrorText("invalid_request")).toBe("Dữ liệu chưa hợp lệ. Kiểm tra các trường và giới hạn nội dung.");
   expect(commissionErrorText("fulfillment_disabled")).toBe("Tạm dừng trao đổi và giao bài. Lịch sử vẫn được giữ.");
   expect(commissionErrorText("file_too_large", "submission")).toBe("Tệp vượt quá 250 MB.");
   expect(commissionErrorText("file_too_large", "thread")).toBe("Tệp vượt quá 25 MB.");

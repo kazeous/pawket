@@ -8,3 +8,5 @@ export * from "./catalog-media-ownership.js";
 export * from "./creator-tip-settings.js";
 export * from "./platform-tip-policy.js";
 export * from "./commission-packages.js";
+
+export { createPackageReportTargetPort } from "./package-report-target.js";

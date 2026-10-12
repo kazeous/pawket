@@ -35,36 +35,40 @@ export function CommissionSession({ actorUserId, children }: Readonly<{ actorUse
 export function useCommissionSession() {
   const verify = useContext(SessionContext); if (!verify) throw new Error("Commission session boundary required"); return verify;
 }
-type Attempt = { path: string; key: string; body: string; done(value: unknown): void };
-export function useCommissionCommand(request: typeof tipRequest = tipRequest) {
-  const verify = useCommissionSession(); const attempt = useRef<Attempt | null>(null); const running = useRef(false);
+type Attempt = { path: string; key: string; body: string; actorUserId?: string; done(value: unknown): void };
+export function useCommissionCommand(request: typeof tipRequest = tipRequest, options: Readonly<{ sessionOptional?: boolean; actorUserId?: string }> = {}) {
+  const verify = useContext(SessionContext);
+  if (!verify && !options.sessionOptional) throw new Error("Commission session boundary required");
+  const attempt = useRef<Attempt | null>(null); const running = useRef(false);
   const [pending, setPending] = useState(false); const [locked, setLocked] = useState(false); const [code, setCode] = useState<string | null>(null);
   async function send() {
     if (running.current || !attempt.current) return;
     running.current = true; setPending(true); setLocked(true); setCode(null);
     try {
-      const actorUserId = await verify(true); const a = attempt.current;
-      const value = await request(a.path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": a.key, "x-pawket-actor": actorUserId }, body: a.body }, 131_072);
-      await verify(); a.done(value); attempt.current = null; setLocked(false);
+      const a = attempt.current; const actorUserId = verify ? await verify(true) : a.actorUserId;
+      const value = await request(a.path, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": a.key,
+        ...(actorUserId ? { "x-pawket-actor": actorUserId } : {}) }, body: a.body }, 131_072);
+      if (verify) await verify(); a.done(value); attempt.current = null; setLocked(false);
     } catch (error) {
-      const failure = error instanceof TipRequestError ? error.code : "dependency_unavailable"; setCode(failure);
+      const rawCode = error instanceof TipRequestError ? error.code : "dependency_unavailable";
+      const failure = options.sessionOptional && ["AUTHENTICATION_REQUIRED", "not_authorized"].includes(rawCode) ? "authentication_required" : rawCode; setCode(failure);
       // An unknown outcome keeps the original bytes and key, including across reauthentication.
       if (!["dependency_unavailable", "authentication_required", "recent_auth_required", "totp_required", "account_changed"].includes(failure)) { attempt.current = null; setLocked(false); }
     } finally { running.current = false; setPending(false); }
   }
   function execute(path: string, payload: unknown, done: (value: unknown) => void) {
     if (running.current || attempt.current) return;
-    attempt.current = { path, key: crypto.randomUUID(), body: JSON.stringify(payload), done }; void send();
+    attempt.current = { path, key: crypto.randomUUID(), body: JSON.stringify(payload), ...(options.actorUserId ? { actorUserId: options.actorUserId } : {}), done }; void send();
   }
   return { execute, retry: send, pending, locked, code };
 }
-export function CommandFeedback({ command }: Readonly<{ command: ReturnType<typeof useCommissionCommand> }>) {
+export function CommandFeedback({ command, errorText = commissionErrorText }: Readonly<{ command: ReturnType<typeof useCommissionCommand>; errorText?(code: string): string }>) {
   const feedback = useRef<HTMLDivElement>(null);
   useEffect(() => { if (command.code) feedback.current?.focus(); }, [command.code]);
   if (!command.code && !command.pending) return null;
   return <Alert ref={feedback} tabIndex={-1} role={command.pending ? "status" : "alert"} variant={command.pending ? "default" : "destructive"}>
     <AlertTitle>{command.pending ? "Đang kiểm tra kết quả…" : "Chưa hoàn tất thao tác"}</AlertTitle><AlertDescription className="flex flex-col items-start gap-3">
-      {command.code ? <p>{commissionErrorText(command.code)}</p> : null}
+      {command.code ? <p>{errorText(command.code)}</p> : null}
       {command.code === "dependency_unavailable" ? <p>Giữ trang này mở. Lần kiểm tra tiếp theo dùng cùng yêu cầu, không tạo thêm đơn hoặc thanh toán.</p> : null}
       {["authentication_required", "recent_auth_required"].includes(command.code ?? "") ? <a className={buttonVariants({ variant: "outline" })} href="/sign-in" target="_blank" rel="noopener noreferrer">Đăng nhập lại trong tab mới</a> : null}
       {command.code === "OIDC_STEP_UP_REQUIRED" ? <p>Đang chuyển đến trang xem lại và xác thực tài khoản.</p> : null}

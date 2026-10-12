@@ -23,7 +23,8 @@ export async function validateResolutionOutboxEvent(db: PawketDatabase, event: S
   const shape = (aggregate: string, keys: readonly string[], id: string) => {
     if (event.aggregateType !== aggregate || !readCommissionRecord(expected, keys) || expected[id] !== event.aggregateId) invalid();
     for (const key of keys.filter((key) => key.endsWith("Id") && key !== "creatorUserId" && key !== "correlationId")) {
-      if (!(key === "policyRevisionId" && expected[key] === null) && !commissionUuid(expected[key])) invalid();
+      const nullableId = expected[key] === null && (key === "policyRevisionId" || (key === "orderId" && event.eventType === "trust.case_opened.v1"));
+      if (!nullableId && !commissionUuid(expected[key])) invalid();
     }
   };
   const time = (at: Date | null | undefined) => at?.toISOString() === event.occurredAt;

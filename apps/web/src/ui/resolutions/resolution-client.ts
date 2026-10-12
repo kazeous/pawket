@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { commissionPath, type Role } from "../commissions/commission-client";
 import { tipRequest } from "../tips/tip-client";
+import { myTrustCasesSchema } from "../trust/trust-client";
 
 const uuid = z.uuid(); const time = z.iso.datetime(); const amount = z.number().int().min(0).max(50_000_000);
 export const proposalKinds = ["cancel_with_refund", "complete_with_refund"] as const;
@@ -22,8 +23,9 @@ export const resolutionSchema = z.object({ controls: z.object({ mode: z.enum(["d
     ruling: z.object({ outcome: z.enum(["complete", "close"]), refundAmountVnd: amount, currentRefundAmountVnd: amount, correctedAt: time.nullable(), reasoning: z.string(), ruledAt: time }).nullable() }).nullable(),
   refunds: z.array(refundSchema), lateClaim: lateClaim.nullable(), actions: z.object({ canPropose: z.boolean(), canOpenDispute: z.boolean(),
     disputeTrigger: z.enum(["final_delivery", "overdue", "proposal_declined"]).nullable(), disputeTriggerEndsAt: time.nullable(), canCancelAfterSuspension: z.boolean() }) }) });
-export const myCasesSchema = z.object({ cases: z.object({ disputes: z.array(z.object({ id: uuid, orderId: uuid, state: z.string(), reason: z.string(), trigger: z.string(), openedAt: time, closedAt: time.nullable() })),
-  refunds: z.array(refundSchema.extend({ orderId: uuid })), lateClaims: z.array(lateClaim.extend({ orderId: uuid })) }) });
+export const myCasesSchema = z.object({ controls: z.object({ trustMode: z.enum(["disabled", "enabled"]) }).optional(), cases: z.object({ disputes: z.array(z.object({ id: uuid, orderId: uuid, state: z.string(), reason: z.string(), trigger: z.string(), openedAt: time, closedAt: time.nullable() })),
+  refunds: z.array(refundSchema.extend({ orderId: uuid })), lateClaims: z.array(lateClaim.extend({ orderId: uuid })),
+  ...myTrustCasesSchema.partial().shape }) });
 export const revealSchema = z.object({ bankName: z.string(), accountNumber: z.string().regex(/^[0-9]{6,19}$/u), accountHolder: z.string(), amountVnd: amount,
   reference: z.string(), qrPayload: z.string().min(50).max(1000), dueAt: time });
 export type ResolutionView = z.infer<typeof resolutionSchema>;

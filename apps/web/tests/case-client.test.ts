@@ -2,8 +2,17 @@
 import { afterEach, expect, test, vi } from "vitest";
 const { redirect } = vi.hoisted(() => ({ redirect: vi.fn() }));
 vi.mock("../src/auth/oidc-review-redirect", () => ({ redirectToOidcReview: redirect }));
-import { casePost, caseRequest, openCaseFile } from "../src/ui/cases/case-client";
+import { casePost, caseRequest, openCaseFile, caseErrorText, queueSchema } from "../src/ui/cases/case-client";
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); redirect.mockReset(); });
+test.each(["use_penalty", "duplicate", "resolution_disabled", "enforcement_disabled"])("owner error %s has actionable copy", (code) => {
+  expect(caseErrorText(code)).not.toBe(caseErrorText("dependency_unavailable"));
+  if (code === "use_penalty") expect(caseErrorText(code)).toContain("biện pháp");
+  if (code === "duplicate") expect(caseErrorText(code)).toContain("đang có hiệu lực");
+});
+test.each(["report", "appeal"])("queue accepts orderless %s metadata", (kind) => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  expect(queueSchema.safeParse({ cases: [{ caseId: id, orderId: null, sourceId: id, sourceType: "commission_package", kind, state: "open", resolutionKind: null, policyRevisionId: null, version: 1, openedAt: "2026-10-07T00:00:00.000Z", resolvedAt: null, nextDeadline: null }] }).success).toBe(true);
+});
 test("owner commands preserve actor and command id and use the existing opaque step-up flow", async () => {
   const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(JSON.stringify({ code: "OIDC_STEP_UP_REQUIRED", reviewPath: "/auth/review/10000000-0000-4000-8000-000000000001" }), { status: 403, headers: { "content-type": "application/json" } }));
   vi.stubGlobal("fetch", fetch);

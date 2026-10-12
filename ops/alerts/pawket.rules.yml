@@ -295,3 +295,11 @@ groups:
         annotations:
           summary: Commission resolution maintenance is unhealthy or stale
           runbook: ops/runbooks/commission-operations.md
+      - alert: PawketTrustEnforcementScanStale
+        expr: (pawket_worker_scan_healthy{scan="trust_enforcement"} == 0) or (time() - pawket_worker_last_success_timestamp_seconds{scan="trust_enforcement"} >= 900)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Trust enforcement maintenance is unhealthy or stale
+          runbook: ops/runbooks/trust-enforcement.md

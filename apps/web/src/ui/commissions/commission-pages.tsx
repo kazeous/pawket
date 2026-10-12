@@ -19,6 +19,8 @@ import { CommissionSession } from "./commission-session";
 import { CommissionTerms } from "./commission-terms";
 import { PackageWorkbench } from "./package-workbench";
 import { resolutionSchema, type ResolutionView } from "../resolutions/resolution-client";
+import { PartyWarnings } from "../trust/party-warnings";
+import { ReportDialog } from "../trust/report-dialog";
 
 async function pageContext() {
   const incoming = new Headers(await headers()); const platform = getPlatformRuntime(); const env = loadServerEnv();
@@ -37,7 +39,7 @@ export async function CommissionListPage({ role }: Readonly<{ role: Role }>) {
   let initial = null; let code = "dependency_unavailable";
   try { initial = await read(await ctx.platform.commissionHandlers.list(ctx.request(`/api/v1${commissionPath(role)}`), role), ordersSchema); } catch (error) { code = errorCode(error); }
   return <AppShell context="Commission" action={{ href: role === "creator" ? "/creator" : "/creators", label: role === "creator" ? "Trang nghệ sĩ" : "Tìm nghệ sĩ" }}><section data-commission-surface className="flex min-w-0 flex-col gap-6"><header><p className="eyebrow">Commission</p><h1>{role === "creator" ? "Yêu cầu và đơn nhận vẽ" : "Commission của bạn"}</h1><p className="lede">Theo dõi yêu cầu, điều khoản và trạng thái thanh toán.</p></header>
-    <CommissionSession key={`${actor.userId}:${role}`} actorUserId={actor.userId}>{initial ? <CommissionList initial={initial.orders} role={role} /> : <PageFailure code={code} href={commissionPath(role)} />}</CommissionSession>
+    <CommissionSession key={`${actor.userId}:${role}`} actorUserId={actor.userId}><PartyWarnings incoming={ctx.incoming} />{initial ? <CommissionList initial={initial.orders} role={role} /> : <PageFailure code={code} href={commissionPath(role)} />}</CommissionSession>
   </section></AppShell>;
 }
 export async function CommissionDetailPage({ role, orderId }: Readonly<{ role: Role; orderId: string }>) {
@@ -48,7 +50,7 @@ export async function CommissionDetailPage({ role, orderId }: Readonly<{ role: R
   let resolution: ResolutionView | null = null;
   if (initial) try { resolution = await read(await ctx.platform.resolutionHandlers.resolution(ctx.request(`/api/v1${commissionPath(role)}/${encodeURIComponent(orderId)}/resolution`), orderId, role), resolutionSchema); } catch { /* The panel offers its own retry without hiding the order. */ }
   return <AppShell context="Commission" action={{ href: commissionPath(role), label: "Danh sách commission" }}><section data-commission-surface className="min-w-0"><CommissionSession key={`${actor.userId}:${orderId}`} actorUserId={actor.userId}>
-    {initial ? <CommissionDetail initial={initial} initialResolution={resolution} refundBanks={VIETQR_REFUND_BANKS} /> : <><h1>Chi tiết commission</h1><PageFailure code={code} href={`${commissionPath(role)}/${encodeURIComponent(orderId)}`} /></>}
+    {initial ? <CommissionDetail initial={initial} initialResolution={resolution} refundBanks={VIETQR_REFUND_BANKS} trustMode={ctx.env.TRUST_ENFORCEMENT_MODE} /> : <><h1>Chi tiết commission</h1><PageFailure code={code} href={`${commissionPath(role)}/${encodeURIComponent(orderId)}`} /></>}
   </CommissionSession></section></AppShell>;
 }
 export async function CommissionPackagesPage() {
@@ -66,7 +68,12 @@ export async function PublicCommissionPackages({ handle }: Readonly<{ handle: st
   try { result = await read(await ctx.platform.commissionHandlers.publicPackages(ctx.request(`/api/v1/public/creators/${encodeURIComponent(handle)}/commissions`), handle), publicPackagesSchema); }
   catch { return <Alert><AlertTitle>Chưa tải được gói commission</AlertTitle><AlertDescription>Vui lòng quay lại sau để xem các gói nhận việc.</AlertDescription></Alert>; }
   if (!result.packages.length) return null;
-  return <section data-commission-surface className="flex min-w-0 flex-col gap-4" aria-label="Gói commission"><h2>Commission</h2><div className="grid min-w-0 gap-4 md:grid-cols-2">{result.packages.map((p) => <Card key={p.id}><CardHeader><CardTitle role="heading" aria-level={3} className="wrap-anywhere"><a href={`/creators/${handle}/commissions/${p.id}`} className="underline underline-offset-4">{p.title}</a></CardTitle><CardDescription>{routeLabels[p.route]}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><p>{p.terms ? formatVnd(p.terms.amountVnd) : "Giá theo brief"}</p><p className="text-sm text-muted-foreground">{!p.accepting ? "Tạm ngưng nhận đơn" : p.capacityAvailable ? "Đang nhận yêu cầu" : p.route === "fixed_immediate" ? "Đã hết suất" : "Nhận yêu cầu · chưa giữ suất"}</p></CardContent></Card>)}</div></section>;
+  let reportActor: Awaited<ReturnType<typeof ctx.platform.authenticate>> = null;
+  if (ctx.env.TRUST_ENFORCEMENT_MODE === "enabled") {
+    try { reportActor = await ctx.platform.authenticate(ctx.incoming); }
+    catch { /* Public packages remain available during an identity outage. */ }
+  }
+  return <section data-commission-surface className="flex min-w-0 flex-col gap-4" aria-label="Gói commission"><h2>Commission</h2><div className="grid min-w-0 gap-4 md:grid-cols-2">{result.packages.map((p) => <Card key={p.id}><CardHeader><CardTitle role="heading" aria-level={3} className="wrap-anywhere"><a href={`/creators/${handle}/commissions/${p.id}`} className="underline underline-offset-4">{p.title}</a></CardTitle><CardDescription>{routeLabels[p.route]}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><p>{p.terms ? formatVnd(p.terms.amountVnd) : "Giá theo brief"}</p><p className="text-sm text-muted-foreground">{!p.accepting ? "Tạm ngưng nhận đơn" : p.capacityAvailable ? "Đang nhận yêu cầu" : p.route === "fixed_immediate" ? "Đã hết suất" : "Nhận yêu cầu · chưa giữ suất"}</p><PublicPackageReport packageId={p.id} revisionId={p.revisionId} actorUserId={reportActor?.userId ?? null} /></CardContent></Card>)}</div></section>;
 }
 export async function PublicCommissionPackagePage({ handle, packageId }: Readonly<{ handle: string; packageId: string }>) {
   const ctx = await pageContext(); let result;
@@ -77,8 +84,17 @@ export async function PublicCommissionPackagePage({ handle, packageId }: Readonl
   return <AppShell context={`@${handle}`} action={{ href: `/creators/${handle}`, label: "Trang nghệ sĩ" }}><article data-commission-surface className="flex min-w-0 flex-col gap-6"><header className="flex min-w-0 flex-col gap-3"><p className="eyebrow">{routeLabels[offering.route]}</p><h1 className="wrap-anywhere">{offering.title}</h1><p className="lede whitespace-pre-wrap wrap-anywhere">{offering.description}</p></header>
     <Card><CardHeader><CardTitle role="heading" aria-level={2}>Nội dung và điều khoản</CardTitle><CardDescription>Đọc kỹ nội dung trước khi gửi brief.</CardDescription></CardHeader><CardContent><CommissionTerms terms={offering.terms} policy={offering.policy?.document} /></CardContent></Card>
     {offering.showcaseId ? <a href={`/creators/${handle}#showcase-${offering.showcaseId}`} className="underline">Xem tác phẩm tham khảo</a> : null}
+    <PublicPackageReport packageId={offering.id} revisionId={offering.revisionId} actorUserId={actor?.userId ?? null} />
     {!offering.accepting ? <Alert><AlertTitle>Tạm ngưng nhận đơn</AlertTitle><AlertDescription>Gói này hiện chưa nhận yêu cầu mới.</AlertDescription></Alert> : null}
     {actor ? <CommissionSession key={`${actor.userId}:${offering.revisionId}`} actorUserId={actor.userId}><CommissionRequest offering={offering} /></CommissionSession> : <Alert><AlertTitle>Đăng nhập để đặt commission</AlertTitle><AlertDescription><p>Dùng tài khoản đã xác minh email để gửi brief và theo dõi đơn riêng tư.</p><a href="/sign-in" className={buttonVariants({ variant: "outline" })}>Đăng nhập</a></AlertDescription></Alert>}
     <Link prefetch={false} href="/commissions" className="text-sm underline">Xem commission của bạn</Link>
   </article></AppShell>;
+}
+
+async function PublicPackageReport({ packageId, revisionId, actorUserId }: Readonly<{ packageId: string; revisionId: string; actorUserId: string | null }>) {
+  if (loadServerEnv().TRUST_ENFORCEMENT_MODE !== "enabled") return null;
+  try {
+    if (actorUserId && await getPlatformRuntime().isOwnCommissionPackage(actorUserId, packageId)) return null;
+  } catch { return null; }
+  return <ReportDialog mode="enabled" guest={!actorUserId} {...(actorUserId ? { actorUserId } : {})} target={{ kind: "commission_package", packageId, revisionId }} />;
 }

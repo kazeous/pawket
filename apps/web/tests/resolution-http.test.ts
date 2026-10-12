@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { CommissionError } from "@pawket/orders";
 import { CommissionRefundError } from "@pawket/payments";
 import { ResolutionError } from "@pawket/resolutions";
+import { TrustEnforcementError } from "@pawket/trust";
 import { COMMISSION_PRIVATE_HEADERS } from "../src/platform/commission-http.js";
 import { createResolutionHttpHandlers } from "../src/platform/resolution-http.js";
 
@@ -63,6 +64,7 @@ describe("party resolution HTTP boundary", () => {
     [new CommissionRefundError("totp_required"), 403, "totp_required"], [new CommissionRefundError("invalid_destination"), 400, "invalid_destination"],
     [new CommissionError("invalid_transition"), 400, "invalid_transition"], [new CommissionError("rate_limited"), 429, "rate_limited"],
     [new CommissionError("completion_held"), 409, "completion_held"], [new Error("synthetic dependency failure"), 503, "dependency_unavailable"],
+    [new TrustEnforcementError("rate_limited"), 429, "rate_limited"], [new TrustEnforcementError("not_authorized"), 404, "not_available"],
   ] as const)("domain error %s maps to %s", async (error, status, expected) => {
     const f = fixture(); f.proposals.propose.mockRejectedValue(error); await code(await f.http.propose(request(proposal), orderId, "buyer"), status, expected);
   });

@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 
 import { drizzle } from "drizzle-orm/postgres-js";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import * as schema from "@pawket/database";
 import { type PawketDatabase } from "@pawket/database";
-import { CREATOR_APPLICATION_ATTESTATION_VERSIONS } from "@pawket/identity";
+import { CREATOR_APPLICATION_ATTESTATION_VERSIONS, createIdentityEnforcementPort, createEnforcementNoticePort } from "@pawket/identity";
+import { canonicalizeEmailAddress } from "@pawket/identity/email-address";
 import { createEncryptionKeyring, encryptSensitiveField } from "@pawket/security";
+import { createPenaltyService, createHelpLinkService } from "@pawket/trust";
 
 import * as admin from "../src/index.js";
 
@@ -192,6 +195,75 @@ afterAll(async () => {
 });
 
 describe("owner creator review", () => {
+  test.each([
+    { kind: "removal", target: "creator_capability" },
+    { kind: "removal", target: "account" },
+    { kind: "suspension", target: "creator_capability" },
+  ] as const)("legacy suspension survives $target $kind and lift; reinstatement checks active penalties", async (shape) => {
+    const common = { db, keyring, commandFingerprintKey: new Uint8Array(32).fill(11), now: () => now,
+      consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition };
+    const enabled = admin.createCreatorReviewService({ ...common, enforcementMode: "enabled" });
+    const disabled = admin.createCreatorReviewService({ ...common, enforcementMode: "disabled" });
+    const claimed = await disabled.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: randomUUID() });
+    await disabled.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId,
+      expectedVersion: claimed.version, idempotencyKey: randomUUID(), requestId: randomUUID(), action: "approve", reasonCode: "other", applicantExplanation: "Approved" });
+    const command = { ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, userId: "review-artist",
+      action: "suspend" as const, reasonCode: "other", applicantExplanation: "Legacy suspension", idempotencyKey: randomUUID(), requestId: randomUUID() };
+    await disabled.setCreatorCapability(command);
+    const pageId = randomUUID(); const publicationId = randomUUID(); const publicReportId = randomUUID();
+    await db.insert(schema.creatorPages).values({ id: pageId, userId: "review-artist", initializedFromRevisionId: revisionId, createdAt: now, updatedAt: now });
+    await db.insert(schema.creatorPublicationRevisions).values({ id: publicationId, pageId, revisionNumber: 1, canonicalHandle: "review-artist",
+      displayName: "Artist", shortIntroduction: "Art", primaryDiscipline: "illustration", secondaryDisciplines: [], actorUserId: "review-artist",
+      actorSessionId: "artist-session", expectedDraftVersion: 1, requestId: randomUUID(), publishedAt: now });
+    await db.insert(schema.publicContentReports).values({ id: publicReportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`,
+      targetType: "page", targetId: pageId, publicationRevisionId: publicationId, reason: "other", reporterUserId: "other-owner", createdAt: now, updatedAt: now });
+    const notices = createEnforcementNoticePort({ keyring });
+    const helpLinks = createHelpLinkService({ db, mode: "enabled", lookupHmacKey: new Uint8Array(32).fill(12), notices, logger: { error() {} },
+      canonicalizeEmail: (raw) => { try { return canonicalizeEmailAddress(raw).canonical; } catch { return null; } }, now: () => now });
+    const penalties = createPenaltyService({ db, mode: "enabled", keyring, lookupHmacKey: new Uint8Array(32).fill(12), helpLinks, notices,
+      applicationRevision: "synthetic-review", now: () => now, consumeStepUpProof: async () => true,
+      fence: { async lockCreatorFence(tx, userId) { await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${userId}`}, 0))`); } },
+      identity: createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) }),
+      freeze: { freezeForRemoval: async () => ({ closedOrders: 0 }) }, policies: { readCurrentIds: async () => ({ enforcementRevisionId: null }) } });
+    const ownerCommand = () => ({ owner: { userId: "review-owner", sessionId: "owner-session" }, stepUpProofId: proofId, idempotencyKey: randomUUID(), requestId: randomUUID() });
+    const { penaltyId } = await penalties.apply({ ...ownerCommand(), subjectUserId: "review-artist", source: { publicReportId }, ...shape,
+      reasonCategory: "other", explanation: "Synthetic penalty" });
+    if (shape.target === "account") expect((await client`select access_status from identity_users where id = 'review-artist'`)[0]?.access_status).toBe("closed");
+    if (shape.kind === "suspension") {
+      // Already suspended: applying the penalty changes no capability row or latest event.
+      expect((await client`select penalty_id from identity_creator_capability_events order by version desc limit 1`)[0]?.penalty_id).toBeNull();
+    }
+    const reinstate = { ...command, action: "reinstate" as const, idempotencyKey: randomUUID(), requestId: randomUUID() };
+    await expect(enabled.setCreatorCapability(reinstate)).rejects.toMatchObject({ code: "use_penalty" });
+    await penalties.lift({ ...ownerCommand(), penaltyId, reason: "Lift synthetic penalty" });
+    expect((await client`select state from identity_creator_capabilities where user_id = 'review-artist'`)[0]?.state).toBe("suspended");
+    await expect(enabled.setCreatorCapability(reinstate)).resolves.toEqual({ state: "active" });
+  });
+  test("enabled enforcement refuses legacy suspend and penalty reinstatement; disabled legacy suspension can still be reinstated", async () => {
+    const common = { db, keyring, commandFingerprintKey: new Uint8Array(32).fill(11), now: () => now, consumeStepUpProof: async () => true, catalogCapabilityTransition: noCatalogCapabilityTransition };
+    const enabled = admin.createCreatorReviewService({ ...common, enforcementMode: "enabled" });
+    const disabled = admin.createCreatorReviewService({ ...common, enforcementMode: "disabled" });
+    const claimed = await enabled.claim({ ownerUserId: "review-owner", ownerSessionId: "owner-session", applicationId, expectedVersion: 2, requestId: randomUUID() });
+    await enabled.decide({ ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, applicationId, revisionId, expectedVersion: claimed.version, idempotencyKey: randomUUID(), requestId: randomUUID(), action: "approve", reasonCode: "other", applicantExplanation: "Approved" });
+    const command = { ownerUserId: "review-owner", ownerSessionId: "owner-session", stepUpProofId: proofId, userId: "review-artist", action: "suspend" as const, reasonCode: "other", applicantExplanation: "Suspended", idempotencyKey: randomUUID(), requestId: randomUUID() };
+    await expect(enabled.setCreatorCapability(command)).rejects.toMatchObject({ code: "use_penalty" });
+    await disabled.setCreatorCapability(command); expect(await enabled.setCreatorCapability({ ...command, action: "reinstate", idempotencyKey: randomUUID() })).toEqual({ state: "active" });
+    const penaltyId = randomUUID(); const caseId = randomUUID();
+    await client.begin(async (tx) => {
+      await tx`insert into trust_cases (id, kind, source_type, source_id, opened_at) values (${caseId}, 'report', 'commission_package', ${randomUUID()}, ${at})`;
+      await tx`insert into trust_case_events (case_id, action, request_id, expected_version, resulting_version, after_state, occurred_at) values (${caseId}, 'opened', 'fixture', 0, 1, 'open', ${at})`;
+    });
+    const explanation = encryptSensitiveField({ keyring, plaintext: "Synthetic penalty", binding: { recordType: "trust_penalties", recordId: penaltyId, fieldName: "explanation" } });
+    await client`insert into trust_penalties (id, subject_user_id, kind, target, reason_category, explanation_envelope, source_case_id, starts_at, owner_user_id, owner_session_id, step_up_proof_id, request_id, created_at) values (${penaltyId}, 'review-artist', 'suspension', 'creator_capability', 'other', ${JSON.stringify(explanation)}::jsonb, ${caseId}, ${at}, 'review-owner', 'owner-session', ${proofId}, 'fixture', ${at})`;
+    const identity = createIdentityEnforcementPort({ clearPublishedHeadForSuspension: async () => ({ pageId: null, previousPublishedRevisionId: null }) });
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${'commissions:creator:review-artist'}, 0))`);
+      await identity.lockSubject(tx, "review-artist");
+      await identity.setCreatorCapability(tx, { userId: "review-artist", state: "suspended", penaltyId, actor: { userId: "review-owner", sessionId: "owner-session", stepUpProofId: proofId }, requestId: randomUUID(), at: now });
+    });
+    await expect(enabled.setCreatorCapability({ ...command, action: "reinstate", idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "use_penalty" });
+    await expect(disabled.setCreatorCapability({ ...command, action: "reinstate", idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "use_penalty" });
+  });
   test("rejects stale claims and permits a different owner to reclaim only after the 15-minute lease expires", async () => {
     type QueueItem = { state: string; version: number; claimedByCurrentOwner: boolean };
     type Factory = { createCreatorReviewService(input: Record<string, unknown>): { claim(input: Record<string, unknown>): Promise<{ version: number; leaseExpiresAt: Date }>; listSubmitted(ownerUserId?: string, at?: Date): Promise<QueueItem[]> } };

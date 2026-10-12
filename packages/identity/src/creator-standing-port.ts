@@ -15,7 +15,7 @@ export function createCreatorStandingPort() {
       }
       const [user] = await tx.select({ accessStatus: identityUsers.accessStatus }).from(identityUsers)
         .where(eq(identityUsers.id, userId)).limit(1).for("share");
-      if (locked?.state === "suspended" || user?.accessStatus === "access_suspended") return "suspended";
+      if (locked?.state === "suspended" || locked?.state === "removed" || user?.accessStatus === "access_suspended" || user?.accessStatus === "closed") return "suspended";
       return locked?.state === "active" && user?.accessStatus === "active" ? "active" : "none";
     },
   };

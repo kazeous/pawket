@@ -50,8 +50,8 @@ export function createOwnerResolutionService(kit: Kit, input: Input) {
   const rulingCreator = async (tx: PawketTransaction, rulingId: string) => disputeCreator(tx, (await ruling(tx, rulingId)).disputeId);
   async function refundCase(tx: PawketTransaction, caseId: string) {
     const row = await input.cases.readCase(tx, caseId);
-    if (!row || !["refund_not_received", "refund_overdue"].includes(row.kind) || row.sourceType !== "commission_refund_obligation") resolutionFail("not_available");
-    return row;
+    if (!row || row.orderId === null || !["refund_not_received", "refund_overdue"].includes(row.kind) || row.sourceType !== "commission_refund_obligation") resolutionFail("not_available");
+    return { ...row, orderId: row.orderId };
   }
   async function openDisputeCase(tx: PawketTransaction, disputeId: string) {
     const row = await input.cases.findOpenCase(tx, { kind: "dispute", sourceId: disputeId });

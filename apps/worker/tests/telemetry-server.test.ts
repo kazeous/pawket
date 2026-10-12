@@ -56,6 +56,7 @@ describe("worker telemetry server", () => {
       commissionCleanupScan: "not_configured",
       commissionFulfillmentScan: "not_configured",
       commissionResolutionScan: "not_configured",
+      trustEnforcementScan: "not_configured",
       oidcCleanupScan: "not_configured",
       sepay: "disabled",
       sepayRecoveryScan: "not_configured",

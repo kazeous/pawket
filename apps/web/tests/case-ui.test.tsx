@@ -8,7 +8,7 @@ vi.mock("../src/ui/cases/case-client", async (original) => ({ ...await original<
 import { CaseQueue } from "../src/ui/cases/case-queue";
 import { CaseDetail } from "../src/ui/cases/case-detail";
 import { caseDetailSchema, formatVnd } from "../src/ui/cases/case-client";
-import { EvidenceView } from "../src/ui/cases/evidence-tabs";
+import { EvidenceTabs, EvidenceView } from "../src/ui/cases/evidence-tabs";
 import { RulingForm, rulingBounds } from "../src/ui/cases/ruling-form";
 import { RefundCaseActions } from "../src/ui/cases/refund-case-actions";
 import type { CaseDetailView } from "../src/ui/cases/case-client";
@@ -80,6 +80,7 @@ test("the owner sees the corrected ruling amount and date, and the correction fo
   const correctedAt = new Date().toISOString(); const correctionEndsAt = new Date(Date.now() + 86_400_000).toISOString();
   const corrected = caseDetailSchema.parse({ case: { ...detail, state: "resolved", ruling: { id, outcome: "close", refundAmountVnd: 200_000,
     currentRefundAmountVnd: 100_000, correctedAt, ruledAt: at, correctionEndsAt } } }).case;
+  if (!("ruling" in corrected)) throw new Error("Expected a Stage A case");
   await mounted(createElement(CaseDetail, { initial: corrected, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {
     const summary = Array.from(node.querySelectorAll("section")).find((section) => section.querySelector("h2")?.textContent === "Kết luận đã ghi nhận")!;
     expect(summary.textContent).toContain(formatVnd(100_000)); expect(summary.textContent).toContain(formatVnd(200_000));
@@ -104,6 +105,25 @@ test("evidence ignores inherited label keys and leaves unknown enum values liter
   const node = markup(createElement(EvidenceView, { value: JSON.parse('{"constructor":"Synthetic hidden","toString":"Synthetic hidden","state":"constructor","kind":"toString"}') }));
   expect(Array.from(node.querySelectorAll("dt"), (field) => field.textContent)).toEqual(["Trạng thái", "Loại"]);
   expect(Array.from(node.querySelectorAll("dd"), (field) => field.textContent)).toEqual(["constructor", "toString"]);
+});
+test.each([
+  ["dispute", "order_summary", "Thông tin đơn hàng"],
+  ["dispute", "thread_page", "Tin nhắn và bàn giao"],
+  ["dispute", "resolution_records", "Khiếu nại và hoàn tiền"],
+  ["refund_not_received", "refund_destination", "Tài khoản nhận hoàn tiền"],
+] as const)("Stage A %s %s evidence retains its original field allowlist", async (kind, section, label) => {
+  const trustFields = { action: "hidden action", detail: "hidden detail", source: "hidden source", hidden: true, target: "account", revision: "hidden revision", messages: [{ text: "hidden message" }], endsAt: at,
+    reports: [{ reporterUserId: "hidden reporter" }], reasonCategory: "privacy", carrier: "hidden carrier", appeal: "hidden appeal", statement: "hidden statement", sections: "hidden sections", explanation: "hidden explanation", restriction: "reporting", file: "hidden file",
+    order_summary: "hidden order", thread_page: "hidden thread", resolution_records: "hidden resolution", refund_destination: "hidden destination", report_context: "hidden report", package_revision: "hidden package", appeal_source: "hidden appeal source" };
+  const visible = { brief: { text: "Yêu cầu gốc" }, disputes: [{ reason: "other", state: "ruled" }], items: [{ kind: "message", text: "Tin nhắn gốc" }] };
+  const read = vi.fn().mockResolvedValue({ ...trustFields, ...visible, brief: { ...visible.brief, ...trustFields }, items: [{ ...visible.items[0], ...trustFields }] });
+  await mounted(<EvidenceTabs kind={kind} disabled={false} onRead={read} onFile={vi.fn()} />, async (node) => {
+    const click = async (text: string) => act(async () => Array.from(node.querySelectorAll("button")).find((item) => item.textContent === text)!.click());
+    await click(label); await click("Xem bằng chứng");
+    expect(read).toHaveBeenCalledWith(section, undefined);
+    expect(node.querySelector("dl")?.outerHTML).toBe(markup(<EvidenceView value={visible} />).querySelector("dl")?.outerHTML);
+    expect(Array.from(node.querySelectorAll("dt"), (item) => item.textContent)).toEqual(["Yêu cầu sáng tác", "Nội dung", "Khiếu nại", "Lý do", "Trạng thái", "Tin nhắn và bàn giao", "Loại", "Nội dung"]);
+  });
 });
 test("access log tab lists item, time and owner session", async () => {
   await mounted(createElement(CaseDetail, { initial: detail, caseId: id, actorUserId: "synthetic-owner" }), async (node) => {

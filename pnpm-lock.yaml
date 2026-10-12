@@ -226,6 +226,9 @@ importers:
       '@pawket/catalog':
         specifier: workspace:*
         version: link:../catalog
+      '@pawket/trust':
+        specifier: workspace:*
+        version: link:../trust
       postgres:
         specifier: 3.4.9
         version: 3.4.9
@@ -250,6 +253,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      postgres:
+        specifier: 3.4.9
+        version: 3.4.9
 
   packages/commission-files:
     dependencies:
@@ -486,6 +493,21 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@pawket/commission-files':
+        specifier: workspace:*
+        version: link:../commission-files
+      '@pawket/identity':
+        specifier: workspace:*
+        version: link:../identity
+      '@pawket/orders':
+        specifier: workspace:*
+        version: link:../orders
+      '@pawket/payments':
+        specifier: workspace:*
+        version: link:../payments
+      '@pawket/resolutions':
+        specifier: workspace:*
+        version: link:../resolutions
       postgres:
         specifier: 3.4.9
         version: 3.4.9

@@ -13,6 +13,7 @@ import { createSecurityEmailSenderFromEnv } from "./security-email.js";
 import { createWorkerPublicMediaConfiguration } from "./public-media-cleanup-config.js";
 import { createWorkerSePayConfiguration } from "./sepay-config.js";
 import { createWorkerResolutionConfiguration } from "./resolution-config.js";
+import { createWorkerTrustEnforcementConfiguration } from "./trust-enforcement-config.js";
 import { createWorkerCommissionConfiguration } from "./commission-config.js";
 import { createWorkerCommissionFilesConfiguration } from "./commission-files-config.js";
 import { startWorkerTelemetryServer } from "./telemetry-server.js";
@@ -59,6 +60,7 @@ const worker = await startWorker({
   tipPayments: { mode: env.TIP_PAYMENTS_MODE, batchSize: env.TIP_EXPIRY_BATCH_SIZE, scanIntervalMs: env.TIP_EXPIRY_SCAN_INTERVAL_MS, tips: createTipExpiryPort() },
   sepay: createWorkerSePayConfiguration(env, keyring, identityProvider),
   commissions: { ...createWorkerCommissionConfiguration(env, keyring, identityProvider), resolution: createWorkerResolutionConfiguration(env, keyring) },
+  trustEnforcement: createWorkerTrustEnforcementConfiguration(env, keyring),
   commissionFiles: createWorkerCommissionFilesConfiguration(env),
   ...publicMediaConfiguration,
   securityEmail: {

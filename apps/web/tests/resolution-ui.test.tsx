@@ -134,7 +134,7 @@ test("help renders the current reviewed policy and an unpublished state", () => 
   const policy = { revisionId: id, revisionNumber: 2, document: "Synthetic <policy>", checksum: "synthetic", acceptsOrders: true };
   const markup = renderToStaticMarkup(createElement(HelpPolicy, { policy }));
   expect(markup).toContain("Phiên bản 2"); expect(markup).toContain("Synthetic &lt;policy&gt;");
-  expect(renderToStaticMarkup(createElement(HelpPolicy, { policy: null }))).toContain("Chính sách commission hiện chưa được công bố.");
+  expect(renderToStaticMarkup(createElement(HelpPolicy, { policy: null }))).toContain("Chưa được công bố");
 });
 test("an open dispute still permits statements after its response deadline and shows owner questions", () => {
   const dispute = { id, state: "open", reason: "not_delivered", trigger: "overdue", respondBy: "2020-01-01T00:00:00.000Z", ruling: null,

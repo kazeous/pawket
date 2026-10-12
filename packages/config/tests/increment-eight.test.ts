@@ -50,3 +50,31 @@ describe("commission resolution controls", () => {
     expect(readFileSync(new URL(".github/workflows/verify.yml", root), "utf8").includes("COMMISSION_RESOLUTION_MODE: disabled")).toBe(true);
   });
 });
+
+describe("trust enforcement controls", () => {
+  test("TRUST_ENFORCEMENT_MODE defaults to disabled", () => {
+    expect(parseServerEnv(base).TRUST_ENFORCEMENT_MODE).toBe("disabled");
+  });
+  test.each(["true", " enabled", "", "on", "DISABLED"])("rejects values other than disabled and enabled: %j", (value) => {
+    expect(() => parseServerEnv({ ...base, TRUST_ENFORCEMENT_MODE: value })).toThrow("TRUST_ENFORCEMENT_MODE");
+  });
+  test("enforcement is independent of commerce modes and returned by the resolver", async () => {
+    expect(parseServerEnv({ ...base, TRUST_ENFORCEMENT_MODE: "enabled" })).toMatchObject({
+      COMMISSION_RESOLUTION_MODE: "disabled", TRUST_ENFORCEMENT_MODE: "enabled",
+    });
+    const { incrementEightEnvShape, resolveIncrementEightEnv } = await import("../src/increment-eight.js");
+    expect(resolveIncrementEightEnv({ ...z.object(incrementEightEnvShape).parse({ TRUST_ENFORCEMENT_MODE: "enabled" }),
+      COMMISSION_FULFILLMENT_MODE: "disabled", COMMISSION_PAYMENTS_MODE: "disabled" })).toEqual({
+      COMMISSION_RESOLUTION_MODE: "disabled", TRUST_ENFORCEMENT_MODE: "enabled",
+    });
+  });
+  test("delivery surfaces keep enforcement disabled", () => {
+    const root = new URL("../../../", import.meta.url);
+    expect(readFileSync(new URL(".env.example", root), "utf8")).toContain("TRUST_ENFORCEMENT_MODE=disabled");
+    const compose = readFileSync(new URL("compose.prod.yaml", root), "utf8");
+    for (const name of ["web", "worker"]) {
+      const service = compose.split(`\n  ${name}:`)[1]!.split(/\n  [a-z][a-z-]*:/u)[0]!;
+      expect(service).toMatch(/^      TRUST_ENFORCEMENT_MODE: disabled$/mu);
+    }
+  });
+});

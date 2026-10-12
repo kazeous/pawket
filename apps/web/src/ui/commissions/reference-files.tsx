@@ -9,6 +9,9 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { tipRequest, TipRequestError } from "@/ui/tips/tip-client";
 import { commissionErrorText, type OrderView, type ReferenceFileView } from "./commission-client";
 import { useCommissionSession } from "./commission-session";
+import { HiddenContent } from "../trust/hidden-content";
+import { ReportDialog } from "../trust/report-dialog";
+import type { TrustMode } from "../trust/trust-client";
 
 const ACCEPT = "image/jpeg,image/png,image/webp,image/gif,application/pdf";
 type Target = Readonly<{ context: "brief"; packageId: string } | { context: "thread" | "submission" | "resolution_evidence"; orderId: string }>;
@@ -134,17 +137,17 @@ export function ReferenceFilePicker({ target, maxFiles, maxBytes, label = "Tệp
   </Field>;
 }
 
-export function ReferenceFileList({ order }: Readonly<{ order: OrderView["order"] }>) {
+export function ReferenceFileList({ order, trustMode = "disabled" }: Readonly<{ order: OrderView["order"]; trustMode?: TrustMode }>) {
   if (!order.referenceFiles.length) return null;
-  return <div className="flex min-w-0 flex-col gap-3"><h3 className="text-sm font-medium">Tệp tham khảo</h3><AttachedFileList order={order} files={order.referenceFiles} brief /></div>;
+  return <div className="flex min-w-0 flex-col gap-3"><h3 className="text-sm font-medium">Tệp tham khảo</h3><AttachedFileList order={order} files={order.referenceFiles} brief trustMode={trustMode} /></div>;
 }
 
-export function AttachedFileList({ order, files, brief = false, withdrawn = false }: Readonly<{ order: Pick<OrderView["order"], "id" | "role">; files: readonly ReferenceFileView[]; brief?: boolean; withdrawn?: boolean }>) {
+export function AttachedFileList({ order, files, brief = false, withdrawn = false, trustMode = "disabled", reportable = false }: Readonly<{ order: Pick<OrderView["order"], "id" | "role">; files: readonly ReferenceFileView[]; brief?: boolean; withdrawn?: boolean; trustMode?: TrustMode; reportable?: boolean }>) {
   if (!files.length) return null;
   const base = `/api/v1${order.role === "creator" ? "/creator/commissions" : "/commissions"}/${order.id}/files`;
   return <ul className="flex min-w-0 flex-col gap-3">
     {files.map((file) => <li key={file.fileId} className="flex min-w-0 flex-col gap-2 text-sm">
-      {file.availability === "withdrawn" ? <p className="text-muted-foreground">Không còn quyền xem sau khi yêu cầu đóng.</p>
+      {file.availability === "hidden" ? <HiddenContent kind="file" /> : file.availability === "withdrawn" ? <p className="text-muted-foreground">Không còn quyền xem sau khi yêu cầu đóng.</p>
         : <>
           <div className="flex flex-wrap items-center gap-2"><span className="min-w-0 wrap-anywhere font-medium">{file.name}</span><span className="text-muted-foreground">{sizeText(file.sizeBytes)} · {file.detectedType.toUpperCase()}</span></div>
           {withdrawn ? <p className="text-muted-foreground">Không còn quyền tải tệp này sau khi đơn đã hủy.</p> : file.availability === "deleted" ? <p className="text-muted-foreground">Tệp đã được xóa theo thời hạn lưu trữ.</p> : <>
@@ -153,6 +156,7 @@ export function AttachedFileList({ order, files, brief = false, withdrawn = fals
             <a href={`${base}/${file.fileId}?disposition=attachment`} rel="noopener noreferrer" referrerPolicy="no-referrer" className={buttonVariants({ variant: "outline", size: "sm" })}>Tải xuống</a>
           </>}
           <details><summary className="cursor-pointer text-muted-foreground">{brief ? "Mã kiểm tra SHA-256" : "Mã SHA-256"}</summary><code className="break-all text-xs">{file.sha256.slice("sha256:".length)}</code></details>
+          {reportable && !withdrawn && file.availability === "available" ? <ReportDialog mode={trustMode} target={{ kind: "commission_file", orderId: order.id, fileId: file.fileId }} /> : null}
         </>}
     </li>)}
   </ul>;

@@ -18,7 +18,7 @@ import { createCommissionFulfillmentService, readCommissionCompletionDueAt, read
 import { commissionFileDeletionAt } from "./fulfillment-timing.js";
 import { commissionCommandFingerprint } from "./command-fingerprint.js";
 import { requireCommissionPolicy, type CommissionPolicyReadPort } from "./policy-repository.js";
-import type { CommissionCatalogPort, CommissionCompletionHoldPort, CommissionFilesPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort, CommissionThreadPort } from "./ports.js";
+import type { CommissionCatalogPort, CommissionCompletionHoldPort, CommissionFilesPort, CommissionIdentityPort, CommissionIntakePackage, CommissionPaymentsPort, CommissionThreadPort, CommissionRestrictionPort } from "./ports.js";
 
 type Order = typeof commissionOrders.$inferSelect;
 type Quote = typeof commissionQuoteRevisions.$inferSelect;
@@ -31,6 +31,7 @@ type Input = Readonly<{
   identity: CommissionIdentityPort; catalog: CommissionCatalogPort; payments: CommissionPaymentsPort; policy: CommissionPolicyReadPort;
   trust: { lockCommissionPage(tx: PawketTransaction, creatorUserId: string): Promise<boolean> };
   files?: CommissionFilesPort;
+  restrictions?: CommissionRestrictionPort;
   authorizeCommand?: (tx: PawketTransaction, actor: CommissionActor) => Promise<void>;
   now?: () => Date; idFactory?: () => string;
 }>;
@@ -59,6 +60,7 @@ export function createCommissionOrderService(input: Input) {
   async function boundary<T>(run: () => Promise<T>): Promise<T> {
     try { return await run(); } catch (error) {
       if (error instanceof CommissionError) throw error;
+      if (error instanceof Error && error.name === "TrustEnforcementError" && "code" in error && error.code === "restricted") commissionFail("not_available");
       // Payments keeps its released error contract; expose only known domain codes.
       if (error instanceof Error && error.name === "TipPaymentError" && "code" in error) {
         if (error.code === "not_available" || error.code === "payments_disabled" || error.code === "idempotency_conflict") commissionFail(error.code);
@@ -103,6 +105,10 @@ export function createCommissionOrderService(input: Input) {
       if (changed.guardUntil) requireCommissionBeforeDeadline(completedAt, changed.guardUntil);
       if (!await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: changed.orderId, completedAt })) commissionFail("idempotency_conflict");
       await input.authorizeCommand?.(tx, command.actor);
+      if (input.restrictions && (scope === "request" || scope === "accept")) {
+        const [order] = await tx.select({ buyerUserId: commissionOrders.buyerUserId }).from(commissionOrders).where(eq(commissionOrders.id, changed.orderId)).limit(1);
+        if (order?.buyerUserId === command.actor.userId) await input.restrictions?.assertAllowed(tx, { userId: command.actor.userId, restriction: "commission_buying", at: now() });
+      }
       return changed.orderId;
     }));
   }
@@ -112,10 +118,11 @@ export function createCommissionOrderService(input: Input) {
     if (!order.expiresAt || !["requested", "quoted", "awaiting_payment"].includes(order.state)) commissionFail("invalid_transition");
     requireCommissionBeforeDeadline(now(), order.expiresAt);
   }
-  async function intake(tx: PawketTransaction, order: Order, requirePayment: boolean): Promise<CommissionIntakePackage> {
+  async function intake(tx: PawketTransaction, order: Order, requirePayment: boolean, buyerAccept = false): Promise<CommissionIntakePackage> {
     if (input.intakeMode !== "enabled") commissionFail("intake_disabled");
     if (requirePayment && input.paymentsMode === "disabled") commissionFail("payments_disabled");
     await participants(tx, order.creatorUserId, order.buyerUserId);
+    if (buyerAccept) await input.restrictions?.assertAllowed(tx, { userId: order.buyerUserId, restriction: "commission_buying", at: now() });
     return input.catalog.getIntakePackage(tx, { packageId: order.packageId, revisionId: order.packageRevisionId, allowPreviousRevision: true, requirePayment, at: now() });
   }
   async function reserve(tx: PawketTransaction, order: Order, data: CommissionIntakePackage, at: Date) {
@@ -179,6 +186,7 @@ export function createCommissionOrderService(input: Input) {
       return mutate(command, "request", [command.packageId, command.revisionId, command.policyRevisionId, command.acceptTerms, brief, command.abuseKeyHash, ...(fileIds.length ? [fileIds] : [])], async (tx) => (await find(tx)).creatorUserId, async (tx) => {
         if (input.intakeMode !== "enabled") commissionFail("intake_disabled");
         const candidate = await find(tx); await participants(tx, candidate.creatorUserId, command.actor.userId);
+        await input.restrictions?.assertAllowed(tx, { userId: command.actor.userId, restriction: "commission_buying", at: now() });
         const immediate = candidate.route === "fixed_immediate";
         if (immediate && input.paymentsMode === "disabled") commissionFail("payments_disabled");
         const data = await input.catalog.getIntakePackage(tx, { packageId: command.packageId, revisionId: command.revisionId, allowPreviousRevision: false, requirePayment: immediate, at: now() });
@@ -237,7 +245,7 @@ export function createCommissionOrderService(input: Input) {
         const fixed = order.route === "fixed_approval" && order.state === "requested";
         if (fixed ? order.creatorUserId !== command.actor.userId : order.buyerUserId !== command.actor.userId) commissionFail("not_authorized");
         if (!fixed && (order.route !== "custom_quote" || order.state !== "quoted")) commissionFail("invalid_transition");
-        const data = await intake(tx, order, true); let quote: Quote | null = null;
+        const data = await intake(tx, order, true, !fixed); let quote: Quote | null = null;
         if (!fixed) {
           if (order.currentQuoteId !== command.quoteRevisionId) commissionFail("version_conflict");
           const [currentQuote] = await tx.select().from(commissionQuoteRevisions).where(and(eq(commissionQuoteRevisions.id, command.quoteRevisionId!), eq(commissionQuoteRevisions.orderId, order.id))).limit(1);
@@ -302,13 +310,15 @@ export function createCommissionOrderService(input: Input) {
       return { ...await projectOrder(tx, order), role: "owner" as const };
     },
     /** Internal evidence port; never an HTTP participant bypass. No creator lock behind the case share lock. */
-    async readThreadForCase(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number }>) {
+    async readThreadForCase(tx: PawketTransaction, command: Readonly<{ orderId: string; beforeSequence?: number; limit: number;
+      reportTarget?: { kind: "commission_message" | "commission_file"; id: string } }>) {
       if (!commissionUuid(command.orderId)) commissionFail("invalid_request");
       commissionInteger(command.limit, 1, 50);
       if (command.beforeSequence !== undefined) commissionInteger(command.beforeSequence, 1, 2_147_483_647);
+      if (command.reportTarget && (!["commission_message", "commission_file"].includes(command.reportTarget.kind) || !commissionUuid(command.reportTarget.id))) commissionFail("invalid_request");
       const [order] = await tx.select().from(commissionOrders).where(eq(commissionOrders.id, command.orderId)).limit(1);
       if (!order) commissionFail("not_available");
-      return readCommissionThread(tx, input, order, { ...command, now });
+      return readCommissionThread(tx, input, order, { ...command, includeHidden: true, now });
     },
     async getOrder(command: { actor: CommissionActor; orderId: string }) {
       actorValid(command.actor); if (!commissionUuid(command.orderId)) commissionFail("not_authorized");

@@ -8,6 +8,7 @@ import { notFound, redirect } from "next/navigation";
 import { getPlatformRuntime } from "../../platform/runtime";
 import { AppShell } from "../../ui/app-shell";
 import { CreatorPageWorkbench } from "./creator-page-workbench";
+import { PartyWarnings } from "@/ui/trust/party-warnings";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,7 @@ export default async function CreatorShellPage() {
   if (loadServerEnv().CREATOR_PUBLISHING_MODE === "disabled") {
     return (
       <AppShell width="narrow" context="Creator" action={{ href: "/settings/security", label: "Bảo mật" }}>
+        {loadServerEnv().TRUST_ENFORCEMENT_MODE === "enabled" ? <PartyWarnings incoming={new Headers(requestHeaders)} actorUserId={session.userId} /> : null}
         <section className="work-surface reveal stack">
           <p className="eyebrow">Creator workspace</p>
           <h1>Trang nhà sáng tạo chưa khả dụng</h1>
@@ -37,6 +39,7 @@ export default async function CreatorShellPage() {
   });
   return (
     <AppShell context="Creator" action={{ href: "/settings/security", label: "Bảo mật" }}>
+      {loadServerEnv().TRUST_ENFORCEMENT_MODE === "enabled" ? <PartyWarnings incoming={new Headers(requestHeaders)} actorUserId={session.userId} /> : null}
       <header className="workspace-header reveal">
         <div>
           <p className="eyebrow">Bản nháp riêng tư → trang công khai</p>

@@ -10,13 +10,18 @@ export type TrustCaseEvidencePort = Readonly<{
   resolutionRecords(tx: PawketTransaction, orderId: string): Promise<unknown>;
   refundDestination(tx: PawketTransaction, obligationId: string): Promise<unknown>;
   fileGrant(tx: PawketTransaction, input: Readonly<{ orderId: string; fileId: string; disposition: "attachment" | "inline" }>): Promise<{ url: string }>;
+  reportContext?(tx: PawketTransaction, caseId: string): Promise<unknown>;
+  packageRevision?(tx: PawketTransaction, caseId: string): Promise<unknown>;
+  brief?(tx: PawketTransaction, orderId: string): Promise<unknown>;
+  appealSource?(tx: PawketTransaction, caseId: string): Promise<unknown>;
+  fileInScope?(tx: PawketTransaction, caseId: string, fileId: string): Promise<boolean>;
 }>;
 type Case = typeof trustCases.$inferSelect;
-export type TrustCaseDeadlineRow = Readonly<{ caseId: string; kind: string; orderId: string; sourceId: string; state: string }>;
+export type TrustCaseDeadlineRow = Readonly<{ caseId: string; kind: string; orderId: string | null; sourceId: string; state: string }>;
 export type TrustCaseDeadlinePort = Readonly<{
   nextDeadlines(db: PawketDatabase, rows: readonly TrustCaseDeadlineRow[]): Promise<ReadonlyMap<string, Date | null>>;
 }>;
-type EvidenceSection = "order_summary" | "thread_page" | "resolution_records" | "refund_destination";
+type EvidenceSection = "order_summary" | "thread_page" | "resolution_records" | "refund_destination" | "report_context" | "package_revision" | "brief" | "appeal_source";
 type EvidenceCommand = Readonly<{ owner: TrustCaseActor; stepUpProofId: string; caseId: string; section: EvidenceSection; cursor?: number; requestId: string }>;
 type FileCommand = Readonly<{ owner: TrustCaseActor; stepUpProofId: string; caseId: string; fileId: string; disposition: "attachment" | "inline"; requestId: string }>;
 type FactoryInput = Readonly<{
@@ -27,7 +32,12 @@ type FactoryInput = Readonly<{
 function summary(row: Case) {
   return { caseId: row.id, kind: row.kind as TrustCaseKind, orderId: row.orderId, sourceType: row.sourceType, sourceId: row.sourceId,
     state: row.state as "open" | "resolved", resolutionKind: row.resolutionKind, policyRevisionId: row.policyRevisionId,
+    communityPolicyRevisionId: row.communityPolicyRevisionId, enforcementPolicyRevisionId: row.enforcementPolicyRevisionId,
     openedAt: row.openedAt.toISOString(), resolvedAt: row.resolvedAt?.toISOString() ?? null, version: row.version };
+}
+function caseOrderId(row: Case): string {
+  if (row.orderId === null) caseFail("not_available");
+  return row.orderId;
 }
 async function available<T>(run: () => Promise<T>): Promise<T> {
   try { return await run(); } catch (error) { if (error instanceof TrustCaseError) throw error; caseFail("dependency_unavailable"); }
@@ -47,13 +57,23 @@ export function createTrustCaseService(input: FactoryInput) {
       // Keep the case open until the evidence read and both audit writes commit.
       const [row] = await tx.select().from(trustCases).where(eq(trustCases.id, command.caseId)).limit(1).for("share");
       if (!row || row.state !== "open") caseFail("not_available");
+      if (["order_summary", "thread_page", "resolution_records"].includes(itemType)
+        && !["dispute", "refund_not_received", "refund_overdue", "late_payment"].includes(row.kind)) caseFail("not_available");
       if (itemType === "refund_destination" && row.kind !== "refund_not_received" && row.kind !== "refund_overdue") caseFail("not_available");
+      if (["order_summary", "thread_page", "resolution_records", "file", "brief"].includes(itemType)) caseOrderId(row);
+      if (itemType === "report_context" && (row.kind !== "report" || !evidence.reportContext)) caseFail("not_available");
+      if (itemType === "package_revision" && (row.kind !== "report" || row.sourceType !== "commission_package" || !evidence.packageRevision)) caseFail("not_available");
+      if (itemType === "brief" && (row.kind !== "report" || row.sourceType !== "commission_brief" || !evidence.brief)) caseFail("not_available");
+      if (itemType === "appeal_source" && (row.kind !== "appeal" || row.sourceType !== "trust_appeal" || !evidence.appealSource)) caseFail("not_available");
+      if (itemType === "file" && (row.kind === "report" || row.kind === "appeal")
+        && (!fileId || !evidence.fileInScope || !await evidence.fileInScope(tx, row.id, fileId))) caseFail("not_available");
       let accepted = false;
       try { accepted = await consumeStepUpProof(tx, { proofId: command.stepUpProofId, ...owner, actionClass, now: at }); }
       catch { caseFail("owner_step_up_required"); }
       if (!accepted) caseFail("owner_step_up_required");
       const result = await read(tx, row);
-      const itemId = fileId ?? (itemType === "refund_destination" ? row.sourceId : row.orderId);
+      const itemId = fileId ?? (itemType === "refund_destination" ? row.sourceId
+        : ["report_context", "package_revision", "appeal_source"].includes(itemType) ? row.id : caseOrderId(row));
       await tx.insert(trustCaseAccessLog).values({ id: id(), caseId: row.id, itemType, itemId, ownerUserId: owner.userId,
         ownerSessionId: owner.sessionId, requestId: command.requestId, accessedAt: at });
       await appendAdminAuditEvent(tx, { actorUserId: owner.userId, actorSessionId: owner.sessionId, subjectType: "trust_case", subjectId: row.id,
@@ -102,14 +122,18 @@ export function createTrustCaseService(input: FactoryInput) {
     async readEvidence(command: EvidenceCommand): Promise<unknown> {
       const fields = ["owner", "stepUpProofId", "caseId", "section", "requestId"];
       const record = readExactOwnDataRecord(command, [fields, [...fields, "cursor"]]);
-      if (!record || !["order_summary", "thread_page", "resolution_records", "refund_destination"].includes(record.section as string)
+      if (!record || !["order_summary", "thread_page", "resolution_records", "refund_destination", "report_context", "package_revision", "brief", "appeal_source"].includes(record.section as string)
         || (record.cursor !== undefined && (record.section !== "thread_page" || typeof record.cursor !== "number" || !Number.isSafeInteger(record.cursor) || record.cursor < 1))) caseFail("invalid_request");
       const section = record.section as EvidenceSection;
       const normalized = { owner: caseActor(record.owner), stepUpProofId: record.stepUpProofId as string, caseId: record.caseId as string, requestId: record.requestId as string };
       return access(normalized, "owner.case_evidence", section, null, (tx, row) => {
-        if (section === "order_summary") return evidence.orderSummary(tx, row.orderId);
-        if (section === "thread_page") return evidence.threadPage(tx, row.orderId, record.cursor as number | undefined);
-        if (section === "resolution_records") return evidence.resolutionRecords(tx, row.orderId);
+        if (section === "order_summary") return evidence.orderSummary(tx, caseOrderId(row));
+        if (section === "thread_page") return evidence.threadPage(tx, caseOrderId(row), record.cursor as number | undefined);
+        if (section === "resolution_records") return evidence.resolutionRecords(tx, caseOrderId(row));
+        if (section === "report_context") return evidence.reportContext?.(tx, row.id) ?? caseFail("not_available");
+        if (section === "package_revision") return evidence.packageRevision?.(tx, row.id) ?? caseFail("not_available");
+        if (section === "brief") return evidence.brief?.(tx, caseOrderId(row)) ?? caseFail("not_available");
+        if (section === "appeal_source") return evidence.appealSource?.(tx, row.id) ?? caseFail("not_available");
         return evidence.refundDestination(tx, row.sourceId);
       });
     },
@@ -119,7 +143,7 @@ export function createTrustCaseService(input: FactoryInput) {
       const fileId = record.fileId; const disposition = record.disposition;
       const normalized = { owner: caseActor(record.owner), stepUpProofId: record.stepUpProofId as string, caseId: record.caseId as string, requestId: record.requestId as string };
       return access(normalized, "owner.case_file", "file", fileId, async (tx, row) => {
-        const result = readExactOwnDataRecord(await evidence.fileGrant(tx, { orderId: row.orderId, fileId, disposition }), [["url"]]);
+        const result = readExactOwnDataRecord(await evidence.fileGrant(tx, { orderId: caseOrderId(row), fileId, disposition }), [["url"]]);
         if (!result || typeof result.url !== "string" || !result.url) caseFail("dependency_unavailable");
         return { url: result.url };
       });

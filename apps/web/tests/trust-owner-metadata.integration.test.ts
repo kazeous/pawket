@@ -1,0 +1,54 @@
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { afterAll, beforeAll, expect, test, vi } from "vitest";
+import * as schema from "@pawket/database";
+import { encryptSensitiveField } from "@pawket/security";
+import { createBriefReportTargetPort } from "@pawket/orders";
+import { createPrivateReportService, createTrustRestrictionPort, createTrustCasePort, createTrustCaseService } from "@pawket/trust";
+import { createReportFixture, fixtureKeyring, fixtureLookupKey, reportAt } from "../../../packages/trust/tests/report-fixture.js";
+import { penaltyContext } from "../../../packages/trust/tests/penalty-service-fixture.js";
+import { createTrustOwnerMetadata } from "../src/platform/trust-owner-metadata.js";
+import { createCaseEvidencePort } from "../src/platform/case-evidence.js";
+const f = createReportFixture("ownerui"); beforeAll(f.initialize, 60_000); afterAll(f.dispose, 30_000);
+test("case subjects are source parties, resolved cases remain sources, and owner accounts are excluded", async () => {
+  const c = await penaltyContext(f); const metadata = createTrustOwnerMetadata(f.db);
+  expect((await metadata.readForCase(c.caseId)).parties.map((party) => party.userId).sort()).toEqual([c.p.creator.userId, c.p.buyer.userId].sort());
+  const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: null, sourceType: "commission_package", sourceId: c.p.packageId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  expect((await metadata.readForCase(caseId)).parties).toEqual([{ userId: c.p.creator.userId, label: "Nghệ sĩ" }]);
+  await f.db.transaction((tx) => createTrustCasePort().resolveCase(tx, { caseId, resolutionKind: "dismissed", actor: c.owner, reason: "Synthetic", requestId: randomUUID(), at: reportAt }));
+  expect((await metadata.readForCase(caseId)).parties).toHaveLength(1);
+  const ownerOrder = await f.paidOrder(c.owner);
+  const ownerCase = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "report", orderId: null, sourceType: "commission_package", sourceId: ownerOrder.packageId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  expect((await metadata.readForCase(ownerCase.caseId)).parties).toEqual([]);
+});
+test("I3 penalty choices contain only the creator behind the reported publication", async () => {
+  const c = await penaltyContext(f); const publicationId = randomUUID(); const reportId = randomUUID();
+  await f.db.insert(schema.creatorPublicationRevisions).values({ id: publicationId, pageId: c.p.pageId, revisionNumber: 1, canonicalHandle: `artist-${publicationId.slice(0, 8)}`, displayName: "Artist", shortIntroduction: "Introduction", primaryDiscipline: "illustration", secondaryDisciplines: [], actorUserId: c.p.creator.userId, actorSessionId: c.p.creator.sessionId, expectedDraftVersion: 1, requestId: randomUUID(), publishedAt: reportAt });
+  await f.db.insert(schema.publicContentReports).values({ id: reportId, reportReference: `report:v1:${randomUUID().replaceAll("-", "")}`, targetType: "page", targetId: c.p.pageId, publicationRevisionId: publicationId, reason: "other", reporterUserId: c.p.buyer.userId, createdAt: reportAt, updatedAt: reportAt });
+  const metadata = createTrustOwnerMetadata(f.db); expect(await metadata.publicReportParties(reportId)).toEqual({ parties: [{ userId: c.p.creator.userId, label: "Nghệ sĩ" }] });
+  await expect(metadata.publicReportParties(randomUUID())).rejects.toMatchObject({ code: "not_available" });
+});
+test("appeal metadata carries the original penalty scope and deadline without decrypting private text", async () => {
+  const c = await penaltyContext(f); const endsAt = new Date(reportAt.getTime() + 86_400_000).toISOString();
+  const { penaltyId } = await c.service.apply({ ...await c.command(), kind: "restriction", restriction: "reporting", endsAt });
+  const appealId = randomUUID(); const { caseId } = await f.db.transaction((tx) => createTrustCasePort().openCase(tx, { kind: "appeal", orderId: null, sourceType: "trust_appeal", sourceId: appealId, policyRevisionId: null, requestId: randomUUID(), at: reportAt }));
+  await f.db.insert(schema.trustAppeals).values({ id: appealId, appellantUserId: c.p.creator.userId, penaltyId, caseId, submittedVia: "session", statementEnvelope: encryptSensitiveField({ keyring: fixtureKeyring, plaintext: "Private statement", binding: { recordType: "trust_appeals", recordId: appealId, fieldName: "statement" } }), createdAt: reportAt });
+  const metadata = await createTrustOwnerMetadata(f.db).readForCase(caseId); expect(metadata.appealAction).toEqual({ penaltyId, kind: "restriction", restriction: "reporting", target: null, endsAt });
+  expect(metadata.parties).toEqual([{ userId: c.p.creator.userId, label: "Người kháng nghị" }]);
+  await f.db.update(schema.identityRoleGrants).set({ state: "revoked", revokedAt: reportAt }).where(eq(schema.identityRoleGrants.userId, c.owner.userId));
+  await f.db.insert(schema.identityRoleGrants).values({ userId: c.p.creator.userId, role: "owner", grantSource: "bootstrap_cli" });
+  expect((await createTrustOwnerMetadata(f.db).readForCase(caseId)).parties).toEqual([]);
+  expect(JSON.stringify(metadata)).not.toMatch(/Private statement|Private explanation|Envelope|reporter/u);
+});
+test("report identity and encrypted detail are exposed only through an audited explicit evidence read", async () => {
+  const p = await f.paidOrder(); const service = createPrivateReportService({ db: f.db, mode: "enabled", keyring: fixtureKeyring, lookupHmacKey: fixtureLookupKey, challengeKey: fixtureLookupKey, targets: createBriefReportTargetPort(), restrictions: createTrustRestrictionPort({ mode: "enabled" }), policies: { readCurrentIds: async () => ({ communityRulesRevisionId: null, enforcementRevisionId: null }) }, now: () => reportAt });
+  const result = await service.submit({ requester: { kind: "authenticated", actor: p.creator }, target: { kind: "commission_brief", orderId: p.orderId }, reason: "privacy", detail: "Private report detail", idempotencyKey: randomUUID(), requestId: randomUUID() });
+  const readOrder = vi.fn(async () => ({ brief: { text: "Synthetic brief" }, referenceFiles: [] }));
+  const unused = vi.fn(); const evidence = createCaseEvidencePort({ keyring: fixtureKeyring, orders: { readOrderForCase: readOrder, readThreadForCase: unused }, refunds: { listForOrder: unused, revealForCase: unused }, view: { readForCase: unused }, files: { caseDownloadGrant: unused } } as unknown as Parameters<typeof createCaseEvidencePort>[0]);
+  const cases = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-owner-ui", evidence, consumeStepUpProof: async () => true, now: () => reportAt });
+  expect(JSON.stringify(await cases.getCase(result.caseId))).not.toContain("Private report detail"); expect(readOrder).not.toHaveBeenCalled();
+  const value = await cases.readEvidence({ owner: p.creator, stepUpProofId: randomUUID(), caseId: result.caseId, section: "report_context", requestId: randomUUID() });
+  expect(value).toMatchObject({ reports: [{ reporterUserId: p.creator.userId, reasonCategory: "privacy", detail: "Private report detail", createdAt: reportAt.toISOString() }] });
+  expect(await f.db.select().from(schema.trustCaseAccessLog).where(eq(schema.trustCaseAccessLog.caseId, result.caseId))).toMatchObject([{ itemType: "report_context" }]);
+  expect(JSON.stringify(await f.db.select().from(schema.adminAuditEvents).where(eq(schema.adminAuditEvents.subjectId, result.caseId)))).not.toContain("Private report detail");
+});

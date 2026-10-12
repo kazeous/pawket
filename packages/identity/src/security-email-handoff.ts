@@ -133,7 +133,7 @@ export async function recordSecurityEmailAttentionRequired(
     id: string;
     userId: string;
     purpose: SecurityEmailPurpose;
-    sourceOutboxEventId: string;
+    sourceOutboxEventId?: string;
     failureCode: "no_verified_destination";
     templateData?: Record<string, string>;
     now: Date;
@@ -159,6 +159,8 @@ export async function recordSecurityEmailAttentionRequired(
     .onConflictDoNothing()
     .returning({ id: identityEmailHandoffs.id });
   if (inserted) return inserted.id;
+
+  if (!input.sourceOutboxEventId) throw new Error("Security email attention record conflict");
 
   const [existing] = await tx
     .select({ id: identityEmailHandoffs.id })

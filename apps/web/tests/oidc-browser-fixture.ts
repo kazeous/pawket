@@ -33,6 +33,14 @@ export async function refreshBrowserSession(token: string) {
   } finally { await database.close(); }
 }
 
+/** Age only authentication evidence, preserving the synthetic owner's live session and token. */
+export async function makeSyntheticOwnerAuthenticationStale(db: PawketDatabase, sessionId: string) {
+  assertIncrementThreeBrowserDatabaseName(new URL(browserDatabaseUrl).pathname.slice(1));
+  const staleAt = new Date(Date.now() - 3_601_000);
+  await db.update(identitySessions).set({ primaryAuthenticatedAt: staleAt, mfaVerifiedAt: staleAt })
+    .where(eq(identitySessions.id, sessionId));
+}
+
 /** Supply synthetic IdP evidence to the real callback transaction and proof ports.
  * Browser tests still exercise persistence, review, explicit confirmation and the
  * business transaction. Real signature/provider conformance has separate gates. */

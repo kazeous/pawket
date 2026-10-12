@@ -8,6 +8,7 @@ import {
   creatorApplicationDecisions,
   creatorApplicationRevisions,
   creatorApplications,
+  creatorPages,
   identityCreatorCapabilities,
   identityCreatorCapabilityEvents,
   identitySessions,
@@ -16,11 +17,13 @@ import {
   paymentsReceivingAccountOnboarding,
   paymentsVerificationDepositChallenges,
   paymentsVerificationDepositRefundObligations,
+  trustPenalties,
   type PawketDatabase,
   type PawketTransaction,
 } from "@pawket/database";
 import {
   CREATOR_APPLICATION_ATTESTATION_VERSIONS,
+  recordCreatorCapabilityChange,
   rejectionCooldownUntil,
 } from "@pawket/identity";
 import { createLookupHmac, decryptSensitiveField, type EncryptionEnvelope, type EncryptionKeyring } from "@pawket/security";
@@ -67,6 +70,7 @@ type ServiceInput = {
   commandFingerprintKey: Uint8Array;
   consumeStepUpProof: (tx: PawketTransaction, input: StepUpInput) => Promise<boolean>;
   catalogCapabilityTransition: CatalogCapabilityTransitionPort;
+  enforcementMode?: "disabled" | "enabled";
   authorizeCommand?: (tx: PawketTransaction, actor: { userId: string; sessionId: string }) => Promise<void>;
   idFactory?: () => string;
   now?: () => Date;
@@ -278,8 +282,22 @@ export function createCreatorReviewService(input: ServiceInput) {
           return { state: match[1]! };
         }
         policy(started.kind === "acquired", "idempotency_conflict");
+        // Match enforcement writers: creator fence before capability, publication and user locks.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`commissions:creator:${command.userId}`}, 0))`);
+        if (input.enforcementMode === "enabled" && command.action === "suspend") throw new CreatorReviewError("use_penalty");
         const [capability] = await tx.select().from(identityCreatorCapabilities).where(eq(identityCreatorCapabilities.userId, command.userId)).limit(1).for("update");
         policy(capability, "creator_capability_missing");
+        await tx.select({ id: creatorPages.id }).from(creatorPages).where(eq(creatorPages.userId, command.userId)).limit(1).for("update");
+        if (command.action === "reinstate") {
+          const penaltyAt = now();
+          const [penalty] = await tx.select({ id: trustPenalties.id }).from(trustPenalties).where(and(
+            eq(trustPenalties.subjectUserId, command.userId), eq(trustPenalties.state, "active"), lte(trustPenalties.startsAt, penaltyAt),
+            or(isNull(trustPenalties.endsAt), gt(trustPenalties.endsAt, penaltyAt)),
+            or(and(eq(trustPenalties.target, "creator_capability"), or(eq(trustPenalties.kind, "suspension"), eq(trustPenalties.kind, "removal"))),
+              and(eq(trustPenalties.target, "account"), eq(trustPenalties.kind, "removal"))),
+          )).limit(1);
+          if (penalty) throw new CreatorReviewError("use_penalty");
+        }
         const expectedState = command.action === "suspend" ? "active" : "suspended";
         policy(capability.state === expectedState, "invalid_capability_state");
         await requireStepUp(input, tx, { proofId: command.stepUpProofId, sessionId: command.ownerSessionId, userId: command.ownerUserId, actionClass: `owner.creator_capability_${command.action}`, now: at });
@@ -299,11 +317,11 @@ export function createCreatorReviewService(input: ServiceInput) {
           requestId: command.requestId,
           occurredAt: at,
         });
-        await tx.insert(identityCreatorCapabilityEvents).values({ id: id(), capabilityId: capability.id, action: command.action === "suspend" ? "suspended" : "reinstated", state: nextState, version: updated.version, actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, stepUpProofId: command.stepUpProofId, reasonCode, requestId: command.requestId, createdAt: at });
-        await tx.update(identityUsers).set({ authorizationVersion: sql`${identityUsers.authorizationVersion} + 1`, updatedAt: at }).where(eq(identityUsers.id, command.userId));
-        await tx.update(identitySessions).set({ revokedAt: at, revocationReason: "creator_capability_changed", updatedAt: at }).where(and(eq(identitySessions.userId, command.userId), isNull(identitySessions.revokedAt)));
+        await recordCreatorCapabilityChange(tx, { userId: command.userId, capabilityId: capability.id,
+          previousState: expectedState, state: nextState, version: updated.version, penaltyId: null,
+          actor: { userId: command.ownerUserId, sessionId: command.ownerSessionId, stepUpProofId: command.stepUpProofId },
+          reasonCode, requestId: command.requestId, at }, id);
         await appendAdminAuditEvent(tx, { actorUserId: command.ownerUserId, actorSessionId: command.ownerSessionId, subjectType: "creator_capability", subjectId: capability.id, action: `creator.capability.${command.action}`, outcome: "succeeded", reasonCode, beforeState: { state: capability.state, version: capability.version, pageId: publication.pageId, publishedRevisionId: publication.previousPublishedRevisionId }, afterState: { state: nextState, version: updated.version, pageId: publication.pageId, publishedRevisionId: null }, assurance: { method: "mfa", actionClass: `owner.creator_capability_${command.action}` }, applicationRevision: capability.approvedRevisionId, requestId: command.requestId, occurredAt: at });
-        await insertOutboxEvent(tx, { eventType: command.action === "suspend" ? "creator.capability_suspended.v1" : "creator.capability_reinstated.v1", eventVersion: 1, aggregateType: "creator_capability", aggregateId: capability.id, payload: { userId: command.userId, capabilityId: capability.id, state: nextState, correlationId: command.requestId }, occurredAt: at });
         await insertOutboxEvent(tx, { eventType: "creator.capability_outcome_email.v1", eventVersion: 1, aggregateType: "creator_capability", aggregateId: capability.id, payload: { userId: command.userId, capabilityId: capability.id, state: nextState, correlationId: command.requestId }, occurredAt: at });
         policy(await completeIdempotentCommand(tx, { recordId: started.recordId, resultReference: `creator-capability-v1:${nextState}`, completedAt: at }), "idempotency_failed");
         return { state: nextState };

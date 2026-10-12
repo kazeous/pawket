@@ -345,6 +345,14 @@ describe("production SMTP security email sender", () => {
     expect(html).toContain('href="https://pawket.example/x?a=1&amp;b=&quot;2&quot;"');
   });
 
+  test("SMTP sender rejects an enforcement notice until its template is available", async () => {
+    const sendMail = vi.fn(async () => {});
+    const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp, createTransport: () => ({ sendMail }) });
+    await expect(sender.send({ handoffId: "synthetic-enforcement", purpose: "enforcement_notice", destination: "synthetic@example.invalid", secret: null, templateData: {} }))
+      .rejects.toThrow("Invalid security email message");
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
   test("SMTP sender cannot emit retired credential links", async () => {
     const sendMail = vi.fn(async () => {});
     const sender = createSecurityEmailSender({ adapter: "smtp", appBaseUrl: "https://pawket.example", smtp, createTransport: () => ({ sendMail }) });

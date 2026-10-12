@@ -14,3 +14,4 @@ export * from "./late-claim-service.js";
 export * from "./evidence-upload-port.js";
 export * from "./maintenance.js";
 export { createSuspensionService, type SuspensionService } from "./suspension-service.js";
+export { createRemovalFreezePort, type RemovalFreezePort } from "./removal-freeze.js";

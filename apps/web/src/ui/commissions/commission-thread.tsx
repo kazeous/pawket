@@ -14,9 +14,13 @@ import { CommandFeedback, useCommissionCommand, useCommissionSession } from "./c
 import { CommissionTerms } from "./commission-terms";
 import { AttachedFileList, ReferenceFilePicker } from "./reference-files";
 import { SubmissionCard } from "./submission-card";
+import { HiddenContent } from "../trust/hidden-content";
+import { ReportDialog } from "../trust/report-dialog";
+import type { TrustMode } from "../trust/trust-client";
 
-export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpired, onRefresh }: Readonly<{
+export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpired, onRefresh, trustMode = "disabled" }: Readonly<{
   order: OrderView["order"]; fulfillmentMode: "disabled" | "enabled"; disabled: boolean; reviewExpired: boolean; onRefresh(): Promise<void>;
+  trustMode?: TrustMode;
 }>) {
   const base = `/api/v1${commissionPath(order.role)}/${order.id}`; const verify = useCommissionSession();
   const [thread, setThread] = useState<ThreadView | null>(null); const [timeline, setTimeline] = useState<TimelineView | null>(null);
@@ -88,9 +92,8 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
     {failed ? <Alert variant="destructive"><AlertTitle>Chưa tải được lịch sử</AlertTitle><AlertDescription>Vui lòng thử lại.</AlertDescription></Alert> : null}
     <ol className="flex min-w-0 flex-col gap-4">{entries.map((entry) => <li key={entry.key} className="min-w-0">
       {"event" in entry ? <p className="text-sm text-muted-foreground"><time dateTime={entry.at}>{formatTipTime(entry.at)}</time> · {stateLabels[entry.event.type as keyof typeof stateLabels] ?? (entry.event.type === "confirmed" ? "Đã xác nhận tiền" : "Đã cập nhật đơn")}{entry.event.reason ? ` · ${closeLabels[entry.event.reason] ?? completionLabels[entry.event.reason] ?? "Điều kiện đơn thay đổi"}` : ""}</p>
-        : entry.item.kind === "submission" ? <SubmissionCard submission={{ ...entry.item, actionable: enabled && entry.item.actionable && !deadlinePassed && entry.item.sequence === latestSubmission }} order={order} disabled={locked} onUpdated={updated} />
-          : <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={3}><Badge variant="outline">{entry.item.author === "creator" ? "nghệ sĩ" : "người đặt"}</Badge></CardTitle><CardDescription><time dateTime={entry.at}>{formatTipTime(entry.at)}</time></CardDescription></CardHeader>
-            <CardContent className="flex min-w-0 flex-col gap-3">{entry.item.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{entry.item.text}</p> : null}<AttachedFileList order={order} files={entry.item.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer" && entry.item.author === "creator"} /></CardContent></Card>}
+        : entry.item.kind === "submission" ? <SubmissionCard submission={{ ...entry.item, actionable: enabled && entry.item.actionable && !deadlinePassed && entry.item.sequence === latestSubmission }} order={order} disabled={locked} onUpdated={updated} trustMode={trustMode} />
+          : <CommissionMessage order={order} message={entry.item} trustMode={trustMode} />}
     </li>)}</ol>
     <div className="flex flex-wrap gap-2">{thread?.nextBeforeSequence ? <Button variant="outline" disabled={busy} onClick={() => void older("thread", thread.nextBeforeSequence)}>Diễn biến cũ hơn</Button> : null}{timeline?.nextBeforeVersion ? <Button variant="outline" disabled={busy} onClick={() => void older("timeline", timeline.nextBeforeVersion)}>Xem diễn biến đơn</Button> : null}</div>
     {quotes ? <div className="flex flex-col gap-3">{quotes.items.length ? quotes.items.map((quote) => <Card key={quote.id}><CardHeader><CardTitle role="heading" aria-level={3}>Báo giá lần {quote.revisionNumber}</CardTitle><CardDescription>{formatTipTime(quote.issuedAt)} · Hạn {formatTipTime(quote.expiresAt)}</CardDescription></CardHeader><CardContent><CommissionTerms terms={quote.terms} /></CardContent></Card>) : <p>Chưa có báo giá riêng.</p>}{quotes.nextBeforeRevision ? <Button variant="outline" disabled={busy} onClick={() => void older("quotes", quotes.nextBeforeRevision)}>Báo giá cũ hơn</Button> : null}</div> : null}
@@ -99,6 +102,15 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
       <SubmissionComposer kind="draft" order={order} disabled={locked} onUpdated={updated} /><SubmissionComposer kind="final" order={order} disabled={locked} onUpdated={updated} />
     </div> : null}
   </section>;
+}
+
+export function CommissionMessage({ order, message, trustMode }: Readonly<{ order: OrderView["order"]; message: Extract<ThreadView["items"][number], { kind: "message" }>; trustMode: TrustMode }>) {
+  return <Card className="min-w-0"><CardHeader><CardTitle role="heading" aria-level={3}><Badge variant="outline">{message.author === "creator" ? "nghệ sĩ" : "người đặt"}</Badge></CardTitle><CardDescription><time dateTime={message.createdAt}>{formatTipTime(message.createdAt)}</time></CardDescription></CardHeader>
+    <CardContent className="flex min-w-0 flex-col gap-3">
+      {message.hidden ? <HiddenContent kind="message" /> : message.text ? <p data-message-text className="whitespace-pre-wrap wrap-anywhere">{message.text}</p> : null}
+      <AttachedFileList order={order} files={message.files} withdrawn={order.state === "closed" && !!order.confirmedAt && order.role === "buyer" && message.author === "creator"} trustMode={trustMode} reportable={order.role !== message.author} />
+      {message.hidden ? null : <ReportDialog mode={trustMode} ownContent={order.role === message.author} target={{ kind: "commission_message", orderId: order.id, messageId: message.id }} />}
+    </CardContent></Card>;
 }
 
 function MessageComposer({ order, disabled, onUpdated }: Readonly<{ order: OrderView["order"]; disabled: boolean; onUpdated(): void }>) {
