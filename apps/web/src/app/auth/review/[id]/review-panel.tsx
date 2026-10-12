@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { EvidenceView } from "@/ui/cases/evidence-tabs";
 import { openCaseFile, formatTipTime, evidenceLabels, type EvidenceSection } from "@/ui/cases/case-client";
 import { penaltyKindLabels, penaltyReasonLabels, penaltyTargetLabels, restrictionLabels, policyKindLabels } from "@/ui/trust/owner-trust-client";
+import { reportReasonLabels, targetKindLabels } from "@/ui/trust/trust-client";
 
 type Review = { title: string; body: string; ready: boolean; returnPath: string; expiresAt: string };
 const labels: Record<string, string> = { observedAmountVnd: "Số tiền đã nhận (VND)", observedTransferReference: "Nội dung chuyển khoản", observedBankTransactionId: "Mã giao dịch ngân hàng",
@@ -20,14 +21,16 @@ const labels: Record<string, string> = { observedAmountVnd: "Số tiền đã nh
   portfolioLinks: "Liên kết portfolio", revision: "Hồ sơ", application: "Đơn đăng ký", state: "Trạng thái", status: "Trạng thái", reasonCode: "Lý do",
   expectedVersion: "Phiên bản thông tin", outcome: "Kết quả", actualAmountVnd: "Số tiền thực gửi (VND)", outboundBankReference: "Mã giao dịch hoàn tiền", attentionReason: "Lý do cần xử lý",
   section: "Mục bằng chứng", cursor: "Trang tin nhắn", disposition: "Cách tải tệp", refundAmountVnd: "Số tiền hoàn (VND)", reasoning: "Kết luận (hai bên sẽ thấy)",
-  internalNote: "Ghi chú nội bộ (chỉ owner thấy)", rulingId: "Mã kết luận", newRefundAmountVnd: "Tổng số tiền hoàn mới (VND)", until: "Hạn mới" };
+  detail: "Chi tiết", statement: "Trình bày kháng nghị", internalNote: "Ghi chú nội bộ (chỉ owner thấy)", rulingId: "Mã kết luận", newRefundAmountVnd: "Tổng số tiền hoàn mới (VND)", until: "Hạn mới" };
 function detail(value: unknown): string { return typeof value === "boolean" ? value ? "Có" : "Không" : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value ?? "—"); }
 const caseValues: Record<string, string> = { rule: "Kết luận khiếu nại", correct: "Đính chính số tiền hoàn", question: "Gửi câu hỏi", extend: "Gia hạn phản hồi", accept_evidence: "Chấp nhận bằng chứng đã nhận tiền", require_resend: "Yêu cầu chuyển lại", waive: "Miễn nghĩa vụ hoàn tiền", extend_deadline: "Gia hạn chuyển hoàn tiền", rule_claim: "Kết luận thanh toán muộn",
   complete: "Hoàn tất đơn", close: "Đóng đơn", refund_owed: "Cần hoàn tiền", rejected: "Từ chối yêu cầu", order_summary: "Thông tin đơn hàng", thread_page: "Tin nhắn và bàn giao", resolution_records: "Khiếu nại và hoàn tiền", refund_destination: "Tài khoản nhận hoàn tiền", attachment: "Tải xuống", inline: "Xem tệp" };
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
-Object.assign(labels, { subjectUserId: "Người dùng", kind: "Loại", restriction: "Thao tác bị hạn chế", target: "Phạm vi", reasonCategory: "Nhóm lý do", explanation: "Giải thích (người dùng sẽ thấy)", endsAt: "Kết thúc lúc", freezeFulfilment: "Đóng băng thực hiện đơn", expectedCaseVersion: "Phiên bản vụ việc", hideId: "Mã biện pháp ẩn", resolution: "Kết quả đóng báo cáo", decision: "Quyết định kháng nghị", replacement: "Biện pháp thay thế", document: "Nội dung chính sách", expectedRevisionNumber: "Phiên bản chính sách hiện tại" });
-Object.assign(caseValues, { hide: "Ẩn mục tiêu", restore: "Khôi phục mục tiêu", close_report: "Đóng báo cáo", penalty: "Áp dụng biện pháp", decide_appeal: "Quyết định kháng nghị", upheld: "Giữ nguyên biện pháp", reduced: "Giảm biện pháp", reversed: "Hủy biện pháp", dismissed: "Bỏ qua", actioned: "Đã xử lý", report_context: "Ngữ cảnh báo cáo", package_revision: "Phiên bản gói commission", brief: "Yêu cầu sáng tác", appeal_source: "Nguồn kháng nghị", ...penaltyKindLabels, ...penaltyTargetLabels, ...penaltyReasonLabels, ...restrictionLabels, ...policyKindLabels });
-function CommandValue({ name, value }: { name: string; value: unknown }) {
+Object.assign(labels, { subjectUserId: "Người dùng", kind: "Loại", restriction: "Thao tác bị hạn chế", target: "Phạm vi", reasonCategory: "Nhóm lý do", explanation: "Giải thích (người dùng sẽ thấy)", endsAt: "Kết thúc lúc", freezeFulfilment: "Đóng băng thực hiện đơn", expectedCaseVersion: "Phiên bản vụ việc", hideId: "Mã lần ẩn nội dung", resolution: "Kết quả đóng báo cáo", decision: "Quyết định kháng nghị", replacement: "Biện pháp thay thế", document: "Nội dung chính sách", expectedRevisionNumber: "Phiên bản chính sách hiện tại" });
+Object.assign(caseValues, { hide: "Ẩn nội dung", restore: "Khôi phục nội dung", close_report: "Đóng báo cáo", penalty: "Áp dụng biện pháp", decide_appeal: "Quyết định kháng nghị", upheld: "Giữ nguyên biện pháp", reduced: "Giảm biện pháp", reversed: "Hủy biện pháp", dismissed: "Bỏ qua", actioned: "Đã xử lý", report_context: "Ngữ cảnh báo cáo", package_revision: "Phiên bản gói commission", brief: "Yêu cầu sáng tác", appeal_source: "Nguồn kháng nghị", ...penaltyKindLabels, ...penaltyTargetLabels, ...penaltyReasonLabels, ...restrictionLabels, ...policyKindLabels });
+function CommandValue({ name, value, reportReview = false }: { name: string; value: unknown; reportReview?: boolean }) {
+  if (reportReview && name === "reason" && typeof value === "string" && Object.hasOwn(reportReasonLabels, value)) return <>{reportReasonLabels[value as keyof typeof reportReasonLabels]}</>;
+  if (reportReview && name === "target") return <>{record(value) && typeof value.kind === "string" && Object.hasOwn(targetKindLabels, value.kind) ? targetKindLabels[value.kind as keyof typeof targetKindLabels] : "—"}</>;
   if (name === "replacement" && record(value)) return <dl>{Object.entries(value).map(([field, item]) => <div key={field}><dt>{labels[field] ?? field}</dt><dd><CommandValue name={field} value={item} /></dd></div>)}</dl>;
   if (name === "endsAt" && typeof value === "string" && Number.isFinite(Date.parse(value))) return <time dateTime={value}>{formatTipTime(value)}</time>;
   return <>{["action", "outcome", "section", "disposition", "kind", "restriction", "target", "reasonCategory", "resolution", "decision"].includes(name) && typeof value === "string" && Object.hasOwn(caseValues, value) ? caseValues[value] : detail(value)}</>;
@@ -89,6 +92,8 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
   let fields: Array<[string, unknown]> = [];
   try { const value: unknown = JSON.parse(review?.body || "{}"); if (value && typeof value === "object" && !Array.isArray(value)) fields = Object.entries(value); } catch { /* Invalid stored content is not rendered as HTML. */ }
   const requestedSection = fields.find(([name]) => name === "section")?.[1];
+  const reportReview = review?.title === "Gửi báo cáo";
+  const appealReview = review?.title === "Gửi kháng nghị";
   const evidenceSection = typeof requestedSection === "string" && requestedSection !== "file" && Object.hasOwn(evidenceLabels, requestedSection) ? requestedSection as EvidenceSection : undefined;
   let sepayUrl: string | null = null;
   try { if (typeof result?.authorizationUrl === "string") { const url = new URL(result.authorizationUrl); if (url.origin === "https://my.sepay.vn" && url.pathname === "/oauth/authorize" && !url.username && !url.password) sepayUrl = url.href; } } catch { /* No untrusted navigation. */ }
@@ -100,7 +105,7 @@ export function CommandReview({ id, accountPortalUrl }: { id: string; accountPor
       {message ? <Alert variant={done ? "default" : "destructive"}><AlertDescription>{message}</AlertDescription></Alert> : null}
       {!review && !message ? <p role="status">Đang tải nội dung…</p> : null}
       {review && !done ? <><p className="text-sm text-muted-foreground">Có hiệu lực đến {new Date(review.expiresAt).toLocaleTimeString("vi-VN")}.</p>
-        <dl className="flex flex-col gap-3">{fields.map(([name, value]) => <div key={name}><dt className="text-sm font-medium">{labels[name] ?? name}</dt><dd className="whitespace-pre-wrap break-words text-sm text-muted-foreground"><CommandValue name={name} value={value} /></dd></div>)}</dl></> : null}
+        <dl className="flex flex-col gap-3">{fields.map(([name, value]) => <div key={name}><dt className="text-sm font-medium">{name === "target" && reportReview ? "Nội dung được báo cáo" : name === "target" && appealReview ? "Biện pháp được kháng nghị" : labels[name] ?? name}</dt><dd className="whitespace-pre-wrap break-words text-sm text-muted-foreground"><CommandValue name={name} value={value} reportReview={reportReview} /></dd></div>)}</dl></> : null}
       {sepayUrl ? <a className={buttonVariants()} href={sepayUrl} referrerPolicy="no-referrer">Tiếp tục kết nối tại SePay</a> : null}
       {result?.restartRequired === true ? <p>Phiên kết nối trước đã dùng. Quay lại trang SePay để bắt đầu phiên mới.</p> : null}
       {secret ? <section className="flex flex-col gap-3" aria-label="Cấu hình SePay">

@@ -66,6 +66,11 @@ async function sendSubmission(page: Page, kind: "draft" | "final") {
   await expect(page.locator('[data-submission-card]')).toHaveCount(kind === "draft" ? 1 : 2);
 }
 async function capture(page: Page, state: string) {
+  await expect(page.getByText(/Đang kiểm tra phiên/u)).toHaveCount(0);
+  if (await page.locator("style#axe-static-styles").count() === 0) {
+    const style = await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
+    await style.evaluate((node) => { (node as HTMLStyleElement).id = "axe-static-styles"; });
+  }
   for (const width of [375, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);

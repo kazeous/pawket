@@ -17,8 +17,10 @@ test.each(["suspension", "removal"])("renders enforcement_notice %s with a fragm
   const mail = f.sendMail.mock.calls[0]![0];
   expect(mail.subject).toBe("Thông báo về tài khoản Pawket");
   for (const body of [mail.text, mail.html]) {
+    expect(body).toContain(kind === "suspension" ? "Tài khoản Pawket của bạn đã bị tạm khóa." : "Tài khoản Pawket của bạn đã bị đóng.");
     expect(body).toContain(`https://pawket.example.invalid/help/locked#t=${token}`);
     expect(body).toContain("Bạn có thể xem chi tiết và gửi kháng nghị một lần trong 14 ngày.");
+    expect(body).toContain("Liên kết này chỉ dành cho bạn và có thời hạn. Nếu liên kết hết hạn, hãy yêu cầu liên kết mới tại Trung tâm trợ giúp.");
     expect(body).not.toContain("explanation");
   }
   expect(mail.html).toContain("Xem thông báo và kháng nghị");

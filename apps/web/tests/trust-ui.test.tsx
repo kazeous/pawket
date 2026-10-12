@@ -86,7 +86,7 @@ test("guest package report solves a POST challenge in the browser and sends only
     expect(fetch.mock.calls[0]![0]).toBe("/api/v1/reports/challenge"); expect(fetch.mock.calls[0]![1].method).toBe("POST");
     expect(solve).toHaveBeenCalledWith({ token: "synthetic-token", difficulty: 18 }, expect.any(AbortSignal), expect.any(Function));
     expect(JSON.parse(fetch.mock.calls[1]![1].body)).toEqual({ target, reason: "privacy", detail: "", challenge: { token: "synthetic-token", solution: 1234 } });
-    expect(dialog.textContent).toContain("Đã gửi báo cáo. Pawket sẽ xem xét; người bị báo cáo không biết bạn là ai.");
+    expect(dialog.textContent).toContain("Đã gửi báo cáo. Pawket sẽ xem xét và không cho người bị báo cáo biết thông tin của bạn.");
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
 test("appeal form enforces 4,000 code points on submit", async () => {

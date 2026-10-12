@@ -14,5 +14,5 @@ export async function PartyWarnings({ incoming, actorUserId }: Readonly<{ incomi
     view = parseCommission(myCasesSchema, await response.json());
   } catch { /* A failed private read does not hide a possible warning silently. */ }
   return view ? <EnforcementBanner mode={view.controls?.trustMode ?? "disabled"} penalties={view.cases.penalties ?? []} actorUserId={actorUserId} />
-    : <StatusBanner tone="error">Chưa tải được cảnh cáo của bạn. <a href="/help/cases" className="underline">Xem Yêu cầu của tôi</a></StatusBanner>;
+    : <StatusBanner tone="error">Chưa kiểm tra được thông báo về tài khoản của bạn. <a href="/help/cases" className="underline">Xem Yêu cầu của tôi</a></StatusBanner>;
 }

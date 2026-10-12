@@ -34,7 +34,7 @@ async function setup() {
   const storage = { presignDownload: vi.fn(async () => ({ url: "https://example.invalid/download", expiresAt: new Date() })), presignUpload: vi.fn() };
   const files = createCommissionFileService({ ...p.s.creator.common, storage, contentHides, mode: "enabled", fulfillmentMode: "enabled",
     sessions: p.s.input.identity, orders: createCommissionFileAccessPort({ catalog: p.s.catalog }) });
-  const evidence = createCaseEvidencePort({ orders, files, catalog: p.s.catalog, contentHides,
+  const evidence = createCaseEvidencePort({ orders, files, catalog: p.s.catalog, contentHides, keyring: p.s.input.keyring,
     refunds: { listForOrder: vi.fn(), revealForCase: vi.fn() }, view: { readForCase: vi.fn() } });
   const cases = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-hide", consumeStepUpProof: async () => true, evidence, now: p.s.creator.now });
   return { p, orders, send, fileId, report, hides, command, storage, files, cases };
@@ -85,7 +85,7 @@ test("package evidence retains the reported revision and logs reads; hide waits 
   await started; releaseIntake(); await Promise.all([intake, hide]);
   expect(order).toEqual(["intake_admitted", "intake_committing", "hide_fence_acquired"]);
   await expect(f.db.transaction((tx) => catalog.getIntakePackage(tx, { packageId: s.packageId, revisionId: s.revisionId, allowPreviousRevision: true, at: at() }))).rejects.toMatchObject({ code: "not_available" });
-  const evidence = createCaseEvidencePort({ catalog, contentHides, orders: s.service, files: { caseDownloadGrant: vi.fn() }, refunds: { listForOrder: vi.fn(), revealForCase: vi.fn() }, view: { readForCase: vi.fn() } });
+  const evidence = createCaseEvidencePort({ catalog, contentHides, keyring: s.input.keyring, orders: s.service, files: { caseDownloadGrant: vi.fn() }, refunds: { listForOrder: vi.fn(), revealForCase: vi.fn() }, view: { readForCase: vi.fn() } });
   const cases = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-hide", consumeStepUpProof: async () => true, evidence, now: at });
   const command = { owner: s.creator.actor, stepUpProofId: randomUUID(), requestId: randomUUID(), caseId };
   const revision = await cases.readEvidence({ ...command, section: "package_revision" });
@@ -106,7 +106,7 @@ test("brief evidence includes private text, links and reference files, with an a
   const reports = createPrivateReportService({ ...s.creator.common, mode: "enabled", challengeKey: s.creator.common.lookupHmacKey, now: s.creator.now, targets: createBriefReportTargetPort(),
     restrictions: createTrustRestrictionPort({ mode: "enabled" }), policies: { readCurrentIds: async () => ({ communityRulesRevisionId: null, enforcementRevisionId: null }) } });
   const { caseId } = await reports.submit({ requester: { kind: "authenticated", actor: s.creator.actor }, target: { kind: "commission_brief", orderId }, reason: "other", detail: null, ...commandIds() });
-  const evidence = createCaseEvidencePort({ orders, files: { caseDownloadGrant: vi.fn() }, refunds: { listForOrder: vi.fn(), revealForCase: vi.fn() }, view: { readForCase: vi.fn() } });
+  const evidence = createCaseEvidencePort({ orders, keyring: s.input.keyring, files: { caseDownloadGrant: vi.fn() }, refunds: { listForOrder: vi.fn(), revealForCase: vi.fn() }, view: { readForCase: vi.fn() } });
   const cases = createTrustCaseService({ db: f.db, applicationRevision: "synthetic-hide", consumeStepUpProof: async () => true, evidence, now: s.creator.now });
   const command = { owner: s.creator.actor, stepUpProofId: randomUUID(), requestId: randomUUID(), caseId };
   expect(await cases.readEvidence({ ...command, section: "brief" })).toMatchObject({ text: "Private commission brief", referenceLinks: ["https://example.invalid/reference"], referenceFiles: [{ fileId, name: "Reference artwork" }], hidden: false });

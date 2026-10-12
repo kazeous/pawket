@@ -7,18 +7,18 @@ import { StatusBanner } from "@/ui/status-banner";
 import { formatTipTime } from "../tips/tip-client";
 import { AppealForm } from "./appeal-form";
 import { LockedEndSession } from "./locked-end-session";
-import { appealStateLabels, penaltyKindLabels, penaltyStateLabels } from "./trust-client";
+import { appealStateLabels, penaltyStateLabels } from "./trust-client";
 
 export function LockedCase({ view }: Readonly<{ view: HelpCaseView }>) {
   const [sent, setSent] = useState(false);
-  return <><Card><CardHeader><CardTitle role="heading" aria-level={2}>{penaltyKindLabels[view.kind]}</CardTitle><CardDescription>{penaltyStateLabels[view.state]}</CardDescription></CardHeader>
+  return <><Card><CardHeader><CardTitle role="heading" aria-level={2}>{view.kind === "suspension" ? "Tài khoản bị tạm khóa" : "Tài khoản bị gỡ bỏ"}</CardTitle><CardDescription>{penaltyStateLabels[view.state]}</CardDescription></CardHeader>
     <CardContent className="flex flex-col gap-4"><p className="whitespace-pre-wrap wrap-anywhere">{view.explanation}</p><SummaryList items={[
-      { label: "Bắt đầu", value: formatTipTime(view.startsAt) }, { label: "Hết hạn", value: view.endsAt ? formatTipTime(view.endsAt) : "Không có thời hạn" },
-    ]} />{view.enforcementPolicyRevisionId ? <a className="underline" href={`/help/policies/${view.enforcementPolicyRevisionId}`}>Chính sách áp dụng cho biện pháp này</a> : <p>Chưa được công bố</p>}
+      { label: "Bắt đầu", value: formatTipTime(view.startsAt) }, { label: "Hiệu lực đến", value: view.endsAt ? formatTipTime(view.endsAt) : "Không có thời hạn" },
+    ]} />{view.enforcementPolicyRevisionId ? <a className="underline" href={`/help/policies/${view.enforcementPolicyRevisionId}`}>Chính sách áp dụng cho biện pháp này</a> : <p>Chính sách áp dụng chưa được công bố.</p>}
     {sent ? <StatusBanner tone="success">Đã gửi kháng nghị. Pawket đang xem xét.</StatusBanner> : view.appeal ? <div className="flex flex-col gap-3"><p>Kháng nghị · {appealStateLabels[view.appeal.state]}</p>
       {view.appeal.state !== "open" && view.appeal.reasoning ? <p className="whitespace-pre-wrap wrap-anywhere">{view.appeal.reasoning}</p> : null}
       {view.appeal.decidedAt ? <p>Kết luận ngày {formatTipTime(view.appeal.decidedAt)}</p> : null}</div>
-      : view.canAppeal ? <AppealForm target={{ penaltyId: view.penaltyId }} helpSession onSubmitted={() => setSent(true)} /> : <p>Không còn quyền gửi kháng nghị cho biện pháp này.</p>}
+      : view.canAppeal ? <AppealForm target={{ penaltyId: view.penaltyId }} helpSession onSubmitted={() => setSent(true)} /> : <p>Biện pháp này hiện không thể kháng nghị.</p>}
     <p className="text-sm text-muted-foreground">Có thể xem thông báo đến {formatTipTime(view.readOnlyUntil)}.</p></CardContent>
   </Card><LockedEndSession /></>;
 }

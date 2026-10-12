@@ -57,7 +57,7 @@ export function caseErrorText(code: string) {
   if (code === "resolution_disabled") return "Tính năng xử lý khiếu nại và hoàn tiền đang tạm đóng.";
   if (code === "enforcement_disabled") return "Tính năng xử lý báo cáo, biện pháp và kháng nghị đang tạm đóng.";
   if (code === "use_penalty") return "Hãy áp dụng biện pháp từ vụ việc hoặc báo cáo để người dùng có thể kháng nghị.";
-  if (code === "duplicate") return "Người dùng đã có biện pháp này đang có hiệu lực. Kiểm tra tab Biện pháp trước khi xử lý tiếp.";
+  if (code === "duplicate") return "Người dùng đã có biện pháp này đang có hiệu lực. Kiểm tra mục Biện pháp trước khi xử lý tiếp.";
   if (["not_available", "invalid_transition", "version_conflict", "deadline_passed"].includes(code)) return "Vụ việc đã thay đổi hoặc thời hạn đã kết thúc. Hãy kiểm tra trạng thái hiện tại trước khi xử lý tiếp.";
   if (["owner_required", "authentication_required", "owner_step_up_required", "OIDC_ACTOR_CHANGED"].includes(code)) return "Cần xác thực lại tài khoản owner để tiếp tục.";
   if (code.startsWith("invalid_")) return "Thông tin chưa hợp lệ. Hãy kiểm tra số tiền, thời hạn và lý do.";

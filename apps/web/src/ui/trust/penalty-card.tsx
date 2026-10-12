@@ -26,7 +26,7 @@ export function PenaltyCard({ penalty }: Readonly<{ penalty: PenaltyView }>) {
     <CardContent className="flex flex-col gap-3"><p className="whitespace-pre-wrap wrap-anywhere">{penalty.explanation}</p><SummaryList items={[
       { label: "Lý do", value: penalty.reasonCategoryLabel }, ...(penalty.restriction ? [{ label: "Hạn chế", value: restrictionLabels[penalty.restriction] }] : []),
       ...(penalty.target ? [{ label: "Phạm vi", value: penaltyTargetLabels[penalty.target] }] : []), { label: "Bắt đầu", value: formatTipTime(penalty.startsAt) },
-      ...(penalty.endsAt ? [{ label: "Hết hạn", value: formatTipTime(penalty.endsAt) }] : []), ...(penalty.endedAt ? [{ label: "Kết thúc", value: formatTipTime(penalty.endedAt) }] : []),
+      ...(penalty.endsAt ? [{ label: "Hiệu lực đến", value: formatTipTime(penalty.endsAt) }] : []), ...(penalty.endedAt ? [{ label: "Đã kết thúc lúc", value: formatTipTime(penalty.endedAt) }] : []),
     ]} /><AppealAction row={penalty} target={{ penaltyId: penalty.penaltyId }} /></CardContent></Card>;
 }
 export function HideCard({ hide }: Readonly<{ hide: HideView }>) {

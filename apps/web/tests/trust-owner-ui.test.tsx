@@ -37,12 +37,12 @@ test("queue shows report and appeal kinds only when enabled", () => {
 });
 test("report panel hides Hide for brief cases", () => {
   const node = markup(<ReportCasePanel detail={report()} disabled={false} onSubmit={vi.fn()} />);
-  expect(node.textContent).not.toContain("Ẩn mục tiêu"); expect(node.textContent).toContain("Áp dụng biện pháp"); expect(node.textContent).toContain("Yêu cầu sáng tác");
+  expect(node.textContent).not.toContain("Ẩn nội dung"); expect(node.textContent).toContain("Áp dụng biện pháp"); expect(node.textContent).toContain("Yêu cầu sáng tác");
 });
 test("penalty form offers only parties of the source and previews account logout", async () => {
   const send = vi.fn(); await mounted(<PenaltyForm parties={parties} disabled={false} onSubmit={send} />, async (node) => {
     expect(Array.from(node.querySelectorAll('[name="subjectUserId"] option'), (item) => item.getAttribute("value"))).toEqual(["creator", "buyer"]);
-    await select(node, "kind", "suspension"); await select(node, "target", "account"); expect(node.textContent).toContain("Tạm khóa tài khoản sẽ đăng xuất người dùng khỏi mọi phiên");
+    await select(node, "kind", "suspension"); await select(node, "target", "account"); expect(node.querySelector('[role="status"]')?.textContent).toBe("Tạm khóa tài khoản sẽ đăng xuất người dùng khỏi mọi phiên.");
     node.querySelector<HTMLTextAreaElement>('[name="explanation"]')!.value = "Lý do"; await submit(node);
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ action: "penalty", subjectUserId: "creator", kind: "suspension", target: "account" }));
   });
@@ -89,7 +89,7 @@ test("penalty form refuses foreign subjects, long explanations and control chara
 });
 test("report Restore and Close bind the current hide and case version", async () => {
   const send = vi.fn(); await mounted(<ReportCasePanel detail={{ ...report(), sourceType: "commission_message", activeHideId: id }} disabled={false} onSubmit={send} />, async (node) => {
-    expect(node.querySelector('[name="operation"]')?.textContent).not.toContain("Ẩn mục tiêu");
+    expect(Array.from(node.querySelectorAll('[name="operation"] option'), (option) => option.textContent)).toEqual(["Khôi phục nội dung", "Đóng báo cáo"]);
     node.querySelector<HTMLInputElement>('[name="reason"]')!.value = "Khôi phục"; await submit(node);
     expect(send).toHaveBeenCalledWith({ action: "restore", expectedCaseVersion: 2, hideId: id, reason: "Khôi phục" });
     await select(node, "operation", "close_report"); await select(node, "resolution", "actioned"); await submit(node);

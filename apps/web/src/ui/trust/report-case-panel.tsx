@@ -23,9 +23,9 @@ export function ReportCasePanel({ detail, disabled, onSubmit }: Readonly<{ detai
   return <section className="work-surface stack"><h2>Nội dung được báo cáo</h2><p>{targetLabels[detail.sourceType] ?? "Nội dung"} · <span className="mono break-all">{detail.sourceId}</span></p>
     <p>Danh sách báo cáo, lý do, thời điểm và danh tính người báo cáo chỉ owner thấy khi mở Ngữ cảnh báo cáo trong Bằng chứng.</p>
     {detail.state === "open" ? <form className="stack" onSubmit={submit}><FieldGroup>
-      <Field htmlFor={`${id}-action`} label="Hành động" required><select id={`${id}-action`} name="operation" disabled={disabled}>{canHide ? detail.activeHideId ? <option value="restore">Khôi phục mục tiêu</option> : <option value="hide">Ẩn mục tiêu</option> : null}<option value="close_report">Đóng báo cáo</option></select></Field>
+      <Field htmlFor={`${id}-action`} label="Hành động" required><select id={`${id}-action`} name="operation" disabled={disabled}>{canHide ? detail.activeHideId ? <option value="restore">Khôi phục nội dung</option> : <option value="hide">Ẩn nội dung</option> : null}<option value="close_report">Đóng báo cáo</option></select></Field>
       <Field htmlFor={`${id}-resolution`} label="Kết quả đóng báo cáo"><select id={`${id}-resolution`} name="resolution" disabled={disabled}><option value="dismissed">Bỏ qua (không áp dụng biện pháp)</option><option value="actioned">Đã xử lý (đã ẩn hoặc áp dụng biện pháp)</option></select></Field>
-      <Field htmlFor={`${id}-reason`} label="Lý do" required error={error}><Input id={`${id}-reason`} name="reason" required disabled={disabled} /></Field>
+      <Field htmlFor={`${id}-reason`} label="Lý do (chỉ owner thấy)" required error={error}><Input id={`${id}-reason`} name="reason" required disabled={disabled} /></Field>
     </FieldGroup>{error ? <p role="alert">{error}</p> : null}<Button type="submit" disabled={disabled}>Xác nhận xử lý báo cáo</Button></form> : null}
     <Button variant="outline" disabled={disabled} onClick={() => setPenalty(!penalty)}>Áp dụng biện pháp</Button>
     {penalty ? <PenaltyForm parties={detail.parties} disabled={disabled} onSubmit={onSubmit} /> : null}

@@ -139,9 +139,10 @@ function enforcementNoticeContent(appBaseUrl: string, message: SecurityEmailMess
     || typeof endsAt !== "string" || (kind === "removal" && endsAt !== "")
     || (endsAt !== "" && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(endsAt)
       || !Number.isFinite(new Date(endsAt).getTime()) || new Date(endsAt).toISOString() !== endsAt))) throw new Error("Invalid security email message");
-  const paragraphs = [kind === "removal" ? "Tài khoản Pawket của bạn đã bị đóng." : "Tài khoản Pawket của bạn đã bị tạm ngưng."];
+  const paragraphs = [kind === "removal" ? "Tài khoản Pawket của bạn đã bị đóng." : "Tài khoản Pawket của bạn đã bị tạm khóa."];
   if (endsAt) paragraphs.push(`Thời gian kết thúc: ${new Intl.DateTimeFormat("vi-VN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date(endsAt))} (giờ Việt Nam).`);
   paragraphs.push("Bạn có thể xem chi tiết và gửi kháng nghị một lần trong 14 ngày.");
+  paragraphs.push("Liên kết này chỉ dành cho bạn và có thời hạn. Nếu liên kết hết hạn, hãy yêu cầu liên kết mới tại Trung tâm trợ giúp.");
   return { heading: "Thông báo về tài khoản Pawket", paragraphs,
     action: { intro: "Xem thông báo và kháng nghị:", label: "Xem thông báo và kháng nghị", url: safePawketLink(appBaseUrl, "/help/locked", `t=${message.secret}`) } };
 }

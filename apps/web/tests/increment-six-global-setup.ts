@@ -1,7 +1,7 @@
 import { createVersionedTestBuckets } from "../../../packages/public-media/tests/s3-test-helpers.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createCommissionPackageService, createPublicCatalogQuery } from "@pawket/catalog";
-import { commissionPolicyCurrent, commissionPolicyRevisions, createDatabase, creatorPages, identityEmailAddresses, identitySessions, identityUsers } from "@pawket/database";
+import { commissionPolicyCurrent, commissionPolicyRevisions, createDatabase, creatorPages, identityEmailAddresses, identitySessions, identityUsers, trustPolicyCurrent, trustPolicyRevisions } from "@pawket/database";
 import { createIdentityCommissionAssurancePort, createIdentityCreatorSeedPort, hashSessionToken } from "@pawket/identity";
 import { commissionPolicyChecksum, createCommissionPolicyReadPort } from "@pawket/orders";
 import { createTipReceivingAccountEligibilityPort } from "@pawket/payments";
@@ -24,7 +24,15 @@ export default async function setup() {
       const facts = { technicalVersion: "commission-v1", minimumVnd: 50_000, maximumVnd: 50_000_000, approvalKind: "synthetic", document: "CHỈ DỮ LIỆU KIỂM THỬ. Điều khoản tổng hợp để kiểm tra chấp thuận; không áp dụng thanh toán thật." };
       await tx.insert(commissionPolicyRevisions).values({ id: policyId, revisionNumber: 2, ...facts, source: "synthetic-increment-six-browser", checksum: commissionPolicyChecksum(facts), effectiveAt: at, createdAt: at });
       await tx.update(commissionPolicyCurrent).set({ revisionId: policyId, updatedAt: at });
-      for (let index = 0; index < 32; index++) {
+      for (const kind of ["community_rules", "enforcement_appeals"] as const) {
+        const revisionId = randomUUID();
+        const document = "CHỈ DỮ LIỆU KIỂM THỬ. Quy tắc và kháng nghị tổng hợp; không áp dụng cho tài khoản thật.";
+        await tx.insert(trustPolicyRevisions).values({ id: revisionId, kind, revisionNumber: 1, document, approvalKind: "synthetic",
+          checksum: `sha256:${createHash("sha256").update(document, "utf8").digest("hex")}`, source: "synthetic-increment-six-browser", effectiveAt: at, createdAt: at });
+        await tx.insert(trustPolicyCurrent).values({ kind, revisionId, updatedAt: at });
+      }
+      // Buyers 32–35 are reserved for trust journeys, separate from the Stage A fixtures.
+      for (let index = 0; index < 36; index++) {
         const userId = commissionBuyerId(index); const email = `${userId}@example.invalid`;
         await tx.insert(identityUsers).values({ id: userId, name: `Người đặt kiểm thử ${index}`, email, canonicalEmail: email, emailVerified: true, emailVerifiedAt: at, emailVerificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
         await tx.insert(identityEmailAddresses).values({ userId, displayEmail: email, canonicalEmail: email, status: "primary", verifiedAt: at, verificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });

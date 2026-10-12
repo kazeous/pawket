@@ -18,7 +18,7 @@ export function PenaltyForm({ parties, disabled, onSubmit, now }: Readonly<{ par
     const rawNote = String(data.get("internalNote") ?? "").trim(); const internalNote = rawNote ? ownerText(rawNote, 2_000) : undefined;
     const rawEnd = String(data.get("endsAt") ?? ""); const end = rawEnd ? new Date(rawEnd) : null; const at = now?.getTime() ?? Date.now(); const reasonCategory = String(data.get("reasonCategory"));
     if (!parties.some((party) => party.userId === subjectUserId) || !explanation || internalNote === null || !Object.hasOwn(penaltyReasonLabels, reasonCategory)
-      || end && (!Number.isFinite(end.getTime()) || end.getTime() <= at || end.getTime() > at + 3_650 * 86_400_000)) { setError("Kiểm tra người dùng, lý do 1–2.000 ký tự và thời hạn trong tương lai (tối đa 10 năm)."); return; }
+      || end && (!Number.isFinite(end.getTime()) || end.getTime() <= at || end.getTime() > at + 3_650 * 86_400_000)) { setError("Kiểm tra người dùng, phần giải thích 1–2.000 ký tự và thời hạn trong tương lai (tối đa 10 năm)."); return; }
     setError(null); onSubmit({ action: "penalty", subjectUserId, kind, reasonCategory, explanation, ...(internalNote ? { internalNote } : {}),
       ...(kind === "restriction" ? { restriction, endsAt: end?.toISOString() ?? null } : kind === "suspension" ? { target, endsAt: end?.toISOString() ?? null,
         ...(target === "creator_capability" ? { freezeFulfilment: data.get("freezeFulfilment") === "on" } : {}) } : kind === "removal" ? { target } : {}) });
@@ -31,7 +31,7 @@ export function PenaltyForm({ parties, disabled, onSubmit, now }: Readonly<{ par
     {kind === "restriction" || kind === "suspension" ? <Field htmlFor={`${id}-end`} label="Kết thúc lúc" hint="Để trống nếu không có ngày kết thúc; giờ trên thiết bị của bạn."><Input id={`${id}-end`} name="endsAt" type="datetime-local" disabled={blocked} /></Field> : null}
     {kind === "suspension" && target === "creator_capability" ? <Field htmlFor={`${id}-freeze`} label="Đóng băng thực hiện đơn"><input id={`${id}-freeze`} name="freezeFulfilment" type="checkbox" disabled={blocked} /></Field> : null}
     <Field htmlFor={`${id}-category`} label="Nhóm lý do" required><select id={`${id}-category`} name="reasonCategory" disabled={blocked}>{Object.entries(penaltyReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-    <Field htmlFor={`${id}-explanation`} label="Giải thích (người dùng sẽ thấy)" required error={error} hint="1–2.000 ký tự."><Textarea id={`${id}-explanation`} name="explanation" required disabled={blocked} /></Field>
+    <Field htmlFor={`${id}-explanation`} label="Giải thích (người dùng sẽ thấy)" required error={error} hint="1–2.000 ký tự. Không nêu tên, vai trò hoặc nội dung báo cáo của người báo cáo."><Textarea id={`${id}-explanation`} name="explanation" required disabled={blocked} /></Field>
     <Field htmlFor={`${id}-note`} label="Ghi chú nội bộ (chỉ owner thấy)" hint="Tối đa 2.000 ký tự."><Textarea id={`${id}-note`} name="internalNote" disabled={blocked} /></Field>
   </FieldGroup><p role="status">{penaltyEffect(kind, target, restriction)}</p>{kind === "suspension" && target === "creator_capability" ? <p>Nếu chọn đóng băng, mọi đơn đã thanh toán đang thực hiện sẽ đóng và phát sinh hoàn tiền toàn bộ; không thể khôi phục các đơn này.</p> : null}
     {parties.length === 0 ? <p>Không có người dùng đủ điều kiện trong nguồn này.</p> : null}{error ? <p role="alert">{error}</p> : null}<Button type="submit" disabled={blocked}>Áp dụng biện pháp</Button></form>;

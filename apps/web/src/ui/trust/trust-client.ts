@@ -5,7 +5,7 @@ const uuid = z.uuid(); const time = z.iso.datetime();
 export type TrustMode = "disabled" | "enabled";
 export const penaltyKindLabels = { warning: "Cảnh cáo", restriction: "Hạn chế", suspension: "Tạm khóa", removal: "Gỡ bỏ" };
 export const restrictionLabels = { commission_intake: "Nhận đơn commission", commission_buying: "Đặt commission", dispute_opening: "Mở khiếu nại", reporting: "Gửi báo cáo" };
-export const appealStateLabels = { open: "Đang được Pawket xem xét", upheld: "Giữ nguyên biện pháp", reduced: "Đã giảm biện pháp", reversed: "Đã hủy biện pháp" };
+export const appealStateLabels = { open: "Đang được Pawket xem xét", upheld: "Đã giữ nguyên biện pháp", reduced: "Đã giảm biện pháp", reversed: "Đã hủy biện pháp" };
 export const reportStateLabels = { received: "Đã nhận", closed: "Đã xử lý" };
 export const targetKindLabels = { commission_package: "Gói commission", commission_brief: "Brief", commission_message: "Tin nhắn", commission_file: "Tệp" };
 export const penaltyStateLabels = { active: "Đang có hiệu lực", expired: "Đã hết hạn", lifted: "Đã gỡ", reversed: "Đã hủy", reduced: "Đã giảm biện pháp" };
@@ -50,7 +50,7 @@ export const trustClient = { request: (path: string, init: RequestInit = {}, max
   return tipRequest(path, { ...init, method: "POST", headers }, maximumBytes);
 } };
 export function trustErrorText(code: string) {
-  const labels: Record<string, string> = { enforcement_disabled: "Tính năng báo cáo và kháng nghị đang tạm dừng.", REPORT_NOT_ACCEPTED: "Chưa thể gửi báo cáo. Hãy thử lại sau.",
+  const labels: Record<string, string> = { enforcement_disabled: "Tính năng báo cáo và kháng nghị đang tạm đóng.", REPORT_NOT_ACCEPTED: "Chưa thể gửi báo cáo. Hãy thử lại sau.",
     duplicate: "Bạn đã gửi yêu cầu cho nội dung này. Xem trạng thái trong Yêu cầu của tôi.", window_closed: "Đã hết hạn kháng nghị. Tải lại trang để kiểm tra.",
     restricted: "Tài khoản của bạn hiện bị hạn chế thao tác này.", invalid_request: "Kiểm tra nội dung và giới hạn ký tự trước khi gửi.", not_available: "Nội dung hoặc thao tác này hiện không khả dụng." };
   return labels[code];

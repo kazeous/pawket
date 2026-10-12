@@ -15,7 +15,7 @@ import { reportChallengeSchema, reportInputSchema, reportReasonLabels, reportRes
 
 type ReportInput = ReturnType<typeof reportInputSchema.parse>;
 type Props = Readonly<{ target: ReportTarget; mode: TrustMode; ownContent?: boolean; guest?: boolean; actorUserId?: string }>;
-const success = "Đã gửi báo cáo. Pawket sẽ xem xét; người bị báo cáo không biết bạn là ai.";
+const success = "Đã gửi báo cáo. Pawket sẽ xem xét và không cho người bị báo cáo biết thông tin của bạn.";
 export function ReportDialog({ target, mode, ownContent = false, guest = false, actorUserId }: Props) {
   if (mode !== "enabled" || ownContent || guest && target.kind !== "commission_package") return null;
   return guest ? <GuestReport target={target} /> : <AuthenticatedReport target={target} actorUserId={actorUserId} />;

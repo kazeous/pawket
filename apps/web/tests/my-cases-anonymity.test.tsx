@@ -44,6 +44,9 @@ test("appeal eligibility uses effective deadlines, active state, expiry, replace
   expect(warning.penalties[0]!.canAppeal).toBe(false);
   const releasedHide = await projectTrustCases({ reportsFiled: [], penalties: [], hides: [{ hideId: id, targetKind: "commission_file", hiddenAt: at, releasedAt: at }], appeals: [], now, effectiveDeadline: async () => deadline });
   expect(releasedHide.hides[0]!.canAppeal).toBe(false);
+  expect(releasedHide.hides[0]!.explanation).toBe("Pawket đã khôi phục nội dung này.");
+  const html = renderToStaticMarkup(createElement(MyCases, { cases: { disputes: [], refunds: [], lateClaims: [], ...releasedHide }, orderRoles: {}, trustMode: "enabled" }));
+  expect(html).toContain("Pawket đã khôi phục nội dung này."); expect(html).not.toContain("vi phạm quy định cộng đồng");
 });
 
 function httpFixture(mode: "disabled" | "enabled" = "enabled") {

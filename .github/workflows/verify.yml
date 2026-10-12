@@ -26,6 +26,7 @@ env:
   COMMISSION_FILES_MODE: disabled
   COMMISSION_FULFILLMENT_MODE: disabled
   COMMISSION_RESOLUTION_MODE: disabled
+  TRUST_ENFORCEMENT_MODE: disabled
   COMMISSION_FILE_RETENTION_MODE: report_only
   COMMISSION_FILES_S3_ENDPOINT: http://127.0.0.1:9090
   COMMISSION_FILES_S3_REGION: us-east-1
@@ -364,6 +365,7 @@ jobs:
       - name: Increment 6 synthetic commission browser journeys
         env:
           PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment6_commissions_browser
+          TRUST_ENFORCEMENT_MODE: enabled
         run: corepack pnpm test:browser:increment-six
 
   arm64-images:

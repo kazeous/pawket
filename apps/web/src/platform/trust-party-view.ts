@@ -22,7 +22,7 @@ export async function projectTrustCases(input: { penalties: readonly Penalty[]; 
       ...await appeal(row.startsAt, input.appeals.find((a) => a.penaltyId === row.penaltyId)?.state ?? null,
         row.kind !== "warning" && row.state === "active" && !row.replaced && (row.endsAt === null || input.now < new Date(row.endsAt))) }))),
     hides: await Promise.all(input.hides.map(async (row) => ({ hideId: row.hideId, targetKind: row.targetKind, hiddenAt: row.hiddenAt, releasedAt: row.releasedAt,
-      explanation: "Nội dung này đã bị Pawket ẩn vì vi phạm quy định cộng đồng.",
+      explanation: row.releasedAt ? "Pawket đã khôi phục nội dung này." : "Nội dung này đã bị Pawket ẩn vì vi phạm quy định cộng đồng.",
       ...await appeal(row.hiddenAt, input.appeals.find((a) => a.hideId === row.hideId)?.state ?? null, row.releasedAt === null) }))),
     appeals: input.appeals.map((row) => ({ appealId: row.appealId, penaltyId: row.penaltyId, hideId: row.hideId, state: row.state,
       reasoning: row.state === "open" ? null : row.reasoning, createdAt: row.createdAt, decidedAt: row.decidedAt })),

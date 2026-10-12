@@ -36,7 +36,7 @@ export function CaseQueue({ initialCases, now = new Date(), enforcementEnabled =
   return <div className="owner-workspace stack">
     <div className="owner-tabs" role="navigation" aria-label="Khiếu nại và hoàn tiền"><Button variant={tab === "queue" ? "outline" : "ghost"} aria-pressed={tab === "queue"} onClick={() => { setTab("queue"); setError(false); }}>Hàng đợi vụ việc</Button>
       <Button variant={tab === "aging" ? "outline" : "ghost"} aria-pressed={tab === "aging"} onClick={() => setTab("aging")}>Hoàn tiền chờ tài khoản</Button>
-      {enforcementEnabled ? <><Button variant={tab === "penalties" ? "outline" : "ghost"} aria-pressed={tab === "penalties"} onClick={() => setTab("penalties")}>Biện pháp</Button><Link className="text-link" href="/admin/policies">Chính sách cộng đồng</Link></> : null}
+      {enforcementEnabled ? <><Button variant={tab === "penalties" ? "outline" : "ghost"} aria-pressed={tab === "penalties"} onClick={() => setTab("penalties")}>Biện pháp</Button><Link className="text-link" href="/admin/policies">Quy định và chính sách</Link></> : null}
       <Link className="text-link" href="/admin/content-reports">Báo cáo nội dung công khai</Link></div>
     {tab === "queue" ? <section className="work-surface stack"><h2>Vụ việc cần xem xét</h2><FieldGroup>
       <Field htmlFor={`${id}-state`} label="Trạng thái"><select id={`${id}-state`} value={state} onChange={(event) => { setRows([]); setState(event.target.value as "open" | "resolved"); }}><option value="open">Đang mở</option><option value="resolved">Đã giải quyết</option></select></Field>
