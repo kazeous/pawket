@@ -4,17 +4,29 @@ import { boolean, check, index, integer, pgTable, primaryKey, text, timestamp, u
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
 // @ts-ignore Drizzle Kit resolves this TypeScript schema without the emitted suffix.
 import { identityEmailHandoffs, identityUsers } from "./identity-core";
-// The dependency-free policy module shares the catalog without a package dependency cycle.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Drizzle Kit requires extensionless schema imports.
-// @ts-ignore Drizzle Kit resolves this TypeScript policy without the emitted suffix.
-import { NOTIFICATION_CATEGORIES, NOTIFICATION_CHANNELS, NOTIFICATION_CLOCKS, NOTIFICATION_KINDS, OPTIONAL_EMAIL_CATEGORIES } from "../../../notifications/src/policy";
+
+export const NOTIFICATION_KINDS = [
+  "order_requested", "order_quoted", "order_payment_due", "order_transfer_claimed", "order_in_progress",
+  "order_delivered", "order_completed", "order_closed", "order_messages", "draft_sent", "draft_responded",
+  "proposal_received", "proposal_ended", "dispute_opened", "dispute_statement", "dispute_closed",
+  "ruling_recorded", "ruling_corrected", "late_claim_filed", "late_claim_ended", "refund_account_needed",
+  "refund_owed", "refund_send_due", "refund_sent", "refund_not_received", "refund_resend_required",
+  "refund_settled", "refund_overdue", "content_hidden", "content_restored", "penalty_applied", "penalty_ended",
+  "appeal_received", "appeal_decided", "report_received", "report_closed", "owner_case_opened", "tip_status",
+  "tip_transfer_claimed", "account_application", "account_creator_status", "account_deposit_refund",
+  "reminder_due", "deadline_missed",
+] as const;
+export const NOTIFICATION_CATEGORIES = ["orders", "messages", "deliveries", "disputes_refunds", "moderation", "owner_queue", "tips", "account"] as const;
+export const OPTIONAL_EMAIL_CATEGORIES = ["orders", "messages", "deliveries", "disputes_refunds", "moderation", "owner_queue"] as const;
+export const NOTIFICATION_CHANNELS = ["email"] as const;
+export const NOTIFICATION_CLOCKS = ["request_response", "quote_acceptance", "payment", "delivery_due", "review_window", "proposal_response", "dispute_response", "late_claim_response", "refund_send", "refund_confirm", "appeal_window"] as const;
+export const NOTIFICATION_SUBJECT_TYPES = ["commission_order", "commission_proposal", "commission_dispute", "commission_late_payment_claim",
+  "commission_refund_obligation", "trust_case", "trust_content_hide", "trust_penalty", "trust_appeal", "trust_report",
+  "tip", "creator_application", "creator_capability", "verification_deposit"] as const;
 
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const reference = { onDelete: "restrict", onUpdate: "restrict" } as const;
 const enumValues = (values: readonly string[]) => sql.join(values.map((value) => sql.raw(`'${value}'`)), sql`, `);
-const subjectTypes = ["commission_order", "commission_proposal", "commission_dispute", "commission_late_payment_claim",
-  "commission_refund_obligation", "trust_case", "trust_content_hide", "trust_penalty", "trust_appeal", "trust_report",
-  "tip", "creator_application", "creator_capability", "verification_deposit"] as const;
 
 export const notifications = pgTable("notifications", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -48,8 +60,8 @@ export const notifications = pgTable("notifications", {
   check("notifications_kind_check", sql`${table.kind} in (${enumValues(NOTIFICATION_KINDS)})`),
   check("notifications_variant_check", sql`${table.variant} ~ '^[a-z_]{1,40}$'`),
   check("notifications_category_check", sql`${table.category} in (${enumValues(NOTIFICATION_CATEGORIES)})`),
-  check("notifications_subject_type_check", sql`${table.subjectType} in (${enumValues(subjectTypes)})`),
-  check("notifications_link_path_check", sql`${table.linkPath} ~ '^/[A-Za-z0-9/_-]{1,200}$'`),
+  check("notifications_subject_type_check", sql`${table.subjectType} in (${enumValues(NOTIFICATION_SUBJECT_TYPES)})`),
+  check("notifications_link_path_check", sql`${table.linkPath} ~ '^/[A-Za-z0-9/_-]{1,200}$' and ${table.linkPath} !~ '//'`),
   check("notifications_collapse_key_check", sql`${table.collapseKey} ~ '^messages:[0-9a-f-]{36}$'`),
   check("notifications_collapsed_count_check", sql`${table.collapsedCount} >= 1`),
   check("notifications_last_sequence_check", sql`(${table.lastSequence} is not null) = (${table.collapseKey} is not null)`),

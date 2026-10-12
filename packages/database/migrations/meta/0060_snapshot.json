@@ -1,5 +1,5 @@
 {
-  "id": "ea346e35-be79-40d0-8f25-959b2bfbefe1",
+  "id": "54dba51d-ca2a-45b5-8f92-c766b9d4e22b",
   "prevId": "7a022ca0-94ec-4b43-9424-ba5140b29ba0",
   "version": "7",
   "dialect": "postgresql",
@@ -3159,7 +3159,7 @@
         },
         "notifications_link_path_check": {
           "name": "notifications_link_path_check",
-          "value": "\"notifications\".\"link_path\" ~ '^/[A-Za-z0-9/_-]{1,200}$'"
+          "value": "\"notifications\".\"link_path\" ~ '^/[A-Za-z0-9/_-]{1,200}$' and \"notifications\".\"link_path\" !~ '//'"
         },
         "notifications_collapse_key_check": {
           "name": "notifications_collapse_key_check",

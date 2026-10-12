@@ -5,6 +5,7 @@ export {
   OPTIONAL_EMAIL_CATEGORIES,
   NOTIFICATION_CHANNELS,
   NOTIFICATION_CLOCKS,
+  NOTIFICATION_SUBJECT_TYPES,
   NotificationError,
   type NotificationsMode,
   type NotificationSourceEvent,

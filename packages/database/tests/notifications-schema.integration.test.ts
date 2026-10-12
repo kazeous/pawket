@@ -88,7 +88,7 @@ describe("notification database boundaries", () => {
   });
   test("link_path rejects //evil.example and absolute URLs", async () => {
     const recipient = await user();
-    for (const path of ["//evil.example", "https://evil.example", "/creator/tips?next=evil", "/creator/#evil", "/", `/${"a".repeat(201)}`]) {
+    for (const path of ["//evil.example", "//evil", "/admin//x", "https://evil.example", "/creator/tips?next=evil", "/creator/#evil", "/", `/${"a".repeat(201)}`]) {
       await refused(item(recipient, { link_path: path }));
     }
     for (const path of ["/commissions/synthetic-order", "/creator/commissions/synthetic-order", "/admin/cases/synthetic-case", "/help/cases", "/creator/tips", "/creator/apply", "/creator"]) {
@@ -115,6 +115,13 @@ describe("notification database boundaries", () => {
     for (const field of ["kind", "category", "subject_type", "email_state"]) await refused(item(recipient, { [field]: "unknown" }));
     for (const variant of ["", "A", "with-dash", "a".repeat(41)]) await refused(item(recipient, { variant }));
     await item(recipient, { variant: "request_response" });
+  });
+  test("accepts every shared notification kind and subject type", async () => {
+    const recipient = await user();
+    for (const kind of schema.NOTIFICATION_KINDS) await item(recipient, { kind });
+    for (const subjectType of schema.NOTIFICATION_SUBJECT_TYPES) await item(recipient, { subject_type: subjectType });
+    const [count] = await client`select count(*)::int as count from notifications where recipient_user_id = ${recipient}`;
+    expect(count?.count).toBe(58);
   });
   test("preferences only allow optional email categories and have a composite key", async () => {
     const recipient = await user();

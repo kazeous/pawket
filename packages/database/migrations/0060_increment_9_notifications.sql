@@ -45,7 +45,7 @@ CREATE TABLE "notifications" (
 	CONSTRAINT "notifications_variant_check" CHECK ("notifications"."variant" ~ '^[a-z_]{1,40}$'),
 	CONSTRAINT "notifications_category_check" CHECK ("notifications"."category" in ('orders', 'messages', 'deliveries', 'disputes_refunds', 'moderation', 'owner_queue', 'tips', 'account')),
 	CONSTRAINT "notifications_subject_type_check" CHECK ("notifications"."subject_type" in ('commission_order', 'commission_proposal', 'commission_dispute', 'commission_late_payment_claim', 'commission_refund_obligation', 'trust_case', 'trust_content_hide', 'trust_penalty', 'trust_appeal', 'trust_report', 'tip', 'creator_application', 'creator_capability', 'verification_deposit')),
-	CONSTRAINT "notifications_link_path_check" CHECK ("notifications"."link_path" ~ '^/[A-Za-z0-9/_-]{1,200}$'),
+	CONSTRAINT "notifications_link_path_check" CHECK ("notifications"."link_path" ~ '^/[A-Za-z0-9/_-]{1,200}$' and "notifications"."link_path" !~ '//'),
 	CONSTRAINT "notifications_collapse_key_check" CHECK ("notifications"."collapse_key" ~ '^messages:[0-9a-f-]{36}$'),
 	CONSTRAINT "notifications_collapsed_count_check" CHECK ("notifications"."collapsed_count" >= 1),
 	CONSTRAINT "notifications_last_sequence_check" CHECK (("notifications"."last_sequence" is not null) = ("notifications"."collapse_key" is not null)),
