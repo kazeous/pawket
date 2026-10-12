@@ -1,4 +1,5 @@
 export { systemOutbox } from "./system-outbox.js";
+export { notifications, notificationPreferences, notificationReminders } from "./notifications.js";
 export { trustEnforcementPauses, trustPolicyRevisions, trustPolicyCurrent, trustPenalties, trustPenaltyEvents, trustReports, trustContentHides, trustHelpLinks, trustHelpSessions, trustHelpLinkRequests, trustAppeals } from "./trust-enforcement.js";
 export { commissionProposals, commissionDisputes, commissionDisputeStatements, commissionRulings, commissionRulingCorrections, commissionLatePaymentClaims, commissionResolutionPauses } from "./resolutions.js";
 export { commissionRefundObligations, commissionRefundSends, commissionRefundEvents } from "./commission-refunds.js";

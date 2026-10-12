@@ -36,7 +36,7 @@ test("real runtime HTTP holds completion on disputes and pauses catalog intake o
     VALKEY_URL: process.env.TEST_VALKEY_URL, METRICS_TOKEN: "synthetic-metrics-token-0000000000", APP_BASE_URL: origin, AUTH_TRUSTED_ORIGINS: origin });
   vi.spyOn(config, "loadServerEnv").mockReturnValue({ ...env, PII_ACTIVE_KEY_ID: "sepay-services-test", PII_KEYRING_JSON: { "sepay-services-test": Buffer.from(fixtureKey).toString("base64") },
     PII_LOOKUP_HMAC_KEY: Buffer.from(fixtureKey).toString("base64"), CREATOR_PUBLISHING_MODE: "general_audience", VN_BUSINESS_CALENDAR_VERSION: "vn-proposals-test",
-    COMMISSION_INTAKE_MODE: "enabled", COMMISSION_PAYMENTS_MODE: "manual_only", COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_RESOLUTION_MODE: "enabled", COMMISSION_FILES_MODE: "enabled" });
+    COMMISSION_INTAKE_MODE: "enabled", COMMISSION_PAYMENTS_MODE: "manual_only", NOTIFICATIONS_MODE: "enabled", COMMISSION_FULFILLMENT_MODE: "enabled", COMMISSION_RESOLUTION_MODE: "enabled", COMMISSION_FILES_MODE: "enabled" });
   vi.spyOn(config, "parseOidcEnv").mockReturnValue({ ...syntheticOidcProvider, clientSecret: "synthetic-client-secret-0000000000", redirectUri: `${origin}/api/v1/auth/oidc/callback`, accountPortalUrl: "https://idp.example.invalid/if/user/" });
   vi.spyOn(database, "createDatabase").mockReturnValue({ db: f.db, close: async () => undefined });
   try {

@@ -421,6 +421,13 @@
       "when": 1791771775630,
       "tag": "0059_increment_8_trust_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1791797737304,
+      "tag": "0060_increment_9_notifications",
+      "breakpoints": true
     }
   ]
 }

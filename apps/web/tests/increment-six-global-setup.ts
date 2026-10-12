@@ -14,6 +14,7 @@ import { attachSyntheticOidcSession, syntheticOidcProvider } from "./oidc-test-s
 export const commissionBuyerToken = (index: number) => `commission-browser-buyer-token-${index}-00000000000000000000`;
 export const commissionBuyerId = (index: number) => `commission-browser-buyer-${index}`;
 export default async function setup() {
+  process.env.NOTIFICATIONS_MODE = "enabled";
   await createVersionedTestBuckets({ endpoint: process.env.COMMISSION_FILES_S3_ENDPOINT ?? "http://127.0.0.1:9090", region: "us-east-1", forcePathStyle: true, credentials: { accessKeyId: process.env.COMMISSION_FILES_S3_ACCESS_KEY_ID ?? "local-commission-files-key", secretAccessKey: process.env.COMMISSION_FILES_S3_SECRET_ACCESS_KEY ?? "local-commission-files-secret" } }, [process.env.COMMISSION_FILES_QUARANTINE_BUCKET ?? "pawket-commission-quarantine", process.env.COMMISSION_FILES_CLEAN_BUCKET ?? "pawket-commission-clean"]);
   await seedCreatorPaymentBrowserFixture("pawket_increment6_commissions_browser");
   const database = createDatabase(browserDatabaseUrl); const { db } = database; const at = new Date(); const expiresAt = new Date(at.getTime() + 3_600_000);

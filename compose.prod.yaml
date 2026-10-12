@@ -106,6 +106,7 @@ services:
       TIP_PAYMENTS_MODE: disabled
       COMMISSION_INTAKE_MODE: disabled
       COMMISSION_PAYMENTS_MODE: disabled
+      NOTIFICATIONS_MODE: disabled
       COMMISSION_FILES_MODE: disabled
       COMMISSION_FULFILLMENT_MODE: disabled
       COMMISSION_RESOLUTION_MODE: disabled
@@ -225,6 +226,7 @@ services:
       TIP_PAYMENTS_MODE: disabled
       COMMISSION_INTAKE_MODE: disabled
       COMMISSION_PAYMENTS_MODE: disabled
+      NOTIFICATIONS_MODE: disabled
       COMMISSION_FILES_MODE: disabled
       COMMISSION_FULFILLMENT_MODE: disabled
       COMMISSION_RESOLUTION_MODE: disabled

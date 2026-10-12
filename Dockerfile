@@ -28,6 +28,7 @@ COPY packages/resolutions/package.json packages/resolutions/package.json
 COPY packages/security/package.json packages/security/package.json
 COPY packages/tips/package.json packages/tips/package.json
 COPY packages/trust/package.json packages/trust/package.json
+COPY packages/notifications/package.json packages/notifications/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY . .

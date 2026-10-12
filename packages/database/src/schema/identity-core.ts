@@ -323,7 +323,7 @@ export const identityEmailHandoffs = pgTable(
       .where(sql`${table.sourceOutboxEventId} is not null`),
     check(
       "identity_email_handoffs_purpose_check",
-      sql`${table.purpose} in ('email_verification', 'password_reset', 'email_change', 'security_notice', 'application_outcome', 'creator_status', 'refund_status', 'tip_status', 'enforcement_notice')`,
+      sql`${table.purpose} in ('email_verification', 'password_reset', 'email_change', 'security_notice', 'application_outcome', 'creator_status', 'refund_status', 'tip_status', 'enforcement_notice', 'notification')`,
     ),
     check(
       "identity_email_handoffs_status_check",

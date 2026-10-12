@@ -18,6 +18,7 @@
     "@pawket/config": "workspace:*",
     "@pawket/database": "workspace:*",
     "@pawket/identity": "workspace:*",
+    "@pawket/notifications": "workspace:*",
     "@pawket/observability": "workspace:*",
     "@pawket/orders": "workspace:*",
     "@pawket/payments": "workspace:*",

@@ -13,6 +13,7 @@ export default defineConfig({ ...base, globalSetup: "./tests/increment-six-globa
       DATABASE_URL: browserDatabaseUrl, APP_BASE_URL: `http://127.0.0.1:${port}`, AUTH_TRUSTED_ORIGINS: `http://127.0.0.1:${port}`,
       VALKEY_URL: process.env.TEST_VALKEY_URL ?? "redis://127.0.0.1:16379/0", CREATOR_PUBLISHING_MODE: "general_audience", PUBLIC_MEDIA_RETENTION_MODE: "report_only",
       TIP_PAYMENTS_MODE: "disabled", COMMISSION_INTAKE_MODE: port === 4181 ? "enabled" : "disabled", COMMISSION_PAYMENTS_MODE: port === 4181 ? "manual_only" : "disabled",
+      NOTIFICATIONS_MODE: port === 4181 ? "enabled" : "disabled",
       COMMISSION_FILES_MODE: port === 4181 ? "enabled" : "disabled",
       COMMISSION_FULFILLMENT_MODE: port === 4181 ? "enabled" : "disabled",
       COMMISSION_RESOLUTION_MODE: port === 4181 ? "enabled" : "disabled",

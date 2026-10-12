@@ -24,7 +24,7 @@ describe("commission operational controls", () => {
     for (const intake of ["disabled", "enabled"]) for (const payment of ["disabled", "manual_only", "sepay_optional"]) {
       const paidMode = payment === "disabled" ? "disabled" : "enabled";
       expect(parseServerEnv({ ...base, ...storage, COMMISSION_INTAKE_MODE: intake, COMMISSION_PAYMENTS_MODE: payment,
-        COMMISSION_FILES_MODE: paidMode, COMMISSION_FULFILLMENT_MODE: paidMode, COMMISSION_RESOLUTION_MODE: paidMode })).toMatchObject({
+        COMMISSION_FILES_MODE: paidMode, COMMISSION_FULFILLMENT_MODE: paidMode, COMMISSION_RESOLUTION_MODE: paidMode, NOTIFICATIONS_MODE: paidMode })).toMatchObject({
         COMMISSION_INTAKE_MODE: intake, COMMISSION_PAYMENTS_MODE: payment, TIP_PAYMENTS_MODE: "disabled", CREATOR_PUBLISHING_MODE: "disabled", SEPAY_INGRESS_MODE: "disabled",
       });
     }
