@@ -7,7 +7,8 @@ import type { createEnforcementMaintenance } from "@pawket/trust";
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import type { CommissionOrderMaintenanceService } from "@pawket/orders";
-import { NOTIFICATION_POLICY, NOTIFICATION_SOURCE_EVENTS, type NotificationsMode, type NotificationSourceEvent } from "@pawket/notifications";
+import { NOTIFICATION_POLICY, NOTIFICATION_SOURCE_EVENTS, type NotificationMaintenanceFailure, type NotificationMaintenanceResult, type NotificationsMode,
+  type NotificationSourceEvent } from "@pawket/notifications";
 import { expireOidcTransientData } from "@pawket/identity/oidc-cleanup";
 
 import {
@@ -195,9 +196,9 @@ export type ResolutionWorkerConfiguration = Readonly<{ mode: "disabled" | "enabl
 export type TrustEnforcementWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled";
   createService(db: DatabaseResource["db"], onPenaltyFailure: (penaltyId: string) => void): Pick<ReturnType<typeof createEnforcementMaintenance>, "runOnce"> }>;
 export type NotificationWorkerMaterializer = { materialize(event: NotificationSourceEvent): Promise<{ created: number; emailed: number }> };
-export type NotificationWorkerMaintenance = { runOnce(): Promise<{ digestsQueued: number; digestsDeferred: number; remindersCreated: number; deleted: number }> };
+export type NotificationWorkerMaintenance = { runOnce(): Promise<NotificationMaintenanceResult> };
 export type NotificationWorkerConfiguration = Readonly<{ mode: NotificationsMode; createMaterializer(db: DatabaseResource["db"]): NotificationWorkerMaterializer;
-  createMaintenance(db: DatabaseResource["db"]): NotificationWorkerMaintenance }>;
+  createMaintenance(db: DatabaseResource["db"], onFailure: (failure: NotificationMaintenanceFailure) => void): NotificationWorkerMaintenance }>;
 export type CommissionWorkerConfiguration = {
   resolution?: ResolutionWorkerConfiguration;
   paymentsMode?: TipPaymentsMode;
@@ -786,7 +787,11 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       logger.error({ category: "trust_enforcement_penalty_failed", penaltyId }, "Trust penalty expiry failed");
     });
     // Disabled notifications build nothing: no digest, reminder or retention scan runs (global constraint).
-    if (options.notifications?.mode === "enabled") notificationMaintenance = options.notifications.createMaintenance(database.db);
+    // Isolated item failures are logged by row id only (never content); they keep the scan from counting as healthy.
+    if (options.notifications?.mode === "enabled") notificationMaintenance = options.notifications.createMaintenance(database.db, (failure) => {
+      if (failure.step === "digest") logger.error({ category: "notification_digest_failed", notificationId: failure.notificationId }, "Notification digest failed");
+      else logger.error({ category: "notification_reminder_failed", clock: failure.clock, subjectId: failure.subjectId }, "Notification reminder failed");
+    });
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -904,6 +909,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     options.healthState.commissionResolutionConfigured = options.commissions?.resolution !== undefined;
     options.healthState.commissionResolutionMaximumAgeMs = options.commissions?.resolution ? options.commissions.scanIntervalMs * 3 : null;
     options.healthState.lastCommissionResolutionSucceededAt = null;
+    options.healthState.notificationScanConfigured = options.notifications?.mode === "enabled";
+    options.healthState.notificationScanMaximumAgeMs = options.notifications?.mode === "enabled" ? 180_000 : null;
+    options.healthState.lastNotificationScanSucceededAt = null;
     options.healthState.trustEnforcementConfigured = Boolean(options.databaseUrl);
     options.healthState.trustEnforcementMaximumAgeMs = options.databaseUrl ? 180_000 : null;
     options.healthState.lastTrustEnforcementSucceededAt = null;
@@ -928,6 +936,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.commissions) setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
   if (options.commissions?.resolution) setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: false });
   if (options.databaseUrl) setWorkerScanHealthMetric({ scan: "trust_enforcement", healthy: false });
+  if (options.notifications?.mode === "enabled") setWorkerScanHealthMetric({ scan: "notification", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -1229,14 +1238,22 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
-  /** Digest emails and retention. A failure is logged by category only and never reaches the outbox loop; health is added later. */
+  /** Digests, reminders and retention. A run counts as healthy only when it completes with no isolated item failure;
+   * a thrown failure is logged by category only and never reaches the outbox loop. */
   const runNotificationMaintenanceIfDue = async (scanAt: number): Promise<void> => {
     if (!running || !notificationMaintenance || scanAt - lastNotificationMaintenanceAt < NOTIFICATION_POLICY.scanIntervalMs) return;
     lastNotificationMaintenanceAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "notification", healthy: false });
     try {
       const result = await notificationMaintenance.runOnce();
-      if (!result || ![result.digestsQueued, result.digestsDeferred, result.remindersCreated, result.deleted]
-        .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 1_000)) throw new Error("Invalid notification maintenance result");
+      const counts = result ? [result.digestsQueued, result.digestsDeferred, result.digestsSuppressed, result.digestsFailed, result.remindersCreated,
+        result.remindersFailed, result.deleted] : [];
+      if (counts.length === 0 || !counts.every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000)) throw new Error("Invalid notification maintenance result");
+      if (result.digestsFailed > 0 || result.remindersFailed > 0) return;
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "notification", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "notification", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastNotificationScanSucceededAt = succeededAt;
     } catch {
       logger.error({ category: "notification_maintenance_failed" }, "Notification maintenance failed");
     }

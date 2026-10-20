@@ -56,7 +56,7 @@ describe("notification retention", () => {
     const oldEmailed = await item(user, daysAgo(90.01), { handoffId: sentHandoff });
     const young = await item(user, daysAgo(89)); const edge = await item(user, daysAgo(90));
     const run = maintenance();
-    await expect(run.service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, remindersCreated: 0, deleted: 3 });
+    await expect(run.service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, digestsSuppressed: 0, digestsFailed: 0, remindersCreated: 0, remindersFailed: 0, deleted: 3 });
     expect(await itemIds([oldUnread, oldRead, oldEmailed, young, edge])).toEqual([young, edge].sort());
     // Email handoffs keep their own retention.
     expect(await f.db.select({ id: schema.identityEmailHandoffs.id }).from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.id, sentHandoff)))
@@ -67,7 +67,7 @@ describe("notification retention", () => {
   test("reminder rows 90 days past their deadline are deleted", async () => {
     const old = await reminder(daysAgo(91)); const older = await reminder(daysAgo(400));
     const young = await reminder(daysAgo(89)); const future = await reminder(new Date(now.getTime() + DAY));
-    await expect(maintenance().service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, remindersCreated: 0, deleted: 2 });
+    await expect(maintenance().service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, digestsSuppressed: 0, digestsFailed: 0, remindersCreated: 0, remindersFailed: 0, deleted: 2 });
     expect(await reminderIds([old, older, young, future])).toEqual([young, future].sort());
   });
 
@@ -88,7 +88,7 @@ describe("notification retention", () => {
   test("disabled maintenance deletes nothing", async () => {
     const user = await f.person(); const old = await item(user, daysAgo(200)); const oldReminder = await reminder(daysAgo(200));
     const service = createNotificationMaintenance({ db: f.db, mode: "disabled", email: createTestEmailPort().port, deadlines, now: () => now });
-    await expect(service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, remindersCreated: 0, deleted: 0 });
+    await expect(service.runOnce()).resolves.toEqual({ digestsQueued: 0, digestsDeferred: 0, digestsSuppressed: 0, digestsFailed: 0, remindersCreated: 0, remindersFailed: 0, deleted: 0 });
     expect(await itemIds([old])).toEqual([old]); expect(await reminderIds([oldReminder])).toEqual([oldReminder]);
     await expect(maintenance().service.runOnce()).resolves.toMatchObject({ deleted: 2 });
   });

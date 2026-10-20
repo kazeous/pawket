@@ -893,3 +893,59 @@ tests:
       - eval_time: 60m
         alertname: PawketTrustEnforcementScanStale
         exp_alerts: []
+
+  - name: notification unhealthy scan waits fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="synthetic-worker",scan="notification"}'
+        values: '0x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PawketNotificationScanStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PawketNotificationScanStale
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              scan: notification
+              severity: warning
+            exp_annotations:
+              summary: Notification digest and reminder maintenance is unhealthy or stale
+              runbook: ops/runbooks/notifications.md
+
+  - name: notification stale success waits fifteen minutes after the 900 second threshold
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="synthetic-worker",scan="notification"}'
+        values: '1x31'
+      - series: 'pawket_worker_last_success_timestamp_seconds{job="worker",instance="synthetic-worker",scan="notification"}'
+        values: '0x31'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: PawketNotificationScanStale
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PawketNotificationScanStale
+        exp_alerts:
+          - exp_labels:
+              job: worker
+              instance: synthetic-worker
+              scan: notification
+              severity: warning
+            exp_annotations:
+              summary: Notification digest and reminder maintenance is unhealthy or stale
+              runbook: ops/runbooks/notifications.md
+
+  - name: notification fresh successful scans stay quiet
+    interval: 1m
+    input_series:
+      - series: 'pawket_worker_scan_healthy{job="worker",instance="synthetic-worker",scan="notification"}'
+        values: '1x61'
+      - series: 'pawket_worker_last_success_timestamp_seconds{job="worker",instance="synthetic-worker",scan="notification"}'
+        values: '0+60x61'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: PawketNotificationScanStale
+        exp_alerts: []

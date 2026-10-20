@@ -303,3 +303,11 @@ groups:
         annotations:
           summary: Trust enforcement maintenance is unhealthy or stale
           runbook: ops/runbooks/trust-enforcement.md
+      - alert: PawketNotificationScanStale
+        expr: (pawket_worker_scan_healthy{scan="notification"} == 0) or (time() - pawket_worker_last_success_timestamp_seconds{scan="notification"} >= 900)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Notification digest and reminder maintenance is unhealthy or stale
+          runbook: ops/runbooks/notifications.md

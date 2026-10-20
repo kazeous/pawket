@@ -5,7 +5,10 @@ import { OUTBOX_JOB, type SystemOutboxJob } from "@pawket/queue";
 import { createCommissionResolutionTestFixture } from "../../web/tests/commission-resolution-test-support.js";
 import { fixtureKeyring, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
 import { metricsRegistry } from "@pawket/observability";
-import { createWorkerNotificationConfiguration, createWorkerNotificationMaintenance } from "../src/notification-wiring.js";
+import { readCommissionCompletionDueAt } from "@pawket/orders";
+import { effectiveResolutionDeadline } from "@pawket/resolutions";
+import { effectiveEnforcementDeadline } from "@pawket/trust";
+import { createWorkerNotificationConfiguration, createWorkerNotificationMaintenance, workerNotificationDeadlines } from "../src/notification-wiring.js";
 import { createWorkerJobProcessor } from "../src/worker-runtime.js";
 
 const f = createCommissionResolutionTestFixture("i9notify");
@@ -105,4 +108,47 @@ test("enabled maintenance queues a due message digest through the real email han
   const [handoff] = await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.id, after!.emailHandoffId!));
   expect(handoff).toMatchObject({ status: "pending", purpose: "notification", sourceOutboxEventId: null,
     templateData: { kind: "order_messages", variant: "", category: "messages", linkPath: `/creator/commissions/${p.orderId}` } });
+});
+
+test("the worker deadline port reads each module's effective deadline", async () => {
+  const deadline = new Date("2026-11-03T04:00:00Z"); const review = { reviewEndsAt: new Date("2026-11-04T04:00:00Z"), completionFloorAt: new Date("2026-11-05T04:00:00Z") };
+  await f.db.transaction(async (tx) => {
+    expect(await workerNotificationDeadlines.resolution(tx, deadline)).toEqual(await effectiveResolutionDeadline(tx, deadline));
+    expect(await workerNotificationDeadlines.enforcement(tx, deadline)).toEqual(await effectiveEnforcementDeadline(tx, deadline));
+    expect(await workerNotificationDeadlines.completion(tx, review)).toEqual(await readCommissionCompletionDueAt(tx, review));
+    expect(await workerNotificationDeadlines.completion(tx, review)).toEqual(review.completionFloorAt);
+  });
+});
+
+test("enabled maintenance sends a review-window reminder at the real completion deadline", async () => {
+  const p = await f.deliveredOrder();
+  const [order] = await f.db.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.id, p.orderId));
+  const due = await f.db.transaction((tx) => readCommissionCompletionDueAt(tx, { reviewEndsAt: order!.reviewEndsAt!, completionFloorAt: order!.completionFloorAt }));
+  const reminderLine = async () => Number((await metricsRegistry.metrics()).split("\n")
+    .find((line) => line.startsWith('pawket_notification_operations_total{operation="reminder",outcome="created"}'))?.split(" ").at(-1) ?? 0);
+  const before = await reminderLine();
+  const result = await createWorkerNotificationMaintenance({ db: f.db, keyring: fixtureKeyring, now: () => new Date(due!.getTime() - 12 * 3_600_000) }).runOnce();
+  expect(result.remindersCreated).toBeGreaterThanOrEqual(1); expect(result.remindersFailed).toBe(0);
+  expect(await reminderLine()).toBe(before + result.remindersCreated);
+  const items = await f.db.select().from(schema.notifications).where(and(eq(schema.notifications.subjectId, p.orderId), eq(schema.notifications.kind, "reminder_due")));
+  expect(items).toMatchObject([{ recipientUserId: p.buyer.userId, variant: "review_window", category: "orders", actionRequired: true, linkPath: `/commissions/${p.orderId}` }]);
+  expect(["queued", "attention_required"]).toContain(items[0]!.emailState);
+  const [ledger] = await f.db.select().from(schema.notificationReminders).where(eq(schema.notificationReminders.subjectId, p.orderId));
+  expect(ledger).toMatchObject({ clock: "review_window", stage: "due_24h", effectiveDeadline: due });
+});
+
+test("a digest overdue by more than an hour is suppressed and counted", async () => {
+  const { p } = await paidOrderEvents();
+  const createdAt = new Date("2026-10-01T06:00:00Z"); const at = new Date(createdAt.getTime() + 3 * 3_600_000);
+  const [item] = await f.db.insert(schema.notifications).values({ recipientUserId: p.creator.userId, kind: "order_messages", category: "messages", actionRequired: false,
+    subjectType: "commission_order", subjectId: p.orderId, linkPath: `/creator/commissions/${p.orderId}`, collapseKey: `messages:${p.orderId}`, lastSequence: 1,
+    sourceKey: randomUUID(), emailState: "pending", emailDueAt: new Date(createdAt.getTime() + 15 * 60_000), createdAt, updatedAt: createdAt }).returning();
+  const suppressedLine = async () => Number((await metricsRegistry.metrics()).split("\n")
+    .find((line) => line.startsWith('pawket_notification_operations_total{operation="digest",outcome="suppressed"}'))?.split(" ").at(-1) ?? 0);
+  const before = await suppressedLine();
+  const result = await createWorkerNotificationMaintenance({ db: f.db, keyring: fixtureKeyring, now: () => at }).runOnce();
+  expect(result.digestsSuppressed).toBeGreaterThanOrEqual(1);
+  expect(await suppressedLine()).toBe(before + result.digestsSuppressed);
+  const [after] = await f.db.select().from(schema.notifications).where(eq(schema.notifications.id, item!.id));
+  expect(after).toMatchObject({ emailState: "suppressed", emailDueAt: null, emailHandoffId: null });
 });

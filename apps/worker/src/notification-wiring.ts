@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { ServerEnv } from "@pawket/config";
 import { findOperationalEmailUser, type PawketDatabase } from "@pawket/database";
 import { queueSecurityEmailHandoff, recordSecurityEmailAttentionRequired } from "@pawket/identity/security-email-handoff";
-import { createNotificationMaintenance, createNotificationMaterializer, type NotificationDeadlinePort, type NotificationEmailPort } from "@pawket/notifications";
+import { createNotificationMaintenance, createNotificationMaterializer, type NotificationDeadlinePort, type NotificationEmailPort,
+  type NotificationMaintenanceFailure } from "@pawket/notifications";
+import { readCommissionCompletionDueAt } from "@pawket/orders";
+import { effectiveResolutionDeadline } from "@pawket/resolutions";
+import { effectiveEnforcementDeadline } from "@pawket/trust";
 import { recordNotificationOperation, recordSecurityEmailMetrics } from "@pawket/observability";
 import type { EncryptionKeyring } from "@pawket/security";
 import type { NotificationWorkerConfiguration, NotificationWorkerMaintenance, NotificationWorkerMaterializer } from "./worker-runtime.js";
@@ -44,27 +48,39 @@ export function createWorkerNotificationMaterializer(input: { db: PawketDatabase
   };
 }
 
-/** Reminders (and so effective deadlines) are not wired yet; the maintenance runner never calls this port in this stage. */
-const deadlinesNotWired: NotificationDeadlinePort = {
-  resolution: async () => { throw new Error("Notification deadlines unavailable"); },
-  completion: async () => { throw new Error("Notification deadlines unavailable"); },
-  enforcement: async () => { throw new Error("Notification deadlines unavailable"); },
-};
+/** Effective deadlines read through their owning modules (spec section 9); `packages/notifications` depends on none of them. */
+export const workerNotificationDeadlines: NotificationDeadlinePort = Object.freeze({
+  resolution: (tx, deadline) => effectiveResolutionDeadline(tx, deadline),
+  completion: (tx, order) => readCommissionCompletionDueAt(tx, order),
+  enforcement: (tx, deadline) => effectiveEnforcementDeadline(tx, deadline),
+});
 
-/** One maintenance run per call so digest email metrics are recorded only after the digest transaction commits. */
-export function createWorkerNotificationMaintenance(input: { db: PawketDatabase; keyring: EncryptionKeyring; now?: () => Date; batch?: number }): NotificationWorkerMaintenance {
+/** Counter increments are bounded per call; larger counts are recorded in bounded steps. */
+function recordCount(operation: "digest" | "reminder" | "retention", outcome: string, count: number): void {
+  for (let left = count; left > 0; left -= 500) recordNotificationOperation({ operation, outcome, count: Math.min(left, 500) });
+}
+
+/** One maintenance run per call; email and outcome metrics are recorded once the run returns. */
+export function createWorkerNotificationMaintenance(input: { db: PawketDatabase; keyring: EncryptionKeyring; now?: () => Date; batch?: number;
+  onFailure?: (failure: NotificationMaintenanceFailure) => void }): NotificationWorkerMaintenance {
   return {
     async runOnce() {
       const outcomes: EmailOutcome[] = [];
       const email = createNotificationEmailPort({ keyring: input.keyring, onQueued: (outcome) => outcomes.push(outcome) });
-      const result = await createNotificationMaintenance({ db: input.db, mode: "enabled", email, deadlines: deadlinesNotWired, now: input.now, batch: input.batch }).runOnce();
+      const result = await createNotificationMaintenance({ db: input.db, mode: "enabled", email, deadlines: workerNotificationDeadlines, now: input.now,
+        batch: input.batch, onFailure: input.onFailure }).runOnce();
+      // Rare: an email queued inside an item transaction that later rolled back is still counted; the handoff row is the source of truth.
       for (const outcome of outcomes) {
         recordSecurityEmailMetrics({ purpose: "notification", outcome });
         recordNotificationOperation({ operation: "email", outcome });
       }
-      if (result.digestsQueued > 0) recordNotificationOperation({ operation: "digest", outcome: "queued", count: result.digestsQueued });
-      if (result.digestsDeferred > 0) recordNotificationOperation({ operation: "digest", outcome: "deferred", count: result.digestsDeferred });
-      if (result.deleted > 0) recordNotificationOperation({ operation: "retention", outcome: "deleted", count: result.deleted });
+      recordCount("digest", "queued", result.digestsQueued);
+      recordCount("digest", "deferred", result.digestsDeferred);
+      recordCount("digest", "suppressed", result.digestsSuppressed);
+      recordCount("digest", "failed", result.digestsFailed);
+      recordCount("reminder", "created", result.remindersCreated);
+      recordCount("reminder", "failed", result.remindersFailed);
+      recordCount("retention", "deleted", result.deleted);
       return result;
     },
   };
@@ -72,5 +88,5 @@ export function createWorkerNotificationMaintenance(input: { db: PawketDatabase;
 
 export function createWorkerNotificationConfiguration(env: Pick<ServerEnv, "NOTIFICATIONS_MODE">, keyring: EncryptionKeyring): NotificationWorkerConfiguration {
   return { mode: env.NOTIFICATIONS_MODE, createMaterializer: (db) => createWorkerNotificationMaterializer({ db, keyring }),
-    createMaintenance: (db) => createWorkerNotificationMaintenance({ db, keyring }) };
+    createMaintenance: (db, onFailure) => createWorkerNotificationMaintenance({ db, keyring, onFailure }) };
 }

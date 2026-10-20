@@ -77,6 +77,40 @@ async function emailOptedOut(tx: PawketTransaction, notice: NoticeDraft): Promis
   return row !== undefined;
 }
 
+/** False for a closed account, which gets nothing; a missing recipient is a broken committed graph. */
+async function recipientOpen(tx: PawketTransaction, userId: string): Promise<boolean> {
+  const [user] = await tx.select({ accessStatus: identityUsers.accessStatus }).from(identityUsers).where(eq(identityUsers.id, userId)).limit(1);
+  if (!user) throw new NotificationError("dependency_unavailable");
+  return user.accessStatus !== "closed";
+}
+
+/**
+ * Writes one non-digest notice inside the caller's transaction: closed lists checked, closed accounts skipped, idempotent
+ * on (source_key, recipient), and an immediate email queued with the item (P7) unless the recipient opted out of an
+ * informational category. Shared by event materialization and the reminder scan (source_key = ledger row id).
+ */
+export async function writeNotice(tx: PawketTransaction, input: { notice: NoticeDraft; sourceKey: string; at: Date; id: () => string; email: NotificationEmailPort }):
+  Promise<{ created: boolean; emailed: boolean }> {
+  const { notice, at } = input;
+  checkDraft(notice);
+  if (notice.email === "digest") invalid();
+  if (!await recipientOpen(tx, notice.recipientUserId)) return { created: false, emailed: false };
+  const suppressed = notice.email === "now" && await emailOptedOut(tx, notice);
+  const [row] = await tx.insert(notifications).values({ id: input.id(), recipientUserId: notice.recipientUserId, kind: notice.kind, variant: notice.variant,
+    category: notice.category, actionRequired: notice.actionRequired, subjectType: notice.subjectType, subjectId: notice.subjectId, linkPath: notice.linkPath,
+    sourceKey: input.sourceKey, emailState: suppressed ? "suppressed" : "none", createdAt: at, updatedAt: at })
+    .onConflictDoNothing({ target: [notifications.sourceKey, notifications.recipientUserId] }).returning({ id: notifications.id });
+  if (!row) return { created: false, emailed: false }; // Already written by an earlier delivery of the same source.
+  if (notice.email !== "now" || suppressed) return { created: true, emailed: false };
+  // P7: the handoff and the item's email state commit together, so a replay never queues twice.
+  const handoff = await input.email.queue(tx, { notificationId: row.id, userId: notice.recipientUserId, kind: notice.kind, variant: notice.variant,
+    category: notice.category, linkPath: notice.linkPath, at });
+  if (!handoff || !UUID_PATTERN.test(handoff.handoffId) || (handoff.outcome !== "queued" && handoff.outcome !== "attention_required")) invalid();
+  await tx.update(notifications).set({ emailState: handoff.outcome, emailHandoffId: handoff.handoffId, emailQueuedAt: handoff.outcome === "queued" ? at : null })
+    .where(eq(notifications.id, row.id));
+  return { created: true, emailed: true };
+}
+
 export function createNotificationMaterializer(input: {
   db: PawketDatabase; mode: NotificationsMode; email: NotificationEmailPort; now?: () => Date; idFactory?: () => string;
 }) {
@@ -95,29 +129,15 @@ export function createNotificationMaterializer(input: {
         const drafts = await resolveNotices(tx, source);
         let created = 0; let emailed = 0;
         for (const notice of drafts) {
-          checkDraft(notice);
-          const [user] = await tx.select({ accessStatus: identityUsers.accessStatus }).from(identityUsers).where(eq(identityUsers.id, notice.recipientUserId)).limit(1);
-          if (!user) throw new NotificationError("dependency_unavailable");
-          if (user.accessStatus === "closed") continue;
           if (notice.email === "digest") {
+            checkDraft(notice);
+            if (!await recipientOpen(tx, notice.recipientUserId)) continue;
             if (await collapseMessage(tx, { notice, sequence: messageSequence(source), sourceKey: source.id, at, id: id() })) created += 1;
             continue;
           }
-          const suppressed = notice.email === "now" && await emailOptedOut(tx, notice);
-          const [row] = await tx.insert(notifications).values({ id: id(), recipientUserId: notice.recipientUserId, kind: notice.kind, variant: notice.variant,
-            category: notice.category, actionRequired: notice.actionRequired, subjectType: notice.subjectType, subjectId: notice.subjectId, linkPath: notice.linkPath,
-            sourceKey: source.id, emailState: suppressed ? "suppressed" : "none", createdAt: at, updatedAt: at })
-            .onConflictDoNothing({ target: [notifications.sourceKey, notifications.recipientUserId] }).returning({ id: notifications.id });
-          if (!row) continue; // Already materialized by an earlier delivery of this event.
-          created += 1;
-          if (notice.email !== "now" || suppressed) continue;
-          // P7: the handoff and the item's email state commit together, so a replay never queues twice.
-          const handoff = await input.email.queue(tx, { notificationId: row.id, userId: notice.recipientUserId, kind: notice.kind, variant: notice.variant,
-            category: notice.category, linkPath: notice.linkPath, at });
-          if (!handoff || !UUID_PATTERN.test(handoff.handoffId) || (handoff.outcome !== "queued" && handoff.outcome !== "attention_required")) invalid();
-          await tx.update(notifications).set({ emailState: handoff.outcome, emailHandoffId: handoff.handoffId, emailQueuedAt: handoff.outcome === "queued" ? at : null })
-            .where(eq(notifications.id, row.id));
-          emailed += 1;
+          const written = await writeNotice(tx, { notice, sourceKey: source.id, at, id, email: input.email });
+          if (written.created) created += 1;
+          if (written.emailed) emailed += 1;
         }
         return { created, emailed };
       });

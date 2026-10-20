@@ -109,8 +109,80 @@ export function createNotificationFixture(label: string) {
     return { ...order, closedAt };
   }
 
+  /** An open custom-quote package of a fresh creator (requests start in `requested`). */
+  async function quotePackage(creator: Party) {
+    const pageId = randomUUID(); const packageId = randomUUID(); const packageRevisionId = randomUUID(); const at = fixtureAt;
+    await db.insert(schema.creatorPages).values({ id: pageId, userId: creator.userId, initializedFromRevisionId: randomUUID(), createdAt: at, updatedAt: at });
+    await db.insert(schema.creatorCommissionSettings).values({ creatorUserId: creator.userId, enabled: true, capacityLimit: 5, createdAt: at, updatedAt: at }).onConflictDoNothing();
+    // A verified receiving account, so an accepted quote can open its payment intent.
+    const accountVersionId = randomUUID();
+    await db.insert(schema.paymentsReceivingAccountOnboarding).values({ id: accountVersionId, onboardingId: randomUUID(), applicantUserId: creator.userId, version: 1,
+      bankBin: "970436", bankName: "Synthetic bank", maskedSuffix: "•••• 0000", accountFingerprint: hash(),
+      accountNumberEnvelope: envelope("payments_receiving_account", accountVersionId, "account_number"), accountHolderLabelEnvelope: envelope("payments_receiving_account", accountVersionId, "account_holder_label"),
+      proofState: "verified", proofVerifiedAt: at, createdAt: at, updatedAt: at });
+    const draft = { title: "Portrait", description: "Synthetic package", discipline: "illustration", route: "custom_quote" as const, briefInstructions: "Describe", terms: null, showcaseId: null };
+    await db.insert(schema.commissionPackages).values({ id: packageId, creatorUserId: creator.userId, pageId, draft, createdAt: at, updatedAt: at });
+    await db.insert(schema.commissionPackageRevisions).values({ id: packageRevisionId, packageId, creatorUserId: creator.userId, revisionNumber: 1,
+      ...draft, policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID, actorSessionId: creator.sessionId, requestId: randomUUID(), publishedAt: at });
+    await db.update(schema.commissionPackages).set({ state: "open", version: 2, publishedRevisionId: packageRevisionId }).where(eq(schema.commissionPackages.id, packageId));
+    return { packageId, packageRevisionId, accountVersionId };
+  }
+  /** A custom-quote request waiting for the creator, as packages/database/tests/commissions-schema.integration.test.ts builds it. */
+  async function requestedOrder(input: { expiresAt: Date; createdAt?: Date }) {
+    const creator = await party(); const buyer = await party(); const { packageId, packageRevisionId, accountVersionId } = await quotePackage(creator);
+    const orderId = randomUUID(); const at = input.createdAt ?? fixtureAt;
+    await db.transaction(async (tx) => {
+      await tx.insert(schema.commissionOrders).values({ id: orderId, creatorUserId: creator.userId, buyerUserId: buyer.userId, packageId, packageRevisionId,
+        route: "custom_quote", state: "requested", expiresAt: input.expiresAt, createdAt: at, updatedAt: at });
+      await tx.insert(schema.commissionBriefs).values({ orderId, textEnvelope: envelope("commission_briefs", orderId, "text"), linksEnvelope: envelope("commission_briefs", orderId, "links"),
+        buyerSessionId: buyer.sessionId, requestId: randomUUID(), createdAt: at });
+      await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId, orderVersion: 1, type: "requested", actorUserId: buyer.userId, actorSessionId: buyer.sessionId,
+        requestId: randomUUID(), occurredAt: at });
+    });
+    return { orderId, packageId, packageRevisionId, accountVersionId, buyer, creator, requestedAt: at };
+  }
+  /** A request the creator quoted at `issuedAt`; the order expires with the quote. */
+  async function quotedOrder(input: { issuedAt: Date; expiresAt: Date }) {
+    const order = await requestedOrder({ expiresAt: new Date(input.expiresAt.getTime() + 86_400_000), createdAt: fixtureAt });
+    const quoteId = randomUUID();
+    await db.transaction(async (tx) => {
+      await tx.insert(schema.commissionQuoteRevisions).values({ id: quoteId, orderId: order.orderId, revisionNumber: 1, policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID,
+        amountVnd: 60_000, turnaroundDays: 7, revisionAllowance: 2, reviewWindowDays: 7,
+        scopeEnvelope: envelope("commission_quote_revisions", quoteId, "scope"), deliverablesEnvelope: envelope("commission_quote_revisions", quoteId, "deliverables"),
+        usageRightsEnvelope: envelope("commission_quote_revisions", quoteId, "usage_rights"), artistTermsEnvelope: envelope("commission_quote_revisions", quoteId, "artist_terms"),
+        actorSessionId: order.creator.sessionId, requestId: randomUUID(), issuedAt: input.issuedAt, expiresAt: input.expiresAt });
+      await tx.update(schema.commissionOrders).set({ state: "quoted", version: 2, currentQuoteId: quoteId, expiresAt: input.expiresAt, updatedAt: input.issuedAt })
+        .where(eq(schema.commissionOrders.id, order.orderId));
+      await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: order.orderId, orderVersion: 2, type: "quoted", actorUserId: order.creator.userId,
+        actorSessionId: order.creator.sessionId, requestId: randomUUID(), occurredAt: input.issuedAt });
+    });
+    return { ...order, quoteId };
+  }
+  /** The buyer accepts the quote at `at` inside the caller's transaction (both acceptances, the locked terms and the reservation commit together). */
+  async function acceptQuote(tx: PawketTransaction, order: Readonly<{ orderId: string; quoteId: string; accountVersionId: string; buyer: Party; creator: Party }>, at: Date) {
+    for (const role of ["buyer", "creator"] as const) await tx.insert(schema.commissionAcceptances).values({ id: randomUUID(), orderId: order.orderId, role,
+      actorUserId: order[role].userId, actorSessionId: order[role].sessionId, packageRevisionId: (await tx.select({ id: schema.commissionOrders.packageRevisionId })
+        .from(schema.commissionOrders).where(eq(schema.commissionOrders.id, order.orderId)))[0]!.id,
+      quoteRevisionId: order.quoteId, policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID, requestId: randomUUID(), acceptedAt: at });
+    const [current] = await tx.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.id, order.orderId));
+    await tx.insert(schema.commissionTermsSnapshots).values({ orderId: order.orderId, packageRevisionId: current!.packageRevisionId, quoteRevisionId: order.quoteId,
+      policyRevisionId: schema.COMMISSION_POLICY_BOOTSTRAP_ID, amountVnd: 60_000, turnaroundDays: 7, revisionAllowance: 2, reviewWindowDays: 7,
+      scopeEnvelope: envelope("commission_terms_snapshots", order.orderId, "scope"), deliverablesEnvelope: envelope("commission_terms_snapshots", order.orderId, "deliverables"),
+      usageRightsEnvelope: envelope("commission_terms_snapshots", order.orderId, "usage_rights"), artistTermsEnvelope: envelope("commission_terms_snapshots", order.orderId, "artist_terms"),
+      buyerAcceptedAt: at, creatorAcceptedAt: at, createdAt: at });
+    await tx.insert(schema.commissionReservations).values({ orderId: order.orderId, creatorUserId: order.creator.userId, reservedAt: at });
+    await tx.update(schema.commissionOrders).set({ state: "awaiting_payment", version: current!.version + 1, acceptedAt: at, amountVnd: 60_000,
+      expiresAt: new Date(at.getTime() + 86_400_000), updatedAt: at }).where(eq(schema.commissionOrders.id, order.orderId));
+    await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: order.orderId, orderVersion: current!.version + 1, type: "awaiting_payment",
+      actorUserId: order.buyer.userId, actorSessionId: order.buyer.sessionId, requestId: randomUUID(), occurredAt: at });
+    const intentId = randomUUID();
+    await tx.insert(schema.paymentIntents).values({ id: intentId, purpose: "commission", commissionOrderId: order.orderId, creatorUserId: order.creator.userId, amountVnd: 60_000,
+      referenceHash: hash(), referenceEnvelope: envelope("payment_intents", intentId, "transfer_reference"), destinationEnvelope: envelope("payment_intents", intentId, "destination"),
+      accountVersionId: order.accountVersionId, abuseKeyHash: hash(), expiresAt: new Date(at.getTime() + 86_400_000), requestId: randomUUID(), createdAt: at, updatedAt: at });
+  }
+
   async function owner() {
-    const [grant] = await db.select().from(schema.identityRoleGrants).where(and(eq(schema.identityRoleGrants.role, "owner"), eq(schema.identityRoleGrants.state, "active")));
+    const [grant] =await db.select().from(schema.identityRoleGrants).where(and(eq(schema.identityRoleGrants.role, "owner"), eq(schema.identityRoleGrants.state, "active")));
     if (grant) return grant.userId;
     const userId = await person(); await db.insert(schema.identityRoleGrants).values({ userId, role: "owner", grantSource: "bootstrap_cli" }); return userId;
   }
@@ -136,9 +208,9 @@ export function createNotificationFixture(label: string) {
       reason: "not_delivered", requestedOutcome: "close", requestedRefundVnd: 10_000, orderStateAtOpen: "in_progress", respondBy: new Date(openedAt.getTime() + 5 * 86_400_000), openedAt });
     return id;
   }
-  async function statement(disputeId: string, authorUserId: string, authorRole: "buyer" | "creator" | "owner") {
+  async function statement(disputeId: string, authorUserId: string, authorRole: "buyer" | "creator" | "owner", kind?: "response" | "statement") {
     const id = randomUUID();
-    await db.insert(schema.commissionDisputeStatements).values({ id, disputeId, authorUserId, authorRole, kind: authorRole === "owner" ? "question" : "statement",
+    await db.insert(schema.commissionDisputeStatements).values({ id, disputeId, authorUserId, authorRole, kind: kind ?? (authorRole === "owner" ? "question" : "statement"),
       textEnvelope: envelope("commission_dispute_statements", id, "text"), actorSessionId: `s-${randomUUID()}`, requestId: randomUUID(), createdAt: later(5_000) });
     return id;
   }
@@ -207,12 +279,12 @@ export function createNotificationFixture(label: string) {
     await db.update(schema.trustContentHides).set({ releasedAt: later(12_000), releasedByUserId: ownerUserId, releaseKind: "owner_restore", releaseRequestId: randomUUID() })
       .where(eq(schema.trustContentHides.id, hideId));
   }
-  async function penalty(subjectUserId: string, kind: "warning" | "restriction" | "suspension" | "removal", ownerUserId: string) {
+  async function penalty(subjectUserId: string, kind: "warning" | "restriction" | "suspension" | "removal", ownerUserId: string, endsAt?: Date | null) {
     const id = randomUUID();
     const sourceCaseId = await openCase({ kind: "report", sourceType: "commission_package", sourceId: randomUUID(), orderId: null });
     await db.insert(schema.trustPenalties).values({ id, subjectUserId, kind, restriction: kind === "restriction" ? "reporting" : null,
       target: kind === "suspension" || kind === "removal" ? "creator_capability" : null, reasonCategory: "other", explanationEnvelope: envelope("trust_penalties", id, "explanation"),
-      sourceCaseId, startsAt: later(13_000), endsAt: kind === "restriction" || kind === "suspension" ? later(86_400_000 * 3) : null,
+      sourceCaseId, startsAt: later(13_000), endsAt: endsAt !== undefined ? endsAt : kind === "restriction" || kind === "suspension" ? later(86_400_000 * 3) : null,
       ownerUserId, ownerSessionId: "owner-session", stepUpProofId: randomUUID(), requestId: randomUUID(), createdAt: later(13_000) });
     return id;
   }
@@ -302,10 +374,47 @@ export function createNotificationFixture(label: string) {
     return id;
   }
   /** A committed refund event row. Notices read the row's obligation and action, not the obligation's current state. */
-  async function refundEvent(obligationId: string, action: string) {
+  async function refundEvent(obligationId: string, action: string, options: { occurredAt?: Date; toState?: string } = {}) {
     const id = randomUUID();
-    await db.insert(schema.commissionRefundEvents).values({ id, obligationId, action, fromState: null, toState: "awaiting_destination", requestId: randomUUID(), occurredAt: later(21_000) });
+    await db.insert(schema.commissionRefundEvents).values({ id, obligationId, action, fromState: null, toState: options.toState ?? "awaiting_destination",
+      requestId: randomUUID(), occurredAt: options.occurredAt ?? later(21_000) });
     return id;
+  }
+  async function refundRow(obligationId: string) {
+    const [row] = await db.select().from(schema.commissionRefundObligations).where(eq(schema.commissionRefundObligations.id, obligationId)); return row!;
+  }
+  /** The buyer entered a destination at `enteredAt`; the creator must send by `dueAt`. */
+  async function refundAwaitingSend(obligationId: string, input: { enteredAt: Date; dueAt: Date }) {
+    const row = await refundRow(obligationId);
+    await db.update(schema.commissionRefundObligations).set({ state: "awaiting_send", destinationBankBin: "970436", destinationBankName: "Synthetic bank", destinationSuffix: "0000",
+      destinationAccountEnvelope: envelope("commission_refund_obligation", obligationId, "account_number"),
+      destinationHolderEnvelope: envelope("commission_refund_obligation", obligationId, "holder_name"),
+      destinationEnteredAt: input.enteredAt, dueAt: input.dueAt, version: row.version + 1, updatedAt: input.enteredAt })
+      .where(eq(schema.commissionRefundObligations.id, obligationId));
+    await refundEvent(obligationId, "destination_entered", { occurredAt: input.enteredAt, toState: "awaiting_send" });
+  }
+  /** The creator recorded a send at `recordedAt`; the buyer confirms within seven days. */
+  async function refundSent(obligationId: string, recordedAt: Date) {
+    const row = await refundRow(obligationId); const sendId = randomUUID();
+    await db.transaction(async (tx) => {
+      await tx.insert(schema.commissionRefundSends).values({ id: sendId, obligationId, transferDate: recordedAt.toISOString().slice(0, 10),
+        referenceEnvelope: envelope("commission_refund_send", sendId, "bank_reference"), actorUserId: row.creatorUserId, actorSessionId: "synthetic-creator",
+        requestId: randomUUID(), recordedAt });
+      await tx.update(schema.commissionRefundObligations).set({ state: "sent", currentSendId: sendId, confirmBy: new Date(recordedAt.getTime() + 7 * 86_400_000),
+        version: row.version + 1, updatedAt: recordedAt }).where(eq(schema.commissionRefundObligations.id, obligationId));
+    });
+    await refundEvent(obligationId, "sent_recorded", { occurredAt: recordedAt, toState: "sent" });
+    return sendId;
+  }
+  /** The buyer denied receipt and the owner required a new send at `at`, due at `dueAt`. */
+  async function refundResend(obligationId: string, input: { deniedAt: Date; at: Date; dueAt: Date }) {
+    const row = await refundRow(obligationId);
+    await db.update(schema.commissionRefundObligations).set({ state: "not_received", version: row.version + 1, updatedAt: input.deniedAt })
+      .where(eq(schema.commissionRefundObligations.id, obligationId));
+    await refundEvent(obligationId, "receipt_denied", { occurredAt: input.deniedAt, toState: "not_received" });
+    await db.update(schema.commissionRefundObligations).set({ state: "awaiting_send", currentSendId: null, confirmBy: null, dueAt: input.dueAt,
+      version: row.version + 2, updatedAt: input.at }).where(eq(schema.commissionRefundObligations.id, obligationId));
+    await refundEvent(obligationId, "resend_required", { occurredAt: input.at, toState: "awaiting_send" });
   }
   /** An open (unanswered) draft submission of a paid order; a final one is not needed because notices read only the committed kind. */
   async function submission(order: FixtureOrder, kind: "draft" | "final") {
@@ -343,6 +452,7 @@ export function createNotificationFixture(label: string) {
   return { db, scopedUrl: scoped.toString(), person, party, awaitingOrder, paidOrder, expiredOrder, owner, outbox, proposal, endProposal, dispute, statement, closeDispute, ruling, correction, lateClaim,
     openCase, message, reportCase, hide, restore, penalty, appeal, decideAppeal, tipIntent, application, capability, depositObligation, optOut,
     refundObligation, refundEvent, submission, ownerGrant, withManyOwners,
+    requestedOrder, quotedOrder, acceptQuote, refundAwaitingSend, refundSent, refundResend,
     async initialize() {
       await admin.db.execute(sql.raw(`create schema "${name}"`));
       await migrate(db, { migrationsFolder: fileURLToPath(new URL("../../database/migrations/", import.meta.url)), migrationsSchema: journal });
