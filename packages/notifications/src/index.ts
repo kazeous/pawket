@@ -25,3 +25,6 @@ export {
   type OptionalEmailCategory,
 } from "./catalog.js";
 export { NOTIFICATION_EMAIL_COPY, renderNotice, subjectForCategory, type NoticeText } from "./copy.js";
+export { NOTIFICATION_SOURCE_EVENTS, createNotificationMaterializer } from "./materializer.js";
+export { resolveNotices, type CommittedOutboxRow } from "./recipients.js";
+export type { NotificationDeadlinePort, NotificationEmailPort } from "./ports.js";
