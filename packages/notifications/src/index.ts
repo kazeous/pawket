@@ -10,3 +10,18 @@ export {
   type NotificationsMode,
   type NotificationSourceEvent,
 } from "./policy.js";
+export {
+  NOTIFICATION_VARIANT_PATTERN,
+  caseLink,
+  isNotificationCategory,
+  isNotificationKind,
+  isNotificationLinkPath,
+  orderLink,
+  type NoticeDraft,
+  type NotificationCategory,
+  type NotificationClock,
+  type NotificationKind,
+  type NotificationSubjectType,
+  type OptionalEmailCategory,
+} from "./catalog.js";
+export { NOTIFICATION_EMAIL_COPY, renderNotice, subjectForCategory, type NoticeText } from "./copy.js";

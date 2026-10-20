@@ -414,6 +414,7 @@ export function createWorkerJobProcessor(input: {
                 "refund_status",
                 "tip_status",
                 "enforcement_notice",
+                "notification",
               ].includes(purpose)
             ) {
               throw new Error("Invalid security email job");

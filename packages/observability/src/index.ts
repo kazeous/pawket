@@ -25,6 +25,7 @@ export {
   recordSecurityEmailMetrics,
   recordWorkerJobMetrics,
   recordTipOperation,
+  recordNotificationOperation,
   recordCommissionOperation,
   recordResolutionOperation,
   setResolutionPausedMetric,

@@ -6,6 +6,18 @@ import {
 } from "@pawket/identity/security-email";
 
 import {
+  NOTIFICATION_CATEGORIES,
+  NOTIFICATION_EMAIL_COPY,
+  NOTIFICATION_KINDS,
+  NOTIFICATION_VARIANT_PATTERN,
+  isNotificationLinkPath,
+  renderNotice,
+  subjectForCategory,
+  type NotificationCategory,
+  type NotificationKind,
+} from "@pawket/notifications";
+
+import {
   renderSecurityEmailHtml,
   renderSecurityEmailText,
   type SecurityEmailContent,
@@ -78,7 +90,7 @@ function isCompleteSmtpConfig(
   );
 }
 
-function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
+function subjectFor(purpose: SecurityEmailMessage["purpose"], templateData: Readonly<Record<string, string>> = {}): string {
   switch (purpose) {
     case "enforcement_notice":
       return "Thông báo về tài khoản Pawket";
@@ -96,6 +108,11 @@ function subjectFor(purpose: SecurityEmailMessage["purpose"]): string {
       return "Cập nhật hoàn khoản xác minh Pawket";
     case "tip_status":
       return "Cập nhật tip Pawket";
+    case "notification": {
+      const { category } = templateData;
+      if (typeof category !== "string" || !(NOTIFICATION_CATEGORIES as readonly string[]).includes(category)) throw new Error("Invalid security email message");
+      try { return subjectForCategory(category as NotificationCategory); } catch { throw new Error("Invalid security email message"); }
+    }
   }
 }
 
@@ -224,6 +241,24 @@ function tipStatusContent(appBaseUrl: string, message: SecurityEmailMessage): Se
   };
 }
 
+function notificationContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
+  const data = message.templateData;
+  const { kind, variant, category, linkPath } = data;
+  // Only these four values, all closed or pattern-checked, ever reach a notification email.
+  if (message.secret !== null || Object.keys(data).sort().join() !== "category,kind,linkPath,variant"
+    || !(NOTIFICATION_KINDS as readonly string[]).includes(kind ?? "")
+    || (variant !== "" && !NOTIFICATION_VARIANT_PATTERN.test(variant ?? ""))
+    || !(NOTIFICATION_CATEGORIES as readonly string[]).includes(category ?? "") || category === "account"
+    || typeof linkPath !== "string" || !isNotificationLinkPath(linkPath)) throw new Error("Invalid security email message");
+  const text = renderNotice(kind as NotificationKind, variant === "" ? null : variant!);
+  return {
+    heading: text.title,
+    paragraphs: [text.body],
+    action: { intro: NOTIFICATION_EMAIL_COPY.actionIntro, label: text.actionLabel, url: safePawketLink(appBaseUrl, linkPath) },
+    footerLink: { label: NOTIFICATION_EMAIL_COPY.manageLabel, url: safePawketLink(appBaseUrl, "/settings/notifications") },
+  };
+}
+
 function renderContent(appBaseUrl: string, message: SecurityEmailMessage): SecurityEmailContent {
   switch (message.purpose) {
     case "enforcement_notice":
@@ -238,6 +273,8 @@ function renderContent(appBaseUrl: string, message: SecurityEmailMessage): Secur
       return refundStatusContent(appBaseUrl, message.templateData);
     case "tip_status":
       return tipStatusContent(appBaseUrl, message);
+    case "notification":
+      return notificationContent(appBaseUrl, message);
     case "email_verification":
     case "password_reset":
     case "email_change":
@@ -253,7 +290,7 @@ class SmtpSecurityEmailSender implements SecurityEmailSender {
   ) {}
 
   async send(message: SecurityEmailMessage): Promise<void> {
-    const subject = subjectFor(message.purpose);
+    const subject = subjectFor(message.purpose, message.templateData);
     const content = renderContent(this.appBaseUrl, message);
     await this.transport.sendMail({
       from: this.from,
