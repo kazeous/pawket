@@ -102,6 +102,7 @@ import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-ema
 import { materializeTipNotification } from "./tip-notification.js";
 import { RESOLUTION_OUTBOX_EVENTS, validateResolutionOutboxEvent } from "./resolution-events.js";
 import { COMMISSION_OUTBOX_EVENTS, validateCommissionOutboxEvent } from "./commission-events.js";
+import { REFUND_OUTBOX_EVENTS, validateRefundOutboxEvent } from "./refund-events.js";
 import { commissionUuid } from "@pawket/orders";
 
 const POLL_INTERVAL_MS = 1_000;
@@ -466,6 +467,9 @@ export function createWorkerJobProcessor(input: {
           } else if (COMMISSION_OUTBOX_EVENTS.has(job.data.eventType)) {
             try { await validateCommissionOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
             catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Commission event validation failed"); }
+          } else if (REFUND_OUTBOX_EVENTS.has(job.data.eventType)) {
+            try { await validateRefundOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
+            catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Refund event validation failed"); }
           } else if ((TIP_NOTIFICATION_EVENTS as readonly string[]).includes(job.data.eventType)) {
             try {
               if (!input.securityEmail) throw new Error("Security email delivery unavailable");

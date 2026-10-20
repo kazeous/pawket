@@ -1,7 +1,7 @@
 import { and, eq, isNotNull } from "drizzle-orm";
 import {
-  commissionDisputes, commissionDisputeStatements, commissionLatePaymentClaims, commissionOrders, commissionProposals, commissionRulingCorrections,
-  commissionRulings, creatorApplications, findRefundEmailContext, identityCreatorCapabilities, identityRoleGrants, paymentIntents, trustAppeals,
+  commissionDisputes, commissionDisputeStatements, commissionLatePaymentClaims, commissionOrders, commissionProposals, commissionRefundEvents,
+  commissionRefundObligations, commissionRulingCorrections, commissionRulings, commissionSubmissions, creatorApplications, findRefundEmailContext, identityCreatorCapabilities, identityRoleGrants, paymentIntents, trustAppeals,
   trustCases, trustContentHides, trustPenalties, trustReports, type PawketTransaction, type systemOutbox,
 } from "@pawket/database";
 import {
@@ -102,7 +102,11 @@ async function commissionNotices(tx: PawketTransaction, source: CommittedOutboxR
     return kind === "draft" ? toRoles(order, ["buyer"], { ...subject, kind: "draft_sent", category: "deliveries", action: false }) : [];
   }
   if (type === "commission.submission_responded.v1") {
-    return toRoles(order, ["creator"], { ...subject, kind: "draft_responded", category: "deliveries", action: false, variant: variantOf(text(payload, "response")) });
+    // R9: the event covers responses to final deliveries too. The variant is the submission's committed kind, read from its row.
+    const [submission] = await tx.select({ orderId: commissionSubmissions.orderId, kind: commissionSubmissions.kind }).from(commissionSubmissions)
+      .where(eq(commissionSubmissions.id, text(payload, "submissionId"))).limit(1);
+    if (!submission || submission.orderId !== order.id || (submission.kind !== "draft" && submission.kind !== "final")) unavailable();
+    return toRoles(order, ["creator"], { ...subject, kind: "draft_responded", category: "deliveries", action: false, variant: submission.kind });
   }
   return unavailable();
 }
@@ -162,18 +166,68 @@ async function resolutionNotices(tx: PawketTransaction, source: CommittedOutboxR
   return unavailable();
 }
 
+type RefundRule = Readonly<{ role: Role; kind: NotificationKind; action: boolean; settled?: true }>;
+const SETTLED: readonly RefundRule[] = [{ role: "buyer", kind: "refund_settled", action: false, settled: true }, { role: "creator", kind: "refund_settled", action: false, settled: true }];
+// P1: one event type for every refund change; the committed action decides who is told what.
+const REFUND_NOTICES: Readonly<Record<string, readonly RefundRule[]>> = {
+  created: [{ role: "buyer", kind: "refund_account_needed", action: true }, { role: "creator", kind: "refund_owed", action: false }],
+  destination_entered: [{ role: "creator", kind: "refund_send_due", action: true }],
+  sent_recorded: [{ role: "buyer", kind: "refund_sent", action: true }],
+  receipt_denied: [{ role: "creator", kind: "refund_not_received", action: true }],
+  resend_required: [{ role: "creator", kind: "refund_resend_required", action: true }],
+  receipt_confirmed: SETTLED, presumed_received: SETTLED, waived: SETTLED,
+};
+
+async function readObligation(tx: PawketTransaction, obligationId: string) {
+  const [obligation] = await tx.select({ id: commissionRefundObligations.id, orderId: commissionRefundObligations.orderId,
+    buyerUserId: commissionRefundObligations.buyerUserId, creatorUserId: commissionRefundObligations.creatorUserId })
+    .from(commissionRefundObligations).where(eq(commissionRefundObligations.id, obligationId)).limit(1);
+  return obligation ?? unavailable();
+}
+/** The order behind a refund obligation; its parties must be the ones the obligation names. */
+async function readObligationOrder(tx: PawketTransaction, obligation: Awaited<ReturnType<typeof readObligation>>): Promise<Order> {
+  const order = await readOrder(tx, obligation.orderId);
+  if (order.buyerUserId !== obligation.buyerUserId || order.creatorUserId !== obligation.creatorUserId) unavailable();
+  return order;
+}
+
+async function refundNotices(tx: PawketTransaction, source: CommittedOutboxRow): Promise<readonly NoticeDraft[]> {
+  if (source.eventType !== "refund.event_recorded.v1") return unavailable();
+  const payload = source.payload;
+  const obligationId = aggregate(source, "commission_refund_obligation", "obligationId");
+  const action = text(payload, "action");
+  const rules = Object.hasOwn(REFUND_NOTICES, action) ? REFUND_NOTICES[action] : undefined;
+  if (!rules) unavailable();
+  // The committed refund event must carry the same obligation and action; the payload alone grants nothing.
+  const [fact] = await tx.select({ action: commissionRefundEvents.action }).from(commissionRefundEvents)
+    .where(and(eq(commissionRefundEvents.id, text(payload, "refundEventId")), eq(commissionRefundEvents.obligationId, obligationId))).limit(1);
+  if (!fact || fact.action !== action) unavailable();
+  const order = await readObligationOrder(tx, await readObligation(tx, obligationId));
+  return rules!.flatMap((rule) => toRoles(order, [rule.role], { kind: rule.kind, category: "disputes_refunds", action: rule.action, subjectType: "commission_refund_obligation",
+    subjectId: obligationId, variant: rule.settled ? action : null }));
+}
+
 async function trustNotices(tx: PawketTransaction, source: CommittedOutboxRow): Promise<readonly NoticeDraft[]> {
   const type = source.eventType; const payload = source.payload;
   const moderation = { category: "moderation" } as const;
   if (type === "trust.case_opened.v1") {
     const caseId = aggregate(source, "trust_case", "caseId");
-    const [row] = await tx.select({ kind: trustCases.kind }).from(trustCases).where(eq(trustCases.id, caseId)).limit(1);
+    const [row] = await tx.select({ kind: trustCases.kind, sourceType: trustCases.sourceType, sourceId: trustCases.sourceId, orderId: trustCases.orderId })
+      .from(trustCases).where(eq(trustCases.id, caseId)).limit(1);
     if (!row) unavailable();
     // P8: every active owner at materialization time. The item carries the case kind and the admin link only.
     const owners = await tx.select({ userId: identityRoleGrants.userId }).from(identityRoleGrants)
       .where(and(eq(identityRoleGrants.role, "owner"), eq(identityRoleGrants.state, "active")));
-    return owners.map((owner) => draft(owner.userId, caseLink(caseId), { kind: "owner_case_opened", category: "owner_queue", action: false,
+    const queue = owners.map((owner) => draft(owner.userId, caseLink(caseId), { kind: "owner_case_opened", category: "owner_queue", action: false,
       subjectType: "trust_case", subjectId: caseId, variant: variantOf(row.kind) }));
+    if (row.kind !== "refund_overdue") return queue;
+    // P2: the scan that opens a refund_overdue case is the only overdue signal. The parties are found through the case's source obligation.
+    if (row.sourceType !== "commission_refund_obligation" || row.sourceId !== payload.sourceId) unavailable();
+    const obligation = await readObligation(tx, row.sourceId);
+    if (row.orderId !== null && row.orderId !== obligation.orderId) unavailable();
+    const order = await readObligationOrder(tx, obligation);
+    const overdue = { kind: "refund_overdue", category: "disputes_refunds", subjectType: "commission_refund_obligation", subjectId: obligation.id } as const;
+    return [...queue, ...toRoles(order, ["creator"], { ...overdue, action: true }), ...toRoles(order, ["buyer"], { ...overdue, action: false })];
   }
   if (type === "trust.report_received.v1") {
     const reportId = aggregate(source, "trust_report", "reportId");
@@ -281,6 +335,7 @@ export async function resolveNotices(tx: PawketTransaction, source: CommittedOut
   if (type.startsWith("commission.")) return commissionNotices(tx, source);
   if (type.startsWith("resolution.")) return resolutionNotices(tx, source);
   if (type.startsWith("trust.")) return trustNotices(tx, source);
+  if (type.startsWith("refund.")) return refundNotices(tx, source);
   if (type.startsWith("tip.")) return tipNotices(tx, source);
   if (type.startsWith("creator.") || type.startsWith("payments.")) return accountNotices(tx, source);
   return unavailable();

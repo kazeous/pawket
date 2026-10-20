@@ -290,12 +290,59 @@ export function createNotificationFixture(label: string) {
     return obligationId;
   }
 
+  let calendar: Promise<void> | undefined;
+  /** A refund obligation in awaiting_destination (the only state the guard lets an insert use), bound to the order's confirmed or expired intent. */
+  async function refundObligation(order: FixtureOrder, source = "agreement") {
+    calendar ??= db.transaction((tx) => schema.importConfiguredBusinessCalendarVersion(tx, { version: "vn-notify-refund", holidayDates: [] })).then(() => undefined);
+    await calendar;
+    const id = randomUUID(); const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    await db.insert(schema.commissionRefundObligations).values({ id, orderId: order.orderId, paymentIntentId: order.intentId, creatorUserId: order.creator.userId,
+      buyerUserId: order.buyer.userId, source, sourceId: randomUUID(), amountVnd: 10_000, calendarVersion: "vn-notify-refund",
+      reference: `PKR${[...randomBytes(12)].map((byte) => alphabet[byte & 31]).join("")}`, createdAt: later(20_000), updatedAt: later(20_000) });
+    return id;
+  }
+  /** A committed refund event row. Notices read the row's obligation and action, not the obligation's current state. */
+  async function refundEvent(obligationId: string, action: string) {
+    const id = randomUUID();
+    await db.insert(schema.commissionRefundEvents).values({ id, obligationId, action, fromState: null, toState: "awaiting_destination", requestId: randomUUID(), occurredAt: later(21_000) });
+    return id;
+  }
+  /** An open (unanswered) draft submission of a paid order; a final one is not needed because notices read only the committed kind. */
+  async function submission(order: FixtureOrder, kind: "draft" | "final") {
+    const id = randomUUID(); const submittedAt = later(30_000);
+    await db.transaction(async (tx) => {
+      if (kind === "final") {
+        await tx.update(schema.commissionOrders).set({ state: "delivered", deliveredAt: submittedAt, reviewEndsAt: later(30_000 + 7 * 86_400_000), version: 3, updatedAt: submittedAt })
+          .where(eq(schema.commissionOrders.id, order.orderId));
+        await tx.insert(schema.commissionEvents).values({ id: randomUUID(), orderId: order.orderId, orderVersion: 3, type: "delivered", requestId: randomUUID(), occurredAt: submittedAt });
+      }
+      await tx.insert(schema.commissionSubmissions).values({ id, orderId: order.orderId, kind, actorSessionId: order.creator.sessionId, requestId: randomUUID(), submittedAt });
+    });
+    return id;
+  }
+  /** An owner grant besides the active one. The partial unique index allows only one active owner, so extra active grants need `withManyOwners`. */
+  async function ownerGrant(state: "active" | "revoked") {
+    const userId = await person();
+    await db.insert(schema.identityRoleGrants).values({ userId, role: "owner", grantSource: "bootstrap_cli", state, revokedAt: state === "revoked" ? fixtureAt : null });
+    return userId;
+  }
+  /** Lifts the one-active-owner index for one callback, so the "every active owner" loop can be exercised; the index is restored afterwards. */
+  async function withManyOwners<T>(run: () => Promise<T>): Promise<T> {
+    await db.execute(sql.raw("drop index identity_role_grants_one_active_owner_uidx"));
+    try { return await run(); }
+    finally {
+      await db.execute(sql.raw("update identity_role_grants set state = 'revoked', revoked_at = now() where role = 'owner' and state = 'active' and id <> (select id from identity_role_grants where role = 'owner' and state = 'active' order by created_at limit 1)"));
+      await db.execute(sql.raw(`create unique index identity_role_grants_one_active_owner_uidx on identity_role_grants (role) where role = 'owner' and state = 'active'`));
+    }
+  }
+
   async function optOut(userId: string, category: string) {
     await db.insert(schema.notificationPreferences).values({ userId, category, channel: "email" });
   }
 
   return { db, person, party, awaitingOrder, paidOrder, expiredOrder, owner, outbox, proposal, endProposal, dispute, statement, closeDispute, ruling, correction, lateClaim,
     openCase, message, reportCase, hide, restore, penalty, appeal, decideAppeal, tipIntent, application, capability, depositObligation, optOut,
+    refundObligation, refundEvent, submission, ownerGrant, withManyOwners,
     async initialize() {
       await admin.db.execute(sql.raw(`create schema "${name}"`));
       await migrate(db, { migrationsFolder: fileURLToPath(new URL("../../database/migrations/", import.meta.url)), migrationsSchema: journal });

@@ -60,15 +60,30 @@ describe("recipient matrix", () => {
     expect(rows.map((row) => row.variant)).toEqual([null, null]);
   });
 
-  test("draft submissions and responses reach the other party under deliveries", async () => {
+  test("draft submissions reach the buyer under deliveries, and a final one is announced by the delivery event", async () => {
     const o = await f.paidOrder();
     const sent = (kind: string) => f.outbox("commission.submission_sent.v1", "commission_order", o.orderId,
       { orderId: o.orderId, submissionId: randomUUID(), kind, sequence: 1, correlationId: randomUUID() });
     await expectNotices(await sent("draft"), [{ to: o.buyer.userId, kind: "draft_sent", action: false, category: "deliveries", link: buyerLink(o), email: "now" }]);
     await expectNotices(await sent("final"), []);
-    await expectNotices(await f.outbox("commission.submission_responded.v1", "commission_order", o.orderId,
-      { orderId: o.orderId, submissionId: randomUUID(), response: "changes_requested", correlationId: randomUUID() }),
-    [{ to: o.creator.userId, kind: "draft_responded", variant: "changes_requested", action: false, category: "deliveries", link: creatorLink(o), email: "now" }]);
+  });
+
+  test("a response reaches the creator with the committed submission kind as its variant (R9)", async () => {
+    const respond = (o: FixtureOrder, submissionId: string, response: string) => f.outbox("commission.submission_responded.v1", "commission_order", o.orderId,
+      { orderId: o.orderId, submissionId, response, correlationId: randomUUID() });
+    const draftOrder = await f.paidOrder(); const draftId = await f.submission(draftOrder, "draft");
+    for (const response of ["approved", "changes_requested"]) {
+      await expectNotices(await respond(draftOrder, draftId, response),
+        [{ to: draftOrder.creator.userId, kind: "draft_responded", variant: "draft", action: false, category: "deliveries", link: creatorLink(draftOrder), email: "now" }]);
+    }
+    const finalOrder = await f.paidOrder(); const finalId = await f.submission(finalOrder, "final");
+    for (const response of ["approved", "changes_requested"]) {
+      await expectNotices(await respond(finalOrder, finalId, response),
+        [{ to: finalOrder.creator.userId, kind: "draft_responded", variant: "final", action: false, category: "deliveries", link: creatorLink(finalOrder), email: "now" }]);
+    }
+    // The submission must exist and belong to the order the event names; the payload alone is never trusted.
+    await expect(notices(await respond(draftOrder, randomUUID(), "approved"))).rejects.toThrow();
+    await expect(notices(await respond(finalOrder, draftId, "approved"))).rejects.toThrow();
   });
 
   test("proposals go to the role opposite the proposer, and their end to both", async () => {
@@ -141,13 +156,85 @@ describe("recipient matrix", () => {
     await expectNotices(await f.outbox("resolution.fulfillment_frozen.v1", "creator", o.creator.userId, { creatorUserId: o.creator.userId, closedOrders: 1 }), []);
   });
 
-  test.todo("a freeze gives each affected buyer order_closed and refund_account_needed");
+  test("a freeze gives each affected buyer order_closed and refund_account_needed (P3)", async () => {
+    const first = await f.paidOrder(); const second = await f.paidOrder(first.creator);
+    await expectNotices(await f.outbox("resolution.fulfillment_frozen.v1", "creator", first.creator.userId, { creatorUserId: first.creator.userId, closedOrders: 2 }), []);
+    for (const o of [first, second]) {
+      const closed = await f.outbox("commission.closed.v1", "commission_order", o.orderId, orderPayload(o, "closed", "fulfillment_frozen"));
+      const obligationId = await f.refundObligation(o, "fulfillment_freeze"); const refund = await f.refundEvent(obligationId, "created");
+      const created = await f.outbox("refund.event_recorded.v1", "commission_refund_obligation", obligationId, { obligationId, refundEventId: refund, action: "created" });
+      const buyerKinds = [...await notices(closed), ...await notices(created)].filter((row) => row.recipientUserId === o.buyer.userId).map((row) => [row.kind, row.variant, row.actionRequired]);
+      expect(buyerKinds.sort()).toEqual([["order_closed", "fulfillment_frozen", false], ["refund_account_needed", null, true]]);
+    }
+  });
 
   test("a new case reaches the active owner with its kind and admin link", async () => {
     const o = await f.paidOrder(); const owner = await f.owner(); const disputeId = await f.dispute(o, "buyer");
     const caseId = await f.openCase({ kind: "dispute", sourceType: "commission_dispute", sourceId: disputeId, orderId: o.orderId });
     await expectNotices(await f.outbox("trust.case_opened.v1", "trust_case", caseId, { caseId, orderId: o.orderId, sourceId: disputeId, policyRevisionId: null, correlationId: randomUUID() }),
       [{ to: owner, kind: "owner_case_opened", variant: "dispute", action: false, category: "owner_queue", link: `/admin/cases/${caseId}`, email: "now" }]);
+  });
+
+  test("every active owner gets the item and a revoked owner grant gets none (P8)", async () => {
+    const o = await f.paidOrder(); const first = await f.owner(); const revoked = await f.ownerGrant("revoked");
+    const disputeId = await f.dispute(o, "buyer");
+    const caseId = await f.openCase({ kind: "dispute", sourceType: "commission_dispute", sourceId: disputeId, orderId: o.orderId });
+    const opened = await f.outbox("trust.case_opened.v1", "trust_case", caseId, { caseId, orderId: o.orderId, sourceId: disputeId, policyRevisionId: null, correlationId: randomUUID() });
+    const item = (to: string) => ({ to, kind: "owner_case_opened", variant: "dispute", action: false, category: "owner_queue", link: `/admin/cases/${caseId}`, email: "now" as const });
+    await expectNotices(opened, [item(first)]);
+    expect((await notices(opened)).map((row) => row.recipientUserId)).not.toContain(revoked);
+    // The database allows one active owner at a time; the index is lifted here only to prove the resolver loops over every active grant.
+    await f.withManyOwners(async () => {
+      const second = await f.ownerGrant("active");
+      await expectNotices(opened, [item(first), item(second)]);
+    });
+  });
+
+  test("refund events reach the parties named in the design, with links to the order page", async () => {
+    const o = await f.paidOrder(); const b = o.buyer.userId; const c = o.creator.userId; const obligationId = await f.refundObligation(o);
+    const announce = async (action: string) => f.outbox("refund.event_recorded.v1", "commission_refund_obligation", obligationId,
+      { obligationId, refundEventId: await f.refundEvent(obligationId, action), action });
+    const refund = (to: string, kind: string, action: boolean, variant: string | null = null): Expected => ({ to, kind, variant, action, category: "disputes_refunds",
+      link: to === b ? buyerLink(o) : creatorLink(o), email: "now" });
+    await expectNotices(await announce("created"), [refund(b, "refund_account_needed", true), refund(c, "refund_owed", false)]);
+    await expectNotices(await announce("destination_entered"), [refund(c, "refund_send_due", true)]);
+    await expectNotices(await announce("sent_recorded"), [refund(b, "refund_sent", true)]);
+    await expectNotices(await announce("receipt_denied"), [refund(c, "refund_not_received", true)]);
+    // resend_required restarts the refund-send clock (asserted with the clock reader in Task 6); here the creator is told to send again.
+    await expectNotices(await announce("resend_required"), [refund(c, "refund_resend_required", true)]);
+    for (const action of ["receipt_confirmed", "presumed_received", "waived"]) {
+      await expectNotices(await announce(action), [refund(b, "refund_settled", false, action), refund(c, "refund_settled", false, action)]);
+    }
+  });
+
+  test("refund actions that never notify, and refund events that do not match the committed row, are refused", async () => {
+    const o = await f.paidOrder(); const obligationId = await f.refundObligation(o); const other = await f.refundObligation(await f.paidOrder());
+    const refundEventId = await f.refundEvent(obligationId, "created");
+    const announce = (payload: Record<string, unknown>, aggregateId = obligationId) => f.outbox("refund.event_recorded.v1", "commission_refund_obligation", aggregateId, payload);
+    for (const action of ["destination_revealed", "deadline_extended", "amount_adjusted", "amount_recorded", "destination_purged"]) {
+      const silentId = await f.refundEvent(obligationId, action);
+      await expect(notices(await announce({ obligationId, refundEventId: silentId, action }))).rejects.toThrow();
+    }
+    await expect(notices(await announce({ obligationId, refundEventId, action: "waived" }))).rejects.toThrow();
+    await expect(notices(await announce({ obligationId, refundEventId: randomUUID(), action: "created" }))).rejects.toThrow();
+    await expect(notices(await announce({ obligationId: other, refundEventId, action: "created" }, other))).rejects.toThrow();
+    await expect(notices(await announce({ obligationId: other, refundEventId, action: "created" }))).rejects.toThrow();
+    await expect(notices(await f.outbox("refund.event_recorded.v1", "commission_order", obligationId, { obligationId, refundEventId, action: "created" }))).rejects.toThrow();
+  });
+
+  test("an overdue refund case also reaches the creator as an action and the buyer as information (P2)", async () => {
+    const o = await f.paidOrder(); const owner = await f.owner(); const obligationId = await f.refundObligation(o);
+    const caseId = await f.openCase({ kind: "refund_overdue", sourceType: "commission_refund_obligation", sourceId: obligationId, orderId: o.orderId });
+    const opened = await f.outbox("trust.case_opened.v1", "trust_case", caseId, { caseId, orderId: o.orderId, sourceId: obligationId, policyRevisionId: null, correlationId: randomUUID() });
+    await expectNotices(opened, [
+      { to: owner, kind: "owner_case_opened", variant: "refund_overdue", action: false, category: "owner_queue", link: `/admin/cases/${caseId}`, email: "now" },
+      { to: o.creator.userId, kind: "refund_overdue", action: true, category: "disputes_refunds", link: creatorLink(o), email: "now" },
+      { to: o.buyer.userId, kind: "refund_overdue", action: false, category: "disputes_refunds", link: buyerLink(o), email: "now" }]);
+    // The case names an obligation of another order than its own order_id: refuse instead of guessing.
+    const second = await f.refundObligation(o);
+    const stray = await f.openCase({ kind: "refund_overdue", sourceType: "commission_refund_obligation", sourceId: second, orderId: (await f.paidOrder()).orderId });
+    await expect(notices(await f.outbox("trust.case_opened.v1", "trust_case", stray, { caseId: stray, orderId: null, sourceId: second, policyRevisionId: null, correlationId: randomUUID() }))).rejects.toThrow();
+    await expect(notices(await f.outbox("trust.case_opened.v1", "trust_case", caseId, { caseId, orderId: null, sourceId: second, policyRevisionId: null, correlationId: randomUUID() }))).rejects.toThrow();
   });
 
   test("report receipt and closure reach each reporter only", async () => {

@@ -6,7 +6,7 @@ import { NotificationError, OPTIONAL_EMAIL_CATEGORIES, type NotificationsMode, t
 import type { NotificationEmailPort } from "./ports.js";
 import { resolveNotices } from "./recipients.js";
 
-/** Committed events that produce notices in this stage. `commission.message_sent.v1` (Task 5) and refund events (Task 4) are not here yet.
+/** Committed events that produce notices in this stage. `commission.message_sent.v1` (Task 5) is not here yet.
  * `commission.in_progress.v1` is deliberately absent (Ruling R7): it only reopens an order after a change request. */
 export const NOTIFICATION_SOURCE_EVENTS: ReadonlySet<string> = new Set([
   "commission.requested.v1", "commission.quoted.v1", "commission.awaiting_payment.v1", "commission.transfer_claimed.v1", "commission.confirmed.v1",
@@ -17,6 +17,7 @@ export const NOTIFICATION_SOURCE_EVENTS: ReadonlySet<string> = new Set([
   "resolution.late_claim_ended.v1", "resolution.fulfillment_frozen.v1",
   "trust.case_opened.v1", "trust.report_received.v1", "trust.report_case_closed.v1", "trust.content_hidden.v1", "trust.content_restored.v1",
   "trust.penalty_applied.v1", "trust.penalty_ended.v1", "trust.appeal_submitted.v1", "trust.appeal_decided.v1",
+  "refund.event_recorded.v1",
   "tip.notification_available.v1", "tip.transfer_claimed.v1",
   "creator.application_outcome_email.v1", "creator.capability_outcome_email.v1",
   "payments.receiving_account_control_verified.v1", "payments.verification_deposit_refund_due_soon.v1", "payments.verification_deposit_refund_due_today.v1",

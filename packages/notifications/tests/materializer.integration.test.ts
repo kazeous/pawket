@@ -19,7 +19,8 @@ const itemsFor = (sourceKey: string) => f.db.select().from(schema.notifications)
 const setUser = (userId: string, values: Partial<typeof schema.identityUsers.$inferInsert>) => f.db.update(schema.identityUsers).set(values).where(eq(schema.identityUsers.id, userId));
 
 describe("notification materializer", () => {
-  test("the source set covers the Task 3 events and leaves messages and refunds for later tasks", () => {
+  test("the source set covers the Task 3 and refund events and leaves messages for a later task", () => {
+    expect(NOTIFICATION_SOURCE_EVENTS.has("refund.event_recorded.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.requested.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("trust.case_opened.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("tip.notification_available.v1")).toBe(true);
@@ -28,6 +29,22 @@ describe("notification materializer", () => {
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.confirmed.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.in_progress.v1")).toBe(false);
     expect(NOTIFICATION_SOURCE_EVENTS.has("identity.user_registered.v1")).toBe(false);
+  });
+
+  test("a refund event creates its notices once, applies the email preference only to informational ones, and ignores a replay", async () => {
+    const o = await f.paidOrder(); const obligationId = await f.refundObligation(o);
+    const row = await f.outbox("refund.event_recorded.v1", "commission_refund_obligation", obligationId,
+      { obligationId, refundEventId: await f.refundEvent(obligationId, "created"), action: "created" });
+    await f.optOut(o.buyer.userId, "disputes_refunds"); await f.optOut(o.creator.userId, "disputes_refunds");
+    const { email, service } = materializer();
+    await expect(service.materialize(event(row))).resolves.toEqual({ created: 2, emailed: 1 });
+    await expect(service.materialize(event(row))).resolves.toEqual({ created: 0, emailed: 0 });
+    const items = await itemsFor(row.id);
+    expect(items.map((item) => [item.kind, item.recipientUserId, item.actionRequired, item.emailState, item.linkPath]).sort()).toEqual([
+      ["refund_account_needed", o.buyer.userId, true, "queued", `/commissions/${o.orderId}`],
+      ["refund_owed", o.creator.userId, false, "suppressed", `/creator/commissions/${o.orderId}`],
+    ].sort());
+    expect(email.calls.map((call) => [call.kind, call.userId, call.variant])).toEqual([["refund_account_needed", o.buyer.userId, null]]);
   });
 
   test("disabled mode writes nothing", async () => {

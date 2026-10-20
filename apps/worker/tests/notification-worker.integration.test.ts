@@ -55,10 +55,10 @@ test("enabled notifications materialize committed order events through the real 
   expect(responded).toHaveLength(1);
   await processor({ id: responded[0]!.id, name: OUTBOX_JOB, data: job(responded[0]!) } as never);
   const [creatorItem] = await f.db.select().from(schema.notifications).where(eq(schema.notifications.sourceKey, responded[0]!.id));
-  expect(creatorItem).toMatchObject({ recipientUserId: p.creator.userId, kind: "draft_responded", variant: "changes_requested", emailState: "queued" });
+  expect(creatorItem).toMatchObject({ recipientUserId: p.creator.userId, kind: "draft_responded", variant: "draft", emailState: "queued" });
   const [queued] = await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.id, creatorItem!.emailHandoffId!));
   expect(queued).toMatchObject({ status: "pending", purpose: "notification", sourceOutboxEventId: null,
-    templateData: { kind: "draft_responded", variant: "changes_requested", category: "deliveries", linkPath: `/creator/commissions/${p.orderId}` } });
+    templateData: { kind: "draft_responded", variant: "draft", category: "deliveries", linkPath: `/creator/commissions/${p.orderId}` } });
   const requests = await f.db.select().from(schema.systemOutbox).where(and(eq(schema.systemOutbox.eventType, "identity.security_email.requested.v1"), eq(schema.systemOutbox.aggregateId, queued!.id)));
   expect(requests).toHaveLength(1);
 

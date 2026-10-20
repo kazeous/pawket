@@ -312,4 +312,23 @@ describe("commission refund party commands", () => {
     const serialized = JSON.stringify([await events(c), outbox.map((event) => event.payload)]);
     expect([accountNumber, "SYNTHETIC_1", "Synthetic refund note"].some((value) => serialized.includes(value))).toBe(false);
   });
+  test("each party command announces itself once with ids and the action only, and a reveal stays silent", async () => {
+    const announced = async (c: Fixture) => (await f.db.select().from(schema.systemOutbox).where(and(eq(schema.systemOutbox.eventType, "refund.event_recorded.v1"),
+      eq(schema.systemOutbox.aggregateId, c.obligationId)))).sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id));
+    const denied = await setup(); await enter(denied); await denied.service.revealDestination(revealCommand(denied)); await send(denied);
+    await denied.service.confirmReceipt({ ...await command(denied), received: false });
+    const confirmed = await setup(); await enter(confirmed); await send(confirmed);
+    await confirmed.service.confirmReceipt({ ...await command(confirmed), received: true });
+    for (const [c, wanted] of [[denied, ["created", "destination_entered", "sent_recorded", "receipt_denied"]], [confirmed, ["created", "destination_entered", "sent_recorded", "receipt_confirmed"]]] as const) {
+      const rows = await announced(c); const committed = await events(c);
+      expect(rows.map((row) => (row.payload as { action: string }).action).sort()).toEqual([...wanted].sort());
+      expect(committed.map((event) => event.action).filter((action) => !wanted.includes(action as never))).toEqual(c === denied ? ["destination_revealed"] : []);
+      for (const row of rows) {
+        expect(Object.keys(row.payload).sort()).toEqual(["action", "obligationId", "refundEventId"]);
+        const event = committed.find((candidate) => candidate.id === (row.payload as { refundEventId: string }).refundEventId);
+        expect(event).toMatchObject({ obligationId: c.obligationId, action: (row.payload as { action: string }).action });
+        expect(event!.occurredAt.toISOString()).toBe(row.occurredAt.toISOString());
+      }
+    }
+  });
 });

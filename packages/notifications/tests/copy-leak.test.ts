@@ -8,7 +8,7 @@ const closeReasons = ["buyer_withdrawn", "creator_declined", "quote_withdrawn", 
   "cancelled_by_ruling", "buyer_cancelled_after_suspension", "fulfillment_frozen"];
 const variants: readonly (string | null)[] = [null, ...NOTIFICATION_CLOCKS, ...closeReasons, "created", "confirmed", "expired",
   "dispute", "refund_not_received", "refund_overdue", "late_payment", "report", "appeal", "warning", "restriction", "suspension", "removal",
-  "creator", "buyer"];
+  "creator", "buyer", "draft", "final", "receipt_confirmed", "presumed_received", "waived"];
 
 describe("notice copy never carries private content", () => {
   test("rendered notices contain no marker, long number, currency, address or link", () => {
@@ -47,6 +47,13 @@ describe("notice copy never carries private content", () => {
     for (const variant of ["restriction", "suspension", "removal"]) {
       expect(renderNotice("penalty_applied", variant).body).toMatch(/kháng nghị/iu);
     }
+  });
+
+  test("a response to a final delivery speaks of the final delivery, a draft response of the draft (R9)", () => {
+    const draft = renderNotice("draft_responded", "draft"); const final = renderNotice("draft_responded", "final");
+    expect(`${draft.title} ${draft.body}`).toMatch(/bản nháp/iu); expect(`${draft.title} ${draft.body}`).not.toMatch(/bản giao cuối/iu);
+    expect(`${final.title} ${final.body}`).toMatch(/bản giao cuối/iu); expect(`${final.title} ${final.body}`).not.toMatch(/bản nháp/iu);
+    expect(renderNotice("draft_responded", null)).toEqual(draft);
   });
 
   test("moderation notices use no blame wording", () => {

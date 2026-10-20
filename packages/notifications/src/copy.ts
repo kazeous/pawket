@@ -62,6 +62,10 @@ const reminderTask = (task: string): Partial<NoticeText> => ({ body: `Còn kho�
 // Variants are closed enums chosen by the materializer (close reason, clock, tip state, case kind, penalty type).
 // A variant without an entry here falls back to the plain kind text.
 const VARIANT_COPY: VariantCopy = {
+  // The draft variant uses the plain kind text; a response to the final delivery speaks of the final delivery (R9).
+  draft_responded: {
+    final: { title: "Người mua đã phản hồi bản giao cuối", body: "Mở đơn để xem phản hồi về bản giao cuối và các bước tiếp theo." },
+  },
   order_closed: {
     request_expired: { title: "Yêu cầu đặt vẽ đã hết hạn", body: "Yêu cầu không được trả lời kịp nên đơn đã đóng." },
     quote_expired: { title: "Báo giá đã hết hạn", body: "Báo giá không được trả lời kịp nên đơn đã đóng." },
