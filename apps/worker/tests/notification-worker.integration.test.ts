@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray, like } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import { OUTBOX_JOB, type SystemOutboxJob } from "@pawket/queue";
 import { createCommissionResolutionTestFixture } from "../../web/tests/commission-resolution-test-support.js";
 import { fixtureKeyring, schema } from "../../../packages/payments/tests/sepay-integration-fixture.js";
-import { createWorkerNotificationConfiguration } from "../src/notification-wiring.js";
+import { metricsRegistry } from "@pawket/observability";
+import { createWorkerNotificationConfiguration, createWorkerNotificationMaintenance } from "../src/notification-wiring.js";
 import { createWorkerJobProcessor } from "../src/worker-runtime.js";
 
 const f = createCommissionResolutionTestFixture("i9notify");
@@ -82,4 +84,25 @@ test("disabled or unwired notifications acknowledge exactly as before", async ()
   for (const row of rows) await unwired({ id: row.id, name: OUTBOX_JOB, data: job(row) } as never);
   expect(acknowledge).toHaveBeenCalledTimes(rows.length);
   expect(await f.db.select().from(schema.notifications).where(inArray(schema.notifications.sourceKey, rows.map((row) => row.id)))).toEqual([]);
+});
+
+test("enabled maintenance queues a due message digest through the real email handoff", async () => {
+  const { p } = await paidOrderEvents();
+  const configuration = createWorkerNotificationConfiguration({ NOTIFICATIONS_MODE: "enabled" }, fixtureKeyring);
+  expect(typeof configuration.createMaintenance).toBe("function");
+  const createdAt = new Date("2026-10-01T05:00:00Z"); const at = new Date(createdAt.getTime() + 15 * 60_000);
+  const [item] = await f.db.insert(schema.notifications).values({ recipientUserId: p.creator.userId, kind: "order_messages", category: "messages", actionRequired: false,
+    subjectType: "commission_order", subjectId: p.orderId, linkPath: `/creator/commissions/${p.orderId}`, collapseKey: `messages:${p.orderId}`, lastSequence: 1,
+    sourceKey: randomUUID(), emailState: "pending", emailDueAt: at, createdAt, updatedAt: createdAt }).returning();
+  const digestLine = async () => Number((await metricsRegistry.metrics()).split("\n")
+    .find((line) => line.startsWith('pawket_notification_operations_total{operation="digest",outcome="queued"}'))?.split(" ").at(-1) ?? 0);
+  const before = await digestLine();
+  const result = await createWorkerNotificationMaintenance({ db: f.db, keyring: fixtureKeyring, now: () => at }).runOnce();
+  expect(result.digestsQueued).toBeGreaterThanOrEqual(1);
+  expect(await digestLine()).toBe(before + result.digestsQueued);
+  const [after] = await f.db.select().from(schema.notifications).where(eq(schema.notifications.id, item!.id));
+  expect(after).toMatchObject({ emailState: "queued", emailQueuedAt: at, emailDueAt: null });
+  const [handoff] = await f.db.select().from(schema.identityEmailHandoffs).where(eq(schema.identityEmailHandoffs.id, after!.emailHandoffId!));
+  expect(handoff).toMatchObject({ status: "pending", purpose: "notification", sourceOutboxEventId: null,
+    templateData: { kind: "order_messages", variant: "", category: "messages", linkPath: `/creator/commissions/${p.orderId}` } });
 });

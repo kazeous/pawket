@@ -1,7 +1,7 @@
 import { and, eq, isNotNull } from "drizzle-orm";
 import {
-  commissionDisputes, commissionDisputeStatements, commissionLatePaymentClaims, commissionOrders, commissionProposals, commissionRefundEvents,
-  commissionRefundObligations, commissionRulingCorrections, commissionRulings, commissionSubmissions, creatorApplications, findRefundEmailContext, identityCreatorCapabilities, identityRoleGrants, paymentIntents, trustAppeals,
+  commissionDisputes, commissionDisputeStatements, commissionLatePaymentClaims, commissionMessages, commissionOrders, commissionProposals, commissionRefundEvents,
+  commissionRefundObligations, commissionRulingCorrections, commissionRulings, commissionSubmissions, commissionThreadEntries, creatorApplications, findRefundEmailContext, identityCreatorCapabilities, identityRoleGrants, paymentIntents, trustAppeals,
   trustCases, trustContentHides, trustPenalties, trustReports, type PawketTransaction, type systemOutbox,
 } from "@pawket/database";
 import {
@@ -89,6 +89,7 @@ async function commissionNotices(tx: PawketTransaction, source: CommittedOutboxR
     return toRoles(order, BOTH, { subjectType: "commission_order", subjectId: order.id, kind: "order_in_progress", category: "orders", action: false });
   }
   if (type === "commission.in_progress.v1") { aggregate(source, "commission_order", "orderId"); return []; }
+  if (type === "commission.message_sent.v1") return messageNotice(tx, source);
   const order = await readOrder(tx, aggregate(source, "commission_order", "orderId"));
   const subject = { subjectType: "commission_order", subjectId: order.id } as const;
   const known = ORDER_NOTICES[type];
@@ -109,6 +110,24 @@ async function commissionNotices(tx: PawketTransaction, source: CommittedOutboxR
     return toRoles(order, ["creator"], { ...subject, kind: "draft_responded", category: "deliveries", action: false, variant: submission.kind });
   }
   return unavailable();
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/** A thread message reaches the order party who did not write it. The committed message row and its thread entry
+ * decide the author and the sequence; the payload must agree with both. The item collapses per order (spec section 8). */
+async function messageNotice(tx: PawketTransaction, source: CommittedOutboxRow): Promise<readonly NoticeDraft[]> {
+  const payload = source.payload; const order = await readOrder(tx, aggregate(source, "commission_order", "orderId"));
+  const messageId = text(payload, "messageId"); const sequence = payload.sequence;
+  if (!UUID_PATTERN.test(messageId) || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) unavailable();
+  const [message] = await tx.select({ orderId: commissionMessages.orderId, authorUserId: commissionMessages.authorUserId, sequence: commissionThreadEntries.sequence })
+    .from(commissionMessages).innerJoin(commissionThreadEntries, and(eq(commissionThreadEntries.entryId, commissionMessages.id),
+      eq(commissionThreadEntries.orderId, commissionMessages.orderId), eq(commissionThreadEntries.kind, "message")))
+    .where(eq(commissionMessages.id, messageId)).limit(1);
+  if (!message || message.orderId !== order.id || message.sequence !== sequence) unavailable();
+  const recipient: Role = message.authorUserId === order.buyerUserId ? "creator" : message.authorUserId === order.creatorUserId ? "buyer" : unavailable();
+  return toRoles(order, [recipient], { kind: "order_messages", category: "messages", action: false, subjectType: "commission_order", subjectId: order.id, email: "digest" })
+    .map((notice) => ({ ...notice, collapseKey: `messages:${order.id}` }));
 }
 
 async function resolutionNotices(tx: PawketTransaction, source: CommittedOutboxRow): Promise<readonly NoticeDraft[]> {

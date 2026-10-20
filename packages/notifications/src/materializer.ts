@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { identityUsers, notificationPreferences, notifications, systemOutbox, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { NOTIFICATION_VARIANT_PATTERN, isNotificationCategory, isNotificationKind, isNotificationLinkPath, type NoticeDraft } from "./catalog.js";
-import { NotificationError, OPTIONAL_EMAIL_CATEGORIES, type NotificationsMode, type NotificationSourceEvent } from "./policy.js";
+import { NOTIFICATION_POLICY, NotificationError, OPTIONAL_EMAIL_CATEGORIES, type NotificationsMode, type NotificationSourceEvent } from "./policy.js";
 import type { NotificationEmailPort } from "./ports.js";
-import { resolveNotices } from "./recipients.js";
+import { resolveNotices, type CommittedOutboxRow } from "./recipients.js";
 
-/** Committed events that produce notices in this stage. `commission.message_sent.v1` (Task 5) is not here yet.
+/** Committed events that produce notices in this stage. `commission.message_sent.v1` collapses into one digest item per order.
  * `commission.in_progress.v1` is deliberately absent (Ruling R7): it only reopens an order after a change request. */
 export const NOTIFICATION_SOURCE_EVENTS: ReadonlySet<string> = new Set([
   "commission.requested.v1", "commission.quoted.v1", "commission.awaiting_payment.v1", "commission.transfer_claimed.v1", "commission.confirmed.v1",
-  "commission.delivered.v1", "commission.completed.v1", "commission.closed.v1",
+  "commission.delivered.v1", "commission.completed.v1", "commission.closed.v1", "commission.message_sent.v1",
   "commission.submission_sent.v1", "commission.submission_responded.v1",
   "resolution.proposal_made.v1", "resolution.proposal_ended.v1", "resolution.dispute_opened.v1", "resolution.dispute_statement_added.v1",
   "resolution.dispute_closed.v1", "resolution.ruling_recorded.v1", "resolution.ruling_corrected.v1", "resolution.late_claim_filed.v1",
@@ -32,8 +32,41 @@ function invalid(): never { throw new NotificationError("invalid_request"); }
 function checkDraft(notice: NoticeDraft): void {
   if (!isNotificationKind(notice.kind) || !isNotificationCategory(notice.category) || !isNotificationLinkPath(notice.linkPath)
     || (notice.variant !== null && !NOTIFICATION_VARIANT_PATTERN.test(notice.variant)) || typeof notice.actionRequired !== "boolean"
-    || typeof notice.recipientUserId !== "string" || notice.recipientUserId.length === 0 || notice.collapseKey !== undefined
-    || !["now", "never"].includes(notice.email) || (notice.category === "account" && notice.email !== "never")) invalid();
+    || typeof notice.recipientUserId !== "string" || notice.recipientUserId.length === 0 || (notice.category === "account" && notice.email !== "never")) invalid();
+  // Only the thread-message notice collapses, and it is the only one whose email waits for the digest.
+  const digest = notice.email === "digest";
+  if (digest ? notice.kind !== "order_messages" || notice.category !== "messages" || notice.actionRequired || notice.variant !== null
+    || notice.subjectType !== "commission_order" || !UUID_PATTERN.test(notice.subjectId) || notice.collapseKey !== `messages:${notice.subjectId}`
+    : notice.collapseKey !== undefined || !["now", "never"].includes(notice.email)) invalid();
+}
+
+/** The sequence the resolver already matched against the committed thread entry. */
+function messageSequence(source: CommittedOutboxRow): number {
+  const sequence = source.payload.sequence;
+  return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 1 ? sequence : invalid();
+}
+
+/** Section 8: one unread item per (recipient, order) collapses new messages. Replays and late deliveries are ignored by
+ * the thread sequence; the partial unique index serializes concurrent jobs, so two messages never open two items. */
+async function collapseMessage(tx: PawketTransaction, input: { notice: NoticeDraft; sequence: number; sourceKey: string; at: Date; id: string }): Promise<boolean> {
+  const { notice, sequence, at } = input; const collapseKey = notice.collapseKey!;
+  const [seen] = await tx.select({ id: notifications.id }).from(notifications).where(and(eq(notifications.recipientUserId, notice.recipientUserId),
+    eq(notifications.collapseKey, collapseKey), gte(notifications.lastSequence, sequence))).limit(1);
+  if (seen) return false;
+  const suppressed = await emailOptedOut(tx, notice);
+  const [row] = await tx.insert(notifications).values({ id: input.id, recipientUserId: notice.recipientUserId, kind: notice.kind, variant: null,
+    category: notice.category, actionRequired: false, subjectType: notice.subjectType, subjectId: notice.subjectId, linkPath: notice.linkPath,
+    collapseKey, collapsedCount: 1, lastSequence: sequence, sourceKey: input.sourceKey,
+    emailState: suppressed ? "suppressed" : "pending", emailDueAt: suppressed ? null : new Date(at.getTime() + NOTIFICATION_POLICY.digestDelayMs),
+    createdAt: at, updatedAt: at })
+    .onConflictDoUpdate({ target: [notifications.recipientUserId, notifications.collapseKey],
+      targetWhere: sql`${notifications.collapseKey} is not null and ${notifications.readAt} is null`,
+      set: { collapsedCount: sql`${notifications.collapsedCount} + 1`, lastSequence: sql`excluded.last_sequence`,
+        updatedAt: sql`greatest(${notifications.updatedAt}, excluded.updated_at)` },
+      // A message older than the open item's last one (a late or concurrent replay) changes nothing.
+      setWhere: sql`${notifications.lastSequence} < excluded.last_sequence` })
+    .returning({ inserted: sql<boolean>`(xmax = 0)` });
+  return row?.inserted === true;
 }
 
 async function emailOptedOut(tx: PawketTransaction, notice: NoticeDraft): Promise<boolean> {
@@ -66,6 +99,10 @@ export function createNotificationMaterializer(input: {
           const [user] = await tx.select({ accessStatus: identityUsers.accessStatus }).from(identityUsers).where(eq(identityUsers.id, notice.recipientUserId)).limit(1);
           if (!user) throw new NotificationError("dependency_unavailable");
           if (user.accessStatus === "closed") continue;
+          if (notice.email === "digest") {
+            if (await collapseMessage(tx, { notice, sequence: messageSequence(source), sourceKey: source.id, at, id: id() })) created += 1;
+            continue;
+          }
           const suppressed = notice.email === "now" && await emailOptedOut(tx, notice);
           const [row] = await tx.insert(notifications).values({ id: id(), recipientUserId: notice.recipientUserId, kind: notice.kind, variant: notice.variant,
             category: notice.category, actionRequired: notice.actionRequired, subjectType: notice.subjectType, subjectId: notice.subjectId, linkPath: notice.linkPath,

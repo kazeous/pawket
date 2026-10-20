@@ -340,7 +340,7 @@ export function createNotificationFixture(label: string) {
     await db.insert(schema.notificationPreferences).values({ userId, category, channel: "email" });
   }
 
-  return { db, person, party, awaitingOrder, paidOrder, expiredOrder, owner, outbox, proposal, endProposal, dispute, statement, closeDispute, ruling, correction, lateClaim,
+  return { db, scopedUrl: scoped.toString(), person, party, awaitingOrder, paidOrder, expiredOrder, owner, outbox, proposal, endProposal, dispute, statement, closeDispute, ruling, correction, lateClaim,
     openCase, message, reportCase, hide, restore, penalty, appeal, decideAppeal, tipIntent, application, capability, depositObligation, optOut,
     refundObligation, refundEvent, submission, ownerGrant, withManyOwners,
     async initialize() {

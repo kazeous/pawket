@@ -7,7 +7,7 @@ import type { createEnforcementMaintenance } from "@pawket/trust";
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import type { CommissionOrderMaintenanceService } from "@pawket/orders";
-import { NOTIFICATION_SOURCE_EVENTS, type NotificationsMode, type NotificationSourceEvent } from "@pawket/notifications";
+import { NOTIFICATION_POLICY, NOTIFICATION_SOURCE_EVENTS, type NotificationsMode, type NotificationSourceEvent } from "@pawket/notifications";
 import { expireOidcTransientData } from "@pawket/identity/oidc-cleanup";
 
 import {
@@ -195,7 +195,9 @@ export type ResolutionWorkerConfiguration = Readonly<{ mode: "disabled" | "enabl
 export type TrustEnforcementWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled";
   createService(db: DatabaseResource["db"], onPenaltyFailure: (penaltyId: string) => void): Pick<ReturnType<typeof createEnforcementMaintenance>, "runOnce"> }>;
 export type NotificationWorkerMaterializer = { materialize(event: NotificationSourceEvent): Promise<{ created: number; emailed: number }> };
-export type NotificationWorkerConfiguration = Readonly<{ mode: NotificationsMode; createMaterializer(db: DatabaseResource["db"]): NotificationWorkerMaterializer }>;
+export type NotificationWorkerMaintenance = { runOnce(): Promise<{ digestsQueued: number; digestsDeferred: number; remindersCreated: number; deleted: number }> };
+export type NotificationWorkerConfiguration = Readonly<{ mode: NotificationsMode; createMaterializer(db: DatabaseResource["db"]): NotificationWorkerMaterializer;
+  createMaintenance(db: DatabaseResource["db"]): NotificationWorkerMaintenance }>;
 export type CommissionWorkerConfiguration = {
   resolution?: ResolutionWorkerConfiguration;
   paymentsMode?: TipPaymentsMode;
@@ -697,7 +699,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.commissions?.resolution && (!["disabled", "enabled"].includes(options.commissions.resolution.mode) ||
     typeof options.commissions.resolution.createService !== "function")) throw new Error("Invalid resolution worker configuration");
   if (options.notifications && (!["disabled", "enabled"].includes(options.notifications.mode) ||
-    typeof options.notifications.createMaterializer !== "function")) throw new Error("Invalid notification worker configuration");
+    typeof options.notifications.createMaterializer !== "function" || typeof options.notifications.createMaintenance !== "function")) throw new Error("Invalid notification worker configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -724,6 +726,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let resolutionService: ReturnType<ResolutionWorkerConfiguration["createService"]> | undefined;
   let trustEnforcementService: ReturnType<TrustEnforcementWorkerConfiguration["createService"]> | undefined;
   let trustEnforcementFailedCount = 0;
+  let notificationMaintenance: NotificationWorkerMaintenance | undefined;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -782,6 +785,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       trustEnforcementFailedCount += 1;
       logger.error({ category: "trust_enforcement_penalty_failed", penaltyId }, "Trust penalty expiry failed");
     });
+    // Disabled notifications build nothing: no digest, reminder or retention scan runs (global constraint).
+    if (options.notifications?.mode === "enabled") notificationMaintenance = options.notifications.createMaintenance(database.db);
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -854,6 +859,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let lastCommissionResolutionScanAt = 0;
   let currentTrustEnforcementScan: Promise<void> | undefined;
   let lastTrustEnforcementScanAt = 0;
+  let currentNotificationMaintenance: Promise<void> | undefined;
+  let lastNotificationMaintenanceAt = 0;
   let commissionCompletionCursor: { reviewEndsAt: Date; id: string } | null = null;
   let currentCommissionFilesScan: Promise<void> | undefined;
   let currentScannerProbe: Promise<void> | undefined;
@@ -1222,6 +1229,19 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  /** Digest emails and retention. A failure is logged by category only and never reaches the outbox loop; health is added later. */
+  const runNotificationMaintenanceIfDue = async (scanAt: number): Promise<void> => {
+    if (!running || !notificationMaintenance || scanAt - lastNotificationMaintenanceAt < NOTIFICATION_POLICY.scanIntervalMs) return;
+    lastNotificationMaintenanceAt = scanAt;
+    try {
+      const result = await notificationMaintenance.runOnce();
+      if (!result || ![result.digestsQueued, result.digestsDeferred, result.remindersCreated, result.deleted]
+        .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 1_000)) throw new Error("Invalid notification maintenance result");
+    } catch {
+      logger.error({ category: "notification_maintenance_failed" }, "Notification maintenance failed");
+    }
+  };
+
   const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
     const config = options.commissionFiles; const queueResource = commissionFileQueue;
     if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
@@ -1385,6 +1405,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       }
       if (!currentCommissionResolutionScan) currentCommissionResolutionScan = scanCommissionResolutionIfDue(Date.now()).finally(() => { currentCommissionResolutionScan = undefined; });
       if (!currentTrustEnforcementScan) currentTrustEnforcementScan = scanTrustEnforcementIfDue(Date.now()).finally(() => { currentTrustEnforcementScan = undefined; });
+      if (!currentNotificationMaintenance) currentNotificationMaintenance = runNotificationMaintenanceIfDue(Date.now()).finally(() => { currentNotificationMaintenance = undefined; });
       if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
       if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
@@ -1438,6 +1459,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentCommissionFulfillmentScan;
       await currentCommissionResolutionScan;
       await currentTrustEnforcementScan;
+      await currentNotificationMaintenance;
       await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());

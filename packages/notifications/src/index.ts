@@ -28,3 +28,5 @@ export { NOTIFICATION_EMAIL_COPY, renderNotice, subjectForCategory, type NoticeT
 export { NOTIFICATION_SOURCE_EVENTS, createNotificationMaterializer } from "./materializer.js";
 export { resolveNotices, type CommittedOutboxRow } from "./recipients.js";
 export type { NotificationDeadlinePort, NotificationEmailPort } from "./ports.js";
+export { createNotificationMaintenance, type NotificationMaintenanceResult } from "./maintenance.js";
+export { markNotificationsRead, type MarkReadTarget } from "./inbox-service.js";

@@ -19,13 +19,13 @@ const itemsFor = (sourceKey: string) => f.db.select().from(schema.notifications)
 const setUser = (userId: string, values: Partial<typeof schema.identityUsers.$inferInsert>) => f.db.update(schema.identityUsers).set(values).where(eq(schema.identityUsers.id, userId));
 
 describe("notification materializer", () => {
-  test("the source set covers the Task 3 and refund events and leaves messages for a later task", () => {
+  test("the source set covers the Task 3, refund and thread message events", () => {
     expect(NOTIFICATION_SOURCE_EVENTS.has("refund.event_recorded.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.requested.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("trust.case_opened.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("tip.notification_available.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("payments.verification_deposit_refund_sent.v1")).toBe(true);
-    expect(NOTIFICATION_SOURCE_EVENTS.has("commission.message_sent.v1")).toBe(false);
+    expect(NOTIFICATION_SOURCE_EVENTS.has("commission.message_sent.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.confirmed.v1")).toBe(true);
     expect(NOTIFICATION_SOURCE_EVENTS.has("commission.in_progress.v1")).toBe(false);
     expect(NOTIFICATION_SOURCE_EVENTS.has("identity.user_registered.v1")).toBe(false);
@@ -55,8 +55,8 @@ describe("notification materializer", () => {
   });
 
   test("an event outside the source set writes nothing", async () => {
-    const o = await f.paidOrder(); const row = await f.outbox("commission.message_sent.v1", "commission_order", o.orderId,
-      { orderId: o.orderId, messageId: randomUUID(), sequence: 1, correlationId: randomUUID() });
+    const o = await f.paidOrder(); const row = await f.outbox("commission.catalog.publish.v1", "commission_catalog", o.packageId,
+      { reference: o.packageId, actorUserId: o.creator.userId, correlationId: randomUUID() });
     const { email, service } = materializer();
     await expect(service.materialize(event(row))).resolves.toEqual({ created: 0, emailed: 0 });
     expect(await itemsFor(row.id)).toEqual([]); expect(email.calls).toEqual([]);
