@@ -21,6 +21,34 @@ describe("notice copy never carries private content", () => {
     }
   });
 
+  test("markers passed as variant or kind are never echoed", () => {
+    for (const marker of MARKERS) {
+      for (const kind of NOTIFICATION_KINDS) {
+        const { title, body, actionLabel } = renderNotice(kind, marker);
+        expect(`${title} ${body} ${actionLabel}`).not.toContain(marker);
+        expect({ title, body, actionLabel }).toEqual(renderNotice(kind, null));
+      }
+      expect(() => renderNotice(marker as never, null)).toThrow();
+    }
+    for (const unsafe of ["constructor", "__proto__", "toString"]) {
+      expect(() => renderNotice(unsafe as never, null)).toThrow();
+      expect(renderNotice("order_closed", unsafe)).toEqual(renderNotice("order_closed", null));
+    }
+  });
+
+  test("notices that are not appealable never mention an appeal", () => {
+    const warning = renderNotice("penalty_applied", "warning");
+    expect(`${warning.title} ${warning.body} ${warning.actionLabel}`).not.toMatch(/kháng nghị/iu);
+    expect(warning.actionLabel).toBe("Xem thông báo");
+    for (const kind of ["content_restored", "penalty_ended"] as const) for (const variant of variants) {
+      const { title, body, actionLabel } = renderNotice(kind, variant);
+      expect(`${title} ${body} ${actionLabel}`, `${kind}/${variant}`).not.toMatch(/kháng nghị/iu);
+    }
+    for (const variant of ["restriction", "suspension", "removal"]) {
+      expect(renderNotice("penalty_applied", variant).body).toMatch(/kháng nghị/iu);
+    }
+  });
+
   test("moderation notices use no blame wording", () => {
     for (const kind of ["content_hidden", "content_restored", "penalty_applied", "penalty_ended", "appeal_received", "appeal_decided", "report_received", "report_closed"] as const) {
       for (const variant of variants) {

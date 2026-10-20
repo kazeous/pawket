@@ -16,7 +16,7 @@ const KIND_COPY: Readonly<Record<NotificationKind, NoticeText>> = {
   order_in_progress: notice("Đơn đặt vẽ đã bắt đầu thực hiện", "Thanh toán đã được ghi nhận và công việc bắt đầu. Bạn có thể theo dõi tiến độ trên trang đơn.", "Xem đơn"),
   order_delivered: notice("Bản giao cuối đã sẵn sàng", "Hãy xem bản giao và xác nhận hoặc phản hồi trước khi hết thời gian xem lại ghi trên trang.", "Xem bản giao"),
   order_completed: notice("Đơn đặt vẽ đã hoàn tất", "Đơn đã được ghi nhận là hoàn tất. Bạn có thể xem lại chi tiết bất cứ lúc nào.", "Xem đơn"),
-  order_closed: notice("Đơn đặt vẽ đã đóng", "Đơn không tiếp tục nữa. Mở trang đơn để xem lý do và các bước tiếp theo, nếu có.", "Xem đơn"),
+  order_closed: notice("Đơn đặt vẽ đã đóng", "Đơn đã kết thúc và không tiếp tục. Mở trang đơn để xem lý do và các bước tiếp theo, nếu có.", "Xem đơn"),
   order_messages: notice("Có tin nhắn mới trong đơn đặt vẽ", "Bạn có tin nhắn chưa đọc. Mở đơn để xem và trả lời.", "Xem tin nhắn"),
   draft_sent: notice("Creator đã gửi bản nháp", "Hãy xem bản nháp và phản hồi để creator biết bước tiếp theo.", "Xem bản nháp"),
   draft_responded: notice("Người mua đã phản hồi bản nháp", "Mở đơn để xem phản hồi và tiếp tục công việc.", "Xem phản hồi"),
@@ -50,7 +50,7 @@ const KIND_COPY: Readonly<Record<NotificationKind, NoticeText>> = {
   tip_transfer_claimed: notice("Người ủng hộ báo đã chuyển tip", "Hãy kiểm tra ngân hàng và xác nhận khi đã nhận được tiền.", "Xem tip"),
   account_application: notice("Hồ sơ creator có cập nhật", "Mở trang hồ sơ để xem trạng thái và hướng dẫn tiếp theo.", "Xem hồ sơ"),
   account_creator_status: notice("Quyền creator có cập nhật", "Mở trang để xem trạng thái hiện tại.", "Xem trạng thái"),
-  account_deposit_refund: notice("Khoản hoàn xác minh có cập nhật", "Mở trang hồ sơ để xem trạng thái hiện tại.", "Xem trạng thái"),
+  account_deposit_refund: notice("Hoàn khoản xác minh có cập nhật", "Mở trang hồ sơ để xem trạng thái hiện tại.", "Xem trạng thái"),
   reminder_due: notice("Sắp đến hạn xử lý", "Còn khoảng 24 giờ để hoàn tất việc này. Mở trang để xem và xử lý.", "Xem và xử lý"),
   deadline_missed: notice("Đã quá hạn xử lý", "Một hạn xử lý đã qua. Mở trang để xem điều gì diễn ra tiếp theo.", "Xem chi tiết"),
 };
@@ -77,7 +77,7 @@ const VARIANT_COPY: VariantCopy = {
     fulfillment_frozen: { title: "Đơn đã đóng do tạm dừng thực hiện", body: "Việc thực hiện đơn đã được tạm dừng nên đơn đã đóng. Mở trang đơn để xem các bước tiếp theo." },
   },
   penalty_applied: {
-    warning: { title: "Bạn nhận được một lời nhắc từ Pawket", body: "Hãy xem chi tiết. Bạn có thể gửi kháng nghị trong 14 ngày." },
+    warning: { title: "Bạn nhận được một lời nhắc từ Pawket", body: "Hãy xem chi tiết trên trang.", actionLabel: "Xem thông báo" },
     restriction: { title: "Một số tính năng của bạn bị hạn chế", body: "Hãy xem chi tiết. Bạn có thể gửi kháng nghị trong 14 ngày." },
     suspension: { title: "Tài khoản của bạn đã bị tạm khóa", body: "Email về việc này đã được gửi riêng cho bạn, kèm hướng dẫn kháng nghị." },
     removal: { title: "Tài khoản của bạn đã bị đóng", body: "Email về việc này đã được gửi riêng cho bạn, kèm hướng dẫn kháng nghị." },
@@ -115,7 +115,7 @@ const VARIANT_COPY: VariantCopy = {
 };
 
 export function renderNotice(kind: NotificationKind, variant: string | null): NoticeText {
-  const base = KIND_COPY[kind];
+  const base = Object.hasOwn(KIND_COPY, kind) ? KIND_COPY[kind] : undefined;
   if (!base) throw new NotificationError("invalid_request");
   const override = variant !== null && Object.hasOwn(VARIANT_COPY[kind] ?? {}, variant) ? VARIANT_COPY[kind]?.[variant] : undefined;
   return override ? { ...base, ...override } : { ...base };

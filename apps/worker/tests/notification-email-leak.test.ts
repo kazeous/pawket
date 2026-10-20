@@ -25,6 +25,18 @@ describe("notification email never carries private content", () => {
       for (const body of [mail.subject, mail.text, mail.html]) for (const marker of MARKERS) expect(body).not.toContain(marker);
       expect(mail.text).toContain(renderNotice(kind, variant).title);
     }
+    // A lowercase look-alike of a marker passes the variant pattern; it must fall back to the plain kind text and never be echoed.
+    for (const marker of MARKERS) {
+      const lookAlike = marker.toLowerCase().replace(/[^a-z]+/gu, "_");
+      if (lookAlike.replace(/_/gu, "").length < 8) continue; // the digit-only marker has no letter form
+      await s.send(message({ kind: "dispute_opened", variant: lookAlike, category: "disputes_refunds", linkPath: "/help/cases" }));
+      const mail = sendMail.mock.calls.at(-1)![0];
+      for (const body of [mail.subject, mail.text, mail.html]) {
+        expect(body).not.toContain(marker);
+        expect(body).not.toContain(lookAlike);
+      }
+      expect(mail.text).toContain(renderNotice("dispute_opened", null).title);
+    }
     for (const category of NOTIFICATION_CATEGORIES.filter((c) => c !== "account")) {
       await s.send(message({ kind: "order_requested", variant: "", category, linkPath: "/creator" }));
       expect(sendMail.mock.calls.at(-1)![0].subject).toBe(subjectForCategory(category));
