@@ -7,7 +7,8 @@ import { fixtureKeyring, schema } from "../../../packages/payments/tests/sepay-i
 import { metricsRegistry } from "@pawket/observability";
 import { readCommissionCompletionDueAt } from "@pawket/orders";
 import { effectiveResolutionDeadline } from "@pawket/resolutions";
-import { effectiveEnforcementDeadline } from "@pawket/trust";
+import { APPEAL_WINDOW_MS } from "@pawket/notifications";
+import { TRUST_ENFORCEMENT_POLICY, effectiveEnforcementDeadline } from "@pawket/trust";
 import { createWorkerNotificationConfiguration, createWorkerNotificationMaintenance, workerNotificationDeadlines } from "../src/notification-wiring.js";
 import { createWorkerJobProcessor } from "../src/worker-runtime.js";
 
@@ -118,6 +119,11 @@ test("the worker deadline port reads each module's effective deadline", async ()
     expect(await workerNotificationDeadlines.completion(tx, review)).toEqual(await readCommissionCompletionDueAt(tx, review));
     expect(await workerNotificationDeadlines.completion(tx, review)).toEqual(review.completionFloorAt);
   });
+});
+
+test("the notification appeal window matches the trust enforcement policy", () => {
+  // packages/notifications mirrors the window instead of depending on @pawket/trust; the worker depends on both.
+  expect(APPEAL_WINDOW_MS).toBe(TRUST_ENFORCEMENT_POLICY.appealWindowMs);
 });
 
 test("enabled maintenance sends a review-window reminder at the real completion deadline", async () => {

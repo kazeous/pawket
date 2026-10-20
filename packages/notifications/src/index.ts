@@ -25,9 +25,9 @@ export {
   type OptionalEmailCategory,
 } from "./catalog.js";
 export { NOTIFICATION_EMAIL_COPY, renderNotice, subjectForCategory, type NoticeText } from "./copy.js";
-export { NOTIFICATION_SOURCE_EVENTS, createNotificationMaterializer, writeNotice } from "./materializer.js";
+export { NOTIFICATION_SOURCE_EVENTS, createNotificationMaterializer } from "./materializer.js";
 export { resolveNotices, type CommittedOutboxRow } from "./recipients.js";
 export type { NotificationDeadlinePort, NotificationEmailPort } from "./ports.js";
 export { createNotificationMaintenance, type NotificationMaintenanceFailure, type NotificationMaintenanceResult } from "./maintenance.js";
-export { APPEAL_WINDOW_MS, CLOCK_CATEGORIES, readOpenClock, readOpenClocks, reminderStage, type ClockRecipient, type OpenClock, type ReminderStage } from "./clocks.js";
+export { APPEAL_WINDOW_MS, CLOCK_CATEGORIES, readOpenClocks, reminderStage, type ClockRecipient, type OpenClock, type ReminderStage } from "./clocks.js";
 export { markNotificationsRead, type MarkReadTarget } from "./inbox-service.js";

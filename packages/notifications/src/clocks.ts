@@ -247,14 +247,23 @@ export async function readOpenClocks(tx: PawketTransaction, input: { clock: Noti
   return Object.freeze(result);
 }
 
-/** Re-reads one clock under FOR SHARE locks on its subject row and re-checks that it is still pending. */
+/**
+ * Re-reads one clock under a FOR SHARE lock on its subject row and re-checks that it is still pending. Postgres
+ * re-evaluates a locked row only against its own new version, and the NOT EXISTS checks (a dispute response, an appeal)
+ * keep the statement's starting snapshot; actions that lock the subject but only insert a child row would stay
+ * invisible. So once the lock is held, the pending read runs again as a new statement (READ COMMITTED: a new snapshot
+ * that sees everything committed before the lock was granted), and its result is the one used.
+ */
 export async function readOpenClock(tx: PawketTransaction, input: { clock: NotificationClock; subjectType: NotificationSubjectType; subjectId: string; now: Date;
   deadlines: NotificationDeadlinePort }): Promise<OpenClock | null> {
   checkInput(input);
   if (typeof input.subjectId !== "string" || !UUID_PATTERN.test(input.subjectId)) invalid();
   const now = as(input.now);
-  const [candidate] = await candidates(tx, input.clock, { now, horizon: new Date(now.getTime() + NOTIFICATION_POLICY.reminderLeadMs), limit: 1,
-    subjectId: input.subjectId, subjectType: input.subjectType, lock: true, deadlines: input.deadlines });
+  const query = { now, horizon: new Date(now.getTime() + NOTIFICATION_POLICY.reminderLeadMs), limit: 1, subjectId: input.subjectId,
+    subjectType: input.subjectType, lock: true, deadlines: input.deadlines };
+  const [locked] = await candidates(tx, input.clock, query);
+  if (!locked) return null;
+  const [candidate] = await candidates(tx, input.clock, { ...query, lock: false });
   if (!candidate) return null;
   return open(input.clock, candidate, candidate.effective ? await candidate.effective(tx) : candidate.rawDeadline);
 }

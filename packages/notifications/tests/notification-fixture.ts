@@ -208,9 +208,10 @@ export function createNotificationFixture(label: string) {
       reason: "not_delivered", requestedOutcome: "close", requestedRefundVnd: 10_000, orderStateAtOpen: "in_progress", respondBy: new Date(openedAt.getTime() + 5 * 86_400_000), openedAt });
     return id;
   }
-  async function statement(disputeId: string, authorUserId: string, authorRole: "buyer" | "creator" | "owner", kind?: "response" | "statement") {
+  async function statement(disputeId: string, authorUserId: string, authorRole: "buyer" | "creator" | "owner", kind?: "response" | "statement",
+    executor: PawketDatabase | PawketTransaction = db) {
     const id = randomUUID();
-    await db.insert(schema.commissionDisputeStatements).values({ id, disputeId, authorUserId, authorRole, kind: kind ?? (authorRole === "owner" ? "question" : "statement"),
+    await executor.insert(schema.commissionDisputeStatements).values({ id, disputeId, authorUserId, authorRole, kind: kind ?? (authorRole === "owner" ? "question" : "statement"),
       textEnvelope: envelope("commission_dispute_statements", id, "text"), actorSessionId: `s-${randomUUID()}`, requestId: randomUUID(), createdAt: later(5_000) });
     return id;
   }
@@ -288,14 +289,16 @@ export function createNotificationFixture(label: string) {
       ownerUserId, ownerSessionId: "owner-session", stepUpProofId: randomUUID(), requestId: randomUUID(), createdAt: later(13_000) });
     return id;
   }
-  async function appeal(appellantUserId: string, target: { penaltyId: string } | { hideId: string }) {
+  /** Files an appeal; with `outer`, inside the caller's transaction (as the appeal service does under its penalty or hide lock). */
+  async function appeal(appellantUserId: string, target: { penaltyId: string } | { hideId: string }, outer?: PawketTransaction) {
     const id = randomUUID(); const at = later(14_000);
-    const caseId = await db.transaction(async (tx) => {
+    const file = async (tx: PawketTransaction) => {
       const opened = await trustCase(tx, { kind: "appeal", sourceType: "trust_appeal", sourceId: id, orderId: null, at });
       await tx.insert(schema.trustAppeals).values({ id, appellantUserId, penaltyId: "penaltyId" in target ? target.penaltyId : null, hideId: "hideId" in target ? target.hideId : null,
         statementEnvelope: envelope("trust_appeals", id, "statement"), submittedVia: "session", caseId: opened, createdAt: at });
       return opened;
-    });
+    };
+    const caseId = outer ? await file(outer) : await db.transaction(file);
     return { appealId: id, caseId };
   }
   async function decideAppeal(appealId: string, ownerUserId: string, state: "upheld" | "reversed") {

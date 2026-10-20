@@ -186,6 +186,29 @@ describe("reminder rules", () => {
     expect(await ledger(o.orderId)).toEqual([]);
   });
 
+  test("no missed notice when the respondent's response commits while the scan waits on the dispute", async () => {
+    const o = await f.paidOrder(); const disputeId = await f.dispute(o, "buyer"); const respondBy = later(4_000 + 5 * DAY);
+    // As addStatement does: lock the dispute, insert the response, never update the dispute row itself.
+    await actWhileScanning(shift(respondBy, HOUR), async (tx) => {
+      await tx.select({ id: schema.commissionDisputes.id }).from(schema.commissionDisputes).where(eq(schema.commissionDisputes.id, disputeId)).for("update");
+      await f.statement(disputeId, o.creator.userId, "creator", "response", tx);
+    });
+    expect(await reminders(disputeId)).toEqual([]);
+    expect(await ledger(disputeId)).toEqual([]);
+  });
+
+  test("no appeal-window reminder when an appeal commits while the scan waits on the penalty", async () => {
+    const owner = await f.owner(); const subject = await f.person();
+    const penaltyId = await f.penalty(subject, "restriction", owner, null);
+    // As the appeal service does: lock the penalty, insert the appeal, never update the penalty row itself.
+    await actWhileScanning(later(13_000 + 14 * DAY - 12 * HOUR), async (tx) => {
+      await tx.select({ id: schema.trustPenalties.id }).from(schema.trustPenalties).where(eq(schema.trustPenalties.id, penaltyId)).for("update");
+      await f.appeal(subject, { penaltyId }, tx);
+    });
+    expect(await reminders(penaltyId)).toEqual([]);
+    expect(await ledger(penaltyId)).toEqual([]);
+  });
+
   test("pause moves the deadline and re-arms one reminder", async () => {
     const o = await f.paidOrder(); const id = await f.proposal(o, "buyer"); const respondBy = later(2_000 + 72 * HOUR);
     const pause = { open: false, extendMs: 0 };
@@ -305,14 +328,28 @@ describe("reminder rules", () => {
   });
 });
 
-/** Waits until another session is blocked on a row lock taken by the scan's re-read. */
+/** Runs `action` on a second connection and holds its transaction open until the scan at `at` is blocked on its lock, then commits. */
+async function actWhileScanning(at: Date, action: (tx: Parameters<Parameters<typeof f.db.transaction>[0]>[0]) => Promise<void>) {
+  const other = createDatabase(f.scopedUrl); const gate = Promise.withResolvers<void>(); const held = Promise.withResolvers<void>();
+  try {
+    const acting = other.db.transaction(async (tx) => { await action(tx); held.resolve(); await gate.promise; });
+    acting.catch(() => undefined); await Promise.race([held.promise, acting]);
+    const scan = run(at);
+    await waitForLockWait();
+    gate.resolve(); await acting;
+    await scan;
+  } finally { gate.resolve(); await other.close(); }
+}
+
+/** Waits until the scan's locked re-read is blocked on the other session's row lock. */
 async function waitForLockWait() {
   for (let attempt = 0; attempt < 400; attempt += 1) {
+    // Long scan queries exceed track_activity_query_size, so match the lock wait rather than the query text.
     const rows = await f.db.execute(sql`select count(*)::int as waiting from pg_stat_activity
-      where datname = current_database() and wait_event_type = 'Lock' and query ilike '%for share%'`);
+      where datname = current_database() and wait_event_type = 'Lock' and query ilike 'select%'`);
     if (Number((rows as unknown as { waiting: number }[])[0]?.waiting ?? 0) > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("the scan never waited on the order row");
+  throw new Error("the scan never waited on the subject row");
 }
 
