@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
-import { notifications, type PawketDatabase } from "@pawket/database";
-import { NOTIFICATION_POLICY, NotificationError, type NotificationsMode } from "./policy.js";
-import { isNotificationKind, type NotificationKind } from "./catalog.js";
+import { identityRoleGrants, notificationPreferences, notifications, type PawketDatabase } from "@pawket/database";
+import { NOTIFICATION_POLICY, OPTIONAL_EMAIL_CATEGORIES, NotificationError, type NotificationsMode } from "./policy.js";
+import { isNotificationKind, type NotificationKind, type OptionalEmailCategory } from "./catalog.js";
 import { renderNotice } from "./copy.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -51,6 +51,8 @@ export type NotificationInbox = Readonly<{
   list(userId: string, cursor: string | null): Promise<{ items: readonly InboxItem[]; nextCursor: string | null }>;
   summary(userId: string): Promise<{ unread: number }>;
   markRead(userId: string, target: MarkReadTarget): Promise<number>;
+  readPreferences(userId: string): Promise<{ email: Record<OptionalEmailCategory, boolean>; owner: boolean }>;
+  setPreference(userId: string, input: { channel: "email"; category: OptionalEmailCategory; enabled: boolean; at: Date }): Promise<void>;
 }>;
 
 // The cursor carries the last row's updated_at at full microsecond precision (a JavaScript Date would drop the
@@ -107,6 +109,36 @@ export function createNotificationInbox(input: { db: PawketDatabase; mode: Notif
     async markRead(userId, target) {
       available();
       return markNotificationsRead(input.db, { userId, target, at: clock() });
+    },
+    async readPreferences(userId) {
+      available(); validUser(userId);
+      return input.db.transaction(async (tx) => {
+        const [grant] = await tx.select({ id: identityRoleGrants.id }).from(identityRoleGrants)
+          .where(and(eq(identityRoleGrants.userId, userId), eq(identityRoleGrants.role, "owner"), eq(identityRoleGrants.state, "active"))).limit(1);
+        const disabled = await tx.select({ category: notificationPreferences.category }).from(notificationPreferences)
+          .where(and(eq(notificationPreferences.userId, userId), eq(notificationPreferences.channel, "email")));
+        const off = new Set(disabled.map((row) => row.category));
+        // The owner-only key is deliberately absent for everyone without a current active grant.
+        const email = Object.fromEntries(OPTIONAL_EMAIL_CATEGORIES.filter((category) => category !== "owner_queue" || grant)
+          .map((category) => [category, !off.has(category)])) as Record<OptionalEmailCategory, boolean>;
+        return { email, owner: !!grant };
+      });
+    },
+    async setPreference(userId, preference) {
+      available(); validUser(userId);
+      if (!preference || preference.channel !== "email" || !(OPTIONAL_EMAIL_CATEGORIES as readonly string[]).includes(preference.category)
+        || typeof preference.enabled !== "boolean" || !(preference.at instanceof Date) || !Number.isFinite(preference.at.getTime())) invalid();
+      await input.db.transaction(async (tx) => {
+        if (preference.category === "owner_queue") {
+          const [grant] = await tx.select({ id: identityRoleGrants.id }).from(identityRoleGrants)
+            .where(and(eq(identityRoleGrants.userId, userId), eq(identityRoleGrants.role, "owner"), eq(identityRoleGrants.state, "active")))
+            .limit(1).for("share");
+          if (!grant) invalid();
+        }
+        if (preference.enabled) await tx.delete(notificationPreferences).where(and(eq(notificationPreferences.userId, userId),
+          eq(notificationPreferences.channel, "email"), eq(notificationPreferences.category, preference.category)));
+        else await tx.insert(notificationPreferences).values({ userId, channel: "email", category: preference.category, updatedAt: preference.at }).onConflictDoNothing();
+      });
     },
   };
 }

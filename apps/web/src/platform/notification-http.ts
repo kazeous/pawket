@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { NOTIFICATION_POLICY, NotificationError, type NotificationInbox } from "@pawket/notifications";
+import { NOTIFICATION_POLICY, OPTIONAL_EMAIL_CATEGORIES, NotificationError, type NotificationInbox } from "@pawket/notifications";
 import { COMMISSION_PRIVATE_HEADERS, CommissionHttpFailure, commissionJson, readCommissionBody } from "./commission-http.js";
 
 type Input = Readonly<{
   appBaseUrl: string;
   authenticate(headers: Headers): Promise<{ userId: string; sessionId: string } | null>;
-  inbox: Pick<NotificationInbox, "mode" | "list" | "summary" | "markRead">;
+  inbox: NotificationInbox;
 }>;
 
 const uuid = z.uuid();
@@ -16,6 +16,7 @@ const readBody = z.union([
   z.strictObject({ orderId: uuid }),
 ]);
 const CURSOR = /^[A-Za-z0-9_-]{1,200}$/u;
+const preferenceBody = z.strictObject({ channel: z.literal("email"), category: z.enum(OPTIONAL_EMAIL_CATEGORIES), enabled: z.boolean() });
 const fail = (status: number, code: string): never => { throw new CommissionHttpFailure(status, code); };
 
 function failure(error: unknown): Response {
@@ -30,12 +31,12 @@ function failure(error: unknown): Response {
 /** The viewer's own inbox: list, unread summary and mark-read. Disabled mode answers 404 on every route before anything else. */
 export function createNotificationHttpHandlers(input: Input) {
   const origin = new URL(input.appBaseUrl).origin;
-  async function run(request: Request, method: "GET" | "POST", action: (userId: string) => Promise<Response>): Promise<Response> {
+  async function run(request: Request, method: "GET" | "POST" | "PUT", action: (userId: string) => Promise<Response>): Promise<Response> {
     try {
       if (input.inbox.mode !== "enabled") fail(404, "not_available");
       if (request.method !== method) fail(405, "method_not_allowed");
       const requestOrigin = request.headers.get("origin");
-      if (request.headers.get("sec-fetch-site") === "cross-site" || ((method === "POST" || requestOrigin !== null) && requestOrigin !== origin)) fail(403, "untrusted_origin");
+      if (request.headers.get("sec-fetch-site") === "cross-site" || ((method !== "GET" || requestOrigin !== null) && requestOrigin !== origin)) fail(403, "untrusted_origin");
       const actor = await input.authenticate(request.headers);
       if (!actor) fail(401, "unauthenticated");
       return await action(actor!.userId);
@@ -62,6 +63,14 @@ export function createNotificationHttpHandlers(input: Input) {
       noQuery(request);
       const target = await readCommissionBody(request, readBody);
       await input.inbox.markRead(userId, target);
+      return new Response(null, { status: 204, headers: COMMISSION_PRIVATE_HEADERS });
+    }),
+    preferences: (request: Request) => run(request, "GET", async (userId) => {
+      noQuery(request); return commissionJson(200, await input.inbox.readPreferences(userId));
+    }),
+    setPreference: (request: Request) => run(request, "PUT", async (userId) => {
+      noQuery(request); const preference = await readCommissionBody(request, preferenceBody);
+      await input.inbox.setPreference(userId, { ...preference, at: new Date() });
       return new Response(null, { status: 204, headers: COMMISSION_PRIVATE_HEADERS });
     }),
   };

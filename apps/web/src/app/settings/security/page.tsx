@@ -1,4 +1,6 @@
 import { headers } from "next/headers";
+import Link from "next/link";
+import { loadServerEnv } from "@pawket/config";
 import { redirect } from "next/navigation";
 import { getIdentityRuntime } from "../../../auth/runtime";
 import { SecurityPanel } from "./security-panel";
@@ -11,5 +13,6 @@ export default async function SecuritySettingsPage() {
   return <AppShell context="Tài khoản" action={{ href: "/creator/apply", label: "Hồ sơ creator" }}>
     <header className="workspace-header reveal"><div><p className="eyebrow">Tài khoản</p><h1>Bảo mật &amp; đăng nhập</h1><p className="lede">Quản lý tài khoản chung và các phiên truy cập Pawket.</p></div></header>
     <SecurityPanel accountPortalUrl={runtime.accountPortalUrl} mfaStatus={session.mfaStatus} />
+    {loadServerEnv().NOTIFICATIONS_MODE === "enabled" ? <Link className="underline" href="/settings/notifications">Thông báo</Link> : null}
   </AppShell>;
 }

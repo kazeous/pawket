@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const { push, platform } = vi.hoisted(() => ({ push: vi.fn(), platform: {
-  notifications: { mode: "enabled", list: vi.fn() }, authenticate: vi.fn(),
+  notifications: { mode: "enabled", list: vi.fn(), readPreferences: vi.fn() }, authenticate: vi.fn(),
 } }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push }), notFound: () => { throw new Error("NOT_FOUND"); }, redirect: (path: string) => { throw new Error(`REDIRECT:${path}`); } }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
@@ -13,6 +13,8 @@ vi.mock("../src/ui/app-shell", () => ({ AppShell: ({ children }: { children: Rea
 import { NotificationBell } from "../src/ui/notifications/notification-bell";
 import { NotificationInbox } from "../src/ui/notifications/notification-inbox";
 import NotificationsPage from "../src/app/notifications/page";
+import { NotificationPreferences } from "../src/ui/notifications/notification-preferences";
+import NotificationSettingsPage from "../src/app/settings/notifications/page";
 
 const id = "10000000-0000-4000-8000-000000000001";
 const item = { id, kind: "order_completed" as const, variant: null, title: "Đơn đã hoàn tất", body: "Bạn có thể xem lại lịch sử đơn.", actionLabel: "Xem đơn",
@@ -67,4 +69,27 @@ test("notification page is unavailable while disabled, redirects anonymous users
   await expect(NotificationsPage()).rejects.toThrow("REDIRECT:/sign-in?returnTo=/notifications");
   platform.authenticate.mockResolvedValue({ userId: "viewer" });
   await mount(await NotificationsPage()); expect(platform.notifications.list).toHaveBeenCalledWith("viewer", null); expect(container.textContent).toContain(item.title);
+});
+test("preferences show informational switches, always-on rows and save one category at a time", async () => {
+  fetch.mockResolvedValue(new Response(null, { status: 204 }));
+  await mount(<NotificationPreferences initial={{ owner: false, email: { orders: true, messages: true, deliveries: true, disputes_refunds: true, moderation: true } }} />);
+  expect(container.querySelectorAll('[role="switch"]')).toHaveLength(5);
+  expect(container.textContent).not.toContain("Hàng đợi xử lý");
+  expect(container.textContent).toContain("Luôn bật"); expect(container.textContent).toContain("Thông báo trong ứng dụng luôn nhận đầy đủ");
+  const orders = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Email về đơn commission"]')!;
+  await act(async () => orders.click());
+  expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ channel: "email", category: "orders", enabled: false });
+  expect(orders.getAttribute("aria-checked")).toBe("false");
+  fetch.mockResolvedValueOnce(new Response(null, { status: 503 })); await act(async () => orders.click());
+  expect(orders.getAttribute("aria-checked")).toBe("false"); expect(container.querySelector('[role="alert"]')).not.toBeNull();
+});
+test("settings page is gated and shows the owner queue only with an active owner grant", async () => {
+  platform.notifications.mode = "disabled";
+  await expect(NotificationSettingsPage()).rejects.toThrow("NOT_FOUND"); expect(platform.authenticate).not.toHaveBeenCalled();
+  platform.notifications.mode = "enabled"; platform.authenticate.mockResolvedValue(null);
+  await expect(NotificationSettingsPage()).rejects.toThrow("REDIRECT:/sign-in?returnTo=/settings/notifications");
+  platform.authenticate.mockResolvedValue({ userId: "viewer" });
+  platform.notifications.readPreferences.mockResolvedValue({ owner: true, email: { orders: true, messages: true, deliveries: true, disputes_refunds: true, moderation: true, owner_queue: true } });
+  await mount(await NotificationSettingsPage()); expect(container.querySelectorAll('[role="switch"]')).toHaveLength(6);
+  expect(platform.notifications.readPreferences).toHaveBeenCalledWith("viewer"); expect(container.textContent).toContain("Hàng đợi xử lý");
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { NotificationError } from "@pawket/notifications";
+import { NotificationError, type OptionalEmailCategory } from "@pawket/notifications";
 import { createNotificationHttpHandlers } from "../src/platform/notification-http.js";
 
 const origin = "https://pawket.example.invalid";
@@ -17,6 +17,8 @@ function fixture(options: { anonymous?: boolean; mode?: "enabled" | "disabled" }
     list: vi.fn(mode === "enabled" ? () => Promise.resolve(listed) : disabled),
     summary: vi.fn(mode === "enabled" ? () => Promise.resolve({ unread: 3 }) : disabled),
     markRead: vi.fn(mode === "enabled" ? () => Promise.resolve(1) : disabled),
+    readPreferences: vi.fn(async () => ({ email: { orders: true, messages: true, deliveries: true, disputes_refunds: true, moderation: true } as Record<OptionalEmailCategory, boolean>, owner: false })),
+    setPreference: vi.fn(async () => undefined),
   };
   const authenticate = vi.fn().mockResolvedValue(options.anonymous ? null : actor);
   return { inbox, authenticate, http: createNotificationHttpHandlers({ appBaseUrl: origin, authenticate, inbox }) };
@@ -105,5 +107,36 @@ describe("notification HTTP", () => {
     // Marking items that are already read, or someone else's, is still a quiet 204.
     f.inbox.markRead.mockResolvedValueOnce(0);
     expect((await f.http.read(post({ ids: [itemId] }))).status).toBe(204);
+  });
+
+  test("PUT refuses unknown categories and extra keys", async () => {
+    const f = fixture();
+    const put = (body: unknown, suffix = "", headers: Record<string, string> = {}) => new Request(`${origin}/api/v1/notifications/preferences${suffix}`,
+      { method: "PUT", headers: { origin, "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    for (const body of [{ channel: "email", category: "tips", enabled: false }, { channel: "email", category: "unknown", enabled: false },
+      { channel: "discord", category: "orders", enabled: true }, { channel: "email", category: "orders", enabled: true, userId: "other" },
+      { channel: "email", category: "orders", enabled: "true" }]) expect((await f.http.setPreference(put(body))).status).toBe(400);
+    const valid = { channel: "email", category: "orders", enabled: false };
+    expect((await f.http.setPreference(put(valid, "?x=1"))).status).toBe(400);
+    expect((await f.http.setPreference(put(valid, "", { origin: "https://foreign.invalid" }))).status).toBe(403);
+    expect((await f.http.setPreference(put(valid, "", { "sec-fetch-site": "cross-site" }))).status).toBe(403);
+    expect(f.inbox.setPreference).not.toHaveBeenCalled();
+    const response = await f.http.setPreference(put(valid)); expect(response.status).toBe(204); privateHeaders(response);
+    expect(f.inbox.setPreference).toHaveBeenCalledWith(actor.userId, { ...valid, at: expect.any(Date) });
+    const read = await f.http.preferences(get("/api/v1/notifications/preferences")); expect(read.status).toBe(200);
+    expect(await read.json()).toEqual(await f.inbox.readPreferences());
+    f.inbox.setPreference.mockRejectedValueOnce(new NotificationError("invalid_request"));
+    expect((await f.http.setPreference(put({ ...valid, category: "owner_queue" }))).status).toBe(400);
+  });
+
+  test("preferences are 404 when disabled and 401 when anonymous", async () => {
+    for (const options of [{ mode: "disabled" as const }, { anonymous: true }]) {
+      const f = fixture(options);
+      const request = new Request(`${origin}/api/v1/notifications/preferences`, { method: "PUT", headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ channel: "email", category: "orders", enabled: false }) });
+      const status = options.mode === "disabled" ? 404 : 401;
+      expect((await f.http.preferences(get("/api/v1/notifications/preferences"))).status).toBe(status);
+      expect((await f.http.setPreference(request)).status).toBe(status); expect(f.inbox.setPreference).not.toHaveBeenCalled();
+    }
   });
 });
