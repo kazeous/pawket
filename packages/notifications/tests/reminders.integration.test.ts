@@ -171,15 +171,19 @@ describe("reminder rules", () => {
     const o = await f.quotedOrder({ issuedAt: later(HOUR), expiresAt: later(HOUR + 3 * DAY) });
     const at = later(HOUR + 3 * DAY - 12 * HOUR);
     const buyer = createDatabase(f.scopedUrl); const gate = Promise.withResolvers<void>(); const accepted = Promise.withResolvers<void>();
+    let acceptance: Promise<void> | undefined; let scanning: ReturnType<typeof run> | undefined; let blockerPid = 0;
     try {
       // The buyer's acceptance holds the order row until the scan is waiting on it, then commits.
-      const acceptance = buyer.db.transaction(async (tx) => { await f.acceptQuote(tx, o, later(2 * HOUR)); accepted.resolve(); await gate.promise; });
-      await accepted.promise;
-      const scan = run(at);
-      await waitForLockWait();
+      acceptance = buyer.db.transaction(async (tx) => {
+        const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`); blockerPid = backend!.pid;
+        await f.acceptQuote(tx, o, later(2 * HOUR)); accepted.resolve(); await gate.promise;
+      });
+      acceptance.catch(() => undefined); await Promise.race([accepted.promise, acceptance]);
+      scanning = run(at); scanning.catch(() => undefined);
+      await waitForLockWait(blockerPid);
       gate.resolve(); await acceptance;
-      await scan;
-    } finally { gate.resolve(); await buyer.close(); }
+      await scanning;
+    } finally { gate.resolve(); await Promise.allSettled([acceptance, scanning]); await buyer.close(); }
     const [order] = await f.db.select().from(schema.commissionOrders).where(eq(schema.commissionOrders.id, o.orderId));
     expect(order!.state).toBe("awaiting_payment");
     expect(await reminders(o.orderId)).toEqual([]);
@@ -331,22 +335,26 @@ describe("reminder rules", () => {
 /** Runs `action` on a second connection and holds its transaction open until the scan at `at` is blocked on its lock, then commits. */
 async function actWhileScanning(at: Date, action: (tx: Parameters<Parameters<typeof f.db.transaction>[0]>[0]) => Promise<void>) {
   const other = createDatabase(f.scopedUrl); const gate = Promise.withResolvers<void>(); const held = Promise.withResolvers<void>();
+  let acting: Promise<void> | undefined; let scanning: ReturnType<typeof run> | undefined; let blockerPid = 0;
   try {
-    const acting = other.db.transaction(async (tx) => { await action(tx); held.resolve(); await gate.promise; });
+    acting = other.db.transaction(async (tx) => {
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`); blockerPid = backend!.pid;
+      await action(tx); held.resolve(); await gate.promise;
+    });
     acting.catch(() => undefined); await Promise.race([held.promise, acting]);
-    const scan = run(at);
-    await waitForLockWait();
+    scanning = run(at); scanning.catch(() => undefined);
+    await waitForLockWait(blockerPid);
     gate.resolve(); await acting;
-    await scan;
-  } finally { gate.resolve(); await other.close(); }
+    await scanning;
+  } finally { gate.resolve(); await Promise.allSettled([acting, scanning]); await other.close(); }
 }
 
 /** Waits until the scan's locked re-read is blocked on the other session's row lock. */
-async function waitForLockWait() {
+async function waitForLockWait(blockerPid: number) {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    // Long scan queries exceed track_activity_query_size, so match the lock wait rather than the query text.
+    // Match this action's backend, so another waiting query cannot release the gate early.
     const rows = await f.db.execute(sql`select count(*)::int as waiting from pg_stat_activity
-      where datname = current_database() and wait_event_type = 'Lock' and query ilike 'select%'`);
+      where datname = current_database() and wait_event_type = 'Lock' and ${blockerPid} = any(pg_blocking_pids(pid))`);
     if (Number((rows as unknown as { waiting: number }[])[0]?.waiting ?? 0) > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

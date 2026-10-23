@@ -29,13 +29,13 @@ const KIND_COPY: Readonly<Record<NotificationKind, NoticeText>> = {
   ruling_corrected: notice("Quyết định đã được chỉnh lại", "Hãy xem nội dung cập nhật và các bước tiếp theo trên trang.", "Xem quyết định"),
   late_claim_filed: notice("Có yêu cầu về thanh toán đến muộn", "Người mua đề nghị xem xét một khoản thanh toán đến muộn. Hãy kiểm tra ngân hàng và trả lời trước hạn ghi trên trang.", "Xem yêu cầu"),
   late_claim_ended: notice("Yêu cầu về thanh toán đến muộn đã kết thúc", "Mở trang đơn để xem kết quả và các bước tiếp theo.", "Xem đơn"),
-  refund_account_needed: notice("Cần nhập tài khoản nhận hoàn tiền", "Hãy nhập tài khoản nhận tiền trên trang hoàn tiền trước hạn ghi trên trang.", "Nhập tài khoản nhận"),
+  refund_account_needed: notice("Cần nhập tài khoản nhận hoàn tiền", "Hãy nhập tài khoản nhận tiền trên trang hoàn tiền để nghệ sĩ có thể chuyển khoản cho bạn.", "Nhập tài khoản nhận"),
   refund_owed: notice("Có một khoản hoàn tiền cần thực hiện", "Người mua sẽ nhập tài khoản nhận tiền. Bạn sẽ được báo khi đến lượt bạn gửi hoàn tiền.", "Xem hoàn tiền"),
   refund_send_due: notice("Đến lượt bạn gửi hoàn tiền", "Tài khoản nhận đã được nhập. Hãy chuyển khoản và ghi nhận trên trang trước hạn ghi trên trang.", "Xem hoàn tiền"),
   refund_sent: notice("Creator đã ghi nhận gửi hoàn tiền", "Hãy kiểm tra tài khoản và xác nhận đã nhận hay chưa trước hạn ghi trên trang. Nếu không phản hồi, khoản hoàn sẽ được xem là đã nhận.", "Xác nhận đã nhận"),
   refund_not_received: notice("Người mua báo chưa nhận được hoàn tiền", "Hãy kiểm tra lại giao dịch và xem hướng dẫn trên trang.", "Xem hoàn tiền"),
   refund_resend_required: notice("Cần gửi lại hoàn tiền", "Khoản hoàn cần được gửi lại. Hãy gửi và ghi nhận trên trang trước hạn ghi trên trang.", "Xem hoàn tiền"),
-  refund_settled: notice("Hoàn tiền đã được giải quyết", "Khoản hoàn đã được ghi nhận là hoàn tất. Mở trang để xem chi tiết.", "Xem hoàn tiền"),
+  refund_settled: notice("Hoàn tiền đã được giải quyết", "Khoản hoàn đã có kết quả xử lý. Mở trang để xem chi tiết.", "Xem hoàn tiền"),
   refund_overdue: notice("Hoàn tiền đã quá hạn", "Việc này đã được chuyển sang xử lý ưu tiên. Mở trang để xem bước tiếp theo.", "Xem hoàn tiền"),
   content_hidden: notice("Một nội dung của bạn đã được ẩn", "Nội dung tạm thời không hiển thị công khai. Bạn có thể xem chi tiết và gửi kháng nghị trong 14 ngày.", "Xem và kháng nghị"),
   content_restored: notice("Nội dung của bạn đã hiển thị lại", "Nội dung đã được khôi phục. Bạn không cần làm gì thêm.", "Xem thông báo"),
@@ -62,6 +62,11 @@ const reminderTask = (task: string): Partial<NoticeText> => ({ body: `Còn kho�
 // Variants are closed enums chosen by the materializer (close reason, clock, tip state, case kind, penalty type).
 // A variant without an entry here falls back to the plain kind text.
 const VARIANT_COPY: VariantCopy = {
+  refund_settled: {
+    receipt_confirmed: { title: "Người đặt đã xác nhận nhận hoàn tiền", body: "Việc nhận hoàn tiền đã được người đặt xác nhận trên trang. Mở trang để xem chi tiết." },
+    presumed_received: { title: "Hết hạn xác nhận hoàn tiền", body: "Khoản hoàn được xem là đã nhận theo thời hạn phản hồi. Mở trang để xem chi tiết." },
+    waived: { title: "Nghĩa vụ hoàn tiền đã được miễn", body: "Pawket đã miễn nghĩa vụ hoàn tiền. Mở trang để xem kết quả xử lý." },
+  },
   // The draft variant uses the plain kind text; a response to the final delivery speaks of the final delivery (R9).
   draft_responded: {
     final: { title: "Người mua đã phản hồi bản giao cuối", body: "Mở đơn để xem phản hồi về bản giao cuối và các bước tiếp theo." },

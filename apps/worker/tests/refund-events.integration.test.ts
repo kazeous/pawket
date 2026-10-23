@@ -62,7 +62,8 @@ test("a refund event naming an action the committed row does not carry is refuse
   const forged = (await f.db.select().from(schema.systemOutbox).where(eq(schema.systemOutbox.id, await forge(row!, { payload }))))[0]!;
   const acknowledge = vi.fn(async () => true); const logger = { info: vi.fn(), error: vi.fn() };
   const processor = createWorkerJobProcessor({ database: f.db, acknowledge, logger });
-  await expect(processor({ id: forged.id, name: OUTBOX_JOB, data: job(forged) } as never)).rejects.toThrow();
+  await expect(validateRefundOutboxEvent(f.db, job(forged))).rejects.toThrow("Invalid refund worker source");
+  await expect(processor({ id: forged.id, name: OUTBOX_JOB, data: job(forged) } as never)).rejects.toThrow("Worker job processing failed");
   expect(acknowledge).not.toHaveBeenCalled();
   // The genuine row is acknowledged; an unknown refund event type is still refused as before.
   await processor({ id: row!.id, name: OUTBOX_JOB, data: job(row!) } as never);

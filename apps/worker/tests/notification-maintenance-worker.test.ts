@@ -25,7 +25,7 @@ async function runtime(mode: "disabled" | "enabled" = "enabled") {
       scanRefundWindows: async () => ({}), readBacklogMetrics: async () => ({}), hostname: () => "synthetic", randomUUID,
     } as unknown as Partial<WorkerRuntimeDependencies> });
   await vi.advanceTimersByTimeAsync(0);
-  return { maintenance, createMaintenance, handle, logger, dispatch, resource, state, reportFailure: (failure: NotificationMaintenanceFailure) => reportFailure(failure) };
+  return { maintenance, createMaintenance, createMaterializer, handle, logger, dispatch, resource, state, reportFailure: (failure: NotificationMaintenanceFailure) => reportFailure(failure) };
 }
 // The synthetic runtime also logs its stubbed refund and backlog reads; only this scan's category matters here.
 const maintenanceErrors = (logger: { error: ReturnType<typeof vi.fn> }) =>
@@ -35,6 +35,7 @@ test("enabled maintenance runs every 60 seconds", async () => {
   const r = await runtime();
   try {
     expect(r.createMaintenance).toHaveBeenCalledOnce(); expect(r.maintenance.runOnce).toHaveBeenCalledOnce();
+    expect(r.createMaterializer).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(59_000); expect(r.maintenance.runOnce).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1_000); expect(r.maintenance.runOnce).toHaveBeenCalledTimes(2);
     expect(maintenanceErrors(r.logger)).toEqual([]);
@@ -46,6 +47,7 @@ test("disabled notifications never build or run maintenance", async () => {
   try {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(r.createMaintenance).not.toHaveBeenCalled(); expect(r.maintenance.runOnce).not.toHaveBeenCalled();
+    expect(r.createMaterializer).not.toHaveBeenCalled();
   } finally { await r.handle.stop(); }
 });
 

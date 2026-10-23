@@ -11,6 +11,21 @@ const variants: readonly (string | null)[] = [null, ...NOTIFICATION_CLOCKS, ...c
   "creator", "buyer", "draft", "final", "receipt_confirmed", "presumed_received", "waived"];
 
 describe("notice copy never carries private content", () => {
+  test("the refund destination request does not invent an entry deadline", () => {
+    const copy = renderNotice("refund_account_needed", null);
+    expect(copy.body).toMatch(/nhập tài khoản/iu);
+    expect(copy.body).not.toMatch(/hạn/iu);
+  });
+
+  test("refund settlements distinguish receipt, presumed receipt and waiver", () => {
+    expect(renderNotice("refund_settled", "receipt_confirmed").title).toMatch(/xác nhận/iu);
+    expect(renderNotice("refund_settled", "presumed_received").title).toMatch(/hết hạn/iu);
+    const waived = renderNotice("refund_settled", "waived");
+    expect(`${waived.title} ${waived.body}`).toMatch(/miễn/iu);
+    expect(`${waived.title} ${waived.body}`).not.toMatch(/đã nhận|hoàn tất/iu);
+    expect(renderNotice("refund_settled", null).body).not.toMatch(/hoàn tất/iu);
+  });
+
   test("rendered notices contain no marker, long number, currency, address or link", () => {
     for (const kind of NOTIFICATION_KINDS) for (const variant of variants) {
       const { title, body, actionLabel } = renderNotice(kind, variant);

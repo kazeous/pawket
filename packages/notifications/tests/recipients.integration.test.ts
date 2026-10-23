@@ -18,6 +18,26 @@ const creatorLink = (o: FixtureOrder) => `/creator/commissions/${o.orderId}`;
 const orderPayload = (o: FixtureOrder, state: string, reason: string | null = null) => ({ orderId: o.orderId, version: 2, state, reason, correlationId: randomUUID() });
 
 describe("recipient matrix", () => {
+  test("subjects identify the committed order, dispute, refund, owner case and tip rather than the transport aggregate", async () => {
+    async function subject(source: CommittedRow, type: string, id: string) {
+      const rows = await notices(source); expect(rows.length).toBeGreaterThan(0);
+      expect(rows.map((row) => [row.subjectType, row.subjectId])).toEqual(rows.map(() => [type, id]));
+    }
+    const order = await f.paidOrder();
+    await subject(await f.outbox("commission.confirmed.v1", "payment_intent", order.intentId,
+      { paymentIntentId: order.intentId, orderId: order.orderId, creatorUserId: order.creator.userId, confirmationId: randomUUID(), correlationId: randomUUID() }), "commission_order", order.orderId);
+    const disputeId = await f.dispute(order, "buyer");
+    await subject(await f.outbox("resolution.dispute_opened.v1", "commission_dispute", disputeId, { disputeId, orderId: order.orderId }), "commission_dispute", disputeId);
+    const obligationId = await f.refundObligation(order); const refundEventId = await f.refundEvent(obligationId, "created");
+    await subject(await f.outbox("refund.event_recorded.v1", "commission_refund_obligation", obligationId,
+      { obligationId, refundEventId, action: "created" }), "commission_refund_obligation", obligationId);
+    await f.owner(); const caseId = await f.openCase({ kind: "dispute", sourceType: "commission_dispute", sourceId: disputeId, orderId: order.orderId });
+    await subject(await f.outbox("trust.case_opened.v1", "trust_case", caseId, { caseId, kind: "dispute", sourceId: disputeId }), "trust_case", caseId);
+    const creatorUserId = await f.person(); const tip = await f.tipIntent(creatorUserId);
+    await subject(await f.outbox("tip.transfer_claimed.v1", "payment_intent", tip.intentId,
+      { paymentIntentId: tip.intentId, tipId: tip.tipId, creatorUserId, claimId: randomUUID(), correlationId: randomUUID() }), "tip", tip.tipId);
+  });
+
   test("order events reach the parties named in spec section 6", async () => {
     const o = await f.paidOrder(); const b = o.buyer.userId; const c = o.creator.userId;
     const order = (type: string, state: string, reason: string | null = null) => f.outbox(type, "commission_order", o.orderId, orderPayload(o, state, reason));

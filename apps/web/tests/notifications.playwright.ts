@@ -5,7 +5,7 @@ import { and, asc, eq, gte, inArray, isNull } from "drizzle-orm";
 import { acknowledgeOutboxEvent, commissionDisputes, commissionRefundObligations, createDatabase, importConfiguredBusinessCalendarVersion, notifications, systemOutbox } from "@pawket/database";
 import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
 import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
-import { NOTIFICATION_SOURCE_EVENTS, renderNotice } from "@pawket/notifications";
+import { NOTIFICATION_SOURCE_EVENTS, renderNotice, type NotificationKind } from "@pawket/notifications";
 import { OUTBOX_JOB } from "@pawket/queue";
 import { createEncryptionKeyring } from "@pawket/security";
 import { createWorkerJobProcessor } from "../../worker/src/worker-runtime";
@@ -80,6 +80,19 @@ function emails(kind: string, userId: string) {
   return sink.snapshot().filter((message) => message.purpose === "notification" && message.templateData.kind === kind
     && message.destination === `${userId}@example.invalid`);
 }
+async function showInboxItem(page: Page, token: string, userId: string, orderId: string, kind: NotificationKind, variant: string | null = null) {
+  await signIn(page, token); await page.goto("/notifications");
+  const inbox = page.getByRole("region", { name: "Hộp thông báo", exact: true });
+  const path = userId === tipBrowserUserId ? `/creator/commissions/${orderId}` : `/commissions/${orderId}`;
+  const entry = inbox.locator("li").filter({ has: page.locator(`a[href="${path}"]`) })
+    .filter({ has: page.getByRole("heading", { name: renderNotice(kind, variant).title, exact: true }) });
+  for (let pageNumber = 0; pageNumber < 10 && !await entry.count(); pageNumber++) {
+    const more = inbox.getByRole("button", { name: "Xem thêm", exact: true });
+    if (!await more.count()) break;
+    await more.click(); await expect(inbox).toHaveAttribute("aria-busy", "false");
+  }
+  await expect(entry).toHaveCount(1); await expect(entry).toBeVisible(); return entry;
+}
 async function openOrder(page: Page, buyer: number, paid = true) {
   await signIn(page, commissionBuyerToken(buyer));
   const response = await page.request.get(`/api/v1/public/creators/${tipBrowserHandle}/commissions`); expect(response.status()).toBe(200);
@@ -143,7 +156,10 @@ test("buyer opens a dispute; the creator sees the bell count, the inbox item and
   await scan(new Date(deadline.getTime() - DAY));
   expect((await inboxItem(tipBrowserUserId, orderId, "reminder_due")).some((row) => row.variant === "dispute_response")).toBe(true);
   await scan(new Date(deadline.getTime() + 1));
-  for (const user of [tipBrowserUserId, commissionBuyerId(buyer)]) expect(await inboxItem(user, orderId, "deadline_missed")).toHaveLength(1);
+  for (const user of [tipBrowserUserId, commissionBuyerId(buyer)]) {
+    expect(await inboxItem(user, orderId, "deadline_missed")).toHaveLength(1);
+    await showInboxItem(page, user === tipBrowserUserId ? tipBrowserSessionToken : commissionBuyerToken(buyer), user, orderId, "deadline_missed", "dispute_response");
+  }
 });
 
 test("refund owed: buyer gets the account request, enters the account; creator gets the send reminder, records the send; buyer gets the confirmation request and confirms; both see refund settled", async ({ page }) => {
@@ -181,7 +197,10 @@ test("refund owed: buyer gets the account request, enters the account; creator g
   await signIn(page, commissionBuyerToken(buyer)); await page.goto(`/commissions/${orderId}`);
   await page.getByRole("button", { name: "Tôi đã nhận được tiền", exact: true }).click(); await page.getByRole("button", { name: "Xác nhận đã nhận tiền", exact: true }).click();
   await expect(page.getByText("Đã nhận tiền", { exact: true })).toBeVisible(); await pump();
-  for (const user of [tipBrowserUserId, commissionBuyerId(buyer)]) expect(await inboxItem(user, orderId, "refund_settled")).toHaveLength(1);
+  for (const user of [tipBrowserUserId, commissionBuyerId(buyer)]) {
+    expect(await inboxItem(user, orderId, "refund_settled")).toHaveLength(1);
+    await showInboxItem(page, user === tipBrowserUserId ? tipBrowserSessionToken : commissionBuyerToken(buyer), user, orderId, "refund_settled", "receipt_confirmed");
+  }
 });
 
 test("three messages give one inbox item; opening the order clears it and no email is sent", async ({ page }) => {
@@ -193,6 +212,8 @@ test("three messages give one inbox item; opening the order clears it and no ema
     await expect(page.locator("[data-message-text]").filter({ hasText: `Tin tổng hợp ${index + 1}` })).toBeVisible();
   }
   await pump(); const rows = await inboxItem(tipBrowserUserId, orderId, "order_messages"); expect(rows).toHaveLength(1); expect(rows[0]!.collapsedCount).toBe(3);
+  const entry = await showInboxItem(page, tipBrowserSessionToken, tipBrowserUserId, orderId, "order_messages");
+  await expect(entry).toContainText("3 tin nhắn");
   await signIn(page, tipBrowserSessionToken); await page.goto(`/creator/commissions/${orderId}`);
   await expect.poll(async () => (await inboxItem(tipBrowserUserId, orderId, "order_messages"))[0]!.readAt !== null).toBe(true);
   await scan(new Date(Date.now() + 16 * 60_000));
