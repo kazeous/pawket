@@ -30,4 +30,4 @@ export { resolveNotices, type CommittedOutboxRow } from "./recipients.js";
 export type { NotificationDeadlinePort, NotificationEmailPort } from "./ports.js";
 export { createNotificationMaintenance, type NotificationMaintenanceFailure, type NotificationMaintenanceResult } from "./maintenance.js";
 export { APPEAL_WINDOW_MS, CLOCK_CATEGORIES, readOpenClocks, reminderStage, type ClockRecipient, type OpenClock, type ReminderStage } from "./clocks.js";
-export { markNotificationsRead, type MarkReadTarget } from "./inbox-service.js";
+export { createNotificationInbox, markNotificationsRead, type InboxItem, type MarkReadTarget, type NotificationInbox } from "./inbox-service.js";

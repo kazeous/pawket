@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { NotificationBell } from "./notifications/notification-bell";
 
 type ShellAction = Readonly<{ href: string; label: string }>;
 
@@ -69,6 +70,7 @@ export function AccountSessionControlView({
         <strong>{account.displayEmail}</strong>
       </p>
       <div className="account-actions">
+        <NotificationBell />
         {nextAction ? (
           <Link className="header-account-link" href={nextAction.href}>
             {nextAction.label}

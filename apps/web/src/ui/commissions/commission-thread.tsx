@@ -17,6 +17,7 @@ import { SubmissionCard } from "./submission-card";
 import { HiddenContent } from "../trust/hidden-content";
 import { ReportDialog } from "../trust/report-dialog";
 import type { TrustMode } from "../trust/trust-client";
+import { markNotificationRead } from "../notifications/notification-client";
 
 export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpired, onRefresh, trustMode = "disabled" }: Readonly<{
   order: OrderView["order"]; fulfillmentMode: "disabled" | "enabled"; disabled: boolean; reviewExpired: boolean; onRefresh(): Promise<void>;
@@ -26,6 +27,12 @@ export function CommissionThread({ order, fulfillmentMode, disabled, reviewExpir
   const [thread, setThread] = useState<ThreadView | null>(null); const [timeline, setTimeline] = useState<TimelineView | null>(null);
   const [quotes, setQuotes] = useState<QuotesView | null>(null); const [failed, setFailed] = useState(false); const [busy, setBusy] = useState(false); const [refreshIndex, setRefreshIndex] = useState(0);
   const alive = useRef(true); const paging = useRef(false);
+  const markedOrder = useRef<string | null>(null);
+  useEffect(() => {
+    if (markedOrder.current === order.id) return;
+    markedOrder.current = order.id;
+    void markNotificationRead({ orderId: order.id }).catch(() => undefined);
+  }, [order.id]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
     let active = true; let running = false; let controller: AbortController | null = null; let timer: ReturnType<typeof setInterval> | undefined;
