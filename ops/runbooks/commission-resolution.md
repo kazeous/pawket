@@ -12,6 +12,7 @@ rules here supersede the historical I6/I7 statements that paid cancellation is
 unavailable and that the owner has no private-content access.
 
 See [Trust enforcement](trust-enforcement.md) for reports, content hides, penalties and appeals.
+See [Notifications](notifications.md) for the inbox, email preferences, reminder scans and notification delivery failures.
 
 ## Release and switch order
 

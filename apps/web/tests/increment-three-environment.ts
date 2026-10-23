@@ -125,7 +125,7 @@ export function resolveIncrementThreeBrowserValkeyUrl(
   if (
     parsed.protocol !== "redis:" ||
     !isLoopback(parsed) ||
-    parsed.port !== "6379" ||
+    (parsed.port === "" || Number(parsed.port) < 1) ||
     parsed.username !== "" ||
     parsed.password !== "" ||
     (parsed.pathname !== "" && parsed.pathname !== "/" && parsed.pathname !== "/0") ||

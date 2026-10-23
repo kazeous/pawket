@@ -31,8 +31,8 @@ export default async function setup() {
           checksum: `sha256:${createHash("sha256").update(document, "utf8").digest("hex")}`, source: "synthetic-increment-six-browser", effectiveAt: at, createdAt: at });
         await tx.insert(trustPolicyCurrent).values({ kind, revisionId, updatedAt: at });
       }
-      // Buyers 32–35 are reserved for trust journeys, separate from the Stage A fixtures.
-      for (let index = 0; index < 36; index++) {
+      // Buyers 32–35 are reserved for trust journeys and 36–39 for notifications.
+      for (let index = 0; index < 40; index++) {
         const userId = commissionBuyerId(index); const email = `${userId}@example.invalid`;
         await tx.insert(identityUsers).values({ id: userId, name: `Người đặt kiểm thử ${index}`, email, canonicalEmail: email, emailVerified: true, emailVerifiedAt: at, emailVerificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
         await tx.insert(identityEmailAddresses).values({ userId, displayEmail: email, canonicalEmail: email, status: "primary", verifiedAt: at, verificationProvenance: "password_email_challenge", createdAt: at, updatedAt: at });
