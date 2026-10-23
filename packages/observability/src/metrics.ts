@@ -465,6 +465,7 @@ const allowedEmailPurposes = new Set([
   "refund_status",
   "security_notice",
   "tip_status",
+  "notification",
 ]);
 const allowedEmailOutcomes = new Set([
   "attention_required",
@@ -472,7 +473,7 @@ const allowedEmailOutcomes = new Set([
   "retryable_failure",
   "sent",
 ]);
-const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "commission_resolution", "trust_enforcement", "oidc_cleanup", "commission_files"]);
+const allowedWorkerScans = new Set(["outbox", "public_media_cleanup", "refund", "retention", "tip_expiry", "sepay_recovery", "commission_cleanup", "commission_fulfillment", "commission_resolution", "trust_enforcement", "oidc_cleanup", "commission_files", "notification"]);
 const allowedRetentionDatasets = new Set([
   "tip_guest_capabilities", "tip_guest_content", "tip_instructions", "tip_claims", "tip_confirmations",
   "application_content",
@@ -926,4 +927,18 @@ export function setResolutionPausedMetric(paused: boolean): void { resolutionPau
 export function setCommissionRefundOverdueMetric(count: number): void {
   if (!Number.isSafeInteger(count) || count < 0) throw new Error("Invalid refund overdue count");
   commissionRefundOverdue.set(count);
+}
+
+const notificationOperationsTotal = new Counter({ name: "pawket_notification_operations_total", help: "Notification operations by fixed operation and outcome; never kinds, recipients, links or content.", labelNames: ["operation", "outcome"], registers: [metricsRegistry] });
+const notificationOutcomes: Readonly<Record<string, readonly string[]>> = {
+  materialize: ["created", "already_materialized", "skipped", "failed"],
+  email: ["queued", "suppressed", "attention_required", "failed"],
+  digest: ["queued", "suppressed", "deferred", "failed"],
+  reminder: ["created", "skipped", "failed"],
+  retention: ["deleted", "failed"],
+};
+export function recordNotificationOperation(input: { operation: string; outcome: string; count?: number }): void {
+  assertSafeStructuredData(input, "metric"); const count = input.count ?? 1;
+  if (!Object.hasOwn(notificationOutcomes, input.operation) || !notificationOutcomes[input.operation]?.includes(input.outcome) || !safeCount(count, 500)) rejectUnsafeMetric();
+  notificationOperationsTotal.inc({ operation: input.operation, outcome: input.outcome }, count);
 }

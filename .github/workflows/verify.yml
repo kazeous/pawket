@@ -23,6 +23,7 @@ env:
   TIP_PAYMENTS_MODE: disabled
   COMMISSION_INTAKE_MODE: disabled
   COMMISSION_PAYMENTS_MODE: disabled
+  NOTIFICATIONS_MODE: disabled
   COMMISSION_FILES_MODE: disabled
   COMMISSION_FULFILLMENT_MODE: disabled
   COMMISSION_RESOLUTION_MODE: disabled
@@ -366,6 +367,7 @@ jobs:
         env:
           PAWKET_BROWSER_DATABASE_URL: postgresql://pawket:pawket_ci_only@127.0.0.1:5432/pawket_increment6_commissions_browser
           TRUST_ENFORCEMENT_MODE: enabled
+          NOTIFICATIONS_MODE: enabled
         run: corepack pnpm test:browser:increment-six
 
   arm64-images:

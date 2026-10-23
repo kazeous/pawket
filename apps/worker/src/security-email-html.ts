@@ -5,12 +5,14 @@ export type SecurityEmailContent = Readonly<{
   paragraphs: readonly string[];
   detail?: Readonly<{ label: string; value: string }>;
   action?: Readonly<{ intro: string; label: string; url: string }>;
+  footerLink?: Readonly<{ label: string; url: string }>;
 }>;
 
 export function renderSecurityEmailText(content: SecurityEmailContent): string {
   const blocks = [content.heading, ...content.paragraphs];
   if (content.detail) blocks.push(`${content.detail.label}: ${content.detail.value}.`);
   if (content.action) blocks.push(`${content.action.intro}\n${content.action.url}`);
+  if (content.footerLink) blocks.push(`${content.footerLink.label}:\n${content.footerLink.url}`);
   return blocks.join("\n\n");
 }
 
@@ -97,6 +99,7 @@ ${content.action ? actionHtml(content.action) : `<tr><td style="padding: 0 0 16p
       </td></tr>
       <tr><td style="padding: 20px 8px 0; font-family: ${fontStack}; font-size: 12px; line-height: 1.6; color: ${palette.muted};">
         Email này được gửi tự động từ Pawket về tài khoản của bạn.<br>
+${content.footerLink ? `<a href="${escapeHtml(content.footerLink.url)}" target="_blank" rel="noopener noreferrer" style="color: ${palette.muted}; text-decoration: underline;">${escapeHtml(content.footerLink.label)}</a><br>` : ""}
         <a href="${home}" target="_blank" rel="noopener noreferrer" style="color: ${palette.muted}; text-decoration: underline;">${homeLabel}</a>
       </td></tr>
     </table>

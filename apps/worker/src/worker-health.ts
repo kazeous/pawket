@@ -21,6 +21,9 @@ export type WorkerHealthState = {
   trustEnforcementConfigured: boolean;
   trustEnforcementMaximumAgeMs: number | null;
   lastTrustEnforcementSucceededAt: number | null;
+  notificationScanConfigured: boolean;
+  notificationScanMaximumAgeMs: number | null;
+  lastNotificationScanSucceededAt: number | null;
   sepayStatus: "disabled" | "not_configured" | "contract_pending" | "configured";
   sepayRecoveryConfigured: boolean;
   sepayRecoveryMaximumAgeMs: number | null;
@@ -58,6 +61,9 @@ export function createWorkerHealthState(): WorkerHealthState {
     trustEnforcementConfigured: false,
     trustEnforcementMaximumAgeMs: null,
     lastTrustEnforcementSucceededAt: null,
+    notificationScanConfigured: false,
+    notificationScanMaximumAgeMs: null,
+    lastNotificationScanSucceededAt: null,
     sepayStatus: "disabled",
     sepayRecoveryConfigured: false,
     sepayRecoveryMaximumAgeMs: null,
@@ -85,6 +91,8 @@ export type WorkerReadinessResult = RevisionAttestation & {
   commissionFulfillmentScan: "up" | "down" | "not_configured";
   commissionResolutionScan: "up" | "down" | "not_configured";
   trustEnforcementScan: "up" | "down" | "not_configured";
+  /** Reported and alerted on, but not a readiness dependency: notification backlog never affects readiness (spec section 14). */
+  notificationScan: "up" | "down" | "not_configured";
   sepay: WorkerHealthState["sepayStatus"];
   sepayRecoveryScan: "up" | "down" | "not_configured";
   publicMediaCleanupScan: "up" | "down" | "not_configured";
@@ -136,6 +144,7 @@ export function workerReadiness(input: {
   const commissionFulfillmentScan = !input.state.commissionFulfillmentConfigured ? "not_configured" : isFresh(input.state.lastCommissionFulfillmentSucceededAt, now, input.state.commissionFulfillmentMaximumAgeMs ?? 180_000) ? "up" : "down";
   const commissionResolutionScan = !input.state.commissionResolutionConfigured ? "not_configured" : isFresh(input.state.lastCommissionResolutionSucceededAt, now, input.state.commissionResolutionMaximumAgeMs ?? 180_000) ? "up" : "down";
   const trustEnforcementScan = !input.state.trustEnforcementConfigured ? "not_configured" : isFresh(input.state.lastTrustEnforcementSucceededAt, now, input.state.trustEnforcementMaximumAgeMs ?? 180_000) ? "up" : "down";
+  const notificationScan = !input.state.notificationScanConfigured ? "not_configured" : isFresh(input.state.lastNotificationScanSucceededAt, now, input.state.notificationScanMaximumAgeMs ?? 180_000) ? "up" : "down";
   const sepayRecoveryScan = !input.state.sepayRecoveryConfigured ? "not_configured" : isFresh(input.state.lastSePayRecoverySucceededAt, now, input.state.sepayRecoveryMaximumAgeMs ?? 180_000) ? "up" : "down";
   const commissionFilesScan = !input.state.commissionFilesConfigured ? "not_configured" : isFresh(input.state.lastCommissionFilesMaintenanceSucceededAt, now, input.state.commissionFilesMaximumAgeMs ?? 300_000) ? "up" : "down";
   const ready =
@@ -164,6 +173,7 @@ export function workerReadiness(input: {
     commissionFulfillmentScan,
     commissionResolutionScan,
     trustEnforcementScan,
+    notificationScan,
     sepay: input.state.sepayStatus,
     sepayRecoveryScan,
     publicMediaCleanupScan,

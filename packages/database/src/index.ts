@@ -1,4 +1,8 @@
 export { createDatabase, type PawketDatabase, type PawketTransaction } from "./client.js";
+export {
+  NOTIFICATION_KINDS, NOTIFICATION_CATEGORIES, OPTIONAL_EMAIL_CATEGORIES, NOTIFICATION_CHANNELS,
+  NOTIFICATION_CLOCKS, NOTIFICATION_SUBJECT_TYPES, notifications, notificationPreferences, notificationReminders,
+} from "./schema.js";
 export { trustEnforcementPauses, trustPolicyRevisions, trustPolicyCurrent, trustPenalties, trustPenaltyEvents, trustReports, trustContentHides, trustHelpLinks, trustHelpSessions, trustHelpLinkRequests, trustAppeals } from "./schema.js";
 export { TRUST_CASE_KINDS, trustCases, trustCaseEvents, trustCaseAccessLog } from "./schema.js";
 export { commissionRefundObligations, commissionRefundSends, commissionRefundEvents } from "./schema.js";

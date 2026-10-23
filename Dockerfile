@@ -18,6 +18,7 @@ COPY packages/commission-files/package.json packages/commission-files/package.js
 COPY packages/config/package.json packages/config/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/identity/package.json packages/identity/package.json
+COPY packages/notifications/package.json packages/notifications/package.json
 COPY packages/object-storage/package.json packages/object-storage/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/orders/package.json packages/orders/package.json

@@ -5,7 +5,7 @@ import { parseServerEnv } from "../src/index.js";
 
 const base = { NODE_ENV: "test", APP_ENV: "test", APP_REVISION: "synthetic",
   DATABASE_URL: "postgresql://test:test@localhost:15449/test", VALKEY_URL: "redis://localhost:16389", METRICS_TOKEN: "synthetic-test-metrics-000000000000" };
-const storage = { COMMISSION_FILES_MODE: "enabled", COMMISSION_FILES_S3_ENDPOINT: "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
+const storage = { NOTIFICATIONS_MODE: "enabled", COMMISSION_FILES_MODE: "enabled", COMMISSION_FILES_S3_ENDPOINT: "http://127.0.0.1:9090", COMMISSION_FILES_S3_REGION: "us-east-1",
   COMMISSION_FILES_S3_ACCESS_KEY_ID: "synthetic-key", COMMISSION_FILES_S3_SECRET_ACCESS_KEY: "synthetic-secret",
   COMMISSION_FILES_QUARANTINE_BUCKET: "pawket-commission-quarantine", COMMISSION_FILES_CLEAN_BUCKET: "pawket-commission-clean" };
 

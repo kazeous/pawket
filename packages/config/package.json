@@ -12,6 +12,7 @@
     "./increment-six": "./src/increment-six.ts",
     "./increment-seven": "./src/increment-seven.ts",
     "./increment-eight": "./src/increment-eight.ts",
+    "./increment-nine": "./src/increment-nine.ts",
     "./oidc": "./src/oidc.ts"
   },
   "scripts": {

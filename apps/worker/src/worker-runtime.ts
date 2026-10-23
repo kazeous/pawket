@@ -7,6 +7,8 @@ import type { createEnforcementMaintenance } from "@pawket/trust";
 import { DelayedError, Worker, type Job, type Processor } from "bullmq";
 import { isTipPaymentsEnabled, type TipPaymentsMode } from "@pawket/config/increment-four";
 import type { CommissionOrderMaintenanceService } from "@pawket/orders";
+import { NOTIFICATION_POLICY, NOTIFICATION_SOURCE_EVENTS, type NotificationMaintenanceFailure, type NotificationMaintenanceResult, type NotificationsMode,
+  type NotificationSourceEvent } from "@pawket/notifications";
 import { expireOidcTransientData } from "@pawket/identity/oidc-cleanup";
 
 import {
@@ -25,6 +27,7 @@ import type {
 import type { EncryptionKeyring } from "@pawket/security";
 import {
   recordRefundOperation,
+  recordNotificationOperation,
   recordPublicMediaOperation,
   recordWorkerJobMetrics,
   recordSecurityEmailMetrics,
@@ -100,6 +103,7 @@ import { DOMAIN_EMAIL_EVENTS, materializeDomainEmailHandoff } from "./domain-ema
 import { materializeTipNotification } from "./tip-notification.js";
 import { RESOLUTION_OUTBOX_EVENTS, validateResolutionOutboxEvent } from "./resolution-events.js";
 import { COMMISSION_OUTBOX_EVENTS, validateCommissionOutboxEvent } from "./commission-events.js";
+import { REFUND_OUTBOX_EVENTS, validateRefundOutboxEvent } from "./refund-events.js";
 import { commissionUuid } from "@pawket/orders";
 
 const POLL_INTERVAL_MS = 1_000;
@@ -191,6 +195,10 @@ export type SePayWorkerService = {
 export type ResolutionWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled"; createService(db: DatabaseResource["db"]): Pick<ReturnType<typeof createResolutionMaintenance>, "observeResolutionMode" | "scan" | "readRefundOverdueCount"> }>;
 export type TrustEnforcementWorkerConfiguration = Readonly<{ mode: "disabled" | "enabled";
   createService(db: DatabaseResource["db"], onPenaltyFailure: (penaltyId: string) => void): Pick<ReturnType<typeof createEnforcementMaintenance>, "runOnce"> }>;
+export type NotificationWorkerMaterializer = { materialize(event: NotificationSourceEvent): Promise<{ created: number; emailed: number }> };
+export type NotificationWorkerMaintenance = { runOnce(): Promise<NotificationMaintenanceResult> };
+export type NotificationWorkerConfiguration = Readonly<{ mode: NotificationsMode; createMaterializer(db: DatabaseResource["db"]): NotificationWorkerMaterializer;
+  createMaintenance(db: DatabaseResource["db"], onFailure: (failure: NotificationMaintenanceFailure) => void): NotificationWorkerMaintenance }>;
 export type CommissionWorkerConfiguration = {
   resolution?: ResolutionWorkerConfiguration;
   paymentsMode?: TipPaymentsMode;
@@ -253,6 +261,7 @@ export type StartWorkerOptions = {
   sepay?: SePayWorkerConfiguration;
   commissions?: CommissionWorkerConfiguration;
   trustEnforcement?: TrustEnforcementWorkerConfiguration;
+  notifications?: NotificationWorkerConfiguration;
   concurrency: number;
   batchSize: number;
   leaseMs: number;
@@ -367,6 +376,8 @@ export function createWorkerJobProcessor(input: {
     deliver?: typeof deliverSecurityEmailHandoff;
     materialize?: typeof materializeDomainEmailHandoff;
   };
+  /** Wired only when NOTIFICATIONS_MODE=enabled; absent, every event is processed exactly as before Increment 9. */
+  notifications?: NotificationWorkerMaterializer;
 }): Processor<SystemOutboxJob> {
   return async (job: Job<SystemOutboxJob>) => {
     if (!job.id) {
@@ -414,6 +425,7 @@ export function createWorkerJobProcessor(input: {
                 "refund_status",
                 "tip_status",
                 "enforcement_notice",
+                "notification",
               ].includes(purpose)
             ) {
               throw new Error("Invalid security email job");
@@ -458,6 +470,9 @@ export function createWorkerJobProcessor(input: {
           } else if (COMMISSION_OUTBOX_EVENTS.has(job.data.eventType)) {
             try { await validateCommissionOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
             catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Commission event validation failed"); }
+          } else if (REFUND_OUTBOX_EVENTS.has(job.data.eventType)) {
+            try { await validateRefundOutboxEvent(input.database, job.data); recordCommissionOperation({ operation: "event", outcome: "validated" }); }
+            catch { recordCommissionOperation({ operation: "event", outcome: "failed" }); throw new Error("Refund event validation failed"); }
           } else if ((TIP_NOTIFICATION_EVENTS as readonly string[]).includes(job.data.eventType)) {
             try {
               if (!input.securityEmail) throw new Error("Security email delivery unavailable");
@@ -505,6 +520,15 @@ export function createWorkerJobProcessor(input: {
           ) {
             throw new Error("Unsupported outbox event type");
           }
+          // Notices follow the event's own branch and precede acknowledgement, so a failure retries the whole event
+          // (each branch above is idempotent) and the item rows are idempotent on (source_key, recipient).
+          if (input.notifications && NOTIFICATION_SOURCE_EVENTS.has(job.data.eventType)) {
+            let materialized: { created: number; emailed: number };
+            try { materialized = await input.notifications.materialize(job.data); }
+            catch { recordNotificationOperation({ operation: "materialize", outcome: "failed" }); throw new Error("Notification materialization failed"); }
+            if (materialized.created > 0) recordNotificationOperation({ operation: "materialize", outcome: "created", count: materialized.created });
+            else recordNotificationOperation({ operation: "materialize", outcome: "skipped" });
+          }
           const acknowledged = await input.acknowledge(input.database, {
             eventId: job.data.outboxEventId,
           });
@@ -528,6 +552,7 @@ export function createWorkerJobProcessor(input: {
               error.message === "Unsupported outbox event type" ||
               error.message === "Invalid security email job" ||
               error.message === "Security email delivery unavailable" ||
+              error.message === "Notification materialization failed" ||
               error.message === "Outbox event acknowledgement failed")
           ) {
             throw error;
@@ -674,6 +699,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     !Number.isInteger(options.commissionFiles.scanIntervalMs) || options.commissionFiles.scanIntervalMs < 10_000 || options.commissionFiles.scanIntervalMs > 600_000)) throw new Error("Invalid commission file worker configuration");
   if (options.commissions?.resolution && (!["disabled", "enabled"].includes(options.commissions.resolution.mode) ||
     typeof options.commissions.resolution.createService !== "function")) throw new Error("Invalid resolution worker configuration");
+  if (options.notifications && (!["disabled", "enabled"].includes(options.notifications.mode) ||
+    typeof options.notifications.createMaterializer !== "function" || typeof options.notifications.createMaintenance !== "function")) throw new Error("Invalid notification worker configuration");
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const logger = options.logger ?? defaultLogger;
   const signalSource = options.signalSource ?? process;
@@ -700,6 +727,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let resolutionService: ReturnType<ResolutionWorkerConfiguration["createService"]> | undefined;
   let trustEnforcementService: ReturnType<TrustEnforcementWorkerConfiguration["createService"]> | undefined;
   let trustEnforcementFailedCount = 0;
+  let notificationMaintenance: NotificationWorkerMaintenance | undefined;
 
   const startupCleanup = async (): Promise<void> => {
     const attemptCleanup = async (
@@ -758,6 +786,12 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       trustEnforcementFailedCount += 1;
       logger.error({ category: "trust_enforcement_penalty_failed", penaltyId }, "Trust penalty expiry failed");
     });
+    // Disabled notifications build nothing: no digest, reminder or retention scan runs (global constraint).
+    // Isolated item failures are logged by row id only (never content); they keep the scan from counting as healthy.
+    if (options.notifications?.mode === "enabled") notificationMaintenance = options.notifications.createMaintenance(database.db, (failure) => {
+      if (failure.step === "digest") logger.error({ category: "notification_digest_failed", notificationId: failure.notificationId }, "Notification digest failed");
+      else logger.error({ category: "notification_reminder_failed", clock: failure.clock, subjectId: failure.subjectId }, "Notification reminder failed");
+    });
     producerConnection = dependencies.createProducerConnection(options.valkeyUrl);
     await connectQueueProducer(producerConnection, options.producerOperationTimeoutMs);
     workerConnection = dependencies.createWorkerConnection(options.valkeyUrl);
@@ -775,6 +809,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
         mediaQueue,
         commissionFileQueue,
         securityEmail: options.securityEmail,
+        ...(options.notifications?.mode === "enabled" ? { notifications: options.notifications.createMaterializer(database.db) } : {}),
         ...(options.sepay && sepayService ? { sepay: { environment: options.sepay.environment, mode: options.sepay.mode, commissionMode: options.sepay.commissionMode, service: sepayService } } : {}),
       }),
       workerConnection,
@@ -829,6 +864,8 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   let lastCommissionResolutionScanAt = 0;
   let currentTrustEnforcementScan: Promise<void> | undefined;
   let lastTrustEnforcementScanAt = 0;
+  let currentNotificationMaintenance: Promise<void> | undefined;
+  let lastNotificationMaintenanceAt = 0;
   let commissionCompletionCursor: { reviewEndsAt: Date; id: string } | null = null;
   let currentCommissionFilesScan: Promise<void> | undefined;
   let currentScannerProbe: Promise<void> | undefined;
@@ -872,6 +909,9 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     options.healthState.commissionResolutionConfigured = options.commissions?.resolution !== undefined;
     options.healthState.commissionResolutionMaximumAgeMs = options.commissions?.resolution ? options.commissions.scanIntervalMs * 3 : null;
     options.healthState.lastCommissionResolutionSucceededAt = null;
+    options.healthState.notificationScanConfigured = options.notifications?.mode === "enabled";
+    options.healthState.notificationScanMaximumAgeMs = options.notifications?.mode === "enabled" ? 180_000 : null;
+    options.healthState.lastNotificationScanSucceededAt = null;
     options.healthState.trustEnforcementConfigured = Boolean(options.databaseUrl);
     options.healthState.trustEnforcementMaximumAgeMs = options.databaseUrl ? 180_000 : null;
     options.healthState.lastTrustEnforcementSucceededAt = null;
@@ -896,6 +936,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
   if (options.commissions) setWorkerScanHealthMetric({ scan: "commission_fulfillment", healthy: false });
   if (options.commissions?.resolution) setWorkerScanHealthMetric({ scan: "commission_resolution", healthy: false });
   if (options.databaseUrl) setWorkerScanHealthMetric({ scan: "trust_enforcement", healthy: false });
+  if (options.notifications?.mode === "enabled") setWorkerScanHealthMetric({ scan: "notification", healthy: false });
 
   const cleanupRules: readonly PublicMediaCleanupRule[] = [
     "processed_source",
@@ -1197,6 +1238,27 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   };
 
+  /** Digests, reminders and retention. A run counts as healthy only when it completes with no isolated item failure;
+   * a thrown failure is logged by category only and never reaches the outbox loop. */
+  const runNotificationMaintenanceIfDue = async (scanAt: number): Promise<void> => {
+    if (!running || !notificationMaintenance || scanAt - lastNotificationMaintenanceAt < NOTIFICATION_POLICY.scanIntervalMs) return;
+    lastNotificationMaintenanceAt = scanAt;
+    setWorkerScanHealthMetric({ scan: "notification", healthy: false });
+    try {
+      const result = await notificationMaintenance.runOnce();
+      const counts = result ? [result.digestsQueued, result.digestsDeferred, result.digestsSuppressed, result.digestsFailed, result.remindersCreated,
+        result.remindersFailed, result.deleted] : [];
+      if (counts.length === 0 || !counts.every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000)) throw new Error("Invalid notification maintenance result");
+      if (result.digestsFailed > 0 || result.remindersFailed > 0) return;
+      const succeededAt = Date.now();
+      setWorkerScanHealthMetric({ scan: "notification", healthy: true });
+      setWorkerLastSuccessMetric({ scan: "notification", timestampSeconds: succeededAt / 1_000 });
+      if (options.healthState) options.healthState.lastNotificationScanSucceededAt = succeededAt;
+    } catch {
+      logger.error({ category: "notification_maintenance_failed" }, "Notification maintenance failed");
+    }
+  };
+
   const scanCommissionFilesIfDue = async (scanAt: number): Promise<void> => {
     const config = options.commissionFiles; const queueResource = commissionFileQueue;
     if (!running || !config || !queueResource || scanAt - lastCommissionFilesScanAt < config.scanIntervalMs) return;
@@ -1360,6 +1422,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       }
       if (!currentCommissionResolutionScan) currentCommissionResolutionScan = scanCommissionResolutionIfDue(Date.now()).finally(() => { currentCommissionResolutionScan = undefined; });
       if (!currentTrustEnforcementScan) currentTrustEnforcementScan = scanTrustEnforcementIfDue(Date.now()).finally(() => { currentTrustEnforcementScan = undefined; });
+      if (!currentNotificationMaintenance) currentNotificationMaintenance = runNotificationMaintenanceIfDue(Date.now()).finally(() => { currentNotificationMaintenance = undefined; });
       if (!currentCommissionFilesScan) currentCommissionFilesScan = scanCommissionFilesIfDue(Date.now()).finally(() => { currentCommissionFilesScan = undefined; });
       if (!currentScannerProbe) currentScannerProbe = probeCommissionFileScannerIfDue(Date.now()).finally(() => { currentScannerProbe = undefined; });
       // Provider readback has its own bounded network budget. Keep one scan in
@@ -1413,6 +1476,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
       await currentCommissionFulfillmentScan;
       await currentCommissionResolutionScan;
       await currentTrustEnforcementScan;
+      await currentNotificationMaintenance;
       await currentCommissionFilesScan;
       if (mediaWorker) await attemptClose("media-worker", () => mediaWorker.close());
       if (commissionFileWorker) await attemptClose("commission-file-worker", () => commissionFileWorker.close());

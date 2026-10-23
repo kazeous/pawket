@@ -3,6 +3,7 @@ import { and, asc, eq, exists, gt, inArray, isNotNull, isNull, lte, or } from "d
 import { calculateStoredBusinessDayDeadline, commissionRefundObligations, commissionRefundSends, commissionRefundEvents,
   type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { decryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
+import { announceRefundEvent } from "./commission-refund-outbox.js";
 import { COMMISSION_REFUND_POLICY, createRefundReference, refundFail, type CommissionRefundSource } from "./commission-refund-policy.js";
 
 type Obligation = typeof commissionRefundObligations.$inferSelect;
@@ -22,9 +23,11 @@ function scan(input: Scan) {
 export function createCommissionRefundPort(input: { keyring: EncryptionKeyring; calendarVersion: string; idFactory?: () => string; now?: () => Date }) {
   const newId = () => { const value = (input.idFactory ?? randomUUID)(); if (!uuid(value)) refundFail("dependency_unavailable"); return value; };
   async function event(tx: PawketTransaction, row: Obligation, command: Command, action: string, toState = row.state) {
-    await tx.insert(commissionRefundEvents).values({ id: newId(), obligationId: row.id, action, actorUserId: command.actor?.userId ?? null,
+    const refundEventId = newId();
+    await tx.insert(commissionRefundEvents).values({ id: refundEventId, obligationId: row.id, action, actorUserId: command.actor?.userId ?? null,
       actorSessionId: command.actor?.sessionId ?? null, fromState: action === "created" ? null : row.state,
       toState, requestId: command.requestId, occurredAt: command.at });
+    await announceRefundEvent(tx, { obligationId: row.id, refundEventId, action, occurredAt: command.at });
   }
   async function lock(tx: PawketTransaction, command: Command): Promise<Obligation> {
     if (!uuid(command.obligationId) || !identifier(command.requestId) || (command.actor !== null &&

@@ -7,7 +7,8 @@ export type SecurityEmailPurpose =
   | "application_outcome"
   | "creator_status"
   | "refund_status"
-  | "tip_status";
+  | "tip_status"
+  | "notification";
 
 export type SecurityEmailMessage = Readonly<{
   handoffId: string;

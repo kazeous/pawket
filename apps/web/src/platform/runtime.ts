@@ -13,6 +13,7 @@ import {
   type VisibilityReadPort,
 } from "@pawket/catalog";
 import { loadServerEnv, parseOidcEnv } from "@pawket/config";
+import { createNotificationInbox } from "@pawket/notifications";
 import { createDatabase, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import {
   createOidcAccountHttpHandlers,
@@ -93,11 +94,14 @@ import { createTrustOwnerMetadata } from "./trust-owner-metadata.js";
 import { createTrustEnforcementHttpHandlers } from "./trust-enforcement-http.js";
 import { createHelpLinkHttpHandlers } from "./help-link-http.js";
 import { createAppealHttpHandlers } from "./appeal-http.js";
+import { createNotificationHttpHandlers } from "./notification-http.js";
 import { createCaseEvidencePort } from "./case-evidence.js";
 import { createOidcCommandHttp } from "./oidc-command-http.js";
 import { oidcCommand } from "./oidc-command-registry.js";
 
 export type WebPlatformRuntime = {
+  notifications: ReturnType<typeof createNotificationInbox>;
+  notificationHandlers: ReturnType<typeof createNotificationHttpHandlers>;
   partyTrust: ReturnType<typeof createTrustPartyView>;
   helpLinkHandlers: ReturnType<typeof createHelpLinkHttpHandlers>;
   helpLinks: ReturnType<typeof createHelpLinkService>;
@@ -715,7 +719,11 @@ export function getPlatformRuntime(): WebPlatformRuntime {
 
   const commandHttp = createOidcCommandHttp({ db: database.db, baseUrl: env.APP_BASE_URL, commands: pendingCommands,
     context: commandContext, authenticate, commandFor, runtime: () => runtime! });
+  const notifications = createNotificationInbox({ db: database.db, mode: env.NOTIFICATIONS_MODE });
+  const notificationHandlers = createNotificationHttpHandlers({ appBaseUrl: env.APP_BASE_URL, authenticate, inbox: notifications });
   runtime = {
+    notifications,
+    notificationHandlers,
     partyTrust,
     helpLinks,
     helpCases,

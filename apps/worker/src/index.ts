@@ -16,6 +16,7 @@ import { createWorkerResolutionConfiguration } from "./resolution-config.js";
 import { createWorkerTrustEnforcementConfiguration } from "./trust-enforcement-config.js";
 import { createWorkerCommissionConfiguration } from "./commission-config.js";
 import { createWorkerCommissionFilesConfiguration } from "./commission-files-config.js";
+import { createWorkerNotificationConfiguration } from "./notification-wiring.js";
 import { startWorkerTelemetryServer } from "./telemetry-server.js";
 import { createWorkerHealthState } from "./worker-health.js";
 import { startWorker } from "./worker-runtime.js";
@@ -61,6 +62,7 @@ const worker = await startWorker({
   sepay: createWorkerSePayConfiguration(env, keyring, identityProvider),
   commissions: { ...createWorkerCommissionConfiguration(env, keyring, identityProvider), resolution: createWorkerResolutionConfiguration(env, keyring) },
   trustEnforcement: createWorkerTrustEnforcementConfiguration(env, keyring),
+  notifications: createWorkerNotificationConfiguration(env, keyring),
   commissionFiles: createWorkerCommissionFilesConfiguration(env),
   ...publicMediaConfiguration,
   securityEmail: {

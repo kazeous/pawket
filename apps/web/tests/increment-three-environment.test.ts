@@ -145,6 +145,10 @@ describe("Increment 3 browser environment isolation", () => {
     ).resolveIncrementThreeBrowserValkeyUrl;
     if (!resolveValkey) throw new Error("Increment 3 browser Valkey resolver is missing");
     expect(resolveValkey({})).toBe("redis://127.0.0.1:6379");
+    expect(resolveValkey({ PAWKET_BROWSER_VALKEY_URL: "redis://127.0.0.1:56379" })).toBe("redis://127.0.0.1:56379");
+    for (const source of ["redis://127.0.0.1:0", "redis://127.0.0.1", "redis://user:password@127.0.0.1:56379", "redis://127.0.0.1:56379/1", "redis://127.0.0.1:56379?x=1"]) {
+      expect(() => resolveValkey({ PAWKET_BROWSER_VALKEY_URL: source })).toThrow("Unsafe Increment 3 browser Valkey configuration");
+    }
     expect(() =>
       resolveValkey({ PAWKET_BROWSER_VALKEY_URL: "redis://valkey.example.test:6379" }),
     ).toThrow("Unsafe Increment 3 browser Valkey configuration");

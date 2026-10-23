@@ -117,11 +117,13 @@ async function submitReport(page: Page, trigger: Locator) {
   const dialog = page.getByRole("alertdialog");
   await dialog.getByLabel("Lý do báo cáo", { exact: true }).selectOption("privacy");
   await dialog.getByLabel("Chi tiết", { exact: true }).fill("Nội dung tổng hợp cần được Pawket xem xét.");
-  const submitted = commandResponse(page, "/api/v1/reports");
+  // Capture the body as soon as the response arrives, before click auto-waiting can outlive its document.
+  const submitted = commandResponse(page, "/api/v1/reports").then(async (response) => {
+    expect(response.status()).toBe(202);
+    return reportResultSchema.parse(await response.json());
+  });
   await dialog.getByRole("button", { name: "Gửi báo cáo", exact: true }).click();
-  const response = await submitted;
-  expect(response.status()).toBe(202);
-  const result = reportResultSchema.parse(await response.json());
+  const result = await submitted;
   await expect(dialog.getByText(reportAccepted, { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "Đóng", exact: true }).click();
   const fixture = databaseFixture();

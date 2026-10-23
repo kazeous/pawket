@@ -538,6 +538,7 @@ async function verifyOperationalEvidence(
     commissionFulfillmentScan: "up",
     commissionResolutionScan: "up",
     trustEnforcementScan: "up",
+    notificationScan: "not_configured",
     commissionFilesScan: "not_configured",
     commissionFileScanner: "not_configured",
     revision: candidateRevision,

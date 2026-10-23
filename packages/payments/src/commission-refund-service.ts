@@ -5,6 +5,7 @@ import { beginIdempotentCommand, completeIdempotentCommand, calculateStoredBusin
   commissionRefundObligations, commissionRefundSends, commissionRefundEvents, type PawketDatabase, type PawketTransaction } from "@pawket/database";
 import { createLookupHmac, decryptSensitiveField, encryptSensitiveField, type EncryptionKeyring } from "@pawket/security";
 import { CommissionRefundError, COMMISSION_REFUND_POLICY, normalizeBankReference, refundFail } from "./commission-refund-policy.js";
+import { announceRefundEvent } from "./commission-refund-outbox.js";
 import { createCommissionRefundPort } from "./commission-refund-port.js";
 import { normalizeReceivingAccountProposal } from "./receiving-account-policy.js";
 import { readTipPortRecord } from "./tip-port-boundary.js";
@@ -127,8 +128,10 @@ export function createCommissionRefundService(input: Input) {
     await session(tx, actor, at, fresh); return at;
   }
   async function event(tx: PawketTransaction, row: Obligation, command: { actor: Actor; requestId: string }, action: string, at: Date, toState = row.state) {
-    await tx.insert(commissionRefundEvents).values({ id: newId(), obligationId: row.id, action, actorUserId: command.actor.userId,
+    const refundEventId = newId();
+    await tx.insert(commissionRefundEvents).values({ id: refundEventId, obligationId: row.id, action, actorUserId: command.actor.userId,
       actorSessionId: command.actor.sessionId, fromState: row.state, toState, requestId: command.requestId, occurredAt: at });
+    await announceRefundEvent(tx, { obligationId: row.id, refundEventId, action, occurredAt: at });
   }
   async function change(tx: PawketTransaction, row: Obligation, command: Command, action: string, at: Date,
     values: Partial<typeof commissionRefundObligations.$inferInsert>) {
