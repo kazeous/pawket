@@ -360,4 +360,3 @@ async function waitForLockWait(blockerPid: number) {
   }
   throw new Error("the scan never waited on the subject row");
 }
-
