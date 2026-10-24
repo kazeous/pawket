@@ -95,10 +95,17 @@ test.each([
 test.each([
   ["2026-10-02T03:00:00.123456789Z", "2026-10-02T03:00:00.123Z"],
   ["2026-10-02T10:00:00.123456789+07:00", "2026-10-02T03:00:00.123Z"],
-  ["2026-10-02T03:00Z", "2026-10-02T03:00:00.000Z"],
+  ["2026-10-02T03:00:00Z", "2026-10-02T03:00:00.000Z"],
 ])("HTTP-accepted end instant %s is normalized to milliseconds", async (endsAt, normalized) => {
   expect(z.iso.datetime({ offset: true }).safeParse(endsAt).success).toBe(true);
   const c = await penaltyContext(f);
   const { penaltyId } = await c.service.apply({ ...await c.command(), kind: "suspension", target: "account", endsAt });
   expect((await c.service.listForSubject(c.p.creator.userId)).find((p) => p.penaltyId === penaltyId)?.endsAt).toBe(normalized);
+});
+
+// zod 4.6 requires seconds when an offset is present; the HTTP schema and the service reject the same inputs.
+test("end instant without seconds is refused like the HTTP schema refuses it", async () => {
+  expect(z.iso.datetime({ offset: true }).safeParse("2026-10-02T03:00Z").success).toBe(false);
+  const c = await penaltyContext(f);
+  await expect(c.service.apply({ ...await c.command(), kind: "suspension", target: "account", endsAt: "2026-10-02T03:00Z" })).rejects.toMatchObject({ code: "invalid_request" });
 });
