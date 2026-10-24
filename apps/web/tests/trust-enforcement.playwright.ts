@@ -9,7 +9,7 @@ import { createEncryptionKeyring } from "@pawket/security";
 import { caseDetailSchema } from "../src/ui/cases/case-client";
 import { ordersSchema, publicPackagesSchema, workspaceSchema, type PublicPackage } from "../src/ui/commissions/commission-client";
 import { myCasesSchema, resolutionSchema } from "../src/ui/resolutions/resolution-client";
-import { appealResultSchema, reportResultSchema } from "../src/ui/trust/trust-client";
+import { appealResultSchema } from "../src/ui/trust/trust-client";
 import { oidcCommand } from "../src/platform/oidc-command-registry";
 import { assertIncrementThreeBrowserDatabaseName, browserDatabaseUrl } from "./increment-three-database";
 import { commissionBuyerId, commissionBuyerToken } from "./increment-six-global-setup";
@@ -117,20 +117,19 @@ async function submitReport(page: Page, trigger: Locator) {
   const dialog = page.getByRole("alertdialog");
   await dialog.getByLabel("Lý do báo cáo", { exact: true }).selectOption("privacy");
   await dialog.getByLabel("Chi tiết", { exact: true }).fill("Nội dung tổng hợp cần được Pawket xem xét.");
-  // Capture the body as soon as the response arrives, before click auto-waiting can outlive its document.
-  const submitted = commandResponse(page, "/api/v1/reports").then(async (response) => {
-    expect(response.status()).toBe(202);
-    return reportResultSchema.parse(await response.json());
-  });
-  await dialog.getByRole("button", { name: "Gửi báo cáo", exact: true }).click();
-  const result = await submitted;
-  await expect(dialog.getByText(reportAccepted, { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Đóng", exact: true }).click();
   const fixture = databaseFixture();
   try {
-    const [row] = await fixture.db.select().from(trustReports).where(eq(trustReports.reportReference, result.reportReference));
-    if (!row) throw new Error("Missing synthetic report");
-    return row;
+    const existingIds = new Set((await fixture.db.select({ id: trustReports.id }).from(trustReports)).map((row) => row.id));
+    const submitted = commandResponse(page, "/api/v1/reports");
+    await dialog.getByRole("button", { name: "Gửi báo cáo", exact: true }).click();
+    const response = await submitted;
+    // Chromium may discard the body consumed by the page; check status and UI instead.
+    expect(response.status()).toBe(202);
+    await expect(dialog.getByText(reportAccepted, { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Đóng", exact: true }).click();
+    const rows = (await fixture.db.select().from(trustReports)).filter((row) => !existingIds.has(row.id));
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
   } finally { await fixture.close(); }
 }
 async function hide(page: Page, caseId: string, reason: string) {
