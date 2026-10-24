@@ -18,6 +18,6 @@
     "@pawket/security": "workspace:*",
     "drizzle-orm": "0.45.2",
     "ipaddr.js": "2.2.0",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   }
 }
