@@ -168,7 +168,7 @@ test("refund owed: buyer gets the account request, enters the account; creator g
   await page.getByRole("button", { name: "Đồng ý", exact: true }).click();
   const accepted = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes("/proposals/") && response.url().endsWith("/respond"));
   await page.getByRole("button", { name: "Xác nhận đồng ý và kết thúc đơn", exact: true }).click();
-  const result = await accepted; expect({ status: result.status(), code: (await result.json()).code ?? null }).toEqual({ status: 200, code: null });
+  const result = await accepted; expect(result.status()).toBe(200);
   await expect(page.locator("[data-order-state]")).toHaveText("Đã đóng"); await pump();
   expect(await inboxItem(commissionBuyerId(buyer), orderId, "refund_account_needed")).toHaveLength(1);
   await signIn(page, commissionBuyerToken(buyer)); await page.goto("/notifications");

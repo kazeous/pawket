@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { and, eq, ne } from "drizzle-orm";
 import { z } from "zod";
-import { createDatabase, identityEmailHandoffs, trustAppeals, trustCases, trustContentHides, trustReports } from "@pawket/database";
+import { createDatabase, identityEmailHandoffs, trustAppeals, trustCases, trustContentHides, trustPenalties, trustReports } from "@pawket/database";
 import { DeterministicLocalSecurityEmailSink } from "@pawket/identity/security-email";
 import { deliverSecurityEmailHandoff } from "@pawket/identity/security-email-handoff";
 import { createEncryptionKeyring } from "@pawket/security";
@@ -93,9 +93,7 @@ async function ownerCommand(page: Page, actionClass: string, submit: () => Promi
     await page.getByRole("button", { name: "Xác nhận thực hiện", exact: true }).click();
     const response = await confirmed;
     expect(response.status()).toBe(200);
-    const result: unknown = await response.json();
     await expect(page.getByText("Đã xử lý yêu cầu.", { exact: false })).toBeVisible();
-    return result;
   } finally {
     // Synthetic step-up rotates this shared fixture token; preserve it for later tests.
     try { await restoreBrowserSessionToken(fixture.db, tipPolicyOwnerSessionId, tipPolicyOwnerSessionToken); }
@@ -145,6 +143,19 @@ async function hide(page: Page, caseId: string, reason: string) {
   if (detail.kind !== "report" || !detail.activeHideId) throw new Error("Synthetic hide was not recorded");
   return detail.activeHideId;
 }
+async function submitAppeal(page: Page, path: string, trigger: Locator) {
+  const fixture = databaseFixture();
+  try {
+    const existingIds = new Set((await fixture.db.select({ id: trustAppeals.id }).from(trustAppeals)).map((row) => row.id));
+    const submitted = commandResponse(page, path);
+    await trigger.click();
+    expect((await submitted).status()).toBe(202);
+    // Chromium may discard the body consumed by the page; recover the ID from the database.
+    const rows = (await fixture.db.select({ id: trustAppeals.id }).from(trustAppeals)).filter((row) => !existingIds.has(row.id));
+    expect(rows).toHaveLength(1);
+    return appealResultSchema.parse({ appealId: rows[0]!.id }).appealId;
+  } finally { await fixture.close(); }
+}
 async function decideAppeal(page: Page, caseId: string, decision: "reversed" | "upheld", reasoning: string) {
   await signIn(page, tipPolicyOwnerSessionToken);
   await page.goto(`/admin/cases/${caseId}`);
@@ -193,7 +204,14 @@ async function applyBuyerPenalty(page: Page, caseId: string, buyer: number, kind
   await form.getByLabel("Nhóm lý do", { exact: false }).selectOption("dispute_or_report_abuse");
   await form.getByLabel("Giải thích (người dùng sẽ thấy)", { exact: false }).fill(explanation);
   await form.getByLabel("Ghi chú nội bộ (chỉ owner thấy)", { exact: false }).fill("Ghi chú tổng hợp riêng cho owner.");
-  return penaltyResult.parse(await ownerCommand(page, "owner.trust_penalty_apply", () => form.getByRole("button", { name: "Áp dụng biện pháp", exact: true }).click())).penaltyId;
+  const fixture = databaseFixture();
+  try {
+    const existingIds = new Set((await fixture.db.select({ id: trustPenalties.id }).from(trustPenalties)).map((row) => row.id));
+    await ownerCommand(page, "owner.trust_penalty_apply", () => form.getByRole("button", { name: "Áp dụng biện pháp", exact: true }).click());
+    const rows = (await fixture.db.select({ id: trustPenalties.id }).from(trustPenalties)).filter((row) => !existingIds.has(row.id));
+    expect(rows).toHaveLength(1);
+    return penaltyResult.parse({ penaltyId: rows[0]!.id }).penaltyId;
+  } finally { await fixture.close(); }
 }
 
 // Use the actual worker delivery function and encrypted handoff, as in tip tests.
@@ -250,11 +268,7 @@ test.describe("trust enforcement browser journeys", () => {
     await expect(page.getByText(reason, { exact: true })).toHaveCount(0);
     await hideCard.getByRole("button", { name: "Kháng nghị", exact: true }).click();
     await hideCard.getByLabel("Trình bày kháng nghị", { exact: true }).fill("Đề nghị xem lại ngữ cảnh tin nhắn tổng hợp này.");
-    const submitted = commandResponse(page, "/api/v1/help/appeals");
-    await hideCard.getByRole("button", { name: "Gửi kháng nghị", exact: true }).click();
-    const response = await submitted;
-    expect(response.status()).toBe(202);
-    const appealId = appealResultSchema.parse(await response.json()).appealId;
+    const appealId = await submitAppeal(page, "/api/v1/help/appeals", hideCard.getByRole("button", { name: "Gửi kháng nghị", exact: true }));
     const reasoning = "Đã xem lại ngữ cảnh và khôi phục tin nhắn tổng hợp.";
     await decideAppeal(page, await sourceCase("appeal", appealId), "reversed", reasoning);
     await signIn(page, commissionBuyerToken(buyer));
@@ -338,11 +352,7 @@ test.describe("trust enforcement browser journeys", () => {
       expect(helpCookie).toMatchObject({ httpOnly: true, secure: true, sameSite: "Strict", path: "/help/locked" });
       await expect(locked.getByText("Ghi chú tổng hợp riêng cho owner.", { exact: true })).toHaveCount(0);
       await locked.getByLabel("Trình bày kháng nghị", { exact: true }).fill("Đề nghị xem lại biện pháp tạm khóa tài khoản tổng hợp.");
-      const submitted = commandResponse(locked, "/help/locked/appeal");
-      await locked.getByRole("button", { name: "Gửi kháng nghị", exact: true }).click();
-      const response = await submitted;
-      expect(response.status()).toBe(202);
-      const appealId = appealResultSchema.parse(await response.json()).appealId;
+      const appealId = await submitAppeal(locked, "/help/locked/appeal", locked.getByRole("button", { name: "Gửi kháng nghị", exact: true }));
       const reasoning = "Giữ nguyên biện pháp sau khi xem xét kháng nghị tổng hợp.";
       await decideAppeal(page, await sourceCase("appeal", appealId), "upheld", reasoning);
       await locked.reload();
@@ -386,7 +396,6 @@ test.describe("trust enforcement browser journeys", () => {
     await page.getByRole("button", { name: "Gửi yêu cầu commission", exact: true }).click();
     const response = await rejected;
     expect(response.status()).toBe(404);
-    expect(await response.json()).toEqual({ code: "not_available" });
     await expect(page.getByText(unavailable, { exact: true })).toBeVisible();
     const list = await page.request.get("/api/v1/commissions");
     expect(list.status()).toBe(200);
